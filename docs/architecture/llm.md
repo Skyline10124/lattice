@@ -495,7 +495,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 2. **授权 URL。** 后台把 `https://auth.openai.com/api/accounts/authorize` 的授权 URL 交给前端：`response_type=code`、`resource=https://api.openai.com/v1`、scope `openid profile email offline_access resource.invoke chatgpt.tokens.use.direct`、`ext_agent_host_id`、`state`、`nonce` 与 `code_challenge`。首次登录时 `client_id=dynamic_agent_client` 并带 `agent_name_hint=LATTICE`；已有注册时用保存的 `client_id`，带 `id_token_hint`（登出后没有保留则不带），不带 `agent_name_hint`。
 3. **用户授权。** 前端打开浏览器或显示 URL。无头机器上，用户把浏览器最终跳转的 URL 粘贴给前端，前端转交后台，后台按回调同样处理。
 4. **校验回调。** 先校验 `state`；回调带 `error` 时停止。首次登录的回调带回正式的 `client_id`，没有带回时登录不成立；再次登录的回调可以不带 `client_id`，带回与保存的不同时拒绝。
-5. **换取 token。** 用正式的 `client_id`、`code`、`code_verifier` 与同一个 `redirect_uri`、`resource` 向 `https://auth.openai.com/api/accounts/oauth/token` 换取 token；`invalid_grant` 时丢弃这次登录。
+5. **换取 token。** 用正式的 `client_id`、`code`、`code_verifier` 与同一个 `redirect_uri`、`resource` 向 `https://auth.openai.com/api/accounts/oauth/token` 换取 token。首次登录的回调已经带回正式 `client_id`，而换码返回 `invalid_grant` 时，丢弃 `code`，将该 `client_id` 与 host ID 保存为不含 token 的记录，本次登录失败；下次登录复用该 `client_id`。再次登录换码失败不覆盖已有凭据。
 6. **校验 id token。** 按 OpenAI 的 JWKS 校验签名，核对 issuer、audience（正式的 `client_id`）、有效期与 `nonce`；授予的 scope 必须含 `chatgpt.tokens.use.direct`。再次登录时，新 id token 的账号必须与保存的一致。
 7. **保存。** 写入 `auth.json` 的 `chatgpt` 项，然后拉取[账号模型列表](#账号模型列表)，把结果返回前端。
 

@@ -10,11 +10,15 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 
 use crate::provider::{Auth, config::ProviderRegistry};
 
+mod callback;
 mod file;
 mod format;
+mod id_token;
+mod login;
 mod oauth;
 mod siwc;
 
+pub use login::{ChatgptLogin, LoginError, SensitiveLoginUrl};
 pub use siwc::{ChatgptAuth, RemoveChatgptResult, RevocationStatus};
 
 /// 元数据缓存与凭据共用配置目录的创建和安全检查，不读取凭据文件。
@@ -177,6 +181,28 @@ impl AuthStore {
                 .ok_or(AuthError::Internal("configuration directory disappeared"))?
                 .write(&document)?;
         }
+        Ok(Credentials(document))
+    }
+
+    /// 首次插入或替换 ChatGPT 项，发布前由生命周期所有者再次核对取消与代次。
+    fn replace_chatgpt<G>(
+        &self,
+        expected: &Credentials,
+        replacement: format::Credential,
+        before_publish: impl FnOnce() -> Result<G, UpdateError>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<Credentials, UpdateError> {
+        let _writer = WRITER
+            .lock()
+            .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
+        let directory = file::Directory::open(&self.directory, true)?
+            .ok_or(AuthError::Internal("configuration directory disappeared"))?;
+        let mut document = directory.read()?;
+        if document.providers.get("chatgpt") != expected.0.providers.get("chatgpt") {
+            return Err(UpdateError::Conflict);
+        }
+        document.providers.insert("chatgpt".into(), replacement);
+        directory.write_guarded(&document, before_publish, published)?;
         Ok(Credentials(document))
     }
 

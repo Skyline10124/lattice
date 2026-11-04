@@ -38,6 +38,69 @@ fn grants_use_issued_client_and_encode_reserved_characters_without_scope() {
     assert_eq!(revoke.len(), 3);
     assert_eq!(revoke["token_type_hint"], "refresh_token");
     assert!(revoke["client_id"] == grant.client_id && revoke["token"] == grant.refresh_token);
+    let code = CodeGrant {
+        client_id: "issued+client&=",
+        code: "code+with&reserved=",
+        verifier: "local-verifier",
+        redirect_uri: "http://127.0.0.1:1455/auth/callback",
+    };
+    let form = decoded(&code_form(&code));
+    assert_eq!(form.len(), 6);
+    assert_eq!(form["grant_type"], "authorization_code");
+    assert_eq!(form["client_id"], code.client_id);
+    assert_eq!(form["code"], code.code);
+    assert_eq!(form["code_verifier"], code.verifier);
+    assert_eq!(form["redirect_uri"], code.redirect_uri);
+    assert_eq!(form["resource"], "https://api.openai.com/v1");
+}
+
+#[test]
+fn login_response_requires_identity_token_and_granted_permission() {
+    let mut value = response();
+    let parsed = parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).unwrap();
+    assert_eq!(parsed.id_token.0, "ignored-id-secret");
+    assert_eq!(
+        parsed.token.expires_at,
+        (now() + chrono::TimeDelta::seconds(3600)).to_rfc3339()
+    );
+    for id in [
+        serde_json::json!(""),
+        serde_json::json!(null),
+        serde_json::json!({"token":"secret"}),
+    ] {
+        value["id_token"] = id;
+        assert!(parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).is_err());
+    }
+    let mut value = response();
+    value.as_object_mut().unwrap().remove("id_token");
+    assert!(parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).is_err());
+    let mut value = response();
+    value["scope"] = serde_json::json!("openid");
+    assert!(parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).is_err());
+}
+
+#[test]
+fn jwks_discovery_uses_only_its_exact_trusted_origin() {
+    for endpoint in [
+        "http://auth.openai.com/keys",
+        "https://auth.openai.com.evil.test/keys",
+        "https://127.0.0.1/keys",
+        "https://auth.openai.com:444/keys",
+        "https://user@auth.openai.com/keys",
+        "https://auth.openai.com/keys?q=secret",
+        "https://auth.openai.com/keys#fragment",
+    ] {
+        let body =
+            serde_json::to_vec(&serde_json::json!({"issuer":ISSUER,"jwks_uri":endpoint})).unwrap();
+        assert!(discovery_endpoint(&body, "jwks_uri").is_err());
+    }
+    let valid = serde_json::to_vec(&serde_json::json!({"issuer":ISSUER,"jwks_uri":"https://auth.openai.com/discovered-keys","extra":true})).unwrap();
+    assert_eq!(
+        discovery_endpoint(&valid, "jwks_uri").unwrap().path(),
+        "/discovered-keys"
+    );
+    let wrong = serde_json::to_vec(&serde_json::json!({"issuer":"https://wrong.test","jwks_uri":"https://auth.openai.com/keys"})).unwrap();
+    assert!(discovery_endpoint(&wrong, "jwks_uri").is_err());
 }
 
 #[test]

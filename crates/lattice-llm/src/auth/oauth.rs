@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use super::{Secret, valid_access_token};
 use crate::{LlmError, transport};
 
-const ISSUER: &str = "https://auth.openai.com";
+pub(super) const ISSUER: &str = "https://auth.openai.com";
 const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
 const DISCOVERY_URL: &str = "https://auth.openai.com/.well-known/openid-configuration";
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -32,12 +32,41 @@ pub(super) struct TokenReply {
     pub scopes: Vec<String>,
 }
 
+pub(super) struct CodeGrant<'a> {
+    pub client_id: &'a str,
+    pub code: &'a str,
+    pub verifier: &'a str,
+    pub redirect_uri: &'a str,
+}
+
+pub(super) struct LoginTokens {
+    pub token: TokenReply,
+    pub id_token: Secret,
+}
+
+pub(super) enum ExchangeFailure {
+    InvalidGrant,
+    Other(LlmError),
+}
+
 pub(super) enum RefreshFailure {
     InvalidToken(&'static str),
     Other(LlmError),
 }
 
 pub(super) trait TokenEndpoint: Send + Sync {
+    fn exchange<'a>(
+        &'a self,
+        grant: CodeGrant<'a>,
+    ) -> BoxFuture<'a, Result<LoginTokens, ExchangeFailure>>;
+
+    fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>>;
+
+    fn jwks<'a>(
+        &'a self,
+        uri: &'a url::Url,
+    ) -> BoxFuture<'a, Result<jsonwebtoken::jwk::JwkSet, LlmError>>;
+
     fn refresh<'a>(
         &'a self,
         grant: RefreshGrant<'a>,
@@ -147,6 +176,72 @@ async fn read_reply(mut response: reqwest::Response) -> Result<HttpReply, LlmErr
 }
 
 impl TokenEndpoint for HttpTokenEndpoint {
+    fn exchange<'a>(
+        &'a self,
+        grant: CodeGrant<'a>,
+    ) -> BoxFuture<'a, Result<LoginTokens, ExchangeFailure>> {
+        Box::pin(async move {
+            let response = self
+                .request(TOKEN_URL, Some(code_form(&grant)))
+                .await
+                .map_err(|error| ExchangeFailure::Other(phase_error(error, "code exchange")))?;
+            if response.status != 200 {
+                if oauth_code(&response.body) == Some("invalid_grant") {
+                    return Err(ExchangeFailure::InvalidGrant);
+                }
+                return Err(ExchangeFailure::Other(endpoint_error(
+                    &response,
+                    "code exchange",
+                    oauth_code(&response.body) == Some("invalid_client"),
+                    (self.clock)(),
+                )));
+            }
+            parse_login_token(&response.body, (self.clock)())
+                .map_err(|error| ExchangeFailure::Other(phase_error(error, "code exchange")))
+        })
+    }
+
+    fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>> {
+        Box::pin(async move {
+            let response = self
+                .request(DISCOVERY_URL, None)
+                .await
+                .map_err(|error| phase_error(error, "JWKS discovery"))?;
+            if response.status != 200 {
+                return Err(endpoint_error(
+                    &response,
+                    "JWKS discovery",
+                    false,
+                    (self.clock)(),
+                ));
+            }
+            discovery_endpoint(&response.body, "jwks_uri")
+        })
+    }
+
+    fn jwks<'a>(
+        &'a self,
+        uri: &'a url::Url,
+    ) -> BoxFuture<'a, Result<jsonwebtoken::jwk::JwkSet, LlmError>> {
+        Box::pin(async move {
+            trusted_endpoint(uri)?;
+            let response = self
+                .request(uri.as_str(), None)
+                .await
+                .map_err(|error| phase_error(error, "JWKS retrieval"))?;
+            if response.status != 200 {
+                return Err(endpoint_error(
+                    &response,
+                    "JWKS retrieval",
+                    false,
+                    (self.clock)(),
+                ));
+            }
+            serde_json::from_slice(&response.body)
+                .map_err(|_| invalid_response("invalid JWKS document"))
+        })
+    }
+
     fn refresh<'a>(
         &'a self,
         grant: RefreshGrant<'a>,
@@ -155,11 +250,12 @@ impl TokenEndpoint for HttpTokenEndpoint {
             let response = self
                 .request(TOKEN_URL, Some(refresh_form(&grant)))
                 .await
-                .map_err(RefreshFailure::Other)?;
+                .map_err(|error| RefreshFailure::Other(phase_error(error, "token refresh")))?;
             if response.status != 200 {
                 return Err(refresh_error(&response, (self.clock)()));
             }
-            parse_token(&response.body, (self.clock)()).map_err(RefreshFailure::Other)
+            parse_token(&response.body, (self.clock)())
+                .map_err(|error| RefreshFailure::Other(phase_error(error, "token refresh")))
         })
     }
 
@@ -189,6 +285,17 @@ fn encoded_form(pairs: &[(&str, &str)]) -> Zeroizing<Vec<u8>> {
     Zeroizing::new(form.finish().into_bytes())
 }
 
+fn code_form(grant: &CodeGrant<'_>) -> Zeroizing<Vec<u8>> {
+    encoded_form(&[
+        ("grant_type", "authorization_code"),
+        ("client_id", grant.client_id),
+        ("code", grant.code),
+        ("code_verifier", grant.verifier),
+        ("redirect_uri", grant.redirect_uri),
+        ("resource", "https://api.openai.com/v1"),
+    ])
+}
+
 fn refresh_form(grant: &RefreshGrant<'_>) -> Zeroizing<Vec<u8>> {
     encoded_form(&[
         ("grant_type", "refresh_token"),
@@ -207,25 +314,41 @@ fn revocation_form(grant: &RefreshGrant<'_>) -> Zeroizing<Vec<u8>> {
 }
 
 fn revocation_endpoint(body: &[u8]) -> Result<url::Url, LlmError> {
+    discovery_endpoint(body, "revocation_endpoint")
+}
+
+fn discovery_endpoint(body: &[u8], field: &str) -> Result<url::Url, LlmError> {
     #[derive(Deserialize)]
     struct Discovery {
         issuer: String,
-        revocation_endpoint: String,
+        #[serde(flatten)]
+        endpoints: std::collections::BTreeMap<String, serde_json::Value>,
     }
-    let discovery: Discovery = serde_json::from_slice(body)
-        .map_err(|_| invalid_response("invalid revocation discovery"))?;
-    let url = url::Url::parse(&discovery.revocation_endpoint)
-        .map_err(|_| configuration("invalid revocation endpoint"))?;
-    if discovery.issuer != ISSUER
-        || url.origin().ascii_serialization() != ISSUER
+    let discovery: Discovery =
+        serde_json::from_slice(body).map_err(|_| invalid_response("invalid OpenID discovery"))?;
+    if discovery.issuer != ISSUER {
+        return Err(configuration("untrusted discovery issuer"));
+    }
+    let endpoint = discovery
+        .endpoints
+        .get(field)
+        .and_then(serde_json::Value::as_str)
+        .ok_or_else(|| configuration("missing discovery endpoint"))?;
+    let url = url::Url::parse(endpoint).map_err(|_| configuration("invalid discovery endpoint"))?;
+    trusted_endpoint(&url)?;
+    Ok(url)
+}
+
+fn trusted_endpoint(url: &url::Url) -> Result<(), LlmError> {
+    if url.origin().ascii_serialization() != ISSUER
         || !url.username().is_empty()
         || url.password().is_some()
         || url.query().is_some()
         || url.fragment().is_some()
     {
-        return Err(configuration("untrusted revocation endpoint"));
+        return Err(configuration("untrusted discovery endpoint"));
     }
-    Ok(url)
+    Ok(())
 }
 
 fn confirm_revocation(status: u16, body: &[u8]) -> Result<(), LlmError> {
@@ -274,7 +397,23 @@ fn parse_token(body: &[u8], now: DateTime<Utc>) -> Result<TokenReply, LlmError> 
     })
 }
 
-fn refresh_error(reply: &HttpReply, now: DateTime<Utc>) -> RefreshFailure {
+fn parse_login_token(body: &[u8], now: DateTime<Utc>) -> Result<LoginTokens, LlmError> {
+    #[derive(Deserialize)]
+    struct IdentityToken {
+        id_token: Secret,
+    }
+    let identity: IdentityToken = serde_json::from_slice(body)
+        .map_err(|_| invalid_response("missing or invalid ID token"))?;
+    if identity.id_token.0.is_empty() || identity.id_token.0.chars().any(char::is_control) {
+        return Err(invalid_response("missing or invalid ID token"));
+    }
+    Ok(LoginTokens {
+        token: parse_token(body, now)?,
+        id_token: identity.id_token,
+    })
+}
+
+fn oauth_code(body: &[u8]) -> Option<&'static str> {
     #[derive(Deserialize)]
     #[serde(untagged)]
     enum Code {
@@ -285,24 +424,39 @@ fn refresh_error(reply: &HttpReply, now: DateTime<Utc>) -> RefreshFailure {
     struct ErrorReply {
         error: Code,
     }
-    let parsed: Option<ErrorReply> = serde_json::from_slice(&reply.body).ok();
+    let parsed: Option<ErrorReply> = serde_json::from_slice(body).ok();
     let code = parsed.as_ref().map(|reply| match &reply.error {
         Code::Plain(code) | Code::Object { code } => code.0.as_str(),
     });
-    let terminal = match code {
+    match code {
         Some("invalid_grant") => Some("invalid_grant"),
         Some("invalid_refresh_token") => Some("invalid_refresh_token"),
         Some("token_expired") => Some("token_expired"),
         Some("refresh_token_expired") => Some("refresh_token_expired"),
         Some("refresh_token_invalidated") => Some("refresh_token_invalidated"),
         Some("refresh_token_reused") => Some("refresh_token_reused"),
+        Some("invalid_client") => Some("invalid_client"),
         _ => None,
-    };
+    }
+}
+
+fn refresh_error(reply: &HttpReply, now: DateTime<Utc>) -> RefreshFailure {
+    let code = oauth_code(&reply.body);
+    let terminal = code.filter(|code| *code != "invalid_client");
     if let Some(code) = terminal {
         return RefreshFailure::InvalidToken(code);
     }
     let invalid_client = code == Some("invalid_client");
-    let mut message = format!("ChatGPT token refresh failed: HTTP {}", reply.status);
+    RefreshFailure::Other(endpoint_error(reply, "token refresh", invalid_client, now))
+}
+
+fn endpoint_error(
+    reply: &HttpReply,
+    action: &str,
+    invalid_client: bool,
+    now: DateTime<Utc>,
+) -> LlmError {
+    let mut message = format!("ChatGPT {action} failed: HTTP {}", reply.status);
     if invalid_client {
         message.push_str(
             " invalid_client; run lattice auth remove chatgpt, then lattice auth login chatgpt",
@@ -312,13 +466,13 @@ fn refresh_error(reply: &HttpReply, now: DateTime<Utc>) -> RefreshFailure {
         message.push_str("; request_id=");
         message.push_str(&id);
     }
-    RefreshFailure::Other(LlmError::ProviderHttp {
+    LlmError::ProviderHttp {
         status_code: reply.status,
         message,
         retryable: !invalid_client
             && (reply.status >= 500 || matches!(reply.status, 408 | 409 | 429)),
         retry_after: transport::retry_after(&reply.headers, now.into()),
-    })
+    }
 }
 
 fn configuration(message: &str) -> LlmError {
@@ -327,15 +481,17 @@ fn configuration(message: &str) -> LlmError {
     }
 }
 
+fn phase_error(error: LlmError, phase: &str) -> LlmError {
+    crate::client::redact_error_with(error, |message| format!("ChatGPT {phase}: {message}"))
+}
+
 fn invalid_response(message: &str) -> LlmError {
-    LlmError::Other(format!(
-        "ChatGPT token refresh/revocation failed: {message}"
-    ))
+    LlmError::Other(format!("ChatGPT OAuth failed: {message}"))
 }
 
 fn timeout_error() -> LlmError {
     LlmError::Timeout {
-        message: "ChatGPT token refresh/revocation did not finish within 30 seconds".into(),
+        message: "ChatGPT OAuth did not finish within 30 seconds".into(),
     }
 }
 
@@ -344,7 +500,7 @@ fn network_error(error: reqwest::Error) -> LlmError {
         timeout_error()
     } else {
         LlmError::Transport {
-            message: "ChatGPT token refresh/revocation network request failed".into(),
+            message: "ChatGPT OAuth network request failed".into(),
             retryable: error.is_connect() || error.is_request() || error.is_body(),
         }
     }
