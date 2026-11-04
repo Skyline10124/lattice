@@ -229,6 +229,8 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 
 内置 `chatgpt` 开启 `tool_namespace`，满足 SIWC 预览的工具要求；`openai`、`xai` 与自定义 Responses provider 默认关闭。返回的 `function_call` 可带 `namespace` 字符串，适配器接受该字段，工具仍按原名路由。推理摘要请求由模型元数据决定，见[档位映射](#档位映射)。
 
+SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器使用流中已通过 `response.output_item.done` 完成的 item，任一 item 未结束仍报错。非空 `output` 继续与流中的 item 交叉校验，缺少 `output` 仍报错。`response.incomplete` 的空 `output` 按[不完整回复](#适配器的职责)规则关闭仍打开的 item。
+
 ### Anthropic Messages
 
 | feature | 取值 | 默认 | 作用 |
@@ -540,7 +542,7 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 
 | 检查对象 | 入口 |
 | --- | --- |
-| 各协议的请求体与流式事件：文字、推理、多个工具调用、用量、错误事件 | `cargo test -p lattice-llm`，夹具取自官方文档 |
+| 各协议的请求体与流式事件：文字、推理、多个工具调用、用量、错误事件 | `cargo test -p lattice-llm`，夹具取自官方文档与脱敏的真实响应 |
 | 每个 feature 取值的请求体，默认值与标准协议形状一致 | 同上 |
 | provider 注册表：内置表与 `providers.toml` 的合并、严格解析、`chatgpt` 不能改写、非 loopback 必须 HTTPS | 同上 |
 | 元数据：来源的选择与按字段覆盖、只保留列出的字段、缓存保留 `providers.toml` 中的 `catalog` 条目、刷新失败继续使用上一份 | 同上 |
