@@ -93,6 +93,11 @@ pub enum ProtocolEvent {
         finish_reason: String,
     },
     Failed(StreamStop),
+    /// 保留 Responses 错误码，在传输边界统一分类并生成诊断。
+    ResponsesError {
+        code: Option<String>,
+        message: String,
+    },
     /// 原始类型名只在协议边界内传递，先脱敏再生成有界的公开错误。
     UnsupportedContentBlock {
         protocol: &'static str,

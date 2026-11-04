@@ -664,11 +664,15 @@ impl ResponsesSseParser {
         if response.status.as_deref() != Some("completed") {
             return Err(malformed("response status is not completed"));
         }
-        self.finish_output(
-            required(response.output, "response missing output")?,
-            false,
-            events,
-        )?;
+        let output = required(response.output, "response missing output")?;
+        if output.is_empty() {
+            // 空终态快照沿用流中已结束的 item，仍拒绝未收到结束事件的 item。
+            if self.items.values().any(|item| !item.done) {
+                return Err(malformed("output item is not complete"));
+            }
+        } else {
+            self.finish_output(output, false, events)?;
+        }
         let calls = self
             .items
             .values()
@@ -724,7 +728,9 @@ impl ResponsesSseParser {
         if response.status.as_deref() != Some("incomplete") {
             return Err(malformed("response status is not incomplete"));
         }
-        if let Some(output) = response.output {
+        if let Some(output) = response.output
+            && !output.is_empty()
+        {
             self.finish_output(output, true, events)?;
         }
         // 截断可能省略 item 的结束事件；结束片段后由共同累积器校验整批工具参数。
@@ -915,15 +921,10 @@ impl ResponsesSseParser {
 }
 
 fn api_error(code: Option<&str>, message: Option<&str>) -> ProtocolEvent {
-    let retryable = matches!(code, Some("server_error" | "rate_limit_exceeded"));
-    ProtocolEvent::error(
-        format!(
-            "Responses {}: {}",
-            code.unwrap_or("error"),
-            message.unwrap_or("provider error")
-        ),
-        retryable,
-    )
+    ProtocolEvent::ResponsesError {
+        code: code.map(str::to_owned),
+        message: message.unwrap_or("provider error").into(),
+    }
 }
 
 #[cfg(test)]

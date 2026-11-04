@@ -227,6 +227,8 @@ Responses 没有 feature。推理摘要请求由模型元数据决定，见[档�
 
 适配器只发送 SIWC 也接受的字段（见[适配器的职责](#适配器的职责)），所以 `chatgpt` 不需要额外的 feature。
 
+SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器使用流中已通过 `response.output_item.done` 完成的 item，任一 item 未结束仍报错。非空 `output` 继续与流中的 item 交叉校验，缺少 `output` 仍报错。`response.incomplete` 的空 `output` 按[不完整回复](#适配器的职责)规则关闭仍打开的 item。
+
 ### Anthropic Messages
 
 | feature | 取值 | 默认 | 作用 |
@@ -521,7 +523,7 @@ SIWC 按 OpenAI 的[开源工具接入方式](https://developers.openai.com/siwc
 ### 请求与错误
 
 - 请求 `POST https://api.openai.com/v1/responses`，`store: false`、`stream: true`；`response.completed` 正常完成；`response.incomplete` 的 `max_output_tokens`、`content_filter` 按[适配器职责](#适配器的职责)保存回复并映射 finish_reason，其他原因、`response.failed` 与流中断按错误停止。
-- 用量超限（`subscription_sharing_usage_limit_exceeded`，HTTP 429，也可能在流中途以 `response.failed` 给出）按不可重试的 provider 错误处理，诊断提示到 ChatGPT 设置查看用量。
+- HTTP 429 且错误码为 `subscription_sharing_usage_limit_exceeded`，以及流中 `response.failed` 的同一码，均按不可重试的 provider 错误处理，优先于 `x-should-retry` 等重试提示。client/transport 统一分类并提示到 ChatGPT 设置查看用量，保留实际 HTTP 状态码、错误码与 request ID；协议适配器只翻译事件。其他 `subscription_sharing_*` 码沿用现有错误规则。
 
 ## 限制
 
@@ -538,7 +540,7 @@ Turn deadline 的范围由[会话合同](session.md#输入与传输限制)维护
 
 | 检查对象 | 入口 |
 | --- | --- |
-| 各协议的请求体与流式事件：文字、推理、多个工具调用、用量、错误事件 | `cargo test -p lattice-llm`，夹具取自官方文档 |
+| 各协议的请求体与流式事件：文字、推理、多个工具调用、用量、错误事件 | `cargo test -p lattice-llm`，夹具取自官方文档与脱敏的真实响应 |
 | 每个 feature 取值的请求体，默认值与标准协议形状一致 | 同上 |
 | provider 注册表：内置表与 `providers.toml` 的合并、严格解析、`chatgpt` 不能改写、非 loopback 必须 HTTPS | 同上 |
 | 元数据：来源的选择与按字段覆盖、只保留列出的字段、缓存保留 `providers.toml` 中的 `catalog` 条目、刷新失败继续使用上一份 | 同上 |

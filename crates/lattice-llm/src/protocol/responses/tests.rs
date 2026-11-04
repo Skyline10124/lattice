@@ -34,6 +34,61 @@ fn collect(events: Vec<Value>) -> (Vec<LlmEvent>, ReplyOutcome, AttemptReport) {
     panic!("script must terminate")
 }
 
+fn sse_events(capture: &str) -> Vec<Value> {
+    capture
+        .trim()
+        .split("\n\n")
+        .filter_map(|frame| {
+            let data = frame.lines().find_map(|line| line.strip_prefix("data: "))?;
+            if data == "[DONE]" {
+                return None;
+            }
+            let name = frame.lines().find_map(|line| line.strip_prefix("event: "));
+            let value: Value = serde_json::from_str(data).unwrap();
+            assert_eq!(name, value["type"].as_str());
+            Some(value)
+        })
+        .collect()
+}
+
+#[test]
+fn siwc_text_stream_uses_finished_items_when_completed_output_is_empty() {
+    let (live, outcome, report) = collect(sse_events(include_str!(
+        "../../../tests/fixtures/projection/responses_siwc_text.sse"
+    )));
+    let ReplyOutcome::Complete { message } = outcome else {
+        panic!("complete text: {outcome:?}")
+    };
+    assert_eq!(
+        live,
+        vec![LlmEvent::Delta(crate::LiveDelta::Text("hello".into()))]
+    );
+    assert!(matches!(
+        message.as_message().parts.as_slice(),
+        [part] if matches!(&part.semantic, lattice_conversation::MessageSemantic::Text { text } if text == "hello")
+    ));
+    assert_eq!(report.finish_reason.as_deref(), Some("stop"));
+}
+
+#[test]
+fn siwc_function_call_stream_uses_finished_items_when_completed_output_is_empty() {
+    let (_, outcome, report) = collect(sse_events(include_str!(
+        "../../../tests/fixtures/projection/responses_siwc_function_call.sse"
+    )));
+    let ReplyOutcome::Complete { message } = outcome else {
+        panic!("complete function call: {outcome:?}")
+    };
+    assert_eq!(
+        message
+            .as_message()
+            .tool_calls()
+            .map(|(_, call)| (call.name.as_str(), call.arguments.clone()))
+            .collect::<Vec<_>>(),
+        vec![("get_time", json!({}))]
+    );
+    assert_eq!(report.finish_reason.as_deref(), Some("tool_calls"));
+}
+
 #[test]
 fn request_controls_preserve_session_tools_metadata_and_effort() {
     let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
@@ -427,6 +482,7 @@ fn failures_keep_usage_and_unknown_incomplete_reasons_still_fail() {
         ("rate_limit_error", false),
         ("temporarily_unavailable", false),
         ("insufficient_quota", false),
+        ("subscription_sharing_usage_unavailable", false),
         ("context_length_exceeded", false),
         ("invalid_request_error", false),
         ("unknown", false),
@@ -447,14 +503,23 @@ fn incomplete_reasons_close_open_items_and_validate_the_complete_tool_batch() {
         ("max_output_tokens", "length"),
         ("content_filter", "content_filter"),
     ] {
-        for (snapshot, item_done) in [(false, false), (true, false), (false, true), (true, true)] {
+        for (snapshot, item_done) in [
+            ("missing", false),
+            ("empty", false),
+            ("full", false),
+            ("missing", true),
+            ("empty", true),
+            ("full", true),
+        ] {
             let reasoning = json!({"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"think"}],"encrypted_content":"final"});
             let text = json!({"type":"message","role":"assistant","id":"msg","status":"incomplete","content":[{"type":"output_text","text":"partial","annotations":[],"logprobs":[]}]});
             let mut terminal = json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":reason},"usage":{"input_tokens":11,"output_tokens":3}}});
-            if snapshot {
+            if snapshot == "full" {
                 let mut snapshot_reasoning = reasoning.clone();
                 snapshot_reasoning["status"] = "in_progress".into();
                 terminal["response"]["output"] = json!([snapshot_reasoning, text]);
+            } else if snapshot == "empty" {
+                terminal["response"]["output"] = json!([]);
             }
             let mut events = vec![
                 json!({"type":"response.output_item.added","output_index":0,"item":{"type":"reasoning","id":"rs","summary":[],"encrypted_content":"unfinished"}}),
@@ -480,7 +545,9 @@ fn incomplete_reasons_close_open_items_and_validate_the_complete_tool_batch() {
                 ]
             );
             let ReplyOutcome::Complete { message } = outcome else {
-                panic!("incomplete {reason} must save its reply: {outcome:?}")
+                panic!(
+                    "incomplete {reason} with {snapshot} output and item_done={item_done} must save its reply: {outcome:?}"
+                )
             };
             assert!(
                 matches!(&message.as_message().parts[0].semantic, MessageSemantic::Reasoning { text } if text == "think")
@@ -493,7 +560,7 @@ fn incomplete_reasons_close_open_items_and_validate_the_complete_tool_batch() {
             assert_eq!((usage.input, usage.output), (Some(11), Some(3)));
             assert_eq!(report.finish_reason.as_deref(), Some(finish_reason));
             let mut replay = Vec::new();
-            if snapshot || item_done {
+            if snapshot == "full" || item_done {
                 replay.push(reasoning);
             }
             let mut text = text;
@@ -694,6 +761,10 @@ fn unknown_content_and_invalid_sequences_fail_without_exposing_payload() {
             invalid("response status is not completed"),
         ),
         (
+            vec![json!({"type":"response.completed","response":{"status":"completed"}})],
+            invalid("response missing output"),
+        ),
+        (
             vec![
                 json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"message","id":"msg","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"private-payload"}]}]}}),
             ],
@@ -722,8 +793,17 @@ fn unknown_content_and_invalid_sequences_fail_without_exposing_payload() {
         ),
         (
             vec![
-                json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"msg","status":"in_progress","role":"assistant","content":[]}}),
+                begin.clone(),
+                json!({"type":"response.output_item.done","output_index":0,"item":message("msg","final_answer","finished")}),
+                json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"later","status":"in_progress","role":"assistant","content":[]}}),
                 response(vec![]),
+            ],
+            invalid("output item is not complete"),
+        ),
+        (
+            vec![
+                json!({"type":"response.output_item.added","output_index":1,"item":{"type":"message","id":"later","status":"in_progress","role":"assistant","content":[]}}),
+                response(vec![message("msg", "final_answer", "private-payload")]),
             ],
             invalid("response omits output item"),
         ),
