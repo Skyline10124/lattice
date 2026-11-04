@@ -54,8 +54,8 @@ fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
             vec!["timeout_secs", "0", "timeout_secs must be > 0"],
         ),
         (
-            format!("{prefix}[prompt]\nsystem='hi'\n[llm]\ntimeout_secs=3601"),
-            vec!["timeout_secs", "3601", "timeout_secs must be <= 3600"],
+            format!("{prefix}[prompt]\nsystem='hi'\n[llm]\ntimeout_secs=86401"),
+            vec!["timeout_secs", "86401", "timeout_secs must be <= 86400"],
         ),
         (
             format!(

@@ -403,6 +403,7 @@ mod tests {
         );
         assert!(lancet.policy.is_none());
         let normalized = TurnProfile::from_loaded(&loaded, &workspace).unwrap();
+        assert_eq!(normalized.effective.timeout_secs, 300);
         let config = lattice_session::store::FrozenTurnConfig {
             agent_name: "test".into(),
             model: "test".into(),
@@ -431,6 +432,15 @@ mod tests {
             serde_json::to_value(restored.capability_admission()).unwrap(),
             serde_json::to_value(loaded.profile.capability_admission_policy()).unwrap()
         );
+
+        // 防止 TurnProfile::from_loaded 截断或忽略超过一小时的显式 timeout_secs；
+        // EffectiveProfile 为私有持久结构，E2E 无法在不跑满长流的情况下直接读取该字段。
+        for timeout_secs in [3601, 86_400] {
+            let mut explicit = loaded.clone();
+            explicit.profile.llm.timeout_secs = Some(timeout_secs);
+            let prepared = TurnProfile::from_loaded(&explicit, &workspace).unwrap();
+            assert_eq!(prepared.effective.timeout_secs, timeout_secs);
+        }
     }
 
     fn private_configuration(

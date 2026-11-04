@@ -117,7 +117,7 @@ impl EffectiveProfile {
             super::validate::provider_id(provider)?;
             model_id(model)?;
         }
-        if !(1..=3600).contains(&self.timeout_secs)
+        if !(1..=super::MAX_TURN_TIMEOUT_SECS).contains(&self.timeout_secs)
             || self.retry.max_retries > 10
             || self.retry.initial_delay_ms > self.retry.max_delay_ms
             || self.retry.max_delay_ms > 60_000

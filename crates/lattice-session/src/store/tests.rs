@@ -1708,31 +1708,163 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
 }
 
 #[test]
+fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
+    // 分别防止冻结限制拒绝合法值、副本校验未同步、保存成功却无法严格重开，
+    // 以及切换 agent 覆盖副本后历史 UserMessage 节点的越界 timeout 漏过重开校验。
+    // 直接读写冻结事实、副本与底层表，外部场景无法等价构造这些私有记录状态。
+    for timeout_secs in [1, 300, 3600, 3601, MAX_TURN_TIMEOUT_SECS] {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        let mut first = accept(sid(1), tid(1));
+        first.config.limits.timeout_secs = timeout_secs;
+        first.profile_copy = SessionProfileCopy::for_test(&first.config);
+        let expected_first = first.config.clone();
+        let expected_first_copy = first.profile_copy.clone();
+        db.accept_turn(&lock, first)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let read = db.begin_read().unwrap();
+        assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_first);
+        assert_eq!(read.profile_copy(sid(1)).unwrap(), expected_first_copy);
+        drop(read);
+        drop(lock);
+        drop(db);
+
+        let reopened = SessionStore::open(&layout)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let lock = reopened.try_lock_session(sid(1)).unwrap();
+        let mut second = accept(sid(1), tid(2));
+        second.session = AcceptSession::Existing { id: sid(1) };
+        second.expected_profile_digest = Some(expected_first_copy.digest().unwrap());
+        second.config.agent_name = "beta".into();
+        second.config.limits.timeout_secs = 300;
+        second.profile_copy = SessionProfileCopy::for_test(&second.config);
+        let expected_second = second.config.clone();
+        let expected_second_copy = second.profile_copy.clone();
+        reopened.accept_turn(&lock, second).unwrap();
+        drop(lock);
+        drop(reopened);
+
+        let reopened = SessionStore::open(&layout)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let read = reopened.begin_read().unwrap();
+        assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_first);
+        assert_eq!(read.turn_config(sid(1), tid(2)).unwrap(), expected_second);
+        assert_eq!(read.profile_copy(sid(1)).unwrap(), expected_second_copy);
+    }
+
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let first = accept(sid(1), tid(1));
+    let digest = first.profile_copy.digest().unwrap();
+    db.accept_turn(&lock, first).unwrap();
+    let mut second = accept(sid(1), tid(2));
+    second.session = AcceptSession::Existing { id: sid(1) };
+    second.expected_profile_digest = Some(digest);
+    second.config.agent_name = "beta".into();
+    second.profile_copy = SessionProfileCopy::for_test(&second.config);
+    db.accept_turn(&lock, second).unwrap();
+    let base = records(&db);
+    drop(lock);
+    drop(db);
+    for invalid_timeout in [0, MAX_TURN_TIMEOUT_SECS + 1] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        let mut tampered = base.clone();
+        let Some(Node::UserMessage { limits, .. }) = tampered.nodes.get_mut(&(sid(1), NodeId(1)))
+        else {
+            panic!("expected first user message node");
+        };
+        limits.timeout_secs = invalid_timeout;
+        overwrite_records(&tx, &tampered);
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(
+            matches!(
+                SessionStore::open(&layout),
+                Err(StoreError::Corruption { .. })
+            ),
+            "invalid_timeout={invalid_timeout}"
+        );
+    }
+}
+
+#[test]
 fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    for case in 0..13 {
+    for case in 0..14 {
         let mut a = accept(sid(1), tid(1));
-        match case {
-            0 => a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1),
-            1 => a.agent_selection = AgentSelection::Inherited,
-            2 => a.config.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1)),
-            3 => a.config.provider = "Bad_id".into(),
-            4 => a
-                .config
-                .catalog
-                .entries
-                .push(a.config.catalog.entries[0].clone()),
-            5 => a.config.limits.max_model_steps = 33,
-            6 => a.config.limits.max_model_attempts = 0,
-            7 => a.config.agent_name.clear(),
-            8 => a.config.catalog.digest = [0; 32],
-            9 => a.config.limits.timeout_secs = 0,
-            10 => a.config.limits.max_model_attempts = 12,
-            11 => a.config.model.clear(),
-            _ => a.config.catalog.entries[0].descriptor_identity = "A".repeat(64),
+        let expected_detail = match case {
+            0 => {
+                a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1);
+                None
+            }
+            1 => {
+                a.agent_selection = AgentSelection::Inherited;
+                None
+            }
+            2 => {
+                a.config.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1));
+                None
+            }
+            3 => {
+                a.config.provider = "Bad_id".into();
+                None
+            }
+            4 => {
+                a.config
+                    .catalog
+                    .entries
+                    .push(a.config.catalog.entries[0].clone());
+                None
+            }
+            5 => {
+                a.config.limits.max_model_steps = 33;
+                Some("invalid frozen configuration")
+            }
+            6 => {
+                a.config.limits.max_model_attempts = 0;
+                Some("invalid frozen configuration")
+            }
+            7 => {
+                a.config.agent_name.clear();
+                None
+            }
+            8 => {
+                a.config.catalog.digest = [0; 32];
+                None
+            }
+            9 => {
+                a.config.limits.timeout_secs = 0;
+                Some("invalid frozen configuration")
+            }
+            10 => {
+                a.config.limits.max_model_attempts = 12;
+                Some("invalid frozen configuration")
+            }
+            11 => {
+                a.config.model.clear();
+                None
+            }
+            12 => {
+                a.config.catalog.entries[0].descriptor_identity = "A".repeat(64);
+                None
+            }
+            13 => {
+                a.config.limits.timeout_secs = MAX_TURN_TIMEOUT_SECS + 1;
+                Some("invalid frozen configuration")
+            }
+            _ => unreachable!(),
+        };
+        let result = accept_prepared(&db, &lock, a);
+        if let Some(expected_detail) = expected_detail {
+            assert!(
+                matches!(&result, Err(StoreError::InvalidInput { field: "config", detail }) if detail == expected_detail),
+                "{case}: {result:?}"
+            );
+        } else {
+            assert!(result.is_err(), "{case}");
         }
-        assert!(accept_prepared(&db, &lock, a).is_err(), "{case}");
         assert!(records(&db).nodes.is_empty());
     }
     assert!(matches!(
@@ -4965,7 +5097,16 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
     db.accept_turn(&lock, first).unwrap();
     let original = db.begin_read().unwrap().profile_copy(sid(1)).unwrap();
     let before = records(&db);
-    for case in ["stale", "profile", "prompt", "model", "effort", "limits"] {
+    for (case, invalid_limits) in [
+        ("stale", false),
+        ("profile", false),
+        ("prompt", false),
+        ("model", false),
+        ("effort", false),
+        ("limits", false),
+        ("timeout_zero", true),
+        ("timeout_over_upper_bound", true),
+    ] {
         let mut next = accept(sid(1), tid(2));
         next.session = AcceptSession::Existing { id: sid(1) };
         next.agent_selection = AgentSelection::Inherited;
@@ -4978,16 +5119,27 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
             "model" => next.profile_copy.current.model = "different".into(),
             "effort" => next.profile_copy.current.effort = Some(lattice_conversation::Effort::High),
             "limits" => next.profile_copy.profile.timeout_secs += 1,
+            "timeout_zero" => next.profile_copy.profile.timeout_secs = 0,
+            "timeout_over_upper_bound" => {
+                next.profile_copy.profile.timeout_secs = MAX_TURN_TIMEOUT_SECS + 1;
+            }
             _ => unreachable!(),
         }
         let result = db.accept_turn(&lock, next);
-        assert!(
-            matches!(
-                result,
-                Err(StoreError::Conflict { .. } | StoreError::InvalidInput { .. })
-            ),
-            "{case}: {result:?}"
-        );
+        if invalid_limits {
+            assert!(
+                matches!(&result, Err(StoreError::InvalidInput { field: "profile", detail }) if detail == "invalid execution limits"),
+                "{case}: {result:?}"
+            );
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(StoreError::Conflict { .. } | StoreError::InvalidInput { .. })
+                ),
+                "{case}: {result:?}"
+            );
+        }
         assert!(before == records(&db), "{case} partially changed records");
     }
     let mut next = accept(sid(1), tid(2));
