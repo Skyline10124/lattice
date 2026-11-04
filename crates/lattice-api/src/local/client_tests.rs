@@ -37,7 +37,7 @@ async fn credential_cleanup_preserves_each_remote_revocation_result() {
                         revocation: Some(revocation),
                     })
                 } else {
-                    Response::AuthLoggedOut { revocation }
+                    Response::AuthLoggedOut(AuthLoggedOut { revocation })
                 })
                 .await;
             };

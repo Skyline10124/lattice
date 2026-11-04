@@ -686,7 +686,7 @@ impl Backend {
                     .logout()
                     .await
                     .map_err(super::auth::error)?;
-                Ok(Response::AuthLoggedOut { revocation })
+                Ok(Response::AuthLoggedOut(AuthLoggedOut { revocation }))
             }
             Request::AuthLogin { .. } => Err(super::client::protocol()),
             Request::AuthStatus {} => {

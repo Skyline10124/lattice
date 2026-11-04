@@ -102,7 +102,7 @@ impl LocalClient {
             })
             .await?
         {
-            Response::AuthLoggedOut { revocation } => Ok(revocation),
+            Response::AuthLoggedOut(result) => Ok(result.revocation),
             _ => Err(protocol()),
         }
     }

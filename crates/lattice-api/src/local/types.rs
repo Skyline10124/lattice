@@ -30,6 +30,13 @@ pub struct AuthRemoval {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revocation: Option<RevocationStatus>,
 }
+
+/// Response 的结构体变体不受严格解析约束，载荷单独成结构体才能拒绝未知字段。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AuthLoggedOut {
+    pub(super) revocation: RevocationStatus,
+}
 pub const HISTORY_TURNS: u32 = 10;
 pub const MAX_HISTORY_TURNS: u32 = 100;
 
@@ -556,7 +563,7 @@ pub(super) enum Response {
     Status(DaemonStatus),
     AuthUpdated,
     AuthRemoved(AuthRemoval),
-    AuthLoggedOut { revocation: RevocationStatus },
+    AuthLoggedOut(AuthLoggedOut),
     AuthStatus(AuthStatus),
     Models(ModelCandidates),
     ModelsRefreshed,

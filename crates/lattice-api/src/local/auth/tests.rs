@@ -284,6 +284,12 @@ async fn auth_frames_round_trip_without_changing_existing_frame_shape() {
             }),
             serde_json::json!({"response":"auth_removed","value":{"removed":false}}),
         ),
+        (
+            Response::AuthLoggedOut(local::AuthLoggedOut {
+                revocation: local::RevocationStatus::Confirmed,
+            }),
+            serde_json::json!({"response":"auth_logged_out","value":{"revocation":"confirmed"}}),
+        ),
     ] {
         let mut writer = ipc::ResponseWriter::default();
         writer.write(&mut sender, &response).await.unwrap();
@@ -292,5 +298,11 @@ async fn auth_frames_round_trip_without_changing_existing_frame_shape() {
             .await
             .unwrap();
         assert_eq!(serde_json::to_value(received).unwrap(), expected);
+    }
+    for wire in [
+        serde_json::json!({"response":"auth_removed","value":{"removed":false,"extra":true}}),
+        serde_json::json!({"response":"auth_logged_out","value":{"revocation":"confirmed","extra":true}}),
+    ] {
+        assert!(serde_json::from_value::<Response>(wire).is_err());
     }
 }
