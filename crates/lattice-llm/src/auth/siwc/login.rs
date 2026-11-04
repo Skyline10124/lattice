@@ -33,7 +33,8 @@ impl ChatgptAuth {
         let control = Arc::new(LoginControl::new());
         {
             let mut state = self.0.state.lock().expect("SIWC state lock");
-            if state.stopped || state.cleaning != 0 || state.login.is_some() {
+            if state.stopped || state.logins_stopped || state.cleaning != 0 || state.login.is_some()
+            {
                 return Err(
                     failure("lifecycle is stopping, signing out or already signing in").into(),
                 );
@@ -227,6 +228,7 @@ impl Manager {
         let state = self.state.lock().expect("SIWC state lock");
         if control.is_cancelled()
             || state.stopped
+            || state.logins_stopped
             || state.cleaning != 0
             || !state
                 .login

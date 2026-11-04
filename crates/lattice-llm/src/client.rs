@@ -48,12 +48,8 @@ fn build_auth_headers(
         Auth::Bearer => "Authorization",
         Auth::XApiKey => "x-api-key",
         Auth::XGoogApiKey => "x-goog-api-key",
-        Auth::None => return Ok(Vec::new()),
-        Auth::OauthChatgpt => {
-            return Err(LlmError::Config {
-                message: "auth oauth:chatgpt is not implemented".into(),
-            });
-        }
+        // OAuth 的认证头由每次发送前取得的 token 构造。
+        Auth::None | Auth::OauthChatgpt => return Ok(Vec::new()),
     };
     let key = api_key.ok_or_else(|| LlmError::Config {
         message: "provider credentials are missing from auth.json".into(),
@@ -779,18 +775,17 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
 }
 
-pub(crate) fn validate_implementation(auth: Auth) -> Result<(), LlmError> {
-    if auth == Auth::OauthChatgpt {
+pub(crate) fn validate_configuration(
+    auth: Auth,
+    provider: &str,
+    credentials: &Credentials,
+) -> Result<(), LlmError> {
+    if auth == Auth::OauthChatgpt && !credentials.chatgpt_logged_in() {
         return Err(LlmError::Config {
-            message: "auth oauth:chatgpt is not implemented".into(),
+            message: "ChatGPT is not signed in; run lattice auth login chatgpt".into(),
         });
     }
-    Ok(())
-}
-
-pub(crate) fn validate_configuration(auth: Auth, api_key: Option<&str>) -> Result<(), LlmError> {
-    validate_implementation(auth)?;
-    build_auth_headers(auth, api_key)?;
+    build_auth_headers(auth, credentials.api_key(provider))?;
     Ok(())
 }
 
@@ -799,7 +794,6 @@ pub(crate) async fn dispatch(
     endpoint: RequestEndpoint<'_>,
     control: StreamControl,
 ) -> Result<LlmStream, LlmError> {
-    validate_implementation(endpoint.auth)?;
     let access_token = if endpoint.auth == Auth::OauthChatgpt {
         Some(endpoint.chatgpt_auth.access_token().await?)
     } else {

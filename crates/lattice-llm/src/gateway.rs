@@ -77,6 +77,31 @@ impl RequestGateway {
         self.configuration.chatgpt_auth.clone()
     }
 
+    /// 仅从本地读取登录与缓存状态，不使用或刷新 token。
+    pub fn chatgpt_catalog_state(
+        &self,
+    ) -> Result<crate::ChatgptCatalogState, crate::MetadataError> {
+        crate::metadata::chatgpt::state(&self.configuration.directory)
+    }
+
+    pub async fn refresh_chatgpt_models(
+        &self,
+        cancel: Arc<crate::MetadataRefreshControl>,
+    ) -> Result<usize, crate::MetadataError> {
+        if !self.has_usable_tls_roots() {
+            return Err(crate::MetadataError::Configuration(
+                "no usable TLS root certificates".into(),
+            ));
+        }
+        crate::metadata::chatgpt::refresh(
+            &self.configuration.directory,
+            &self.configuration.chatgpt_auth,
+            &self.configuration.roots_der,
+            cancel,
+        )
+        .await
+    }
+
     /// 刷新只读取当前注册表，固定使用正式元数据源与启动时的信任根。
     pub async fn refresh_metadata(
         &self,
@@ -193,7 +218,7 @@ impl GatewayTurn {
             .entry((provider.id.clone(), provider.base_url.clone()))
             .or_default()
             .clone();
-        client::validate_configuration(provider.auth, credentials.api_key(&provider.id))?;
+        client::validate_configuration(provider.auth, &provider.id, &credentials)?;
         Ok(ResolvedRequest {
             configuration: self.configuration.clone(),
             provider,

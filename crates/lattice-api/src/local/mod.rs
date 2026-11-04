@@ -12,6 +12,7 @@ mod operation;
 mod server;
 mod types;
 
+pub use auth::login::{AuthCatalogOutcome, AuthLoginEvent, AuthLoginOutcome, LocalAuthLogin};
 pub use client::{LocalClient, LocalWatch};
 pub use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,

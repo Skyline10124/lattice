@@ -90,7 +90,7 @@ async fn startup_and_daily_schedule_share_manual_refresh_and_stop_cancels_waiter
     assert!(calls.try_recv().is_err());
 }
 
-#[tokio::test]
+#[tokio::test(start_paused = true)]
 async fn automatic_refresh_reloads_configuration_and_manual_refresh_ignores_the_switch() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("providers.toml");
@@ -108,6 +108,7 @@ async fn automatic_refresh_reloads_configuration_and_manual_refresh_ignores_the_
     refresh.refresh().await.unwrap();
     assert_eq!(calls.load(Ordering::Relaxed), 1);
     std::fs::write(&path, "[metadata]\nauto_refresh = true").unwrap();
+    tokio::time::advance(REFRESH_INTERVAL).await;
     refresh.automatic_refresh().await;
     assert_eq!(calls.load(Ordering::Relaxed), 2);
     std::fs::write(&path, "[metadata]\nauto_refresh = false").unwrap();
@@ -116,6 +117,294 @@ async fn automatic_refresh_reloads_configuration_and_manual_refresh_ignores_the_
     std::fs::write(&path, "[metadata]\nauto_refresh = true\nunknown = true").unwrap();
     refresh.automatic_refresh().await;
     assert_eq!(calls.load(Ordering::Relaxed), 2);
+    refresh.stop();
+}
+
+fn catalog_reader(
+    state: Arc<Mutex<ChatgptCatalogState>>,
+) -> impl Fn() -> BoxFuture<'static, Result<ChatgptCatalogState>> + Send + Sync {
+    move || {
+        let state = *state.lock().unwrap();
+        Box::pin(async move { Ok(state) })
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn each_source_retries_without_repeating_the_successful_source() {
+    for failing in [Source::ModelsDev, Source::Chatgpt] {
+        let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+        let release = Arc::new([Semaphore::new(0), Semaphore::new(0)]);
+        let catalog = Arc::new(Mutex::new(ChatgptCatalogState {
+            logged_in: true,
+            fetched_at: None,
+            model_count: None,
+        }));
+        let refresh = MetadataRefresh::with_sources(
+            None,
+            {
+                let calls = calls.clone();
+                let release = release.clone();
+                move |source, _| {
+                    let call = calls[source.index()].fetch_add(1, Ordering::SeqCst) + 1;
+                    let release = release.clone();
+                    Box::pin(async move {
+                        if call == 1 {
+                            release[source.index()].acquire().await.unwrap().forget();
+                        }
+                        if source == failing {
+                            Err(LocalError::new(
+                                LocalErrorKind::Transport,
+                                "source unavailable",
+                            ))
+                        } else {
+                            Ok(0)
+                        }
+                    })
+                }
+            },
+            catalog_reader(catalog),
+        );
+        let (refresh, mut outcomes) = observed(refresh);
+        let initial = Instant::now();
+        let mut manual = Box::pin(refresh.refresh());
+        assert!(manual.as_mut().now_or_never().is_none());
+        let mut failure = Box::pin(refresh.refresh_source(failing, false));
+        assert!(failure.as_mut().now_or_never().is_none());
+        release[failing.index()].add_permits(1);
+        assert!(failure.await.is_err());
+        // 等失败计入后才放行另一来源成功，后续退避必须保留已有失败。
+        release[1 - failing.index()].add_permits(1);
+        let error = manual.await.unwrap_err();
+        assert!(error.message.contains("updated:"));
+        assert_eq!(Instant::now(), initial);
+        assert_eq!(calls[0].load(Ordering::SeqCst), 1);
+        assert_eq!(calls[1].load(Ordering::SeqCst), 1);
+        let timer = refresh.start();
+        for (elapsed, count) in [(60, 2), (180, 3), (420, 4)] {
+            assert_fires_once_at(
+                initial,
+                Duration::from_secs(elapsed),
+                &mut outcomes,
+                AutoRefresh::Failed,
+            )
+            .await;
+            assert_eq!(calls[failing.index()].load(Ordering::SeqCst), count);
+            assert_eq!(calls[1 - failing.index()].load(Ordering::SeqCst), 1);
+        }
+        refresh.stop();
+        timer.await.unwrap();
+        refresh.drain().await;
+    }
+}
+
+#[tokio::test(start_paused = true)]
+async fn manual_failure_is_retried_even_while_the_previous_cache_is_fresh() {
+    let directory = tempfile::tempdir().unwrap();
+    write_cache(directory.path(), wall(Duration::ZERO));
+    let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let catalog = Arc::new(Mutex::new(ChatgptCatalogState {
+        logged_in: true,
+        fetched_at: Some(wall(Duration::ZERO)),
+        model_count: Some(0),
+    }));
+    let refresh = MetadataRefresh::with_sources(
+        Some(Ok(directory.path().into())),
+        {
+            let calls = calls.clone();
+            move |source, _| {
+                calls[source.index()].fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move {
+                    if source == Source::ModelsDev {
+                        Err(LocalError::new(LocalErrorKind::Transport, "HTTP 503"))
+                    } else {
+                        Ok(0)
+                    }
+                })
+            }
+        },
+        catalog_reader(catalog),
+    );
+    let (refresh, mut outcomes) = observed(refresh);
+    let initial = Instant::now();
+    let error = refresh.refresh().await.unwrap_err();
+    assert!(error.message.contains("models.dev: HTTP 503"));
+    assert!(error.message.contains("updated: chatgpt"));
+    let timer = refresh.start();
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(60),
+        &mut outcomes,
+        AutoRefresh::Failed,
+    )
+    .await;
+    assert_eq!(calls[0].load(Ordering::SeqCst), 2);
+    assert_eq!(calls[1].load(Ordering::SeqCst), 1);
+    refresh.stop();
+    timer.await.unwrap();
+}
+
+#[tokio::test(start_paused = true)]
+async fn account_directory_and_models_dev_keep_their_own_freshness() {
+    let directory = tempfile::tempdir().unwrap();
+    write_cache(
+        directory.path(),
+        wall(Duration::ZERO) - Duration::from_secs(23 * 3600),
+    );
+    let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let catalog = Arc::new(Mutex::new(ChatgptCatalogState {
+        logged_in: true,
+        fetched_at: None,
+        model_count: None,
+    }));
+    let refresh = MetadataRefresh::with_sources(
+        Some(Ok(directory.path().into())),
+        {
+            let calls = calls.clone();
+            let catalog = catalog.clone();
+            move |source, _| {
+                calls[source.index()].fetch_add(1, Ordering::SeqCst);
+                if source == Source::Chatgpt {
+                    catalog.lock().unwrap().model_count = Some(0);
+                }
+                Box::pin(async { Ok(0) })
+            }
+        },
+        catalog_reader(catalog),
+    );
+    let (refresh, mut outcomes) = observed(refresh);
+    let initial = Instant::now();
+    let timer = refresh.start();
+    assert_eq!(next_outcome(&mut outcomes).await, AutoRefresh::Ran);
+    assert_eq!(calls[0].load(Ordering::SeqCst), 0);
+    assert_eq!(calls[1].load(Ordering::SeqCst), 1);
+    assert!(!refresh.ensure_chatgpt().await.unwrap(), "合法空目录不补拉");
+    assert_fires_once_at(
+        initial,
+        Duration::from_secs(3600),
+        &mut outcomes,
+        AutoRefresh::Ran,
+    )
+    .await;
+    assert_eq!(calls[0].load(Ordering::SeqCst), 1);
+    assert_eq!(calls[1].load(Ordering::SeqCst), 1);
+    refresh.stop();
+    timer.await.unwrap();
+}
+
+#[tokio::test]
+async fn automatic_manual_login_and_missing_queries_share_the_account_flight() {
+    for failed in [false, true] {
+        let (started, mut entered) = mpsc::unbounded_channel();
+        let release = Arc::new(Semaphore::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let catalog = Arc::new(Mutex::new(ChatgptCatalogState {
+            logged_in: true,
+            fetched_at: None,
+            model_count: None,
+        }));
+        let refresh = MetadataRefresh::with_sources(
+            None,
+            {
+                let release = release.clone();
+                let calls = calls.clone();
+                let catalog = catalog.clone();
+                move |source, _| {
+                    let release = release.clone();
+                    let catalog = catalog.clone();
+                    if source == Source::Chatgpt {
+                        calls.fetch_add(1, Ordering::SeqCst);
+                        started.send(()).unwrap();
+                    }
+                    Box::pin(async move {
+                        if source == Source::Chatgpt {
+                            release.acquire().await.unwrap().forget();
+                            if failed {
+                                return Err(LocalError::new(
+                                    LocalErrorKind::Transport,
+                                    "directory unavailable",
+                                ));
+                            }
+                            catalog.lock().unwrap().model_count = Some(0);
+                        }
+                        Ok(0)
+                    })
+                }
+            },
+            catalog_reader(catalog),
+        );
+        let automatic = tokio::spawn({
+            let refresh = refresh.clone();
+            async move { refresh.automatic_refresh().await }
+        });
+        entered.recv().await.unwrap();
+        let mut login = Box::pin(refresh.refresh_chatgpt());
+        let mut manual = Box::pin(refresh.refresh());
+        let mut query = Box::pin(refresh.ensure_chatgpt());
+        assert!(login.as_mut().now_or_never().is_none());
+        assert!(manual.as_mut().now_or_never().is_none());
+        assert!(query.as_mut().now_or_never().is_none());
+        let mut cancelled_query = Box::pin(refresh.ensure_chatgpt());
+        assert!(cancelled_query.as_mut().now_or_never().is_none());
+        drop(cancelled_query);
+        release.add_permits(1);
+        assert_eq!(login.await.is_err(), failed);
+        assert_eq!(manual.await.is_err(), failed);
+        assert_eq!(query.await.is_err(), failed);
+        assert_eq!(
+            automatic.await.unwrap(),
+            if failed {
+                AutoRefresh::Failed
+            } else {
+                AutoRefresh::Ran
+            }
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        if failed {
+            release.add_permits(1);
+            assert!(refresh.refresh_chatgpt().await.is_err());
+            assert_eq!(calls.load(Ordering::SeqCst), 2);
+        } else {
+            assert!(!refresh.ensure_chatgpt().await.unwrap());
+        }
+        refresh.stop();
+        refresh.drain().await;
+    }
+}
+
+#[tokio::test]
+async fn signed_out_accounts_skip_remote_and_manual_refresh_ignores_auto_switch_for_both_sources() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        "[metadata]\nauto_refresh=false\n",
+    )
+    .unwrap();
+    let calls = Arc::new([AtomicUsize::new(0), AtomicUsize::new(0)]);
+    let catalog = Arc::new(Mutex::new(ChatgptCatalogState {
+        logged_in: false,
+        fetched_at: None,
+        model_count: None,
+    }));
+    let refresh = MetadataRefresh::with_sources(
+        Some(Ok(directory.path().into())),
+        {
+            let calls = calls.clone();
+            move |source, _| {
+                calls[source.index()].fetch_add(1, Ordering::SeqCst);
+                Box::pin(async { Ok(0) })
+            }
+        },
+        catalog_reader(catalog.clone()),
+    );
+    assert!(!refresh.ensure_chatgpt().await.unwrap());
+    refresh.refresh().await.unwrap();
+    assert_eq!(calls[0].load(Ordering::SeqCst), 1);
+    assert_eq!(calls[1].load(Ordering::SeqCst), 0);
+    catalog.lock().unwrap().logged_in = true;
+    assert_eq!(refresh.automatic_refresh().await, AutoRefresh::Idle);
+    refresh.refresh().await.unwrap();
+    assert_eq!(calls[0].load(Ordering::SeqCst), 2);
+    assert_eq!(calls[1].load(Ordering::SeqCst), 1);
     refresh.stop();
 }
 

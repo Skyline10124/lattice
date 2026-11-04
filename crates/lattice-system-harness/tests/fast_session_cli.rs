@@ -295,7 +295,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("short-key", "unknown enabled tools [\"EMPTY\"]"),
         ("agent-name", "must match selected agent 'plain'"),
         ("long-profile", "declares '[REDACTED]'"),
-        ("oauth-chatgpt", "auth oauth:chatgpt is not implemented"),
+        ("oauth-chatgpt", "ChatGPT is not signed in"),
         ("cli-provider", "available providers:"),
         ("cli-effort", "does not support reasoning effort off"),
     ] {

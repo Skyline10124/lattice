@@ -16,6 +16,94 @@ fn cache(dir: &Path, source: &serde_json::Value) {
     .unwrap();
 }
 
+#[tokio::test]
+async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("providers.toml"), "[providers.chatgpt.models.known]\ncontext=4321\neffort=['high','low']\n[providers.chatgpt.models.known.cost]\ninput=0\n[providers.chatgpt.models.only-handwritten]\noutput=123\n").unwrap();
+    cache(
+        directory.path(),
+        &json!({"openai":{"models":{
+            "known":{"id":"known","name":"Public name","limit":{"context":100,"output":200},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],"cost":{"input":1,"output":2}},
+            "retired":{"id":"retired","status":"deprecated"},
+            "public-only":{"id":"public-only","limit":{"context":321}}
+        }}}),
+    );
+    let path = directory.path().join("cache/chatgpt-models.json");
+    std::fs::write(
+        &path,
+        json!({"version":1,"fetched_at":"2020-01-01T00:00:00Z","models":[
+            {"slug":"unknown","display_name":"Account unknown"},
+            {"slug":"retired","display_name":"Account retired"},
+            {"slug":"known","display_name":"Account known"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let candidates = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    assert!(candidates.warnings.is_empty());
+    assert_eq!(
+        candidates
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["known", "unknown"]
+    );
+    let known = &candidates.models[0];
+    assert_eq!(known.name.as_deref(), Some("Account known"));
+    assert_eq!((known.context, known.output), (Some(4321), Some(200)));
+    assert_eq!(known.supported_efforts, vec![Effort::Low, Effort::High]);
+    assert_eq!(known.cost.as_ref().unwrap().input, Some(0.0));
+    assert_eq!(known.cost.as_ref().unwrap().output, Some(2.0));
+    assert_eq!(known.credential_status, crate::auth::AuthState::Missing);
+    let unknown = &candidates.models[1];
+    assert_eq!(unknown.name.as_deref(), Some("Account unknown"));
+    assert_eq!(
+        (unknown.context, unknown.output, unknown.cost.as_ref()),
+        (None, None, None)
+    );
+    assert!(unknown.supported_efforts.is_empty());
+    for target in [
+        "chatgpt/retired",
+        "chatgpt/public-only",
+        "chatgpt/org/unknown",
+    ] {
+        assert_eq!(
+            crate::model_candidates(directory.path(), None, Some(target))
+                .unwrap()
+                .models
+                .len(),
+            1
+        );
+    }
+    let gateway = crate::RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    assert_eq!(
+        gateway
+            .open_turn()
+            .supported_efforts(&crate::ModelTarget::new("chatgpt", "known"))
+            .await
+            .unwrap(),
+        known.supported_efforts
+    );
+    std::fs::write(&path, "{bad").unwrap();
+    let invalid = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    assert!(invalid.models.is_empty());
+    assert!(!invalid.warnings.is_empty());
+    std::fs::write(
+        &path,
+        json!({"version":1,"fetched_at":"2020-01-01T00:00:00Z","models":[]}).to_string(),
+    )
+    .unwrap();
+    let empty = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    assert!(empty.models.is_empty());
+    assert!(empty.warnings.is_empty());
+}
+
 #[test]
 fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
     let directory = tempfile::tempdir().unwrap();
@@ -64,7 +152,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             .warnings
             .iter()
             .any(|warning| warning.provider.as_deref() == Some("chatgpt")
-                && warning.message.contains("not implemented"))
+                && warning.message.contains("run lattice auth login chatgpt"))
     );
     let retired = crate::model_candidates(directory.path(), None, Some("local/old")).unwrap();
     assert_eq!(retired.models.len(), 1);
@@ -99,7 +187,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         subscription
             .warnings
             .iter()
-            .any(|warning| warning.message.contains("not implemented"))
+            .any(|warning| warning.message.contains("run lattice auth login chatgpt"))
     );
     for (provider, target, expected) in [
         (

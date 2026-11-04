@@ -15,15 +15,12 @@ use crate::{
     provider::Provider,
 };
 
-/// 能力查询不要求凭据，并沿用请求入口的认证实施门禁。
+/// 能力查询只使用元数据与 features，不要求凭据。
 pub(crate) fn supported_efforts(
     provider: &Provider,
     model_id: &str,
     model: Option<&Model>,
 ) -> Result<Vec<Effort>, LlmError> {
-    if crate::client::validate_implementation(provider.auth).is_err() {
-        return Ok(Vec::new());
-    }
     let features = provider
         .models
         .get(model_id)

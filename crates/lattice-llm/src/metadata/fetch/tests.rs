@@ -193,6 +193,54 @@ fn cancellation_return_marks_the_final_cache_and_prevents_later_replacement() {
     );
 }
 
+#[tokio::test]
+async fn drain_waits_for_blocking_publication_after_the_async_waiter_is_aborted() {
+    let dir = prior_cache();
+    let control = Arc::new(MetadataRefreshControl::default());
+    let (entered, publication_started) = oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let task = tokio::spawn({
+        let directory = dir.path().to_owned();
+        let control = control.clone();
+        async move {
+            publish_cancellable(
+                &directory,
+                "models.json",
+                b"published".to_vec(),
+                control,
+                move |temporary, destination| {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    persist(temporary, destination)
+                },
+            )
+            .await
+        }
+    });
+    publication_started.await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let draining = control.drain();
+    tokio::pin!(draining);
+    assert!(draining.as_mut().now_or_never().is_none());
+    assert_eq!(
+        std::fs::read(dir.path().join("cache/models.json")).unwrap(),
+        PREVIOUS
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), draining)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("cache/models.json")).unwrap(),
+        b"published"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("cache")).unwrap().count(),
+        1
+    );
+}
+
 fn assert_previous(dir: &Path) {
     assert_eq!(
         std::fs::read(dir.join("cache/models.json")).unwrap(),

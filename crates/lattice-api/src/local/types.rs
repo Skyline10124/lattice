@@ -8,7 +8,9 @@ pub use lattice_conversation::{
     CostEstimate, CostSummary, Effort, ResultPayload, StepContent, StoredToolResult,
     SuccessContent, TokenSummary, UsageCompleteness,
 };
-pub use lattice_llm::auth::{AuthState, AuthStatus, ProviderAuthStatus};
+pub use lattice_llm::auth::{
+    AuthState, AuthStatus, ProviderAuthStatus, RevocationStatus, SensitiveLoginUrl,
+};
 pub use lattice_session::store::{
     AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,
     MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice, NoticeLevel, OperatorInvocationState,
@@ -20,6 +22,21 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub const WATCH_TURNS: u32 = 10;
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AuthRemoval {
+    pub removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revocation: Option<RevocationStatus>,
+}
+
+/// Response 的结构体变体不受严格解析约束，载荷单独成结构体才能拒绝未知字段。
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct AuthLoggedOut {
+    pub(super) revocation: RevocationStatus,
+}
 pub const HISTORY_TURNS: u32 = 10;
 pub const MAX_HISTORY_TURNS: u32 = 100;
 
@@ -468,6 +485,12 @@ pub(super) enum Request {
     AuthRemove {
         provider: String,
     },
+    AuthLogin {
+        provider: String,
+    },
+    AuthLogout {
+        provider: String,
+    },
     // 空结构让 serde 拒绝额外字段，避免静默忽略误发给查询的 key。
     AuthStatus {},
     Models {
@@ -539,7 +562,8 @@ pub(super) enum Request {
 pub(super) enum Response {
     Status(DaemonStatus),
     AuthUpdated,
-    AuthRemoved { removed: bool },
+    AuthRemoved(AuthRemoval),
+    AuthLoggedOut(AuthLoggedOut),
     AuthStatus(AuthStatus),
     Models(ModelCandidates),
     ModelsRefreshed,

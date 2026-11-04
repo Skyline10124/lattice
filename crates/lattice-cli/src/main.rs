@@ -38,7 +38,7 @@ enum Commands {
         #[command(subcommand)]
         action: commands::daemon::DaemonAction,
     },
-    /// Manage provider API keys and credential status.
+    /// Manage provider credentials and Sign in with ChatGPT.
     Auth {
         #[command(subcommand)]
         action: commands::auth::AuthAction,
@@ -149,7 +149,7 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             return commands::daemon::run(action, cli.json).await;
         }
         Some(Commands::Auth { action }) => {
-            commands::auth::run(action, cli.json).await?;
+            return commands::auth::run(action, cli.json).await;
         }
         Some(Commands::Models {
             auth,
@@ -261,14 +261,17 @@ mod tests {
             vec!["auth", "set", "openai"],
             vec!["auth", "remove", "openai"],
             vec!["auth", "status"],
+            vec!["auth", "login", "chatgpt"],
+            vec!["auth", "logout", "chatgpt"],
         ] {
             assert!(Cli::try_parse_from(std::iter::once("lattice").chain(args)).is_ok());
         }
         for args in [
             vec!["auth", "set"],
             vec!["auth", "set", "openai", "key"],
-            vec!["auth", "login", "chatgpt"],
-            vec!["auth", "logout", "chatgpt"],
+            vec!["auth", "login", "openai"],
+            vec!["auth", "logout", "openai"],
+            vec!["auth", "login", "chatgpt", "secret"],
         ] {
             assert!(Cli::try_parse_from(std::iter::once("lattice").chain(args)).is_err());
         }
@@ -279,7 +282,7 @@ mod tests {
             .unwrap()
             .render_long_help()
             .to_string();
-        for word in ["set", "remove", "status"] {
+        for word in ["set", "remove", "status", "login", "logout"] {
             assert!(auth.contains(word));
         }
     }

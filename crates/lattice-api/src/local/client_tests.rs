@@ -16,6 +16,49 @@ struct Peer {
 }
 
 #[tokio::test]
+async fn credential_cleanup_preserves_each_remote_revocation_result() {
+    for revocation in [
+        RevocationStatus::Confirmed,
+        RevocationStatus::Unconfirmed,
+        RevocationStatus::NotNeeded,
+    ] {
+        for remove in [false, true] {
+            let peer = Peer::new();
+            let server = async {
+                let (mut wire, request) = peer.request().await;
+                assert!(match request {
+                    Request::AuthRemove { provider } if remove => provider == "chatgpt",
+                    Request::AuthLogout { provider } if !remove => provider == "chatgpt",
+                    _ => false,
+                });
+                wire.reply(if remove {
+                    Response::AuthRemoved(AuthRemoval {
+                        removed: true,
+                        revocation: Some(revocation),
+                    })
+                } else {
+                    Response::AuthLoggedOut(AuthLoggedOut { revocation })
+                })
+                .await;
+            };
+            let client = async {
+                if remove {
+                    let result = peer.client.auth_remove("chatgpt").await.unwrap();
+                    assert!(result.removed);
+                    assert_eq!(result.revocation, Some(revocation));
+                } else {
+                    assert_eq!(
+                        peer.client.auth_logout("chatgpt").await.unwrap(),
+                        revocation
+                    );
+                }
+            };
+            within(async { tokio::join!(client, server) }).await;
+        }
+    }
+}
+
+#[tokio::test]
 async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors() {
     use serde_json::json;
     let old: Request =
@@ -1553,27 +1596,29 @@ async fn status_hints_when_the_backend_reads_the_request_and_closes_without_repl
 /// 从本版本起，后台读到别的魔数会先回写自己的魔数；更旧的魔数要明确报版本不兼容。
 #[tokio::test]
 async fn status_reports_an_older_backend_that_announces_its_magic() {
-    let error = status_against(|mut stream| {
-        Box::pin(async move {
-            // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
-            stream.write_all(b"LTLOCAL5").await.unwrap();
-            stream.write_u32(4).await.unwrap();
-            stream.write_all(b"null").await.unwrap();
-            let _held = stream;
+    for magic in [b"LTLOCAL5", b"LTLOCAL;"] {
+        let error = status_against(move |mut stream| {
+            Box::pin(async move {
+                // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
+                stream.write_all(magic).await.unwrap();
+                stream.write_u32(4).await.unwrap();
+                stream.write_all(b"null").await.unwrap();
+                let _held = stream;
+            })
         })
-    })
-    .await;
-    assert_eq!(
-        (error.kind, error.message.as_str()),
-        (LocalErrorKind::IncompatibleBackend, OLDER_BACKEND)
-    );
+        .await;
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, OLDER_BACKEND)
+        );
+    }
 }
 
 #[tokio::test]
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL<").await.unwrap();
+            stream.write_all(b"LTLOCAL=").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;
