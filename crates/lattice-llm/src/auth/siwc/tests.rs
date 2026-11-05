@@ -4,7 +4,6 @@
 use super::*;
 use crate::auth::{
     AuthState, Secret,
-    oauth::TokenReply,
     tests::{chatgpt, fixture, write},
 };
 use futures::{
@@ -40,28 +39,28 @@ struct Endpoint {
 impl TokenEndpoint for Endpoint {
     fn exchange<'a>(
         &'a self,
-        _: super::super::oauth::CodeGrant<'a>,
-    ) -> BoxFuture<'a, Result<super::super::oauth::LoginTokens, super::super::oauth::ExchangeFailure>>
-    {
+        _: endpoint::CodeGrant<'a>,
+    ) -> BoxFuture<'a, Result<endpoint::UnverifiedLogin, endpoint::ExchangeFailure>> {
         unreachable!("刷新测试不执行登录换码")
     }
-    fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>> {
-        unreachable!("刷新测试不查询登录密钥")
-    }
-    fn jwks<'a>(
+
+    fn verify<'a>(
         &'a self,
-        _: &'a url::Url,
-    ) -> BoxFuture<'a, Result<jsonwebtoken::jwk::JwkSet, LlmError>> {
-        unreachable!("刷新测试不查询登录密钥")
+        _: endpoint::UnverifiedLogin,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFuture<'a, Result<(format::Account, format::Tokens), LlmError>> {
+        unreachable!("刷新测试不执行登录验签")
     }
 
     fn refresh<'a>(
         &'a self,
-        grant: RefreshGrant<'a>,
-    ) -> BoxFuture<'a, Result<TokenReply, RefreshFailure>> {
+        client_id: &'a str,
+        previous: &'a format::Tokens,
+    ) -> BoxFuture<'a, Result<format::Tokens, RefreshFailure>> {
         Box::pin(async move {
-            assert!(grant.client_id == "oaiapp_test-issued-client");
-            assert!(grant.refresh_token == "refresh-test-secret");
+            assert!(client_id == "oaiapp_test-issued-client");
+            assert!(previous.refresh_token.0 == "refresh-test-secret");
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.started.add_permits(1);
             tokio::time::timeout(std::time::Duration::from_secs(5), self.release.acquire())
@@ -70,9 +69,10 @@ impl TokenEndpoint for Endpoint {
                 .unwrap()
                 .forget();
             match self.outcome.lock().unwrap().clone() {
-                Outcome::Success => Ok(TokenReply {
+                Outcome::Success => Ok(format::Tokens {
                     access_token: Secret("rotated-access-secret".into()),
                     refresh_token: Secret("rotated-refresh-secret".into()),
+                    id_token: Secret(previous.id_token.0.clone()),
                     expires_at: (chrono::DateTime::from_timestamp(
                         self.now.load(Ordering::SeqCst),
                         0,
@@ -88,13 +88,14 @@ impl TokenEndpoint for Endpoint {
         })
     }
 
-    fn revoke<'a>(&'a self, grant: RefreshGrant<'a>) -> BoxFuture<'a, Result<(), LlmError>> {
+    fn revoke<'a>(
+        &'a self,
+        client_id: &'a str,
+        refresh_token: &'a str,
+    ) -> BoxFuture<'a, Result<(), LlmError>> {
         Box::pin(async move {
-            assert!(grant.client_id == "oaiapp_test-issued-client");
-            self.revoked
-                .lock()
-                .unwrap()
-                .push(grant.refresh_token.into());
+            assert!(client_id == "oaiapp_test-issued-client");
+            self.revoked.lock().unwrap().push(refresh_token.into());
             self.revoke_started.add_permits(1);
             let gate = self.revoke_gate.lock().unwrap().clone();
             if let Some(gate) = gate {
@@ -864,4 +865,19 @@ async fn cancellation_of_a_logout_waiter_still_finishes_local_cleanup() {
     shutdown.await.unwrap();
     assert!(f.document()["providers"]["chatgpt"].get("tokens").is_none());
     assert_eq!(f.endpoint.revoked.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn publication_rejects_cancelled_attempt_and_ignores_cancel_after_commit() {
+    let control = LoginControl::new();
+    control.cancel();
+    assert!(matches!(control.publication(), Err(UpdateError::Conflict)));
+    let control = LoginControl::new();
+    let mut phase = control
+        .publication()
+        .unwrap_or_else(|_| panic!("未取消的登录应允许发布"));
+    *phase = Phase::Published;
+    drop(phase);
+    control.cancel();
+    assert!(!control.is_cancelled());
 }

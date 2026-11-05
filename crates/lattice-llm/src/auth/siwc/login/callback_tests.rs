@@ -9,7 +9,7 @@ const REDIRECT: &str = "http://127.0.0.1:1455/auth/callback";
 #[test]
 fn callback_checks_state_errors_client_binding_and_unique_parameters() {
     let valid = format!("{REDIRECT}?state=local-state&code=local-code&client_id=local-client");
-    let value = parse(
+    let value = parse_callback(
         &SensitiveLoginUrl::new(valid.clone()),
         REDIRECT,
         "local-state",
@@ -18,7 +18,7 @@ fn callback_checks_state_errors_client_binding_and_unique_parameters() {
     .unwrap();
     assert_eq!(value.code.0, "local-code");
     assert_eq!(value.client_id.0, "local-client");
-    let with_fragment = parse(
+    let with_fragment = parse_callback(
         &SensitiveLoginUrl::new(format!("{valid}#ignored?state=wrong&code=other")),
         REDIRECT,
         "local-state",
@@ -29,7 +29,7 @@ fn callback_checks_state_errors_client_binding_and_unique_parameters() {
     assert_eq!(with_fragment.client_id.0, value.client_id.0);
     let returning = format!("{REDIRECT}?state=local-state&code=local-code");
     assert!(
-        parse(
+        parse_callback(
             &SensitiveLoginUrl::new(returning.clone()),
             REDIRECT,
             "local-state",
@@ -38,7 +38,7 @@ fn callback_checks_state_errors_client_binding_and_unique_parameters() {
         .is_ok()
     );
     assert!(
-        parse(
+        parse_callback(
             &SensitiveLoginUrl::new(valid.clone()),
             REDIRECT,
             "local-state",
@@ -47,7 +47,7 @@ fn callback_checks_state_errors_client_binding_and_unique_parameters() {
         .is_err()
     );
     assert!(
-        parse(
+        parse_callback(
             &SensitiveLoginUrl::new(returning),
             REDIRECT,
             "local-state",
@@ -68,7 +68,7 @@ fn callback_checks_state_errors_client_binding_and_unique_parameters() {
         "state=local-state&code=%FF&client_id=local-client",
         "state=local-state&code=%z0&client_id=local-client",
     ] {
-        let error = parse(
+        let error = parse_callback(
             &SensitiveLoginUrl::new(format!("{REDIRECT}?{query}")),
             REDIRECT,
             "local-state",
@@ -87,7 +87,7 @@ fn callback_checks_state_errors_client_binding_and_unique_parameters() {
         "http://user@127.0.0.1:1455/auth/callback",
     ] {
         assert!(
-            parse(
+            parse_callback(
                 &SensitiveLoginUrl::new(format!("{address}?state=local-state&code=x&client_id=c")),
                 REDIRECT,
                 "local-state",

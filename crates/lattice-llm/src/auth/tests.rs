@@ -41,7 +41,7 @@ fn state(store: &AuthStore, provider: &str) -> AuthState {
 fn login_transaction_preserves_other_keys_and_distinguishes_stale_registration() {
     let (_directory, store) = fixture();
     let expected = store.load().unwrap();
-    let host = login::host_id().unwrap();
+    let host = Secret("urn:uuid:842552aa-85f2-491e-ac5c-60025a71628b".into());
     let host_value = host.0.clone();
     assert!(
         store

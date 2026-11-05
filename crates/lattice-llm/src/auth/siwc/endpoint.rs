@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{sync::Arc, time::Duration};
+use std::{future::Future, time::Duration};
 
 use chrono::{DateTime, Utc};
 use futures::future::BoxFuture;
@@ -9,39 +9,61 @@ use reqwest::header::HeaderMap;
 use serde::Deserialize;
 use zeroize::Zeroizing;
 
-use super::{Secret, valid_access_token};
+use super::{Clock, DIRECT_SCOPE, Redaction, Secret, format, valid_access_token};
 use crate::{LlmError, transport};
+use jsonwebtoken::{
+    Algorithm, DecodingKey, Validation,
+    jwk::{AlgorithmParameters, Jwk, JwkSet, KeyAlgorithm, KeyOperations, PublicKeyUse},
+};
 
-pub(super) const ISSUER: &str = "https://auth.openai.com";
+const ISSUER: &str = "https://auth.openai.com";
 const TOKEN_URL: &str = "https://auth.openai.com/api/accounts/oauth/token";
 const DISCOVERY_URL: &str = "https://auth.openai.com/.well-known/openid-configuration";
 const TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_RESPONSE_BYTES: usize = 1_048_576;
-pub(super) const DIRECT_SCOPE: &str = "chatgpt.tokens.use.direct";
-pub(super) type Clock = Arc<dyn Fn() -> DateTime<Utc> + Send + Sync>;
 
-pub(super) struct RefreshGrant<'a> {
-    pub client_id: &'a str,
-    pub refresh_token: &'a str,
+struct RefreshGrant<'a> {
+    client_id: &'a str,
+    refresh_token: &'a str,
 }
 
-pub(super) struct TokenReply {
-    pub access_token: Secret,
-    pub refresh_token: Secret,
-    pub expires_at: String,
-    pub scopes: Vec<String>,
+struct TokenReply {
+    access_token: Secret,
+    refresh_token: Secret,
+    expires_at: String,
+    scopes: Vec<String>,
 }
 
 pub(super) struct CodeGrant<'a> {
-    pub client_id: &'a str,
-    pub code: &'a str,
-    pub verifier: &'a str,
-    pub redirect_uri: &'a str,
+    pub(super) client_id: &'a str,
+    pub(super) code: &'a str,
+    pub(super) verifier: &'a str,
+    pub(super) redirect_uri: &'a str,
 }
 
-pub(super) struct LoginTokens {
-    pub token: TokenReply,
-    pub id_token: Secret,
+/// 字段保持私有，使未验签 token 只能交给 verify 或加入脱敏集合，不能直接保存。
+pub(super) struct UnverifiedLogin {
+    tokens: format::Tokens,
+}
+
+impl UnverifiedLogin {
+    pub(super) fn add_secrets(&self, redaction: &mut Redaction) {
+        redaction.add(&self.tokens.access_token.0);
+        redaction.add(&self.tokens.refresh_token.0);
+        redaction.add(&self.tokens.id_token.0);
+    }
+}
+
+impl TokenReply {
+    fn with_identity(self, id_token: Secret) -> format::Tokens {
+        format::Tokens {
+            access_token: self.access_token,
+            refresh_token: self.refresh_token,
+            id_token,
+            expires_at: self.expires_at,
+            scopes: self.scopes,
+        }
+    }
 }
 
 pub(super) enum ExchangeFailure {
@@ -58,26 +80,31 @@ pub(super) trait TokenEndpoint: Send + Sync {
     fn exchange<'a>(
         &'a self,
         grant: CodeGrant<'a>,
-    ) -> BoxFuture<'a, Result<LoginTokens, ExchangeFailure>>;
+    ) -> BoxFuture<'a, Result<UnverifiedLogin, ExchangeFailure>>;
 
-    fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>>;
-
-    fn jwks<'a>(
+    fn verify<'a>(
         &'a self,
-        uri: &'a url::Url,
-    ) -> BoxFuture<'a, Result<jsonwebtoken::jwk::JwkSet, LlmError>>;
+        login: UnverifiedLogin,
+        client_id: &'a str,
+        nonce: &'a str,
+    ) -> BoxFuture<'a, Result<(format::Account, format::Tokens), LlmError>>;
 
     fn refresh<'a>(
         &'a self,
-        grant: RefreshGrant<'a>,
-    ) -> BoxFuture<'a, Result<TokenReply, RefreshFailure>>;
+        client_id: &'a str,
+        previous: &'a format::Tokens,
+    ) -> BoxFuture<'a, Result<format::Tokens, RefreshFailure>>;
 
-    fn revoke<'a>(&'a self, grant: RefreshGrant<'a>) -> BoxFuture<'a, Result<(), LlmError>>;
+    fn revoke<'a>(
+        &'a self,
+        client_id: &'a str,
+        refresh_token: &'a str,
+    ) -> BoxFuture<'a, Result<(), LlmError>>;
 }
 
 pub(super) struct HttpTokenEndpoint {
-    pub roots: Vec<reqwest::Certificate>,
-    pub clock: Clock,
+    roots: Vec<reqwest::Certificate>,
+    clock: Clock,
 }
 
 struct HttpReply {
@@ -87,6 +114,10 @@ struct HttpReply {
 }
 
 impl HttpTokenEndpoint {
+    pub(super) fn new(roots: Vec<reqwest::Certificate>, clock: Clock) -> Self {
+        Self { roots, clock }
+    }
+
     async fn request(
         &self,
         url: &str,
@@ -179,28 +210,81 @@ impl TokenEndpoint for HttpTokenEndpoint {
     fn exchange<'a>(
         &'a self,
         grant: CodeGrant<'a>,
-    ) -> BoxFuture<'a, Result<LoginTokens, ExchangeFailure>> {
+    ) -> BoxFuture<'a, Result<UnverifiedLogin, ExchangeFailure>> {
         Box::pin(async move {
             let response = self
                 .request(TOKEN_URL, Some(code_form(&grant)))
                 .await
                 .map_err(|error| ExchangeFailure::Other(phase_error(error, "code exchange")))?;
-            if response.status != 200 {
-                if oauth_code(&response.body) == Some("invalid_grant") {
-                    return Err(ExchangeFailure::InvalidGrant);
-                }
-                return Err(ExchangeFailure::Other(endpoint_error(
-                    &response,
-                    "code exchange",
-                    oauth_code(&response.body) == Some("invalid_client"),
-                    (self.clock)(),
-                )));
-            }
-            parse_login_token(&response.body, (self.clock)())
-                .map_err(|error| ExchangeFailure::Other(phase_error(error, "code exchange")))
+            exchange_reply(&response, (self.clock)())
         })
     }
 
+    fn verify<'a>(
+        &'a self,
+        login: UnverifiedLogin,
+        client_id: &'a str,
+        nonce: &'a str,
+    ) -> BoxFuture<'a, Result<(format::Account, format::Tokens), LlmError>> {
+        Box::pin(async move {
+            verify_login(
+                login,
+                client_id,
+                nonce,
+                self.discovery(),
+                |uri| async move { self.jwks(&uri).await },
+            )
+            .await
+        })
+    }
+
+    fn refresh<'a>(
+        &'a self,
+        client_id: &'a str,
+        previous: &'a format::Tokens,
+    ) -> BoxFuture<'a, Result<format::Tokens, RefreshFailure>> {
+        Box::pin(async move {
+            let grant = RefreshGrant {
+                client_id,
+                refresh_token: &previous.refresh_token.0,
+            };
+            let response = self
+                .request(TOKEN_URL, Some(refresh_form(&grant)))
+                .await
+                .map_err(|error| RefreshFailure::Other(phase_error(error, "token refresh")))?;
+            refresh_reply(&response, previous, (self.clock)())
+        })
+    }
+
+    fn revoke<'a>(
+        &'a self,
+        client_id: &'a str,
+        refresh_token: &'a str,
+    ) -> BoxFuture<'a, Result<(), LlmError>> {
+        Box::pin(async move {
+            let grant = RefreshGrant {
+                client_id,
+                refresh_token,
+            };
+            // 撤销的发现与 POST 共用一个总时限，任一步失败都不重试。
+            tokio::time::timeout(TIMEOUT, async {
+                let discovery = self.request(DISCOVERY_URL, None).await?;
+                if discovery.status != 200 {
+                    return Err(invalid_response("revocation discovery failed"));
+                }
+                let endpoint = revocation_endpoint(&discovery.body)?;
+                let reply = self
+                    .request(endpoint.as_str(), Some(revocation_form(&grant)))
+                    .await?;
+                confirm_revocation(reply.status, &reply.body)
+            })
+            .await
+            .map_err(|_| timeout_error())?
+        })
+    }
+}
+
+impl HttpTokenEndpoint {
     fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>> {
         Box::pin(async move {
             let response = self
@@ -239,42 +323,6 @@ impl TokenEndpoint for HttpTokenEndpoint {
             }
             serde_json::from_slice(&response.body)
                 .map_err(|_| invalid_response("invalid JWKS document"))
-        })
-    }
-
-    fn refresh<'a>(
-        &'a self,
-        grant: RefreshGrant<'a>,
-    ) -> BoxFuture<'a, Result<TokenReply, RefreshFailure>> {
-        Box::pin(async move {
-            let response = self
-                .request(TOKEN_URL, Some(refresh_form(&grant)))
-                .await
-                .map_err(|error| RefreshFailure::Other(phase_error(error, "token refresh")))?;
-            if response.status != 200 {
-                return Err(refresh_error(&response, (self.clock)()));
-            }
-            parse_token(&response.body, (self.clock)())
-                .map_err(|error| RefreshFailure::Other(phase_error(error, "token refresh")))
-        })
-    }
-
-    fn revoke<'a>(&'a self, grant: RefreshGrant<'a>) -> BoxFuture<'a, Result<(), LlmError>> {
-        Box::pin(async move {
-            // 撤销的发现与 POST 共用一个总时限，任一步失败都不重试。
-            tokio::time::timeout(TIMEOUT, async {
-                let discovery = self.request(DISCOVERY_URL, None).await?;
-                if discovery.status != 200 {
-                    return Err(invalid_response("revocation discovery failed"));
-                }
-                let endpoint = revocation_endpoint(&discovery.body)?;
-                let reply = self
-                    .request(endpoint.as_str(), Some(revocation_form(&grant)))
-                    .await?;
-                confirm_revocation(reply.status, &reply.body)
-            })
-            .await
-            .map_err(|_| timeout_error())?
         })
     }
 }
@@ -397,7 +445,7 @@ fn parse_token(body: &[u8], now: DateTime<Utc>) -> Result<TokenReply, LlmError> 
     })
 }
 
-fn parse_login_token(body: &[u8], now: DateTime<Utc>) -> Result<LoginTokens, LlmError> {
+fn parse_login_token(body: &[u8], now: DateTime<Utc>) -> Result<format::Tokens, LlmError> {
     #[derive(Deserialize)]
     struct IdentityToken {
         id_token: Secret,
@@ -407,10 +455,7 @@ fn parse_login_token(body: &[u8], now: DateTime<Utc>) -> Result<LoginTokens, Llm
     if identity.id_token.0.is_empty() || identity.id_token.0.chars().any(char::is_control) {
         return Err(invalid_response("missing or invalid ID token"));
     }
-    Ok(LoginTokens {
-        token: parse_token(body, now)?,
-        id_token: identity.id_token,
-    })
+    Ok(parse_token(body, now)?.with_identity(identity.id_token))
 }
 
 fn oauth_code(body: &[u8]) -> Option<&'static str> {
@@ -506,5 +551,166 @@ fn network_error(error: reqwest::Error) -> LlmError {
     }
 }
 
+fn exchange_reply(
+    response: &HttpReply,
+    now: DateTime<Utc>,
+) -> Result<UnverifiedLogin, ExchangeFailure> {
+    if response.status != 200 {
+        if oauth_code(&response.body) == Some("invalid_grant") {
+            return Err(ExchangeFailure::InvalidGrant);
+        }
+        return Err(ExchangeFailure::Other(endpoint_error(
+            response,
+            "code exchange",
+            oauth_code(&response.body) == Some("invalid_client"),
+            now,
+        )));
+    }
+    parse_login_token(&response.body, now)
+        .map(|tokens| UnverifiedLogin { tokens })
+        .map_err(|error| ExchangeFailure::Other(phase_error(error, "code exchange")))
+}
+
+fn refresh_reply(
+    response: &HttpReply,
+    previous: &format::Tokens,
+    now: DateTime<Utc>,
+) -> Result<format::Tokens, RefreshFailure> {
+    if response.status != 200 {
+        return Err(refresh_error(response, now));
+    }
+    parse_token(&response.body, now)
+        .map(|reply| reply.with_identity(Secret(previous.id_token.0.clone())))
+        .map_err(|error| RefreshFailure::Other(phase_error(error, "token refresh")))
+}
+
+async fn verify_login<F, Fut>(
+    login: UnverifiedLogin,
+    client_id: &str,
+    nonce: &str,
+    discovery: impl Future<Output = Result<url::Url, LlmError>>,
+    jwks: F,
+) -> Result<(format::Account, format::Tokens), LlmError>
+where
+    F: FnMut(url::Url) -> Fut,
+    Fut: Future<Output = Result<JwkSet, LlmError>>,
+{
+    let identity = verify(&login.tokens.id_token.0, client_id, nonce, discovery, jwks).await?;
+    Ok((identity, login.tokens))
+}
+
+async fn verify<F, Fut>(
+    token: &str,
+    client_id: &str,
+    nonce: &str,
+    discovery: impl Future<Output = Result<url::Url, LlmError>>,
+    mut jwks: F,
+) -> Result<format::Account, LlmError>
+where
+    F: FnMut(url::Url) -> Fut,
+    Fut: Future<Output = Result<JwkSet, LlmError>>,
+{
+    let header =
+        jsonwebtoken::decode_header(token).map_err(|_| invalid_identity("invalid JWT header"))?;
+    if header.alg != Algorithm::RS256 {
+        return Err(invalid_identity("only RS256 ID tokens are accepted"));
+    }
+    let kid = header
+        .kid
+        .filter(|kid| !kid.is_empty())
+        .ok_or_else(|| invalid_identity("missing key ID"))?;
+    let uri = discovery.await?;
+    let mut keys = jwks(uri.clone()).await?;
+    if !keys
+        .keys
+        .iter()
+        .any(|key| key.common.key_id.as_deref() == Some(&kid))
+    {
+        keys = jwks(uri.clone()).await?;
+    }
+    verify_with_keys(token, client_id, nonce, &kid, &keys)
+}
+
+fn verify_with_keys(
+    token: &str,
+    client_id: &str,
+    nonce: &str,
+    kid: &str,
+    keys: &JwkSet,
+) -> Result<format::Account, LlmError> {
+    let mut matching = keys
+        .keys
+        .iter()
+        .filter(|key| key.common.key_id.as_deref() == Some(kid));
+    let key = matching
+        .next()
+        .ok_or_else(|| invalid_identity("unknown key ID"))?;
+    if matching.next().is_some() {
+        return Err(invalid_identity("ambiguous key ID"));
+    }
+    validate_identity_key(key)?;
+    let decoding = DecodingKey::from_jwk(key).map_err(|_| invalid_identity("invalid RSA key"))?;
+    let mut validation = Validation::new(Algorithm::RS256);
+    validation.leeway = 5;
+    validation.validate_exp = true;
+    validation.validate_nbf = true;
+    validation.set_required_spec_claims(&["iss", "aud", "sub", "exp"]);
+    validation.set_issuer(&[ISSUER]);
+    validation.set_audience(&[client_id]);
+    let claims = jsonwebtoken::decode::<Claims>(token, &decoding, &validation)
+        .map_err(|_| invalid_identity("signature or claims validation failed"))?
+        .claims;
+    if claims.sub.0.is_empty() || claims.email.is_empty() || claims.nonce.0 != nonce {
+        return Err(invalid_identity("invalid identity or nonce"));
+    }
+    Ok(format::Account {
+        subject: claims.sub,
+        email: claims.email,
+    })
+}
+
+fn validate_identity_key(key: &Jwk) -> Result<(), LlmError> {
+    if !matches!(key.algorithm, AlgorithmParameters::RSA(_))
+        || key
+            .common
+            .key_algorithm
+            .is_some_and(|alg| alg != KeyAlgorithm::RS256)
+        || key
+            .common
+            .public_key_use
+            .as_ref()
+            .is_some_and(|usage| *usage != PublicKeyUse::Signature)
+        || key
+            .common
+            .key_operations
+            .as_ref()
+            .is_some_and(|ops| !ops.contains(&KeyOperations::Verify))
+    {
+        return Err(invalid_identity("key is not an RS256 signing key"));
+    }
+    Ok(())
+}
+
+#[derive(Deserialize)]
+struct Claims {
+    #[serde(rename = "iss")]
+    _issuer: Secret,
+    sub: Secret,
+    nonce: Secret,
+    email: String,
+    #[serde(rename = "exp")]
+    _expiry: u64,
+    #[serde(rename = "nbf", default)]
+    _not_before: Option<u64>,
+}
+
+fn invalid_identity(reason: &str) -> LlmError {
+    LlmError::Credential {
+        message: format!("ChatGPT ID token: {reason}"),
+    }
+}
+
 #[cfg(test)]
-mod tests;
+pub(super) mod identity_tests;
+#[cfg(test)]
+pub(super) mod tests;

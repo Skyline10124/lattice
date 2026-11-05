@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::auth::oauth::{
-    CodeGrant, ExchangeFailure, LoginTokens, RefreshFailure, RefreshGrant, TokenReply,
-};
-use futures::future::BoxFuture;
+use crate::auth::format::Account;
 use serde_json::{Value, json};
 use std::sync::{
     Mutex,
@@ -13,17 +10,17 @@ use std::sync::{
 };
 
 // 测试私钥在本地生成，只保护本地签名与声明规则，不代表 OpenAI 凭据。
-pub(in crate::auth) fn keys() -> JwkSet {
+pub(in crate::auth::siwc) fn keys() -> JwkSet {
     serde_json::from_str(include_str!("test-jwks.json")).unwrap()
 }
 
-pub(in crate::auth) fn claims(client: &str, nonce: &str) -> Value {
+pub(in crate::auth::siwc) fn claims(client: &str, nonce: &str) -> Value {
     let now = chrono::Utc::now().timestamp();
     json!({ "iss": ISSUER, "aud": client, "sub": "local-subject", "email": "local@example.test",
         "nonce": nonce, "exp": now + 3600, "nbf": now - 60 })
 }
 
-pub(in crate::auth) fn signed(claims: &Value) -> String {
+pub(in crate::auth::siwc) fn signed(claims: &Value) -> String {
     let mut header = jsonwebtoken::Header::new(Algorithm::RS256);
     header.kid = Some("local-rsa".into());
     jsonwebtoken::encode(
@@ -42,6 +39,58 @@ fn check(claims: &Value, keys: &JwkSet) -> Result<Account, LlmError> {
         "local-rsa",
         keys,
     )
+}
+
+// 将端点私有的 verify_login 转发给登录流程测试，避免扩大生产可见性。
+pub(in crate::auth::siwc) async fn verify_login<F, Fut>(
+    login: UnverifiedLogin,
+    client_id: &str,
+    nonce: &str,
+    discovery: impl Future<Output = Result<url::Url, LlmError>>,
+    jwks: F,
+) -> Result<(Account, format::Tokens), LlmError>
+where
+    F: FnMut(url::Url) -> Fut,
+    Fut: Future<Output = Result<JwkSet, LlmError>>,
+{
+    super::verify_login(login, client_id, nonce, discovery, jwks).await
+}
+
+#[tokio::test]
+async fn login_verification_propagates_failure_before_returning_identity() {
+    let signed = signed(&claims("local-client", "local-nonce"));
+    for (id_token, nonce, succeeds) in [
+        (signed.as_str(), "local-nonce", true),
+        (signed.as_str(), "wrong-nonce", false),
+        ("invalid-jwt-header", "local-nonce", false),
+    ] {
+        let login = super::tests::exchange_response(
+            &json!({
+                "access_token": "new-access-secret", "refresh_token": "new-refresh-secret",
+                "token_type": "Bearer", "expires_in": 3600,
+                "scope": DIRECT_SCOPE, "id_token": id_token,
+            }),
+            Utc::now(),
+        )
+        .unwrap_or_else(|_| panic!("合法换码回复应返回待验签材料"));
+        let result = super::verify_login(
+            login,
+            "local-client",
+            nonce,
+            async { Ok(url::Url::parse("https://auth.openai.com/local-test-jwks").unwrap()) },
+            |_| async { Ok(keys()) },
+        )
+        .await;
+        if succeeds {
+            let (account, tokens) = result.unwrap();
+            assert_eq!(account.subject.0, "local-subject");
+            assert_eq!(account.email, "local@example.test");
+            assert_eq!(tokens.id_token.0, id_token);
+            assert_eq!(tokens.access_token.0, "new-access-secret");
+        } else {
+            assert!(result.is_err());
+        }
+    }
 }
 
 #[test]
@@ -157,31 +206,23 @@ struct KeyEndpoint {
     calls: AtomicUsize,
 }
 
-impl TokenEndpoint for KeyEndpoint {
-    fn exchange<'a>(
-        &'a self,
-        _: CodeGrant<'a>,
-    ) -> BoxFuture<'a, Result<LoginTokens, ExchangeFailure>> {
-        unreachable!()
-    }
-    fn refresh<'a>(
-        &'a self,
-        _: RefreshGrant<'a>,
-    ) -> BoxFuture<'a, Result<TokenReply, RefreshFailure>> {
-        unreachable!()
-    }
-    fn revoke<'a>(&'a self, _: RefreshGrant<'a>) -> BoxFuture<'a, Result<(), LlmError>> {
-        unreachable!()
-    }
-    fn discovery(&self) -> BoxFuture<'_, Result<url::Url, LlmError>> {
-        Box::pin(async { Ok(url::Url::parse("https://auth.openai.com/local-test-jwks").unwrap()) })
-    }
-    fn jwks<'a>(&'a self, _: &'a url::Url) -> BoxFuture<'a, Result<JwkSet, LlmError>> {
-        Box::pin(async {
-            self.calls.fetch_add(1, Ordering::SeqCst);
-            Ok(self.replies.lock().unwrap().remove(0))
-        })
-    }
+async fn verify_with_endpoint(
+    token: &str,
+    client_id: &str,
+    nonce: &str,
+    endpoint: &KeyEndpoint,
+) -> Result<Account, LlmError> {
+    verify(
+        token,
+        client_id,
+        nonce,
+        async { Ok(url::Url::parse("https://auth.openai.com/local-test-jwks").unwrap()) },
+        |_| async {
+            endpoint.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(endpoint.replies.lock().unwrap().remove(0))
+        },
+    )
+    .await
 }
 
 #[tokio::test]
@@ -199,7 +240,7 @@ async fn unknown_kid_reloads_once_and_known_key_failure_does_not_reload() {
             calls: AtomicUsize::new(0),
         };
         assert_eq!(
-            verify(
+            verify_with_endpoint(
                 &signed(&claims("local-client", "local-nonce")),
                 "local-client",
                 "local-nonce",
@@ -225,7 +266,7 @@ async fn unknown_kid_reloads_once_and_known_key_failure_does_not_reload() {
             calls: AtomicUsize::new(0),
         };
         assert!(
-            verify(&token, "local-client", "local-nonce", &endpoint)
+            verify_with_endpoint(&token, "local-client", "local-nonce", &endpoint)
                 .await
                 .is_err()
         );
@@ -236,7 +277,7 @@ async fn unknown_kid_reloads_once_and_known_key_failure_does_not_reload() {
         calls: AtomicUsize::new(0),
     };
     assert!(
-        verify(
+        verify_with_endpoint(
             "eyJhbGciOiJub25lIn0.e30.",
             "local-client",
             "local-nonce",
