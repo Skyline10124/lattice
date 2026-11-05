@@ -3,8 +3,6 @@
 
 use std::{collections::BTreeSet, fs};
 
-use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
-
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
     ReasoningReplay, ThinkingBudget, ThinkingToggle,
@@ -12,7 +10,6 @@ use crate::protocol::{
 
 use super::{
     config::{MAX_MODELS_PER_PROVIDER, MAX_PROVIDERS, MAX_PROVIDERS_FILE_BYTES, ProviderRegistry},
-    model_ref::MAX_MODEL_ID_BYTES,
     *,
 };
 
@@ -48,7 +45,6 @@ fn assert_invalid(source: &str, line: usize, reason: &str) {
 fn builtins_obey_provider_invariants() {
     let mut ids = BTreeSet::new();
     for provider in builtins::providers() {
-        validate_provider_id(&provider.id).unwrap();
         assert!(
             ids.insert(provider.id.clone()),
             "duplicate id: {}",
@@ -767,53 +763,4 @@ fn file_loading_applies_overrides_and_reports_invalid_input() {
         (error.path.as_path(), error.line, error.reason.as_str()),
         (path.as_path(), 2, "providers.toml must be UTF-8")
     );
-}
-
-#[test]
-fn model_reference_splits_once_and_round_trips() {
-    let source = "openrouter/anthropic/claude-sonnet-4.6";
-    let model: ModelRef = source.parse().unwrap();
-    assert_eq!(
-        (model.provider(), model.model()),
-        ("openrouter", "anthropic/claude-sonnet-4.6")
-    );
-    assert_eq!(model.to_string(), source);
-}
-
-#[test]
-fn model_reference_preserves_provider_id_validation_errors() {
-    assert_eq!(
-        ModelRef::parse("bad_id/model").unwrap_err().to_string(),
-        "provider id must contain only [a-z0-9-]"
-    );
-}
-
-#[test]
-fn model_reference_rejects_missing_parts_invalid_provider_and_control_characters() {
-    for source in [
-        "",
-        "openai",
-        "/model",
-        "openai/",
-        "openai/m\0",
-        "openai/m\u{7f}",
-        "openai/m\u{85}",
-    ] {
-        assert!(ModelRef::parse(source).is_err(), "{source:?}");
-    }
-    // 空格、Unicode 与后续斜杠都是不透明模型名的一部分，不属于控制字符。
-    assert_eq!(
-        ModelRef::parse("openai/ 模型 /suffix").unwrap().model(),
-        " 模型 /suffix"
-    );
-}
-
-#[test]
-fn model_reference_model_byte_limit_is_independent_of_provider_length() {
-    let provider = "a".repeat(MAX_PROVIDER_ID_BYTES);
-    let model = "é".repeat(MAX_MODEL_ID_BYTES / 2);
-    let reference = format!("{provider}/{model}");
-    assert_eq!(reference.len(), MAX_PROVIDER_ID_BYTES + 1 + 4_096);
-    ModelRef::parse(&reference).unwrap();
-    assert!(ModelRef::parse(&format!("{reference}a")).is_err());
 }

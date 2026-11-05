@@ -7,7 +7,9 @@
 //! `~/.lattice/agents/<name>/agent.toml` package semantics.
 //! Lookup order: explicit path > project-local > user-global.
 
-use std::path::{Component, Path, PathBuf};
+use std::path::PathBuf;
+
+use lattice_session::AgentName;
 
 use crate::error::ProfileError;
 use crate::load::{LoadedAgentProfile, load_agent_profile};
@@ -69,16 +71,16 @@ pub fn resolve_agent_profile(
 }
 
 fn resolve_named(name: &str, paths: &DiscoveryPaths) -> Result<LoadedAgentProfile, ProfileError> {
-    if name.contains(['/', '\0'])
-        || !matches!(
-            Path::new(name).components().next(),
-            Some(Component::Normal(_))
-        )
-    {
-        return Err(ProfileError::InvalidAgentName { name: name.into() });
-    }
-    let project_path = paths.project_agents_dir().join(name).join("agent.toml");
-    let global_path = paths.global_agents_dir.join(name).join("agent.toml");
+    let parsed =
+        AgentName::parse(name).map_err(|_| ProfileError::InvalidAgentName { name: name.into() })?;
+    let project_path = paths
+        .project_agents_dir()
+        .join(parsed.as_str())
+        .join("agent.toml");
+    let global_path = paths
+        .global_agents_dir
+        .join(parsed.as_str())
+        .join("agent.toml");
 
     // Project-local wins over user-global.
     if project_path.exists() {
@@ -91,7 +93,7 @@ fn resolve_named(name: &str, paths: &DiscoveryPaths) -> Result<LoadedAgentProfil
 
     // Not found anywhere.
     Err(ProfileError::ProfileNotFound {
-        name: name.to_string(),
+        name: parsed.as_str().to_string(),
         project_path,
         global_path,
     })
@@ -103,7 +105,7 @@ mod tests {
     use std::os::unix::fs::DirBuilderExt;
 
     #[test]
-    fn named_lookup_rejects_non_normal_path_components() {
+    fn named_lookup_does_not_escape_agents_dir() {
         let dir = tempfile::tempdir().unwrap();
         let configuration_dir = dir.path().join("home/.lattice");
         std::fs::DirBuilder::new()
@@ -115,23 +117,22 @@ mod tests {
             project_root: dir.path().join("project"),
             global_agents_dir: configuration_dir.join("agents"),
         };
-        let absolute = dir.path().join("outside");
-        for name in [
-            "",
-            ".",
-            "..",
-            "a/b",
-            "a/",
-            "a\0b",
-            absolute.to_str().unwrap(),
-        ] {
-            if !name.contains('\0') {
-                let target = paths.project_agents_dir().join(name).join("agent.toml");
-                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
-                std::fs::write(target, format!("schema_version=1\n[agent]\nname='{name}'\nmodel='local/test'\n[prompt]\nsystem='valid target'\n")).unwrap();
-            }
+        let outside = dir.path().join("outside");
+        for name in ["../outside", outside.to_str().unwrap()] {
+            let target = paths.project_agents_dir().join(name).join("agent.toml");
+            std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+            std::fs::write(
+                target,
+                format!(
+                    "schema_version=1\n[agent]\nname='{name}'\nmodel='local/test'\n[prompt]\nsystem='valid target'\n"
+                ),
+            )
+            .unwrap();
             assert!(
-                matches!(resolve_agent_profile(ProfileSource::Name(name.into()), &paths), Err(ProfileError::InvalidAgentName { name: found }) if found == name),
+                matches!(
+                    resolve_agent_profile(ProfileSource::Name(name.into()), &paths),
+                    Err(ProfileError::InvalidAgentName { name: found }) if found == name
+                ),
                 "{name:?}"
             );
         }

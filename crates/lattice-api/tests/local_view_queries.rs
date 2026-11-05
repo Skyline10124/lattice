@@ -21,13 +21,13 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
         .accept_turn(&guard, {
             let config = FrozenTurnConfig {
                 effort: None,
-                agent_name: "alpha".into(),
-                model: "test".into(),
-                provider: "openai-compatible".into(),
+                agent_name: AgentName::parse("alpha").unwrap(),
+                model: ModelId::parse("test").unwrap(),
+                provider: ProviderId::parse("openai-compatible").unwrap(),
                 system_prompt: None,
                 catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                 limits: TurnExecutionLimits {
-                    timeout_secs: 300,
+                    timeout_secs: lattice_api::TurnTimeout::default(),
                     max_model_steps: 32,
                     max_model_attempts: 2,
                 },

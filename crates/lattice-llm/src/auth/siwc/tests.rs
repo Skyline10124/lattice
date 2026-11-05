@@ -370,14 +370,14 @@ async fn inference_waits_for_refresh_publication_and_uses_its_header_and_redacti
     let auth = f.auth.clone();
     let credentials = Arc::new(f.store.load().unwrap());
     let send = tokio::spawn(async move {
-        let mut request =
-            crate::ChatRequest::new(vec![], crate::ModelTarget::new("chatgpt", "model"));
+        let target = crate::ModelTarget::test_target("chatgpt", "model");
+        let mut request = crate::ChatRequest::new(vec![], target.clone());
         request.client_request_id = Some("session".into());
         crate::client::dispatch(
             request,
             crate::client::RequestEndpoint {
-                provider: "chatgpt",
-                model: "model",
+                provider: target.model.provider(),
+                model: target.model.model(),
                 base_url: &url,
                 protocol: crate::protocol::Protocol::Responses,
                 auth: crate::provider::Auth::OauthChatgpt,

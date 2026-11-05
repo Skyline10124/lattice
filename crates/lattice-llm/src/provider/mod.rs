@@ -5,17 +5,13 @@
 
 use std::collections::BTreeMap;
 
-use lattice_conversation::Effort;
+use lattice_conversation::{Effort, ModelId, ProviderId};
 use serde::Deserialize;
 
 use crate::protocol::{Features, Protocol};
 
 mod builtins;
 pub(crate) mod config;
-mod model_ref;
-
-pub(crate) use model_ref::validate_model_id;
-pub use model_ref::{MAX_MODEL_ID_BYTES, ModelRef, ModelRefError};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -64,13 +60,13 @@ pub(crate) struct ModelMetadata {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Provider {
-    pub(crate) id: String,
+    pub(crate) id: ProviderId,
     pub(crate) protocol: Protocol,
     pub(crate) base_url: String,
     pub(crate) auth: Auth,
     pub(crate) catalog: Option<String>,
     pub(crate) features: Features,
-    pub(crate) models: BTreeMap<String, ModelMetadata>,
+    pub(crate) models: BTreeMap<ModelId, ModelMetadata>,
 }
 
 #[cfg(test)]

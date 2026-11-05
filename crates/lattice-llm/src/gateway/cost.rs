@@ -76,12 +76,12 @@ fn estimate_at_finish(
         Ok(registry) => registry,
         Err(_) => return unavailable("provider configuration unavailable"),
     };
-    let Some(provider) = registry.get(&target.provider) else {
+    let Some(provider) = registry.get(target.model.provider().as_str()) else {
         return unavailable("provider unavailable");
     };
     let models = Metadata::load(directory).merge(provider);
     let Some(cost) = models
-        .get(&target.model)
+        .get(target.model.model().as_str())
         .and_then(|model| model.cost.as_ref())
     else {
         // 模型无价不影响已报告的用量完整性。

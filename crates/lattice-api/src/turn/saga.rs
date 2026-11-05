@@ -75,7 +75,7 @@ impl ModelExecution {
                     Err(error) => {
                         // #331：解析失败尚无本次协议，暂按最近一次成功解析的协议记失败尝试，不发送请求。
                         let origin = AttemptOrigin {
-                            provider_id: target.provider.clone(),
+                            provider_id: target.model.provider().clone(),
                             protocol: last_origin.protocol,
                         };
                         (
@@ -102,7 +102,7 @@ pub(crate) struct LiveExecution {
     /// 库代故障，不是用户取消。退出时不向失败代写入内存结果。
     pub shutdown: Arc<AtomicBool>,
     pub deadline: Instant,
-    pub retry: lattice_profile::LlmRetrySection,
+    pub retry: crate::RetryPolicy,
 }
 
 impl LiveExecution {
@@ -206,7 +206,7 @@ pub(crate) async fn run_coordinator_saga(
             .read(move |read| history(read, session))
             .await?;
         let mut attempt = 0;
-        let mut delay = live.retry.initial_delay_ms.min(live.retry.max_delay_ms);
+        let mut delay = live.retry.initial_delay_ms().min(live.retry.max_delay_ms());
         let reply = loop {
             live.healthy()?;
             if let Some(cause) = live.stop() {
@@ -222,8 +222,7 @@ pub(crate) async fn run_coordinator_saga(
                 attempt_ordinal: attempt,
             };
             let target = lattice_llm::ModelTarget {
-                provider: config.provider.clone(),
-                model: config.model.clone(),
+                model: crate::ModelRef::new(config.provider.clone(), config.model.clone()),
                 effort: config.effort,
             };
             let (origin, driver) = live.model.resolve(&target).await;
@@ -248,7 +247,7 @@ pub(crate) async fn run_coordinator_saga(
             live.observer.emit(TurnEvent::ModelStarted {
                 key,
                 origin: origin.clone(),
-                model: config.model.clone(),
+                model: config.model.as_str().to_owned(),
             });
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
             let request = ModelStepRequest {
@@ -439,7 +438,7 @@ pub(crate) async fn run_coordinator_saga(
                     });
                     live.backoff(Duration::from_millis(retry_delay_ms)).await?;
                     attempt = next_attempt;
-                    delay = delay.saturating_mul(2).min(live.retry.max_delay_ms);
+                    delay = delay.saturating_mul(2).min(live.retry.max_delay_ms());
                 }
             }
         };
@@ -774,7 +773,7 @@ mod resolution_tests {
         configure("chat-completions");
         let gateway = lattice_llm::RequestGateway::new(directory.path().into(), vec![]).unwrap();
         let turn = gateway.open_turn();
-        let target = lattice_llm::ModelTarget::new("local", "model");
+        let target = lattice_llm::ModelTarget::new(crate::ModelRef::parse("local/model").unwrap());
         let initial = turn.resolve(&target).await.unwrap();
         let mut execution = ModelExecution::gateway(turn, &initial);
         configure("generate-content");

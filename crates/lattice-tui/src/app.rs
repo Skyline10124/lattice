@@ -142,7 +142,7 @@ pub(crate) struct App {
     pub(crate) connected: bool,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
-    pending_agent: Option<String>,
+    pending_agent: Option<lattice_api::AgentName>,
     agent_submissions: HashSet<TurnId>,
     pub(crate) selection: crate::selection::Selection,
     query_generation: u64,
@@ -384,13 +384,17 @@ impl App {
                 DockIntent::Choose(choice) => {
                     let before = self.next_effort();
                     match choice {
-                        PanelChoice::Model(model) => {
-                            self.selection.choose_model(*model);
-                            let after = self.next_effort();
-                            if self.configuration_head().is_some() && before != after {
-                                self.push_status(effort_changed_status(before, after));
+                        PanelChoice::Model(model) => match self.selection.choose_model(*model) {
+                            Ok(()) => {
+                                let after = self.next_effort();
+                                if self.configuration_head().is_some() && before != after {
+                                    self.push_status(effort_changed_status(before, after));
+                                }
                             }
-                        }
+                            Err(error) => {
+                                self.push_status(model_query_failed_status(&error.to_string()));
+                            }
+                        },
                         PanelChoice::Effort(effort) => self.selection.choose_effort(effort),
                     }
                     self.dock.close_panel();
@@ -481,16 +485,13 @@ impl App {
     }
 
     fn next_target(&self) -> Option<String> {
-        self.selection
-            .model()
-            .map(|model| format!("{}/{}", model.provider, model.model))
-            .or_else(|| {
-                Some(format!(
-                    "{}/{}",
-                    self.provider.as_ref()?,
-                    self.model.as_ref()?
-                ))
-            })
+        self.selection.model().map(ToString::to_string).or_else(|| {
+            Some(format!(
+                "{}/{}",
+                self.provider.as_ref()?,
+                self.model.as_ref()?
+            ))
+        })
     }
 
     fn sync_selection(&mut self) {
@@ -538,7 +539,7 @@ impl App {
             }
             Err(error) => {
                 self.dock.close_panel();
-                self.push_status(model_query_failed_status(&error));
+                self.push_status(model_query_failed_status(&error.message));
             }
         }
     }

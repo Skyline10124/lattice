@@ -51,9 +51,12 @@ pub struct SendArgs {
     pub session_id: Option<String>,
     /// Agent to use. Required for a new session; selecting it rebuilds the session profile copy.
     #[arg(long, required_unless_present = "session_id")]
-    pub agent: Option<String>,
-    #[arg(long, value_parser = parse_model, help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend.")]
-    pub model: Option<String>,
+    pub agent: Option<lattice_api::AgentName>,
+    #[arg(
+        long,
+        help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend."
+    )]
+    pub model: Option<lattice_api::ModelRef>,
     #[arg(
         long,
         help = effort_help()
@@ -68,12 +71,6 @@ fn effort_help() -> String {
         .collect::<Vec<_>>()
         .join(", ");
     format!("Reasoning effort: {efforts}. Omit to inherit; off explicitly disables reasoning.")
-}
-
-fn parse_model(value: &str) -> Result<String, String> {
-    lattice_api::ModelRef::parse(value)
-        .map(|_| value.to_owned())
-        .map_err(|error| error.to_string())
 }
 
 pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, String> {
@@ -298,7 +295,10 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
         "session {} current={} agent={} unclosed_turn={}\n",
         log.session.session_id,
         log.session.current.0,
-        summarize(log.current_agent.as_deref().unwrap_or("none"), 120),
+        summarize(
+            log.current_agent.as_ref().map_or("none", |a| a.as_str()),
+            120
+        ),
         log.unclosed_turn
             .map_or_else(|| "none".into(), |id| id.to_string())
     );
@@ -357,7 +357,7 @@ fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
             turn.ordinal,
             turn.turn_id,
             turn.provider,
-            summarize(&turn.model, 120),
+            summarize(turn.model.as_str(), 120),
             render_usage_values(&turn.usage)
         );
     }

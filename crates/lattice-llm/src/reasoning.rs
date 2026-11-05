@@ -25,7 +25,10 @@ pub(crate) fn supported_efforts(
         .models
         .get(model_id)
         .map_or(provider.features, |model| model.features);
-    Ok(ReasoningCapabilities::new(&provider.id, model_id, model, features)?.supported_efforts())
+    Ok(
+        ReasoningCapabilities::new(provider.id.as_str(), model_id, model, features)?
+            .supported_efforts(),
+    )
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

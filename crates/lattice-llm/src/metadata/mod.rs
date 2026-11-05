@@ -231,9 +231,9 @@ impl Metadata {
             .unwrap_or_default();
         for (id, handwritten) in &provider.models {
             models
-                .entry(id.clone())
+                .entry(id.as_str().to_owned())
                 .or_insert_with(|| Model {
-                    id: id.clone(),
+                    id: id.as_str().to_owned(),
                     ..Model::default()
                 })
                 .overlay(handwritten);

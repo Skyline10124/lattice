@@ -2,13 +2,14 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::hex_digest;
+pub use crate::model::{AgentName, RetryPolicy, TurnTimeout};
 use lancet_protocol::{
     BindingIdentity, CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId,
     ModelAttemptKey, ModelMessageAddress, Retriability, SessionId, ToolCallAddress, TurnId,
 };
 use lattice_conversation::{
-    BoundToolCall, NativeMessage, TokenUsage, ToolCallValidation, ToolResultOutcome,
-    UnboundToolCall,
+    BoundToolCall, ModelId, NativeMessage, ProviderId, TokenUsage, ToolCallValidation,
+    ToolResultOutcome, UnboundToolCall,
 };
 use lattice_store::ProjectStoreKey;
 use serde::{Deserialize, Serialize};
@@ -57,9 +58,9 @@ pub enum Node {
         parent: NodeId,
         turn_id: TurnId,
         accepted_at: Timestamp,
-        agent_name: String,
-        model: String,
-        provider: String,
+        agent_name: AgentName,
+        model: ModelId,
+        provider: ProviderId,
         effort: Option<lattice_conversation::Effort>,
         limits: TurnExecutionLimits,
         #[serde(with = "hex_digest")]
@@ -475,13 +476,13 @@ pub struct LogRow {
 pub struct TurnLogSummary {
     pub turn_id: TurnId,
     pub summary: TurnSummary,
-    pub agent_name: String,
+    pub agent_name: AgentName,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionLog {
     pub session: SessionRecord,
-    pub current_agent: Option<String>,
+    pub current_agent: Option<AgentName>,
     pub unclosed_turn: Option<TurnId>,
     pub nodes: Vec<LogRow>,
 }
@@ -499,8 +500,8 @@ pub struct SessionUsage {
 pub struct TurnUsageRow {
     pub turn_id: TurnId,
     pub ordinal: u64,
-    pub provider: String,
-    pub model: String,
+    pub provider: ProviderId,
+    pub model: ModelId,
     pub usage: UsageSummary,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -509,7 +510,7 @@ pub struct TurnDetail {
     pub turn_id: TurnId,
     pub session_id: SessionId,
     pub user_node: NodeId,
-    pub agent_name: String,
+    pub agent_name: AgentName,
     pub accepted_at: Timestamp,
     pub ended_at: Timestamp,
     pub summary: TurnSummary,
@@ -597,7 +598,7 @@ impl ConversationEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionView {
     pub session: SessionRecord,
-    pub current_agent: Option<String>,
+    pub current_agent: Option<AgentName>,
     pub entries: Vec<ConversationEntry>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

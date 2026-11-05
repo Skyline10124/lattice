@@ -247,7 +247,7 @@ impl AuthStore {
             .ok_or(AuthError::Internal("configuration directory disappeared"))?;
         let mut document = directory.read()?;
         document.providers.insert(
-            provider.id.clone(),
+            provider.id.as_str().to_owned(),
             format::Credential::ApiKey {
                 key: Secret(key.to_owned()),
             },
@@ -299,7 +299,7 @@ pub(crate) fn provider_status(
     credentials: Result<&Credentials, &AuthError>,
 ) -> ProviderAuthStatus {
     let mut row = ProviderAuthStatus {
-        provider: provider.id.clone(),
+        provider: provider.id.as_str().to_owned(),
         status: AuthState::Missing,
         email: None,
         expires_at: None,
@@ -307,7 +307,7 @@ pub(crate) fn provider_status(
     if provider.auth == Auth::None {
         row.status = AuthState::Ready;
     } else if let Ok(credentials) = credentials {
-        match credentials.0.providers.get(&provider.id) {
+        match credentials.0.providers.get(provider.id.as_str()) {
             Some(format::Credential::ApiKey { .. }) if provider.auth != Auth::OauthChatgpt => {
                 row.status = AuthState::Ready
             }

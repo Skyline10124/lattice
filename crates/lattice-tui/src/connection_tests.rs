@@ -1305,8 +1305,9 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
 
 #[test]
 fn startup_agent_is_consumed_only_by_its_accepted_submission() {
+    let unused = lattice_api::AgentName::parse("unused").unwrap();
     let options = TuiOptions {
-        agent: "unused".into(),
+        agent: Some(unused.clone()),
         session_id: None,
         session_dir: "/tmp/unused-tui-history".into(),
         project_root: "/tmp".into(),
@@ -1317,24 +1318,24 @@ fn startup_agent_is_consumed_only_by_its_accepted_submission() {
         app.input.set_text("first");
         let prompt = app.submit().unwrap();
         let request = begin_turn(&options, &mut app, prompt).unwrap();
-        assert_eq!(request.agent.as_deref(), Some("unused"));
+        assert_eq!(request.agent.as_ref(), Some(&unused));
         app.apply_submission(receipt(
             request.turn_id,
             SubmissionResult::Rejected {
                 error: local_error(LocalErrorKind::BadRequest, "bad profile"),
             },
         ));
-        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        assert_eq!(app.pending_agent.as_ref(), Some(&unused));
         let prompt = app.submit().unwrap();
         let retry = begin_turn(&options, &mut app, prompt).unwrap();
-        assert_eq!(retry.agent.as_deref(), Some("unused"));
+        assert_eq!(retry.agent.as_ref(), Some(&unused));
         app.apply_submission(receipt(
             retry.turn_id,
             SubmissionResult::Unknown { error: None },
         ));
-        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        assert_eq!(app.pending_agent.as_ref(), Some(&unused));
         app.apply_recovery(turn(99), Ok(turn_detail(turn(99))));
-        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        assert_eq!(app.pending_agent.as_ref(), Some(&unused));
         match proof {
             0 => app.apply_submission(receipt(retry.turn_id, accepted(retry.turn_id))),
             1 => app.apply_recovery(retry.turn_id, Ok(turn_detail(retry.turn_id))),
@@ -1419,23 +1420,25 @@ fn accepted_selection_consumes_only_matching_field_generations() {
         begin_turn(options, app, prompt).unwrap()
     }
     let options = TuiOptions {
-        agent: "unused".into(),
+        agent: Some(lattice_api::AgentName::parse("unused").unwrap()),
         session_id: None,
         session_dir: "/tmp/unused-tui-history".into(),
         project_root: "/tmp".into(),
     };
+    let same = lattice_api::ModelRef::parse("p/same").unwrap();
     for proof in 0..4 {
         for reselect in 0..4 {
             let mut app = test_app(true);
             app.selection
-                .choose_model(model_candidate("p", "same", &[Low, Off]));
+                .choose_model(model_candidate("p", "same", &[Low, Off]))
+                .unwrap();
             app.selection.choose_effort(Low);
             app.input.set_text("first");
             let prompt = app.submit().unwrap();
             let first = begin_turn(&options, &mut app, prompt).unwrap();
             assert_eq!(
-                (first.model.as_deref(), first.effort),
-                (Some("p/same"), Some(Low))
+                (first.model.as_ref(), first.effort),
+                (Some(&same), Some(Low))
             );
             app.apply_submission(receipt(
                 first.turn_id,
@@ -1444,7 +1447,8 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             app.dock.release();
             if reselect & 1 != 0 {
                 app.selection
-                    .choose_model(model_candidate("p", "same", &[Low, Off]));
+                    .choose_model(model_candidate("p", "same", &[Low, Off]))
+                    .unwrap();
             }
             if reselect & 2 != 0 {
                 app.selection.choose_effort(Low);
@@ -1477,12 +1481,12 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             let second = next(&mut app, &options);
             let expected = match reselect {
                 0 => (None, None),
-                1 => (Some("p/same"), None),
+                1 => (Some(&same), None),
                 2 => (None, Some(Low)),
-                _ => (Some("p/same"), Some(Low)),
+                _ => (Some(&same), Some(Low)),
             };
             assert_eq!(
-                (second.model.as_deref(), second.effort),
+                (second.model.as_ref(), second.effort),
                 expected,
                 "proof {proof}, reselect {reselect}"
             );
@@ -1537,7 +1541,8 @@ fn accepted_selection_consumes_only_matching_field_generations() {
     }
     let mut app = test_app(true);
     app.selection
-        .choose_model(model_candidate("p", "same", &[Low, Off]));
+        .choose_model(model_candidate("p", "same", &[Low, Off]))
+        .unwrap();
     app.selection.choose_effort(Low);
     let first = next(&mut app, &options);
     app.apply_submission(receipt(
@@ -1546,19 +1551,20 @@ fn accepted_selection_consumes_only_matching_field_generations() {
     ));
     let second = next(&mut app, &options);
     assert_eq!(
-        (second.model.as_deref(), second.effort),
-        (Some("p/same"), Some(Low)),
+        (second.model.as_ref(), second.effort),
+        (Some(&same), Some(Low)),
         "T1 未知时，T2 仍携带全部待提交字段"
     );
     confirm(&mut app, second.turn_id, 0, 3);
     app.selection
-        .choose_model(model_candidate("p", "same", &[Low, Off]));
+        .choose_model(model_candidate("p", "same", &[Low, Off]))
+        .unwrap();
     app.selection.choose_effort(Off);
     confirm(&mut app, first.turn_id, 0, 1);
     let third = next(&mut app, &options);
     assert_eq!(
-        (third.model.as_deref(), third.effort),
-        (Some("p/same"), Some(Off)),
+        (third.model.as_ref(), third.effort),
+        (Some(&same), Some(Off)),
         "T2 接受后，迟到的 T1 接受不能改变新选择"
     );
 }

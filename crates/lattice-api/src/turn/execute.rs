@@ -49,7 +49,7 @@ impl PreparedModel {
     pub(crate) async fn resolve(
         gateway: &Arc<lattice_llm::RequestGateway>,
         profile: &crate::profile::PreparedProfile,
-        model: Option<&str>,
+        model: Option<&crate::ModelRef>,
         effort: Option<lattice_conversation::Effort>,
     ) -> Result<Self> {
         let auth = gateway.auth_store();
@@ -105,12 +105,15 @@ fn selected_effort(
 
 fn selected_target(
     profile: &crate::profile::PreparedProfile,
-    model: Option<&str>,
+    model: Option<&crate::ModelRef>,
     auth: Option<&lattice_llm::auth::AuthStore>,
 ) -> Result<(lattice_llm::ModelTarget, bool)> {
     let base = if profile.inherited {
         let current = &profile.previous.as_ref().expect("inherited copy").current;
-        let mut target = lattice_llm::ModelTarget::new(&current.provider, &current.model);
+        let mut target = lattice_llm::ModelTarget::new(crate::ModelRef::new(
+            current.provider.clone(),
+            current.model.clone(),
+        ));
         target.effort = current.effort;
         Some(target)
     } else {
@@ -118,16 +121,15 @@ fn selected_target(
             .configuration
             .effective
             .default_model
-            .as_deref()
-            .map(|model| model_target(model, auth))
-            .transpose()?
-            .map(|mut target| {
+            .clone()
+            .map(|model| {
+                let mut target = lattice_llm::ModelTarget::new(model);
                 target.effort = profile.configuration.effective.default_effort;
                 target
             })
     };
     let mut target = match model {
-        Some(model) => model_target(model, auth)?,
+        Some(model) => lattice_llm::ModelTarget::new(model.clone()),
         None => base.clone().ok_or_else(|| {
             ApiError::Configuration(crate::ConfigRejection::new(
                 "model selection or [agent].model is required",
@@ -135,26 +137,11 @@ fn selected_target(
             ))
         })?,
     };
-    let changed = base
-        .as_ref()
-        .is_none_or(|base| base.provider != target.provider || base.model != target.model);
+    let changed = base.as_ref().is_none_or(|base| base.model != target.model);
     target.effort = base.map_or(profile.configuration.effective.default_effort, |base| {
         base.effort
     });
     Ok((target, changed))
-}
-
-fn model_target(
-    model: &str,
-    auth: Option<&lattice_llm::auth::AuthStore>,
-) -> Result<lattice_llm::ModelTarget> {
-    let reference = lattice_llm::ModelRef::parse(model).map_err(|error| {
-        ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), auth))
-    })?;
-    Ok(lattice_llm::ModelTarget::new(
-        reference.provider(),
-        reference.model(),
-    ))
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
@@ -314,8 +301,7 @@ async fn execute_owned(
         }
     };
     let selected = match &request.agent {
-        Some(name) if !name.trim().is_empty() => name.clone(),
-        Some(_) => return Err(ApiError::BadRequest("agent name must not be blank".into())),
+        Some(name) => name.clone(),
         None if request.session_id.is_some() => profile.configuration.effective.agent_name.clone(),
         None => {
             return Err(ApiError::BadRequest(
@@ -337,7 +323,7 @@ async fn execute_owned(
         None => match request.injected_llm() {
             Some((client, protocol, supported)) => {
                 let (mut target, changed) =
-                    selected_target(&profile, request.model.as_deref(), None)?;
+                    selected_target(&profile, request.model.as_ref(), None)?;
                 target.effort = selected_effort(
                     target.effort,
                     profile.configuration.effective.default_effort,
@@ -346,7 +332,7 @@ async fn execute_owned(
                     &supported,
                 );
                 let origin = lattice_session::store::AttemptOrigin {
-                    provider_id: target.provider.clone(),
+                    provider_id: target.model.provider().clone(),
                     protocol,
                 };
                 (
@@ -410,8 +396,8 @@ async fn execute_owned(
             config.digest()?
         },
         current: SessionModelChoice {
-            provider: target.provider.clone(),
-            model: target.model.clone(),
+            provider: target.model.provider().clone(),
+            model: target.model.model().clone(),
             effort: target.effort,
         },
     };
@@ -473,7 +459,7 @@ async fn execute_owned(
         return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
     }
     *accepted_session = Some(session_id);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.as_secs());
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(&coordinator.io, turn_id, "turn_accepted", None, None).await?;
     #[cfg(test)]
@@ -574,14 +560,14 @@ mod tests {
 
     fn profile() -> crate::profile::PreparedProfile {
         let config = FrozenTurnConfig {
-            agent_name: "test".into(),
-            provider: "profile".into(),
-            model: "default".into(),
+            agent_name: crate::AgentName::parse("test").unwrap(),
+            provider: crate::ProviderId::parse("profile").unwrap(),
+            model: crate::ModelId::parse("default").unwrap(),
             effort: Some(Low),
             system_prompt: None,
             catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
             limits: TurnExecutionLimits {
-                timeout_secs: 300,
+                timeout_secs: crate::TurnTimeout::default(),
                 max_model_steps: 32,
                 max_model_attempts: 1,
             },
@@ -600,8 +586,8 @@ mod tests {
         let (target, changed) = selected_target(&profile, None, None).unwrap();
         assert_eq!(
             (
-                target.provider.as_str(),
-                target.model.as_str(),
+                target.model.provider().as_str(),
+                target.model.model().as_str(),
                 target.effort,
                 changed
             ),
@@ -609,8 +595,8 @@ mod tests {
         );
         profile.inherited = true;
         profile.previous.as_mut().unwrap().current = SessionModelChoice {
-            provider: "saved".into(),
-            model: "same".into(),
+            provider: crate::ProviderId::parse("saved").unwrap(),
+            model: crate::ModelId::parse("same").unwrap(),
             effort: Some(High),
         };
         for (request, provider, model, changed) in [
@@ -619,11 +605,13 @@ mod tests {
             (Some("other/same"), "other", "same", true),
             (Some("saved/org/model"), "saved", "org/model", true),
         ] {
-            let (target, actual_changed) = selected_target(&profile, request, None).unwrap();
+            let parsed = request.map(|value| crate::ModelRef::parse(value).unwrap());
+            let (target, actual_changed) =
+                selected_target(&profile, parsed.as_ref(), None).unwrap();
             assert_eq!(
                 (
-                    target.provider.as_str(),
-                    target.model.as_str(),
+                    target.model.provider().as_str(),
+                    target.model.model().as_str(),
                     target.effort,
                     actual_changed
                 ),
@@ -634,8 +622,8 @@ mod tests {
         let (target, changed) = selected_target(&profile, None, None).unwrap();
         assert_eq!(
             (
-                target.provider.as_str(),
-                target.model.as_str(),
+                target.model.provider().as_str(),
+                target.model.model().as_str(),
                 target.effort,
                 changed
             ),
@@ -646,20 +634,17 @@ mod tests {
             selected_target(&profile, None, None),
             Err(ApiError::Configuration(_))
         ));
-        let (target, changed) = selected_target(&profile, Some("chosen/org/model"), None).unwrap();
+        let chosen = crate::ModelRef::parse("chosen/org/model").unwrap();
+        let (target, changed) = selected_target(&profile, Some(&chosen), None).unwrap();
         assert_eq!(
             (
-                target.provider.as_str(),
-                target.model.as_str(),
+                target.model.provider().as_str(),
+                target.model.model().as_str(),
                 target.effort,
                 changed
             ),
             ("chosen", "org/model", Some(Low), true)
         );
-        assert!(matches!(
-            selected_target(&profile, Some("invalid"), None),
-            Err(ApiError::Configuration(_))
-        ));
     }
 
     #[test]

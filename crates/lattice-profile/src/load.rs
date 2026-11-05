@@ -124,58 +124,65 @@ fn toml_error_line(error: &toml::de::Error, content: &str) -> Option<std::num::N
 }
 
 fn validate_llm_retry(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
+    use lattice_session::{MAX_MODEL_ATTEMPTS, MAX_RETRY_DELAY_MS, RetryPolicy, RetryPolicyError};
+
     let retry = &profile.llm.retry;
-    if retry.max_retries > 10 {
-        return Err(ProfileError::InvalidField {
+    match RetryPolicy::new(
+        retry.max_retries,
+        retry.initial_delay_ms,
+        retry.max_delay_ms,
+    ) {
+        Ok(_) => Ok(()),
+        Err(RetryPolicyError::TooManyRetries) => Err(ProfileError::InvalidField {
             path: path.to_path_buf(),
             section: "llm.retry".into(),
             field: "max_retries".into(),
             value: retry.max_retries.to_string().into_boxed_str(),
             reason: "too many LLM retry attempts".into(),
-            expected: "max_retries must be <= 10".into(),
-        });
-    }
-    if retry.initial_delay_ms > 60_000 {
-        return Err(ProfileError::InvalidField {
+            expected: format!("max_retries must be <= {}", MAX_MODEL_ATTEMPTS - 1).into(),
+        }),
+        Err(RetryPolicyError::InitialDelayTooLarge) => Err(ProfileError::InvalidField {
             path: path.to_path_buf(),
             section: "llm.retry".into(),
             field: "initial_delay_ms".into(),
             value: retry.initial_delay_ms.to_string().into_boxed_str(),
             reason: "initial delay is too large".into(),
-            expected: "initial_delay_ms must be <= 60000".into(),
-        });
-    }
-    if retry.max_delay_ms > 60_000 {
-        return Err(ProfileError::InvalidField {
+            expected: format!("initial_delay_ms must be <= {MAX_RETRY_DELAY_MS}").into(),
+        }),
+        Err(RetryPolicyError::MaxDelayTooLarge) => Err(ProfileError::InvalidField {
             path: path.to_path_buf(),
             section: "llm.retry".into(),
             field: "max_delay_ms".into(),
             value: retry.max_delay_ms.to_string().into_boxed_str(),
             reason: "max delay is too large".into(),
-            expected: "max_delay_ms must be <= 60000".into(),
-        });
-    }
-    if retry.initial_delay_ms > retry.max_delay_ms {
-        return Err(ProfileError::InvalidField {
+            expected: format!("max_delay_ms must be <= {MAX_RETRY_DELAY_MS}").into(),
+        }),
+        Err(RetryPolicyError::InitialDelayExceedsMax) => Err(ProfileError::InvalidField {
             path: path.to_path_buf(),
             section: "llm.retry".into(),
             field: "initial_delay_ms".into(),
             value: retry.initial_delay_ms.to_string().into_boxed_str(),
             reason: "initial delay exceeds max delay".into(),
             expected: "initial_delay_ms must be <= max_delay_ms".into(),
-        });
+        }),
     }
-    Ok(())
 }
 
 fn validate_llm_timeout(path: &Path, profile: &AgentProfile) -> Result<(), ProfileError> {
+    use lattice_session::{MAX_TURN_TIMEOUT_SECS, TurnTimeout, TurnTimeoutError};
+
     let Some(secs) = profile.llm.timeout_secs else {
         return Ok(());
     };
-    let (reason, expected) = match secs {
-        0 => ("timeout must be nonzero", "timeout_secs must be > 0"),
-        86_401.. => ("timeout is too large", "timeout_secs must be <= 86400"),
-        _ => return Ok(()),
+    let (reason, expected) = match TurnTimeout::new(secs) {
+        Ok(_) => return Ok(()),
+        Err(TurnTimeoutError::Zero) => {
+            ("timeout must be nonzero", "timeout_secs must be > 0".into())
+        }
+        Err(TurnTimeoutError::TooLarge) => (
+            "timeout is too large",
+            format!("timeout_secs must be <= {MAX_TURN_TIMEOUT_SECS}"),
+        ),
     };
     Err(ProfileError::InvalidField {
         path: path.to_path_buf(),
@@ -663,129 +670,6 @@ allowed_roots = ["src"]
                 msg.contains(expected),
                 "the error must name the correct spelling: {msg}"
             );
-        }
-    }
-
-    #[test]
-    fn reject_invalid_llm_retry_bounds() {
-        let cases = [
-            (
-                "max_retries = 11\ninitial_delay_ms = 1\nmax_delay_ms = 1",
-                "max_retries",
-            ),
-            (
-                "max_retries = 1\ninitial_delay_ms = 60001\nmax_delay_ms = 60001",
-                "initial_delay_ms",
-            ),
-            (
-                "max_retries = 1\ninitial_delay_ms = 10\nmax_delay_ms = 5",
-                "initial_delay_ms",
-            ),
-        ];
-        for (retry, field) in cases {
-            let (_dir, path) = temp_profile(&format!(
-                r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "anthropic/claude-sonnet-4-6"
-
-[prompt]
-system = "hi"
-
-[llm.retry]
-{retry}
-
-"#
-            ));
-            let err = load_agent_profile(&path).unwrap_err();
-            assert!(
-                err.to_string().contains(field),
-                "expected {field} in error, got: {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn llm_timeout_secs_enforces_bounds() {
-        enum Expected {
-            InvalidField(&'static str),
-            LoadedTimeout(u64),
-        }
-
-        for (name, timeout_secs, expected) in [
-            (
-                "llm_timeout_secs_zero_rejected",
-                0,
-                Expected::InvalidField("timeout_secs must be > 0"),
-            ),
-            (
-                "llm_timeout_secs_over_upper_bound_rejected",
-                86_401,
-                Expected::InvalidField("timeout_secs must be <= 86400"),
-            ),
-            (
-                "llm_timeout_secs_lower_bound_accepted",
-                1,
-                Expected::LoadedTimeout(1),
-            ),
-            (
-                "llm_timeout_secs_one_hour_accepted",
-                3600,
-                Expected::LoadedTimeout(3600),
-            ),
-            (
-                "llm_timeout_secs_over_one_hour_accepted",
-                3601,
-                Expected::LoadedTimeout(3601),
-            ),
-            (
-                "llm_timeout_secs_upper_bound_accepted",
-                86_400,
-                Expected::LoadedTimeout(86_400),
-            ),
-        ] {
-            let (_dir, path) = temp_profile(&format!(
-                r#"
-schema_version = 1
-
-[agent]
-name = "test"
-model = "anthropic/claude-sonnet-4-6"
-
-[prompt]
-system = "hi"
-
-[llm]
-timeout_secs = {timeout_secs}
-"#
-            ));
-            let result = load_agent_profile(&path);
-            match expected {
-                Expected::InvalidField(expected) => {
-                    let ProfileError::InvalidField {
-                        path: error_path,
-                        section,
-                        field,
-                        value,
-                        expected: actual_expected,
-                        ..
-                    } = result.expect_err(name)
-                    else {
-                        panic!("{name}: expected a field-level diagnostic");
-                    };
-                    assert_eq!(error_path, path, "{name}");
-                    assert_eq!(section, "llm", "{name}");
-                    assert_eq!(field, "timeout_secs", "{name}");
-                    assert_eq!(value.as_ref(), timeout_secs.to_string(), "{name}");
-                    assert_eq!(actual_expected.as_ref(), expected, "{name}");
-                }
-                Expected::LoadedTimeout(timeout) => {
-                    let loaded = result.expect(name);
-                    assert_eq!(loaded.profile.llm.timeout_secs, Some(timeout), "{name}");
-                }
-            }
         }
     }
 

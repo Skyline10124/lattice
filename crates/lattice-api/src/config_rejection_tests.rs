@@ -238,8 +238,10 @@ fn named_profile_validation_shows_redacted_declared_name() {
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
     .unwrap();
+    let selected = crate::AgentName::parse("selected").unwrap();
+    let missing = crate::AgentName::parse("missing").unwrap();
     let result = LocalError::from(
-        crate::profile::load_for_turn("selected", &root, &configuration_dir).unwrap_err(),
+        crate::profile::load_for_turn(&selected, &root, &configuration_dir).unwrap_err(),
     );
     assert!(result.message.contains("[agent].name"));
     assert!(result.message.contains("selected"));
@@ -248,7 +250,7 @@ fn named_profile_validation_shows_redacted_declared_name() {
     assert!(!result.message.contains(SENTINEL));
 
     let result = LocalError::from(
-        crate::profile::load_for_turn("missing", &root, &configuration_dir).unwrap_err(),
+        crate::profile::load_for_turn(&missing, &root, &configuration_dir).unwrap_err(),
     );
     assert!(result.message.contains("agent profile 'missing' not found"));
     assert!(
@@ -278,7 +280,7 @@ fn named_profile_validation_shows_redacted_declared_name() {
         ),
     )
     .unwrap();
-    let error = crate::profile::load_for_turn("selected", &root, &configuration_dir).unwrap_err();
+    let error = crate::profile::load_for_turn(&selected, &root, &configuration_dir).unwrap_err();
     assert!(!format!("{error:?}").contains(key));
     let result = LocalError::from(error);
     assert!(result.message.contains("declares '[REDACTED]'"));

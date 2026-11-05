@@ -85,7 +85,7 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
     assert_eq!(
         gateway
             .open_turn()
-            .supported_efforts(&crate::ModelTarget::new("chatgpt", "known"))
+            .supported_efforts(&crate::ModelTarget::test_target("chatgpt", "known"))
             .await
             .unwrap(),
         known.supported_efforts

@@ -39,7 +39,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         effort: None,
         input: " original \n".into(),
         session_id: None,
-        agent: Some("alpha".into()),
+        agent: Some(AgentName::parse("alpha").unwrap()),
         loaded_profile: Some(lattice_profile::load_agent_profile(&profile).unwrap()),
         cancel_flag: None,
         test_llm: Some((

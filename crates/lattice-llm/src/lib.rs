@@ -20,7 +20,10 @@ pub use metadata::{
 };
 pub mod protocol;
 pub(crate) mod provider;
-pub use provider::{MAX_MODEL_ID_BYTES, ModelRef, ModelRefError};
+pub use lattice_conversation::{
+    MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, ModelId, ModelIdError, ModelRef, ModelRefError,
+    ProviderId, ProviderIdError,
+};
 mod reasoning;
 mod reply;
 mod reply_stream;

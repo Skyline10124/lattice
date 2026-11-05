@@ -3,6 +3,10 @@
 
 pub use crate::models::ModelCandidates;
 pub use crate::turn::{TextSegment, TurnRef};
+pub use crate::{
+    AgentName, AgentNameError, ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId,
+    ProviderIdError,
+};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{
     CostEstimate, CostSummary, Effort, ResultPayload, StepContent, StoredToolResult,
@@ -59,7 +63,7 @@ impl From<&TurnDetail> for TurnView {
             session_id: turn.session_id,
             turn_id: turn.turn_id,
             user_node: turn.user_node,
-            agent_name: turn.agent_name.clone(),
+            agent_name: turn.agent_name.as_str().to_owned(),
             accepted_at: turn.accepted_at,
             ended_at: turn.ended_at,
             summary: turn.summary.clone(),
@@ -406,8 +410,8 @@ pub struct TurnRequest {
     pub session: SubmitSession,
     pub workspace: PathBuf,
     pub input: String,
-    pub agent: Option<String>,
-    pub model: Option<String>,
+    pub agent: Option<AgentName>,
+    pub model: Option<ModelRef>,
     pub effort: Option<lattice_conversation::Effort>,
 }
 impl TurnRequest {
@@ -416,7 +420,7 @@ impl TurnRequest {
         session_id: Option<SessionId>,
         workspace: PathBuf,
         input: String,
-        agent: Option<String>,
+        agent: Option<AgentName>,
     ) -> Self {
         Self {
             turn_id: super::new_turn_id(),
@@ -600,7 +604,7 @@ mod tests {
                 session,
                 workspace: "/tmp/project".into(),
                 input: "original".into(),
-                agent: Some("local-test".into()),
+                agent: Some(AgentName::parse("local-test").unwrap()),
             };
             let wire = serde_json::to_value(&request).unwrap();
             assert_eq!(

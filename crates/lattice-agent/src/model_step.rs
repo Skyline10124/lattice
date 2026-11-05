@@ -132,8 +132,8 @@ pub enum ModelStepAttempt {
 pub enum ModelStepEvent {
     /// 收到首个 provider 事件；不改变错误的重试属性。
     Opened {
-        provider: Option<String>,
-        model: String,
+        provider: Option<lattice_conversation::ProviderId>,
+        model: lattice_conversation::ModelId,
     },
     /// A reasoning delta.
     ReasoningDelta { content: String },
@@ -150,9 +150,9 @@ pub struct ModelStepRequest {
     /// Assembled provider-neutral history of completed (bound) messages.
     pub history: Vec<lattice_conversation::ConversationItem>,
     /// provider 内的模型标识。
-    pub model: String,
+    pub model: lattice_conversation::ModelId,
     /// 模型引用指定的 provider 标识。
-    pub provider: String,
+    pub provider: lattice_conversation::ProviderId,
     pub effort: Option<lattice_conversation::Effort>,
     /// Frozen tool definitions.
     pub tools: Vec<ToolDefinition>,
@@ -199,8 +199,10 @@ impl ModelStepDriver {
             messages,
             tools: request.tools.clone(),
             target: ModelTarget {
-                provider: request.provider.clone(),
-                model: request.model.clone(),
+                model: lattice_conversation::ModelRef::new(
+                    request.provider.clone(),
+                    request.model.clone(),
+                ),
                 effort: request.effort,
             },
             client_request_id: request.session_id.clone(),
@@ -380,7 +382,7 @@ mod tests {
                 Ok(lattice_llm::testing::script_stream(
                     lattice_conversation::ReplayOrigin {
                         protocol: lattice_conversation::Protocol::ChatCompletions,
-                        provider_id: request.target.provider,
+                        provider_id: request.target.model.provider().clone(),
                     },
                     vec![],
                     control,
@@ -421,8 +423,8 @@ mod tests {
             effort: None,
             system_prompt: None,
             history: Vec::new(),
-            model: "test-model".to_string(),
-            provider: "test".into(),
+            model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+            provider: lattice_conversation::ProviderId::parse("test").unwrap(),
             tools: Vec::new(),
             cancel: None,
             deadline: None,

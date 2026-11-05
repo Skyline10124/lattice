@@ -23,10 +23,10 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
         Some(session.as_str()),
         Some(app.ctx.active_agent.as_str()),
         chosen
-            .map(|model| model.model.as_str())
+            .map(|model| model.model().as_str())
             .or(app.model.as_deref()),
         chosen
-            .map(|model| model.provider.as_str())
+            .map(|model| model.provider().as_str())
             .or(app.provider.as_deref()),
         effort.as_deref(),
     ];

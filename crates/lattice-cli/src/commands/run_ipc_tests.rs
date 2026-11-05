@@ -627,11 +627,11 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
                         parent: NodeId(0),
                         turn_id: id,
                         accepted_at: latest.accepted_at,
-                        agent_name: "test".into(),
-                        model: "test".into(),
-                        provider: "test".into(),
+                        agent_name: lattice_api::AgentName::parse("test").unwrap(),
+                        model: lattice_api::ModelId::parse("test").unwrap(),
+                        provider: lattice_api::ProviderId::parse("test").unwrap(),
                         limits: lattice_session::store::TurnExecutionLimits {
-                            timeout_secs: 300,
+                            timeout_secs: lattice_api::TurnTimeout::default(),
                             max_model_steps: 32,
                             max_model_attempts: 1,
                         },
@@ -767,7 +767,7 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
         session: SubmitSession::New(sid()),
         workspace: peer._root.path().into(),
         input: "input".into(),
-        agent: Some("test".into()),
+        agent: Some(lattice_api::AgentName::parse("test").unwrap()),
     });
     let mut submit = peer.request("submit").await;
     turn.cancel();
@@ -840,8 +840,8 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
             super::super::session::SendArgs {
                 prompt: "original input".into(),
                 session_id: existing.then(|| "1111".into()),
-                agent: (!existing).then(|| "test".into()),
-                model: explicit.then(|| "local/org/model".into()),
+                agent: (!existing).then(|| lattice_api::AgentName::parse("test").unwrap()),
+                model: explicit.then(|| lattice_api::ModelRef::parse("local/org/model").unwrap()),
                 effort: explicit.then_some(lattice_api::Effort::Off),
             },
             false,

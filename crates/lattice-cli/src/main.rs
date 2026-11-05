@@ -72,7 +72,7 @@ enum Commands {
         /// Existing session; when omitted, a session is created once the first submission is accepted.
         session_id: Option<String>,
         #[arg(long, required_unless_present = "session_id")]
-        agent: Option<String>,
+        agent: Option<lattice_api::AgentName>,
     },
 }
 
@@ -170,7 +170,7 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         Some(Commands::Tui { session_id, agent }) => {
             return lattice_tui::run(lattice_tui::TuiOptions {
                 session_id,
-                agent: agent.unwrap_or_default(),
+                agent,
                 session_dir: session_cmd::default_session_dir(),
                 project_root: std::env::current_dir()?,
             })
@@ -318,7 +318,10 @@ mod tests {
                         } => args,
                         _ => panic!("expected submission"),
                     };
-                    assert_eq!(choices.model.as_deref(), Some("unregistered/org/model"));
+                    assert_eq!(
+                        choices.model.as_ref().map(ToString::to_string).as_deref(),
+                        Some("unregistered/org/model")
+                    );
                     assert_eq!(choices.effort.unwrap().as_str(), effort);
                 }
                 for (flag, value) in [
@@ -339,10 +342,6 @@ mod tests {
                         "{invalid:?}"
                     );
                 }
-                let oversized = format!("local/{}", "x".repeat(4097));
-                let mut invalid = args.clone();
-                invalid.extend(["--model", &oversized]);
-                assert!(Cli::try_parse_from(invalid).is_err());
             }
             let mut missing_agent = vec!["lattice"];
             missing_agent.extend(command.clone());

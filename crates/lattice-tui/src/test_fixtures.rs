@@ -49,7 +49,7 @@ pub(super) fn sid() -> SessionId {
 pub(super) fn test_app(existing: bool) -> App {
     App::new(
         SessionContext {
-            startup_agent: Some("unused".into()),
+            startup_agent: Some(lattice_api::AgentName::parse("unused").unwrap()),
             session_id: existing.then(sid),
             active_agent: "unused".into(),
         },

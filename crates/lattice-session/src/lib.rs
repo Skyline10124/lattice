@@ -5,7 +5,13 @@
 
 pub use lattice_store::{ProjectStoreKey, StateLayout};
 
+pub mod model;
 pub mod store;
+
+pub use model::{
+    AgentName, AgentNameError, MAX_AGENT_NAME_BYTES, MAX_MODEL_ATTEMPTS, MAX_RETRY_DELAY_MS,
+    MAX_TURN_TIMEOUT_SECS, RetryPolicy, RetryPolicyError, TurnTimeout, TurnTimeoutError,
+};
 
 /// Shared typed transcript helpers for tests.
 #[doc(hidden)]

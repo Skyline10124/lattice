@@ -40,7 +40,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     .unwrap();
     let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
     let turn = gateway.open_turn();
-    let target = ModelTarget::new("test", "model");
+    let target = ModelTarget::test_target("test", "model");
     assert_eq!(
         turn.supported_efforts(&target).await.unwrap(),
         vec![Effort::Off, Effort::Low, Effort::High]
@@ -56,13 +56,13 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         vec![Effort::Medium]
     );
     assert!(
-        turn.supported_efforts(&ModelTarget::new("test", "unknown"))
+        turn.supported_efforts(&ModelTarget::test_target("test", "unknown"))
             .await
             .unwrap()
             .is_empty()
     );
     assert!(
-        turn.supported_efforts(&ModelTarget::new("missing", "model"))
+        turn.supported_efforts(&ModelTarget::test_target("missing", "model"))
             .await
             .is_err()
     );
@@ -94,7 +94,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ("org/unknown", vec![]),
     ] {
         assert_eq!(
-            turn.supported_efforts(&ModelTarget::new("test", model))
+            turn.supported_efforts(&ModelTarget::test_target("test", model))
                 .await
                 .unwrap(),
             expected,
@@ -133,7 +133,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             vec![]
         };
         assert_eq!(
-            turn.supported_efforts(&ModelTarget::new(provider, "effort"))
+            turn.supported_efforts(&ModelTarget::test_target(provider, "effort"))
                 .await
                 .unwrap(),
             expected,
@@ -409,7 +409,7 @@ fn configure(dir: &std::path::Path, url: &str, protocol: &str, auth: &str) {
 }
 
 fn request(provider: &str) -> ChatRequest {
-    let mut request = ChatRequest::new(Vec::new(), ModelTarget::new(provider, "model-id"));
+    let mut request = ChatRequest::new(Vec::new(), ModelTarget::test_target(provider, "model-id"));
     request.client_request_id = Some("session-id".into());
     request
 }
@@ -810,7 +810,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     .unwrap();
             }
             let mut request = request("test");
-            request.target.model = "family/model id".into();
+            request.target.model = crate::ModelRef::parse("test/family/model id").unwrap();
             request
                 .messages
                 .push(lattice_conversation::ConversationItem::Message(
@@ -1152,7 +1152,7 @@ async fn reasoning_plan_reloads_metadata_and_model_features_for_each_resolution(
     assert!(matches!(error, crate::LlmError::Config { .. }));
     assert!(!error.retryable());
     assert!(server.received.try_recv().is_err());
-    request.target.model = "unknown-model".into();
+    request.target.model = crate::ModelRef::parse("test/unknown-model").unwrap();
     assert!(turn.resolve(&request.target).await.is_err());
     request.target.effort = None;
     complete(
@@ -1502,7 +1502,7 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
     for (protocol, fixture, call_ids, replay_material) in cases {
         let origin = ReplayOrigin {
             protocol,
-            provider_id: "test".into(),
+            provider_id: crate::ProviderId::parse("test").unwrap(),
         };
         let wire: serde_json::Value = serde_json::from_str(fixture).unwrap();
         let has_redacted = wire["content"].as_array().is_some_and(|blocks| {
@@ -2230,7 +2230,7 @@ async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let mut resolved = gateway
         .open_turn()
-        .resolve(&ModelTarget::new("chatgpt", "model-id"))
+        .resolve(&ModelTarget::test_target("chatgpt", "model-id"))
         .await
         .unwrap();
     let mut server = Server::start(true).await;
@@ -2375,7 +2375,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
             ("plain", vec![], false),
             ("unknown", vec![], false),
         ] {
-            let target = ModelTarget::new(id, model);
+            let target = ModelTarget::test_target(id, model);
             assert_eq!(
                 turn.supported_efforts(&target).await.unwrap(),
                 expected,
@@ -2421,7 +2421,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                         } else {
                             crate::Protocol::Responses
                         },
-                        provider_id: id.into(),
+                        provider_id: crate::ProviderId::parse(id).unwrap(),
                     }
                 );
                 complete(
@@ -2539,7 +2539,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
         crate::auth::AuthStore::new(directory.path().into())
             .set(id, "builtin-key")
             .unwrap();
-        let invalid = ModelTarget::new(id, "invalid");
+        let invalid = ModelTarget::test_target(id, "invalid");
         let candidate =
             crate::model_candidates(directory.path(), None, Some(&format!("{id}/invalid")))
                 .unwrap()
@@ -2598,7 +2598,7 @@ async fn builtin_protocol_switch_preserves_old_tool_ids() {
         let source = wire_to_native(
             &ReplayOrigin {
                 protocol: old,
-                provider_id: id.into(),
+                provider_id: crate::ProviderId::parse(id).unwrap(),
             },
             &serde_json::from_str(fixture).unwrap(),
         )
@@ -2953,7 +2953,10 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
             .clients
             .lock()
             .unwrap()
-            .get(&("test".into(), server.url.clone()))
+            .get(&(
+                crate::ProviderId::parse("test").unwrap(),
+                server.url.clone(),
+            ))
             .unwrap()
             .clone();
         assert!(!slot.is_cached(), "{name}");
@@ -2999,7 +3002,10 @@ async fn done_tail_above_64_kib_discards_the_pinned_client() {
         .clients
         .lock()
         .unwrap()
-        .get(&("test".into(), server.url.clone()))
+        .get(&(
+            crate::ProviderId::parse("test").unwrap(),
+            server.url.clone(),
+        ))
         .unwrap()
         .clone();
     assert!(!slot.is_cached());
@@ -3032,7 +3038,10 @@ async fn dropping_an_opening_request_discards_its_pinned_client() {
         .clients
         .lock()
         .unwrap()
-        .get(&("test".into(), server.url.clone()))
+        .get(&(
+            crate::ProviderId::parse("test").unwrap(),
+            server.url.clone(),
+        ))
         .unwrap()
         .clone();
     assert!(!slot.is_cached());
@@ -3175,7 +3184,10 @@ async fn stream_control_reaches_the_shared_reply_assembler() {
         .clients
         .lock()
         .unwrap()
-        .get(&("test".into(), server.url.clone()))
+        .get(&(
+            crate::ProviderId::parse("test").unwrap(),
+            server.url.clone(),
+        ))
         .unwrap()
         .clone();
     assert!(!slot.is_cached());

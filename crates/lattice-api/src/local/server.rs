@@ -436,9 +436,7 @@ impl Backend {
                     "invalid Turn request",
                 ));
             }
-            if request.agent.as_ref().is_some_and(|name| name.len() > 128)
-                || (request.agent.is_none() && request.session.is_new())
-            {
+            if request.agent.is_none() && request.session.is_new() {
                 return Err(LocalError::new(
                     LocalErrorKind::BadRequest,
                     "new Session requires explicit agent",
@@ -520,7 +518,7 @@ impl Backend {
         let prepared_model = crate::turn::execute::PreparedModel::resolve(
             &gateway,
             &prepared_profile,
-            request.model.as_deref(),
+            request.model.as_ref(),
             request.effort,
         )
         .await?;

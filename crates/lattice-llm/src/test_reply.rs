@@ -90,7 +90,7 @@ pub(crate) fn failure(events: &[LlmEvent]) -> Option<String> {
 pub(crate) fn replay_origin(protocol: Protocol) -> ReplayOrigin {
     ReplayOrigin {
         protocol,
-        provider_id: "test".into(),
+        provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
     }
 }
 

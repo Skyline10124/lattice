@@ -210,7 +210,8 @@ fn provider(
     features: Features,
 ) -> Provider {
     Provider {
-        id: id.to_owned(),
+        id: lattice_conversation::ProviderId::parse(id)
+            .expect("built-in provider id must satisfy ProviderId invariants"),
         protocol: features.protocol(),
         base_url: base_url.to_owned(),
         auth,

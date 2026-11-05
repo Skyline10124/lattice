@@ -16,8 +16,8 @@ pub(crate) fn freeze_config(
 ) -> Result<FrozenTurnConfig> {
     let config = FrozenTurnConfig {
         agent_name: profile.effective.agent_name.clone(),
-        model: target.model.clone(),
-        provider: target.provider.clone(),
+        model: target.model.model().clone(),
+        provider: target.model.provider().clone(),
         effort: target.effort,
         system_prompt: profile.system_prompt.clone(),
         catalog: ToolCatalogSnapshot::new(
@@ -36,7 +36,7 @@ pub(crate) fn freeze_config(
         limits: TurnExecutionLimits {
             timeout_secs: profile.effective.timeout_secs,
             max_model_steps: MAX_MODEL_STEPS,
-            max_model_attempts: profile.effective.retry.max_retries.saturating_add(1),
+            max_model_attempts: profile.effective.retry.max_attempts(),
         },
     };
     Ok(config)

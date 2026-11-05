@@ -20,7 +20,7 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct TuiOptions {
     pub session_id: Option<String>,
-    pub agent: String,
+    pub agent: Option<lattice_api::AgentName>,
     pub session_dir: PathBuf,
     pub project_root: PathBuf,
 }

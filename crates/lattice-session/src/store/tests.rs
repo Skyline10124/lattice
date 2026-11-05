@@ -8,8 +8,9 @@ use lancet_protocol::{
     Retriability, SessionId, TurnId,
 };
 use lattice_conversation::{
-    CostEstimate, MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState,
-    Protocol, TokenUsage, ToolResultOutcome, UnboundToolCall, UsageCompleteness,
+    CostEstimate, MessagePart, MessageRole, MessageSemantic, ModelId, NativeMessage,
+    OpaqueProviderState, Protocol, ProviderId, TokenUsage, ToolResultOutcome, UnboundToolCall,
+    UsageCompleteness,
 };
 use lattice_store::{ProjectStoreKey, StateLayout};
 use redb::ReadableTable;
@@ -210,11 +211,27 @@ fn step(t: TurnId, ordinal: u32) -> StepKey {
     }
 }
 
+fn agent(name: &str) -> AgentName {
+    AgentName::parse(name).unwrap()
+}
+
+fn provider(id: &str) -> ProviderId {
+    ProviderId::parse(id).unwrap()
+}
+
+fn model(id: &str) -> ModelId {
+    ModelId::parse(id).unwrap()
+}
+
+fn timeout(secs: u64) -> TurnTimeout {
+    TurnTimeout::new(secs).unwrap()
+}
+
 fn config() -> FrozenTurnConfig {
     FrozenTurnConfig {
-        agent_name: "alpha".into(),
-        model: "model".into(),
-        provider: "openai".into(),
+        agent_name: agent("alpha"),
+        model: model("model"),
+        provider: provider("openai"),
         effort: None,
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(
@@ -228,7 +245,7 @@ fn config() -> FrozenTurnConfig {
         )
         .unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: 300,
+            timeout_secs: TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 3,
         },
@@ -277,7 +294,7 @@ fn accept_prepared(
 fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "openai".into(),
+        provider_id: provider("openai"),
     }
 }
 
@@ -465,6 +482,102 @@ fn structured_result_wire() {
         digest,
         "75f9393780337294f4a878b86195ce835e1af90ba8f3a63c2702f6d6e42f29f4"
     );
+}
+
+#[test]
+fn domain_types_v7_wire() {
+    let choice_wire = json!({
+        "provider": "openai",
+        "model": "org/gpt-5",
+        "effort": "medium"
+    });
+    let choice: SessionModelChoice = serde_json::from_value(choice_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&choice).unwrap(), choice_wire);
+
+    let copy_wire = json!({
+        "profile": {
+            "agent_name": "coder",
+            "description": "coding agent",
+            "default_model": "openai/org/gpt-5",
+            "default_effort": "medium",
+            "enabled_tools": ["observe__workspace"],
+            "timeout_secs": 300,
+            "retry": {
+                "max_retries": 3,
+                "initial_delay_ms": 500,
+                "max_delay_ms": 3000
+            },
+            "capabilities": {
+                "deny": [],
+                "max_boundary": "in"
+            },
+            "policy": {
+                "project_root": "/",
+                "workspace": {
+                    "denied_write_patterns": [],
+                    "included_ignored_read_patterns": [],
+                    "denied_read_patterns": []
+                },
+                "network": {
+                    "allow_public_https": true,
+                    "allow_localhost": false,
+                    "allowed_hosts": [],
+                    "max_web_response_bytes": 10485760
+                },
+                "observation": {
+                    "max_single_read_bytes": 10485760,
+                    "max_turn_observation_bytes": 10485760,
+                    "max_grep_matches": 1000,
+                    "max_list_entries": 1000,
+                    "max_find_paths": 1000
+                }
+            },
+            "extensions": {}
+        },
+        "prompt_config_digest": "ab".repeat(32),
+        "current": {
+            "provider": "openai",
+            "model": "org/gpt-5",
+            "effort": "medium"
+        }
+    });
+    let copy: SessionProfileCopy = serde_json::from_value(copy_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&copy).unwrap(), copy_wire);
+    let encoded_copy = encode(&copy).unwrap();
+    assert_eq!(&encoded_copy[..4], &7_u32.to_be_bytes());
+    assert_eq!(decode_profile_copy("s1", &encoded_copy).unwrap(), copy);
+
+    let user_wire = json!({
+        "kind": "user_message",
+        "parent": 0,
+        "turn_id": "00000000-0000-4000-8000-000000000001",
+        "accepted_at": "2026-09-27T00:00:00Z",
+        "agent_name": "coder",
+        "model": "org/gpt-5",
+        "provider": "openai",
+        "effort": "medium",
+        "limits": {
+            "timeout_secs": 300,
+            "max_model_steps": 32,
+            "max_model_attempts": 4
+        },
+        "config_digest": "cd".repeat(32),
+        "message": {
+            "role": "user",
+            "provider_origin": null,
+            "parts": [
+                {
+                    "semantic": { "text": { "text": "hello" } },
+                    "replay_state": null
+                }
+            ]
+        }
+    });
+    let user: Node = serde_json::from_value(user_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&user).unwrap(), user_wire);
+    let encoded_user = encode(&user).unwrap();
+    assert_eq!(&encoded_user[..4], &7_u32.to_be_bytes());
+    assert!(decode::<Node>("nodes", "n1", &encoded_user).unwrap() == user);
 }
 
 #[test]
@@ -1647,7 +1760,7 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     let old = node_at(&db, 2);
     let mut next = accept(sid(1), tid(2));
     next.session = AcceptSession::Existing { id: sid(1) };
-    next.config.agent_name = "beta".into();
+    next.config.agent_name = agent("beta");
     accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 1);
     assert_eq!(node_at(&db, 2), old);
@@ -1656,7 +1769,8 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
             .unwrap()
             .current_agent(sid(1))
             .unwrap()
-            .as_deref(),
+            .as_ref()
+            .map(AgentName::as_str),
         Some("beta")
     );
     assert!(matches!(
@@ -1664,7 +1778,7 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
         Err(StoreError::InvalidTransition { .. })
     ));
     let mut retry = accept(sid(2), tid(1));
-    retry.config.agent_name.clear();
+    retry.config.agent_name = agent("ignored");
     let lock2 = db.try_lock_session(sid(2)).unwrap();
     assert!(
         matches!(accept_prepared(&db, &lock2,retry).unwrap(),AcceptedTurn::Existing(t) if t.session_id==sid(1))
@@ -1716,7 +1830,7 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
         let (_dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         let mut first = accept(sid(1), tid(1));
-        first.config.limits.timeout_secs = timeout_secs;
+        first.config.limits.timeout_secs = timeout(timeout_secs);
         first.profile_copy = SessionProfileCopy::for_test(&first.config);
         let expected_first = first.config.clone();
         let expected_first_copy = first.profile_copy.clone();
@@ -1735,8 +1849,8 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
         let mut second = accept(sid(1), tid(2));
         second.session = AcceptSession::Existing { id: sid(1) };
         second.expected_profile_digest = Some(expected_first_copy.digest().unwrap());
-        second.config.agent_name = "beta".into();
-        second.config.limits.timeout_secs = 300;
+        second.config.agent_name = agent("beta");
+        second.config.limits.timeout_secs = TurnTimeout::default();
         second.profile_copy = SessionProfileCopy::for_test(&second.config);
         let expected_second = second.config.clone();
         let expected_second_copy = second.profile_copy.clone();
@@ -1760,7 +1874,7 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
     let mut second = accept(sid(1), tid(2));
     second.session = AcceptSession::Existing { id: sid(1) };
     second.expected_profile_digest = Some(digest);
-    second.config.agent_name = "beta".into();
+    second.config.agent_name = agent("beta");
     second.profile_copy = SessionProfileCopy::for_test(&second.config);
     db.accept_turn(&lock, second).unwrap();
     let base = records(&db);
@@ -1769,13 +1883,18 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
     for invalid_timeout in [0, MAX_TURN_TIMEOUT_SECS + 1] {
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
-        let mut tampered = base.clone();
-        let Some(Node::UserMessage { limits, .. }) = tampered.nodes.get_mut(&(sid(1), NodeId(1)))
-        else {
-            panic!("expected first user message node");
-        };
-        limits.timeout_secs = invalid_timeout;
-        overwrite_records(&tx, &tampered);
+        overwrite_records(&tx, &base);
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let mut wire = serde_json::to_value(&base.nodes[&(sid(1), NodeId(1))]).unwrap();
+            wire["limits"]["timeout_secs"] = json!(invalid_timeout);
+            nodes
+                .insert(
+                    node_key(sid(1), NodeId(1)).as_slice(),
+                    encode(&wire).unwrap().as_slice(),
+                )
+                .unwrap();
+        }
         tx.commit().unwrap();
         drop(raw);
         assert!(
@@ -1792,7 +1911,7 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
 fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    for case in 0..14 {
+    for case in 0..9 {
         let mut a = accept(sid(1), tid(1));
         let expected_detail = match case {
             0 => {
@@ -1808,51 +1927,31 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
                 None
             }
             3 => {
-                a.config.provider = "Bad_id".into();
-                None
-            }
-            4 => {
                 a.config
                     .catalog
                     .entries
                     .push(a.config.catalog.entries[0].clone());
                 None
             }
-            5 => {
+            4 => {
                 a.config.limits.max_model_steps = 33;
                 Some("invalid frozen configuration")
             }
-            6 => {
+            5 => {
                 a.config.limits.max_model_attempts = 0;
                 Some("invalid frozen configuration")
             }
-            7 => {
-                a.config.agent_name.clear();
-                None
-            }
-            8 => {
+            6 => {
                 a.config.catalog.digest = [0; 32];
                 None
             }
-            9 => {
-                a.config.limits.timeout_secs = 0;
-                Some("invalid frozen configuration")
-            }
-            10 => {
+            7 => {
                 a.config.limits.max_model_attempts = 12;
                 Some("invalid frozen configuration")
             }
-            11 => {
-                a.config.model.clear();
-                None
-            }
-            12 => {
+            8 => {
                 a.config.catalog.entries[0].descriptor_identity = "A".repeat(64);
                 None
-            }
-            13 => {
-                a.config.limits.timeout_secs = MAX_TURN_TIMEOUT_SECS + 1;
-                Some("invalid frozen configuration")
             }
             _ => unreachable!(),
         };
@@ -2161,15 +2260,15 @@ fn attempt_sources_survive_retry_and_reopen() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut input = accept(sid(1), tid(1));
-    input.config.provider = "edge-1".into();
+    input.config.provider = provider("edge-1");
     accept_prepared(&db, &lock, input).unwrap();
     let first = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "edge-1".into(),
+        provider_id: provider("edge-1"),
     };
     let second = AttemptOrigin {
         protocol: AttemptProtocol::Messages,
-        provider_id: "edge-1".into(),
+        provider_id: provider("edge-1"),
     };
     db.start_request(&lock, key(tid(1), 0, 0), first.clone(), now())
         .unwrap();
@@ -2252,7 +2351,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     .unwrap();
     let third = AttemptOrigin {
         protocol: AttemptProtocol::GenerateContent,
-        provider_id: "edge-1".into(),
+        provider_id: provider("edge-1"),
     };
     db.start_request(&lock, key(tid(1), 1, 0), third.clone(), now())
         .unwrap();
@@ -2376,7 +2475,7 @@ fn provider_id_and_attempt_source_boundaries() {
         let (_dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         let mut input = accept(sid(1), tid(1));
-        input.config.provider = "edge-1".into();
+        input.config.provider = provider("edge-1");
         let origin = AttemptOrigin {
             protocol,
             provider_id: input.config.provider.clone(),
@@ -2391,27 +2490,15 @@ fn provider_id_and_attempt_source_boundaries() {
     }
     let (_dir, _layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    let mut input = accept(sid(1), tid(1));
-    input.config.provider = "bad_id".into();
-    assert!(matches!(
-        accept_prepared(&db, &lock, input),
-        Err(StoreError::InvalidInput {
-            field: "provider",
-            ..
-        })
-    ));
-    assert!(records(&db).nodes.is_empty());
     accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let before = records(&db);
-    for id in ["bad_id", "other-provider"] {
-        let mut source = origin();
-        source.provider_id = id.into();
-        assert!(matches!(
-            db.start_request(&lock, key(tid(1), 0, 0), source, now()),
-            Err(StoreError::InvalidInput { .. })
-        ));
-        assert!(before == records(&db));
-    }
+    let mut source = origin();
+    source.provider_id = provider("other-provider");
+    assert!(matches!(
+        db.start_request(&lock, key(tid(1), 0, 0), source, now()),
+        Err(StoreError::InvalidInput { .. })
+    ));
+    assert!(before == records(&db));
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     let before = records(&db);
@@ -2425,7 +2512,7 @@ fn provider_id_and_attempt_source_boundaries() {
         ),
         (
             AttemptOrigin {
-                provider_id: "other-provider".into(),
+                provider_id: provider("other-provider"),
                 ..origin()
             },
             Protocol::ChatCompletions,
@@ -2449,7 +2536,7 @@ fn provider_id_and_attempt_source_boundaries() {
     for source in [
         None,
         Some(AttemptOrigin {
-            provider_id: "other-provider".into(),
+            provider_id: provider("other-provider"),
             ..origin()
         }),
         Some(AttemptOrigin {
@@ -2663,7 +2750,7 @@ fn conversation_tree() -> (
     for t in [tid(2), tid(3)] {
         let mut next = accept(sid(1), t);
         next.session = AcceptSession::Existing { id: sid(1) };
-        next.config.agent_name = "beta".into();
+        next.config.agent_name = agent("beta");
         accept_prepared(&db, &lock, next).unwrap();
         if t == tid(2) {
             db.start_request(&lock, key(t, 0, 0), origin(), now())
@@ -2685,13 +2772,27 @@ fn last_accepted_agent_survives_rewind() {
     for target in [NodeId(2), NodeId(1), NodeId(0)] {
         db.rewind(&lock, target, now()).unwrap();
         let read = db.begin_read().unwrap();
-        assert_eq!(read.current_agent(sid(1)).unwrap().as_deref(), Some("beta"));
         assert_eq!(
-            read.view(sid(1), 10).unwrap().current_agent.as_deref(),
+            read.current_agent(sid(1))
+                .unwrap()
+                .as_ref()
+                .map(AgentName::as_str),
             Some("beta")
         );
         assert_eq!(
-            read.log(sid(1)).unwrap().current_agent.as_deref(),
+            read.view(sid(1), 10)
+                .unwrap()
+                .current_agent
+                .as_ref()
+                .map(AgentName::as_str),
+            Some("beta")
+        );
+        assert_eq!(
+            read.log(sid(1))
+                .unwrap()
+                .current_agent
+                .as_ref()
+                .map(AgentName::as_str),
             Some("beta")
         );
     }
@@ -2704,7 +2805,8 @@ fn last_accepted_agent_survives_rewind() {
             .unwrap()
             .current_agent(sid(1))
             .unwrap()
-            .as_deref(),
+            .as_ref()
+            .map(AgentName::as_str),
         Some("beta")
     );
 }
@@ -2727,7 +2829,10 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     assert_eq!(entry_nodes(&view.entries), vec![4, 5, 6, 7]);
     assert_eq!(entry_ordinals(&view.entries), vec![2, 3]);
     assert_eq!(view.session.current, NodeId(7));
-    assert_eq!(view.current_agent.as_deref(), Some("beta"));
+    assert_eq!(
+        view.current_agent.as_ref().map(AgentName::as_str),
+        Some("beta")
+    );
     assert!(
         matches!(&view.entries[3], ConversationEntry::Step { step, summary: Some(summary), .. }
         if step.progress == StepProgress::Reserved && summary.progress == StepProgress::Reserved)
@@ -2766,12 +2871,18 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     db.rewind(&lock, NodeId(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1]);
-    assert_eq!(view.current_agent.as_deref(), Some("alpha"));
+    assert_eq!(
+        view.current_agent.as_ref().map(AgentName::as_str),
+        Some("alpha")
+    );
     db.rewind(&lock, NodeId(0), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
-    assert_eq!(view.current_agent.as_deref(), Some("alpha"));
+    assert_eq!(
+        view.current_agent.as_ref().map(AgentName::as_str),
+        Some("alpha")
+    );
 }
 
 #[test]
@@ -3654,8 +3765,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "root_missing",
         "root_extra",
         "user_parent",
-        "user_provider",
-        "consistent_invalid_provider",
         "orphan_session",
         "node_gap",
         "parent_forward",
@@ -3720,35 +3829,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                     unreachable!()
                 };
                 *parent = NodeId(1);
-            }
-            "user_provider" => {
-                let Node::UserMessage { provider, .. } =
-                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
-                else {
-                    unreachable!()
-                };
-                *provider = "Bad_id".into();
-            }
-            "consistent_invalid_provider" => {
-                let Node::UserMessage { provider, .. } =
-                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
-                else {
-                    unreachable!()
-                };
-                *provider = "Bad_id".into();
-                for n in [2, 3] {
-                    if let Node::Step {
-                        attempts,
-                        reply: Some(reply),
-                        ..
-                    } = r.nodes.get_mut(&(sid(1), NodeId(n))).unwrap()
-                    {
-                        for attempt in attempts {
-                            attempt.origin.provider_id = "Bad_id".into();
-                        }
-                        reply.provider_origin.as_mut().unwrap().provider_id = "Bad_id".into();
-                    }
-                }
             }
             "orphan_session" => {
                 r.sessions.clear();
@@ -3829,7 +3909,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                         call.arguments_digest = [0; 32];
                     }
                     "attempt_provider" => {
-                        attempts[0].origin.provider_id = "another-provider".into()
+                        attempts[0].origin.provider_id = provider("another-provider")
                     }
                     "attempt_protocol" => {
                         attempts.last_mut().unwrap().origin.protocol = AttemptProtocol::Messages
@@ -3858,7 +3938,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                             .provider_origin
                             .as_mut()
                             .unwrap()
-                            .provider_id = "another-provider".into();
+                            .provider_id = provider("another-provider");
                     }
                     "reply_origin_missing" => reply.as_mut().unwrap().provider_origin = None,
                     "reply_slot_count" => {
@@ -3915,6 +3995,48 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
         overwrite_records(&tx, &r);
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(
+            matches!(
+                SessionStore::open(&layout),
+                Err(StoreError::Corruption { .. })
+            ),
+            "strict open missed {case}"
+        );
+    }
+    for case in ["user_provider", "consistent_invalid_provider"] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        overwrite_records(&tx, &base);
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let user_key = node_key(sid(1), NodeId(1));
+            let mut user_wire: Value = {
+                let value = nodes.get(user_key.as_slice()).unwrap().unwrap();
+                serde_json::from_slice(&value.value()[4..]).unwrap()
+            };
+            user_wire["provider"] = json!("Bad_id");
+            nodes
+                .insert(user_key.as_slice(), encode(&user_wire).unwrap().as_slice())
+                .unwrap();
+            if case == "consistent_invalid_provider" {
+                for n in [2, 3] {
+                    let step_key = node_key(sid(1), NodeId(n));
+                    let mut step_wire: Value = {
+                        let value = nodes.get(step_key.as_slice()).unwrap().unwrap();
+                        serde_json::from_slice(&value.value()[4..]).unwrap()
+                    };
+                    for attempt in step_wire["attempts"].as_array_mut().unwrap() {
+                        attempt["origin"]["provider_id"] = json!("Bad_id");
+                    }
+                    step_wire["reply"]["provider_origin"]["provider_id"] = json!("Bad_id");
+                    nodes
+                        .insert(step_key.as_slice(), encode(&step_wire).unwrap().as_slice())
+                        .unwrap();
+                }
+            }
+        }
         tx.commit().unwrap();
         drop(raw);
         assert!(
@@ -4500,7 +4622,7 @@ fn invocation_registration_and_transitions_are_atomic() {
                 };
                 call.provider_call_id = Some("call-0".into());
             }
-            9 => input.origin.provider_id = "another-provider".into(),
+            9 => input.origin.provider_id = provider("another-provider"),
             10 => {
                 input.message.provider_origin = Some(AttemptOrigin {
                     protocol: Protocol::Messages,
@@ -5097,16 +5219,7 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
     db.accept_turn(&lock, first).unwrap();
     let original = db.begin_read().unwrap().profile_copy(sid(1)).unwrap();
     let before = records(&db);
-    for (case, invalid_limits) in [
-        ("stale", false),
-        ("profile", false),
-        ("prompt", false),
-        ("model", false),
-        ("effort", false),
-        ("limits", false),
-        ("timeout_zero", true),
-        ("timeout_over_upper_bound", true),
-    ] {
+    for case in ["stale", "profile", "prompt", "model", "effort", "limits"] {
         let mut next = accept(sid(1), tid(2));
         next.session = AcceptSession::Existing { id: sid(1) };
         next.agent_selection = AgentSelection::Inherited;
@@ -5116,30 +5229,22 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
             "stale" => next.expected_profile_digest = Some([1; 32]),
             "profile" => next.profile_copy.profile.description = Some("changed".into()),
             "prompt" => next.profile_copy.prompt_config_digest = [1; 32],
-            "model" => next.profile_copy.current.model = "different".into(),
+            "model" => next.profile_copy.current.model = model("different"),
             "effort" => next.profile_copy.current.effort = Some(lattice_conversation::Effort::High),
-            "limits" => next.profile_copy.profile.timeout_secs += 1,
-            "timeout_zero" => next.profile_copy.profile.timeout_secs = 0,
-            "timeout_over_upper_bound" => {
-                next.profile_copy.profile.timeout_secs = MAX_TURN_TIMEOUT_SECS + 1;
+            "limits" => {
+                next.profile_copy.profile.timeout_secs =
+                    timeout(original.profile.timeout_secs.as_secs() + 1)
             }
             _ => unreachable!(),
         }
         let result = db.accept_turn(&lock, next);
-        if invalid_limits {
-            assert!(
-                matches!(&result, Err(StoreError::InvalidInput { field: "profile", detail }) if detail == "invalid execution limits"),
-                "{case}: {result:?}"
-            );
-        } else {
-            assert!(
-                matches!(
-                    result,
-                    Err(StoreError::Conflict { .. } | StoreError::InvalidInput { .. })
-                ),
-                "{case}: {result:?}"
-            );
-        }
+        assert!(
+            matches!(
+                result,
+                Err(StoreError::Conflict { .. } | StoreError::InvalidInput { .. })
+            ),
+            "{case}: {result:?}"
+        );
         assert!(before == records(&db), "{case} partially changed records");
     }
     let mut next = accept(sid(1), tid(2));
@@ -5180,7 +5285,8 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
             .unwrap()
             .current_agent(sid(1))
             .unwrap()
-            .as_deref(),
+            .as_ref()
+            .map(AgentName::as_str),
         Some(unchanged.profile.agent_name.as_str())
     );
     assert_eq!(
@@ -5235,7 +5341,7 @@ fn profile_copy_is_atomic_with_new_and_replacement_acceptance() {
                 next.expected_profile_digest =
                     Some(before.profile_copies[&sid(1)].digest().unwrap());
             }
-            next.config.agent_name = "beta".into();
+            next.config.agent_name = agent("beta");
             next.config.system_prompt = Some("replacement prompt".into());
             next.config.effort = Some(lattice_conversation::Effort::Low);
             next.profile_copy = SessionProfileCopy::for_test(&next.config);
@@ -5301,10 +5407,12 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
                 changed.configs.insert(digest, other);
                 copy.prompt_config_digest = digest;
             }
-            "agent" => copy.profile.agent_name = "beta".into(),
-            "model" => copy.current.model = "different".into(),
+            "agent" => copy.profile.agent_name = agent("beta"),
+            "model" => copy.current.model = model("different"),
             "effort" => copy.current.effort = Some(lattice_conversation::Effort::Off),
-            "limits" => copy.profile.timeout_secs += 1,
+            "limits" => {
+                copy.profile.timeout_secs = timeout(copy.profile.timeout_secs.as_secs() + 1)
+            }
             _ => unreachable!(),
         }
         overwrite_records(&tx, &changed);
@@ -5321,6 +5429,12 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
     for case in [
         "unknown",
         "effort",
+        "agent_name",
+        "default_model",
+        "timeout_secs",
+        "retry",
+        "current_provider",
+        "current_model",
         "version",
         "key",
         "canonical",
@@ -5335,11 +5449,16 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
         } else {
             let mut table = tx.open_table(PROFILE_COPIES).unwrap();
             let mut value = serde_json::to_value(&base.profile_copies[&sid(1)]).unwrap();
-            if case == "unknown" {
-                value["unknown"] = json!(true);
-            }
-            if case == "effort" {
-                value["current"]["effort"] = json!("default");
+            match case {
+                "unknown" => value["unknown"] = json!(true),
+                "effort" => value["current"]["effort"] = json!("default"),
+                "agent_name" => value["profile"]["agent_name"] = json!("../bad"),
+                "default_model" => value["profile"]["default_model"] = json!("missing-slash"),
+                "timeout_secs" => value["profile"]["timeout_secs"] = json!(0),
+                "retry" => value["profile"]["retry"]["max_retries"] = json!(11),
+                "current_provider" => value["current"]["provider"] = json!("Bad_id"),
+                "current_model" => value["current"]["model"] = json!(""),
+                _ => {}
             }
             let mut bytes = encode(&value).unwrap();
             if case == "version" {
@@ -5362,6 +5481,17 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
         }
         tx.commit().unwrap();
         drop(raw);
-        assert!(SessionStore::open(&layout).is_err(), "{case}");
+        let reopened = SessionStore::open(&layout).map(|_| ());
+        if case == "version" {
+            assert!(
+                matches!(reopened, Err(StoreError::UnsupportedVersion { .. })),
+                "{case}: {reopened:?}"
+            );
+        } else {
+            assert!(
+                matches!(reopened, Err(StoreError::Corruption { .. })),
+                "{case}: {reopened:?}"
+            );
+        }
     }
 }

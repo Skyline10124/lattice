@@ -403,7 +403,7 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
             for provider in ["test", "other"] {
                 let target = ReplayOrigin {
                     protocol: target_protocol,
-                    provider_id: provider.into(),
+                    provider_id: lattice_conversation::ProviderId::parse(provider).unwrap(),
                 };
                 let same_provider = target_protocol == protocol && provider == "test";
                 let projected = project_cross_provider(&source, &target);
@@ -607,11 +607,11 @@ fn replay_origin_matrix_separates_opaque_state_from_call_ids() {
     ] {
         let origin = ReplayOrigin {
             protocol: old,
-            provider_id: id.into(),
+            provider_id: lattice_conversation::ProviderId::parse(id).unwrap(),
         };
         let target = ReplayOrigin {
             protocol: new,
-            provider_id: id.into(),
+            provider_id: lattice_conversation::ProviderId::parse(id).unwrap(),
         };
         let mut wire = fixture(fixture_name);
         if old == Protocol::GenerateContent {
@@ -1753,6 +1753,6 @@ fn wire_usage_distinguishes_present_absent_and_malformed_blocks() {
 fn replay_origin(protocol: Protocol) -> ReplayOrigin {
     ReplayOrigin {
         protocol,
-        provider_id: "test".into(),
+        provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
     }
 }

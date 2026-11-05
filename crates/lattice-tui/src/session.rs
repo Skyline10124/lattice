@@ -13,7 +13,7 @@ use lattice_api::local::{
 pub(crate) struct SessionContext {
     pub session_id: Option<SessionId>,
     pub active_agent: String,
-    pub startup_agent: Option<String>,
+    pub startup_agent: Option<lattice_api::AgentName>,
 }
 
 /// 只读打开；新会话的 SessionId 在首次提交时生成，接受前不算已建立。
@@ -26,14 +26,21 @@ pub(crate) async fn open_or_create(
         let log = client.log(session.session_id).await?;
         return Ok(SessionContext {
             session_id: Some(session.session_id),
-            active_agent: log.current_agent.unwrap_or_default(),
-            startup_agent: (!options.agent.is_empty()).then(|| options.agent.clone()),
+            active_agent: log
+                .current_agent
+                .map(|agent| agent.as_str().to_owned())
+                .unwrap_or_default(),
+            startup_agent: options.agent.clone(),
         });
     }
+    let agent = options
+        .agent
+        .clone()
+        .ok_or_else(|| anyhow::anyhow!("new Session requires explicit agent"))?;
     Ok(SessionContext {
         session_id: None,
-        active_agent: options.agent.clone(),
-        startup_agent: Some(options.agent.clone()),
+        active_agent: agent.as_str().to_owned(),
+        startup_agent: Some(agent),
     })
 }
 
@@ -86,7 +93,7 @@ pub(crate) fn entry_blocks(
                     ordinal: usize::try_from(*ordinal)
                         .ok()
                         .and_then(std::num::NonZeroUsize::new),
-                    agent: agent_name.clone(),
+                    agent: agent_name.as_str().to_owned(),
                 });
                 append_messages(&mut blocks, vec![message.clone()]);
             }

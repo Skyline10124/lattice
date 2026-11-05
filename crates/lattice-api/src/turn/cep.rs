@@ -591,7 +591,7 @@ enabled = ["{tool}"]
             effort: None,
             input: "hi".into(),
             session_id: None,
-            agent: Some(profile.profile.agent.name.clone()),
+            agent: Some(crate::AgentName::parse(&profile.profile.agent.name).unwrap()),
             loaded_profile: Some(profile.clone()),
             cancel_flag: None,
             test_llm: Some((

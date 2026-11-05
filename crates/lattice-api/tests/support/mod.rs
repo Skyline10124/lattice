@@ -119,13 +119,13 @@ impl ReservedClient {
             .accept_turn(&lock, {
                 let config = FrozenTurnConfig {
                     effort: None,
-                    agent_name: "test".into(),
-                    model: "test".into(),
-                    provider: "openai-compatible".into(),
+                    agent_name: lattice_api::AgentName::parse("test").unwrap(),
+                    model: lattice_api::ModelId::parse("test").unwrap(),
+                    provider: lattice_api::ProviderId::parse("openai-compatible").unwrap(),
                     system_prompt: None,
                     catalog: self.catalog.clone(),
                     limits: TurnExecutionLimits {
-                        timeout_secs: 300,
+                        timeout_secs: lattice_api::TurnTimeout::default(),
                         max_model_steps: 32,
                         max_model_attempts: 1,
                     },
@@ -150,7 +150,7 @@ impl ReservedClient {
         };
         let origin = AttemptOrigin {
             protocol: AttemptProtocol::ChatCompletions,
-            provider_id: "openai-compatible".into(),
+            provider_id: lattice_api::ProviderId::parse("openai-compatible").unwrap(),
         };
         self.store
             .start_request(&lock, key, origin.clone(), chrono::Utc::now())
@@ -169,7 +169,8 @@ impl ReservedClient {
                         MessageRole::Assistant,
                         Some(lattice_conversation::ReplayOrigin {
                             protocol: Protocol::ChatCompletions,
-                            provider_id: "openai-compatible".into(),
+                            provider_id: lattice_api::ProviderId::parse("openai-compatible")
+                                .unwrap(),
                         }),
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {

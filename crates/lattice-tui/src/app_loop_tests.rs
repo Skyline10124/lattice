@@ -1266,15 +1266,16 @@ struct Remote {
 impl Harness {
     fn new(new_session: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
+        let unused = lattice_api::AgentName::parse("unused").unwrap();
         let options = TuiOptions {
             session_id: (!new_session).then(|| SESSION.into()),
-            agent: "unused".into(),
+            agent: Some(unused.clone()),
             session_dir: root.path().join("history"),
             project_root: root.path().into(),
         };
         let app = App::new(
             SessionContext {
-                startup_agent: Some("unused".into()),
+                startup_agent: Some(unused),
                 session_id: (!new_session).then(sid),
                 active_agent: "unused".into(),
             },
@@ -2075,7 +2076,8 @@ async fn paged_acceptance_after_unknown_and_reconnect_consumes_old_choices() {
     let mut h = Harness::new(false);
     h.app
         .selection
-        .choose_model(model_candidate("p", "pending", &[Low]));
+        .choose_model(model_candidate("p", "pending", &[Low]))
+        .unwrap();
     h.app.selection.choose_effort(Low);
     let remote = h.remote.clone();
     let driver = async {
@@ -2266,8 +2268,9 @@ async fn existing_submission_keeps_explicit_agent() {
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
-    h.options.agent = "override-agent".into();
-    h.app.pending_agent = Some("override-agent".into());
+    let override_agent = lattice_api::AgentName::parse("override-agent").unwrap();
+    h.options.agent = Some(override_agent.clone());
+    h.app.pending_agent = Some(override_agent);
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");
@@ -2495,7 +2498,8 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
         let mut h = Harness::new(false);
         h.app
             .selection
-            .choose_model(model_candidate("p", "pending", &[Low]));
+            .choose_model(model_candidate("p", "pending", &[Low]))
+            .unwrap();
         h.app.selection.choose_effort(Low);
         h.app.input.set_text("unconfirmed selection");
         let prompt = h.app.submit().unwrap();

@@ -133,7 +133,7 @@ impl LlmClient for CancelOnDone {
             MessageRole::Assistant,
             Some(lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
-                provider_id: "local".into(),
+                provider_id: crate::ProviderId::parse("local").unwrap(),
             }),
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {
@@ -156,7 +156,7 @@ impl LlmClient for CancelOnDone {
             lattice_llm::testing::script_stream(
                 ReplayOrigin {
                     protocol: Protocol::ChatCompletions,
-                    provider_id: request.target.provider,
+                    provider_id: request.target.model.provider().clone(),
                 },
                 events,
                 control,

@@ -49,7 +49,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         effort: None,
         input: "hello".into(),
         session_id: None,
-        agent: Some("test".into()),
+        agent: Some(crate::AgentName::parse("test").unwrap()),
         loaded_profile: Some(lattice_profile::load_agent_profile(&path).unwrap()),
         cancel_flag: None,
         test_llm: Some((

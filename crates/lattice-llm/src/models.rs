@@ -67,7 +67,10 @@ pub fn model_candidates(
         .map_err(|error| LlmError::Config {
             message: error.to_string(),
         })?;
-    let selected = target.as_ref().map(ModelRef::provider).or(selected);
+    let selected = target
+        .as_ref()
+        .map(|target| target.provider().as_str())
+        .or(selected);
     let (registry, credentials) = crate::gateway::load_configuration(directory)?;
     if let Some(id) = selected
         && registry.get(id).is_none()
@@ -84,11 +87,11 @@ pub fn model_candidates(
     }
     for provider in registry
         .iter_for_candidates()
-        .filter(|provider| selected.is_none_or(|id| id == provider.id))
+        .filter(|provider| selected.is_none_or(|id| provider.id == id))
     {
         let mut warn = |message: String| {
             result.warnings.push(ModelWarning {
-                provider: Some(provider.id.clone()),
+                provider: Some(provider.id.as_str().to_owned()),
                 message,
             })
         };
@@ -107,12 +110,12 @@ pub fn model_candidates(
             let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
             let models = metadata.merge(provider);
             if let Some(target) = &target {
-                let mut model =
-                    candidate(provider, target.model(), models.get(target.model()), status);
+                let model_id = target.model().as_str();
+                let mut model = candidate(provider, model_id, models.get(model_id), status);
                 if let Some(name) = catalog
                     .as_ref()
                     .ok()
-                    .and_then(|catalog| catalog.models.get(target.model()))
+                    .and_then(|catalog| catalog.models.get(model_id))
                 {
                     model.name = Some(name.clone());
                 }
@@ -140,12 +143,10 @@ pub fn model_candidates(
         let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
         let models = metadata.merge(provider);
         if let Some(target) = &target {
-            result.models.push(candidate(
-                provider,
-                target.model(),
-                models.get(target.model()),
-                status,
-            ));
+            let model_id = target.model().as_str();
+            result
+                .models
+                .push(candidate(provider, model_id, models.get(model_id), status));
         } else {
             // 先滤掉已弃用模型再校验，隐藏的模型不因配置问题出错。
             for (id, model) in models
@@ -174,7 +175,7 @@ fn candidate(
         Err(error) => (Vec::new(), Some(error.to_string())),
     };
     ModelCandidate {
-        provider: provider.id.clone(),
+        provider: provider.id.as_str().to_owned(),
         model: id.into(),
         name: model.and_then(|model| model.name.clone()),
         context: limits.and_then(|limit| limit.context),

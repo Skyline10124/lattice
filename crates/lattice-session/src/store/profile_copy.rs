@@ -4,16 +4,17 @@
 //! 会话持有的有效 profile；源文件与请求网关的全局状态不进入这份记录。
 
 use super::{FrozenTurnConfig, Result, hex_digest, invalid};
+use crate::model::{AgentName, RetryPolicy, TurnTimeout};
 use lancet_protocol::cell::Trust;
-use lattice_conversation::Effort;
+use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionModelChoice {
-    pub provider: String,
-    pub model: String,
+    pub provider: ProviderId,
+    pub model: ModelId,
     pub effort: Option<Effort>,
 }
 
@@ -29,24 +30,16 @@ pub struct SessionProfileCopy {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EffectiveProfile {
-    pub agent_name: String,
+    pub agent_name: AgentName,
     pub description: Option<String>,
-    pub default_model: Option<String>,
+    pub default_model: Option<ModelRef>,
     pub default_effort: Option<Effort>,
     pub enabled_tools: Vec<String>,
-    pub timeout_secs: u64,
-    pub retry: ProfileRetry,
+    pub timeout_secs: TurnTimeout,
+    pub retry: RetryPolicy,
     pub capabilities: ProfileCapabilities,
     pub policy: ProfilePolicy,
     pub extensions: BTreeMap<String, serde_json::Value>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ProfileRetry {
-    pub max_retries: u32,
-    pub initial_delay_ms: u64,
-    pub max_delay_ms: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -92,38 +85,8 @@ pub struct ProfileObservation {
     pub max_find_paths: usize,
 }
 
-pub(super) fn model_id(model: &str) -> Result<()> {
-    if model.is_empty() || model.len() > 4096 || model.chars().any(char::is_control) {
-        return Err(invalid("model", "invalid model id"));
-    }
-    Ok(())
-}
-
 impl EffectiveProfile {
     fn validate(&self) -> Result<()> {
-        let name = &self.agent_name;
-        if name.trim().is_empty()
-            || name.len() > 128
-            || name.chars().any(char::is_control)
-            || name.contains('/')
-            || matches!(name.as_str(), "." | "..")
-        {
-            return Err(invalid("profile", "invalid agent name"));
-        }
-        if let Some(reference) = &self.default_model {
-            let (provider, model) = reference
-                .split_once('/')
-                .ok_or_else(|| invalid("profile", "invalid default model reference"))?;
-            super::validate::provider_id(provider)?;
-            model_id(model)?;
-        }
-        if !(1..=super::MAX_TURN_TIMEOUT_SECS).contains(&self.timeout_secs)
-            || self.retry.max_retries > 10
-            || self.retry.initial_delay_ms > self.retry.max_delay_ms
-            || self.retry.max_delay_ms > 60_000
-        {
-            return Err(invalid("profile", "invalid execution limits"));
-        }
         if !Path::new(&self.policy.project_root).is_absolute()
             || self.policy.project_root.contains('\0')
         {
@@ -153,9 +116,7 @@ impl EffectiveProfile {
 
 impl SessionProfileCopy {
     pub(super) fn validate(&self) -> Result<()> {
-        self.profile.validate()?;
-        super::validate::provider_id(&self.current.provider)?;
-        model_id(&self.current.model)
+        self.profile.validate()
     }
 
     /// 只作为准备与接受之间的比较依据，不增加第二份持久版本号。
@@ -175,7 +136,7 @@ impl SessionProfileCopy {
             && self.current.model == config.model
             && self.current.effort == config.effort
             && self.profile.timeout_secs == config.limits.timeout_secs
-            && self.profile.retry.max_retries + 1 == config.limits.max_model_attempts
+            && self.profile.retry.max_attempts() == config.limits.max_model_attempts
     }
 
     /// 隔离测试的有效副本夹具；生产只能从已校验的源配置或持久副本准备输入。
@@ -185,7 +146,7 @@ impl SessionProfileCopy {
             profile: EffectiveProfile {
                 agent_name: config.agent_name.clone(),
                 description: None,
-                default_model: Some(format!("{}/{}", config.provider, config.model)),
+                default_model: Some(ModelRef::new(config.provider.clone(), config.model.clone())),
                 default_effort: config.effort,
                 enabled_tools: config
                     .catalog
@@ -194,11 +155,16 @@ impl SessionProfileCopy {
                     .map(|entry| entry.name.clone())
                     .collect(),
                 timeout_secs: config.limits.timeout_secs,
-                retry: ProfileRetry {
-                    max_retries: config.limits.max_model_attempts.saturating_sub(1),
-                    initial_delay_ms: 500,
-                    max_delay_ms: 3000,
-                },
+                retry: RetryPolicy::new(
+                    config
+                        .limits
+                        .max_model_attempts
+                        .saturating_sub(1)
+                        .min(crate::MAX_MODEL_ATTEMPTS - 1),
+                    500,
+                    3000,
+                )
+                .expect("valid test retry policy"),
                 capabilities: ProfileCapabilities {
                     deny: vec![],
                     max_boundary: Trust::In,

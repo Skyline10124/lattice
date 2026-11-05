@@ -34,24 +34,35 @@ impl TurnProfile {
         let source = &loaded.profile;
         let policy =
             crate::turn::cep::load_policy_config(&source.lancet, workspace.canonical_path())?;
-        if let Some(model) = &source.agent.model {
-            lattice_llm::ModelRef::parse(model).map_err(|error| {
-                ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), None))
-            })?;
-        }
+        let reject = |error: &dyn std::fmt::Display| {
+            ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), None))
+        };
         let capabilities = source.capability_admission_policy();
         let effective = EffectiveProfile {
-            agent_name: source.agent.name.clone(),
+            agent_name: crate::AgentName::parse(&source.agent.name).map_err(|e| reject(&e))?,
             description: source.agent.description.clone(),
-            default_model: source.agent.model.clone(),
+            default_model: source
+                .agent
+                .model
+                .as_deref()
+                .map(crate::ModelRef::parse)
+                .transpose()
+                .map_err(|e| reject(&e))?,
             default_effort: source.agent.effort,
             enabled_tools: source.tools.enabled.clone(),
-            timeout_secs: source.llm.timeout_secs.unwrap_or(300),
-            retry: ProfileRetry {
-                max_retries: source.llm.retry.max_retries,
-                initial_delay_ms: source.llm.retry.initial_delay_ms,
-                max_delay_ms: source.llm.retry.max_delay_ms,
-            },
+            timeout_secs: source
+                .llm
+                .timeout_secs
+                .map(crate::TurnTimeout::new)
+                .transpose()
+                .map_err(|e| reject(&e))?
+                .unwrap_or_default(),
+            retry: crate::RetryPolicy::new(
+                source.llm.retry.max_retries,
+                source.llm.retry.initial_delay_ms,
+                source.llm.retry.max_delay_ms,
+            )
+            .map_err(|e| reject(&e))?,
             capabilities: ProfileCapabilities {
                 deny: capabilities.denied_capabilities.into_iter().collect(),
                 max_boundary: capabilities.max_boundary,
@@ -108,13 +119,8 @@ impl TurnProfile {
         }
     }
 
-    pub(crate) fn retry(&self) -> lattice_profile::LlmRetrySection {
-        let retry = &self.effective.retry;
-        lattice_profile::LlmRetrySection {
-            max_retries: retry.max_retries,
-            initial_delay_ms: retry.initial_delay_ms,
-            max_delay_ms: retry.max_delay_ms,
-        }
+    pub(crate) fn retry(&self) -> crate::RetryPolicy {
+        self.effective.retry
     }
 
     pub(crate) fn capability_admission(
@@ -161,7 +167,7 @@ impl TurnProfile {
 
 /// 配置目录来自后台启动环境；项目根已经与会话绑定核对。
 pub(crate) fn load_for_turn(
-    agent_name: &str,
+    agent_name: &crate::AgentName,
     workspace: &crate::LocalWorkspaceRoot,
     configuration_dir: &Path,
 ) -> Result<LoadedAgentProfile> {
@@ -173,7 +179,7 @@ pub(crate) fn load_for_turn(
         global_agents_dir: configuration_dir.join("agents"),
     };
     let mut loaded = lattice_profile::resolve_agent_profile(
-        lattice_profile::ProfileSource::Name(agent_name.to_owned()),
+        lattice_profile::ProfileSource::Name(agent_name.as_str().to_owned()),
         &paths,
     )
     .map_err(|error| reject(&profile_error_message(&error)))?;
@@ -186,20 +192,11 @@ pub(crate) fn load_for_turn(
     ) {
         return Err(reject(&message));
     }
-    if loaded.profile.agent.name != agent_name {
+    if loaded.profile.agent.name != agent_name.as_str() {
         return Err(reject(&format!(
             "[agent].name at {} declares '{}'; must match selected agent '{agent_name}'",
             loaded.path.display(),
             loaded.profile.agent.name,
-        )));
-    }
-    if loaded.profile.agent.model.as_ref().is_some_and(|model| {
-        model.len()
-            > lattice_conversation::MAX_PROVIDER_ID_BYTES + 1 + lattice_llm::MAX_MODEL_ID_BYTES
-    }) {
-        return Err(reject(&format!(
-            "invalid or oversized profile at {}",
-            loaded.path.display()
         )));
     }
     let policy =
@@ -363,7 +360,8 @@ mod tests {
         )
         .unwrap();
         let workspace = crate::LocalWorkspaceRoot::from_path(&project).unwrap();
-        let loaded = load_for_turn("test", &workspace, &configuration_dir).unwrap();
+        let test_agent = crate::AgentName::parse("test").unwrap();
+        let loaded = load_for_turn(&test_agent, &workspace, &configuration_dir).unwrap();
         std::fs::remove_file(policy_path).unwrap();
         std::fs::remove_dir_all(package).unwrap();
         let lancet = &loaded.profile.lancet;
@@ -403,19 +401,19 @@ mod tests {
         );
         assert!(lancet.policy.is_none());
         let normalized = TurnProfile::from_loaded(&loaded, &workspace).unwrap();
-        assert_eq!(normalized.effective.timeout_secs, 300);
+        assert_eq!(normalized.effective.timeout_secs.as_secs(), 300);
         let config = lattice_session::store::FrozenTurnConfig {
-            agent_name: "test".into(),
-            model: "test".into(),
-            provider: "local".into(),
+            agent_name: test_agent,
+            model: crate::ModelId::parse("test").unwrap(),
+            provider: crate::ProviderId::parse("local").unwrap(),
             effort: None,
             system_prompt: normalized.system_prompt.clone(),
             catalog: lattice_session::store::ToolCatalogSnapshot::new("test".into(), vec![])
                 .unwrap(),
             limits: lattice_session::store::TurnExecutionLimits {
-                timeout_secs: 300,
+                timeout_secs: crate::TurnTimeout::default(),
                 max_model_steps: 32,
-                max_model_attempts: normalized.retry().max_retries + 1,
+                max_model_attempts: normalized.retry().max_attempts(),
             },
         };
         let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
@@ -439,7 +437,7 @@ mod tests {
             let mut explicit = loaded.clone();
             explicit.profile.llm.timeout_secs = Some(timeout_secs);
             let prepared = TurnProfile::from_loaded(&explicit, &workspace).unwrap();
-            assert_eq!(prepared.effective.timeout_secs, timeout_secs);
+            assert_eq!(prepared.effective.timeout_secs.as_secs(), timeout_secs);
         }
     }
 
@@ -496,7 +494,8 @@ mod tests {
         let (configuration_dir, workspace) = private_configuration(root.path());
         let agents = global_agents_dir(&configuration_dir, 0o755);
         write_global_agent(&agents, 0o755, 0o644, 0o644);
-        let result = load_for_turn("test", &workspace, &configuration_dir);
+        let test_agent = crate::AgentName::parse("test").unwrap();
+        let result = load_for_turn(&test_agent, &workspace, &configuration_dir);
         assert!(
             result.is_ok(),
             "umask 022 layout (dirs 0755, files 0644) must load, got {:?}",
@@ -506,6 +505,7 @@ mod tests {
 
     #[test]
     fn global_agents_directories_reject_group_or_other_write() {
+        let test_agent = crate::AgentName::parse("test").unwrap();
         for (agents_mode, package_mode, rejected) in [
             (0o775, 0o755, "/agents: "),
             (0o757, 0o755, "/agents: "),
@@ -516,7 +516,7 @@ mod tests {
             let (configuration_dir, workspace) = private_configuration(root.path());
             let agents = global_agents_dir(&configuration_dir, agents_mode);
             write_global_agent(&agents, package_mode, 0o644, 0o644);
-            let message = load_for_turn("test", &workspace, &configuration_dir)
+            let message = load_for_turn(&test_agent, &workspace, &configuration_dir)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -529,6 +529,7 @@ mod tests {
 
     #[test]
     fn global_profile_files_reject_group_or_other_write() {
+        let test_agent = crate::AgentName::parse("test").unwrap();
         for (file_mode, prompt_mode, rejected) in [
             (0o664, 0o644, "/agent.toml: "),
             (0o646, 0o644, "/agent.toml: "),
@@ -539,7 +540,7 @@ mod tests {
             let (configuration_dir, workspace) = private_configuration(root.path());
             let agents = global_agents_dir(&configuration_dir, 0o755);
             write_global_agent(&agents, 0o755, file_mode, prompt_mode);
-            let message = load_for_turn("test", &workspace, &configuration_dir)
+            let message = load_for_turn(&test_agent, &workspace, &configuration_dir)
                 .unwrap_err()
                 .to_string();
             assert!(
@@ -559,7 +560,8 @@ mod tests {
         std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
         write_global_agent(&real, 0o755, 0o644, 0o644);
         std::os::unix::fs::symlink(&real, configuration_dir.join("agents")).unwrap();
-        let message = load_for_turn("test", &workspace, &configuration_dir)
+        let test_agent = crate::AgentName::parse("test").unwrap();
+        let message = load_for_turn(&test_agent, &workspace, &configuration_dir)
             .unwrap_err()
             .to_string();
         assert!(
@@ -578,7 +580,8 @@ mod tests {
         let real = agents.join("test/real.toml");
         std::fs::rename(&profile, &real).unwrap();
         std::os::unix::fs::symlink(&real, &profile).unwrap();
-        let message = load_for_turn("test", &workspace, &configuration_dir)
+        let test_agent = crate::AgentName::parse("test").unwrap();
+        let message = load_for_turn(&test_agent, &workspace, &configuration_dir)
             .unwrap_err()
             .to_string();
         assert!(
@@ -597,6 +600,7 @@ mod tests {
         std::fs::create_dir_all(&project_agents).unwrap();
         std::fs::set_permissions(&project_agents, std::fs::Permissions::from_mode(0o777)).unwrap();
         write_global_agent(&project_agents, 0o777, 0o666, 0o666);
+        let test_agent = crate::AgentName::parse("test").unwrap();
         for (case, configuration_dir) in [
             ("configuration outside project", outside_configuration),
             (
@@ -604,7 +608,7 @@ mod tests {
                 workspace.canonical_path().join(".lattice"),
             ),
         ] {
-            let result = load_for_turn("test", &workspace, &configuration_dir);
+            let result = load_for_turn(&test_agent, &workspace, &configuration_dir);
             assert!(
                 result.is_ok(),
                 "{case}: writable project agent must load, got {:?}",

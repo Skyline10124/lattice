@@ -703,7 +703,7 @@ mod tests {
                 "Get weather",
                 serde_json::json!({"type": "object"}),
             )],
-            target: ModelTarget::new("anthropic", "claude-sonnet-4-6"),
+            target: ModelTarget::test_target("anthropic", "claude-sonnet-4-6"),
             client_request_id: None,
         };
         let body = build_request_json(

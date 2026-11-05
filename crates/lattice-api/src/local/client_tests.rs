@@ -190,7 +190,7 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
         session_id: sid(),
         turn_id: id,
         user_node: NodeId(1),
-        agent_name: "local-test".into(),
+        agent_name: AgentName::parse("local-test").unwrap(),
         accepted_at: "2026-10-17T00:00:00Z".parse().unwrap(),
         ended_at: "2026-10-17T00:00:01Z".parse().unwrap(),
         summary: TurnSummary {
@@ -287,7 +287,7 @@ fn request(peer: &Peer, id: TurnId) -> TurnRequest {
         session: SubmitSession::New(sid()),
         workspace: peer._directory.path().into(),
         input: "原始输入".into(),
-        agent: Some("local-test".into()),
+        agent: Some(AgentName::parse("local-test").unwrap()),
     }
 }
 fn accepted(id: TurnId) -> Response {
@@ -943,11 +943,11 @@ fn user_entry(id: TurnId) -> Box<ConversationEntry> {
             parent: NodeId(0),
             turn_id: id,
             accepted_at: detail(id, true).accepted_at,
-            agent_name: "local-test".into(),
-            model: "test".into(),
-            provider: "openai-compatible".into(),
+            agent_name: AgentName::parse("local-test").unwrap(),
+            model: ModelId::parse("test").unwrap(),
+            provider: ProviderId::parse("openai-compatible").unwrap(),
             limits: lattice_session::store::TurnExecutionLimits {
-                timeout_secs: 300,
+                timeout_secs: crate::TurnTimeout::default(),
                 max_model_steps: 32,
                 max_model_attempts: 2,
             },

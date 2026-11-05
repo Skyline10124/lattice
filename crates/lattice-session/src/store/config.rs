@@ -6,21 +6,17 @@
 
 use sha2::{Digest, Sha256};
 
+use lattice_conversation::{ModelId, ProviderId};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::{Result, invalid};
+use crate::model::{AgentName, TurnTimeout};
+pub use crate::model::{MAX_MODEL_ATTEMPTS, MAX_TURN_TIMEOUT_SECS};
 
 /// Code-defined model-step safety limit; not profile-configurable
 /// (ADR 0005 §10).
 pub const MAX_MODEL_STEPS: u32 = 32;
-
-/// Code-defined per-step model-attempt limit: one initial attempt plus the
-/// profile contract's at-most ten retries.
-pub const MAX_MODEL_ATTEMPTS: u32 = 11;
-
-/// Maximum explicit Turn deadline in seconds (`docs/architecture/session.md`).
-pub const MAX_TURN_TIMEOUT_SECS: u64 = 86_400;
 
 /// Canonical catalog snapshot byte limit (1 MiB, ADR 0005 §8). A snapshot of
 /// exactly this length is legal; one byte more fails closed.
@@ -49,7 +45,7 @@ fn digest_with_domain(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
 #[serde(deny_unknown_fields)]
 pub struct TurnExecutionLimits {
     /// Frozen provider/Tool deadline in seconds.
-    pub timeout_secs: u64,
+    pub timeout_secs: TurnTimeout,
     /// Recorded model-step limit; must equal [`MAX_MODEL_STEPS`] (it is
     /// code-defined, not profile-configurable).
     pub max_model_steps: u32,
@@ -58,19 +54,9 @@ pub struct TurnExecutionLimits {
 }
 
 impl TurnExecutionLimits {
-    /// Validate the frozen limits: `timeout_secs` is within `1..=MAX_TURN_TIMEOUT_SECS`,
-    /// the model-step limit is code-defined, and the attempt budget is between
-    /// one and [`MAX_MODEL_ATTEMPTS`].
+    /// Validate the frozen limits: the model-step limit is code-defined and the
+    /// attempt budget is between one and [`MAX_MODEL_ATTEMPTS`].
     pub fn validate(&self) -> Result<()> {
-        if !(1..=MAX_TURN_TIMEOUT_SECS).contains(&self.timeout_secs) {
-            let actual = self.timeout_secs;
-            return Err(invalid(
-                "limits",
-                &format!(
-                    "timeout_secs must be between 1 and {MAX_TURN_TIMEOUT_SECS}, got {actual}"
-                ),
-            ));
-        }
         if self.max_model_steps != MAX_MODEL_STEPS {
             let actual = self.max_model_steps;
             return Err(invalid(
@@ -220,11 +206,11 @@ impl StoredTurnConfig {
 #[serde(deny_unknown_fields)]
 pub struct FrozenTurnConfig {
     /// Turn 的 Agent 名，用于日志及当前位置的 Agent 投影。
-    pub agent_name: String,
+    pub agent_name: AgentName,
     /// Effective model id.
-    pub model: String,
+    pub model: ModelId,
     /// Effective provider id.
-    pub provider: String,
+    pub provider: ProviderId,
     pub effort: Option<lattice_conversation::Effort>,
     /// Effective system prompt, when one is configured.
     pub system_prompt: Option<String>,
@@ -249,15 +235,8 @@ impl FrozenTurnConfig {
     }
 
     /// Validate a deserialized configuration: limits match the code-defined
-    /// bound, the catalog snapshot is self-consistent, and every string field
-    /// is non-empty where required.
+    /// bound and the catalog snapshot is self-consistent.
     pub fn validate(&self) -> Result<()> {
-        if self.agent_name.is_empty() || self.model.is_empty() || self.provider.is_empty() {
-            return Err(invalid(
-                "config",
-                "frozen config agent/model/provider must not be empty",
-            ));
-        }
         self.limits.validate()?;
         self.stored().validate()?;
         Ok(())
@@ -283,7 +262,7 @@ mod tests {
 
     fn limits() -> TurnExecutionLimits {
         TurnExecutionLimits {
-            timeout_secs: 120,
+            timeout_secs: TurnTimeout::new(120).unwrap(),
             max_model_steps: MAX_MODEL_STEPS,
             max_model_attempts: 3,
         }
@@ -291,9 +270,9 @@ mod tests {
 
     fn config() -> FrozenTurnConfig {
         FrozenTurnConfig {
-            agent_name: "coder".to_string(),
-            model: "m".to_string(),
-            provider: "p".to_string(),
+            agent_name: AgentName::parse("coder").unwrap(),
+            model: ModelId::parse("m").unwrap(),
+            provider: ProviderId::parse("p").unwrap(),
             effort: None,
             system_prompt: None,
             catalog: catalog(),
@@ -318,7 +297,7 @@ mod tests {
         let base = config();
         base.validate().expect("clean config passes");
         let mut same_stored = base.clone();
-        same_stored.agent_name = "other".to_string();
+        same_stored.agent_name = AgentName::parse("other").unwrap();
         assert_eq!(base.digest().unwrap(), same_stored.digest().unwrap());
         let mut different_prompt = base.clone();
         different_prompt.system_prompt = Some("prompt".to_string());
@@ -334,14 +313,6 @@ mod tests {
     #[test]
     fn limits_must_carry_the_code_defined_step_limit() {
         let mut limits = limits();
-        limits.timeout_secs = 0;
-        assert!(limits.validate().is_err());
-        limits.timeout_secs = MAX_TURN_TIMEOUT_SECS + 1;
-        assert!(limits.validate().is_err());
-        for valid_timeout in [1, MAX_TURN_TIMEOUT_SECS] {
-            limits.timeout_secs = valid_timeout;
-            limits.validate().expect("valid timeout bound");
-        }
         limits.max_model_steps = MAX_MODEL_STEPS + 1;
         assert!(limits.validate().is_err());
         limits.max_model_steps = MAX_MODEL_STEPS;

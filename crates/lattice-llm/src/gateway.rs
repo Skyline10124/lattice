@@ -11,9 +11,9 @@ use std::{
 
 use crate::auth::{AuthError, AuthStore, ChatgptAuth, Credentials};
 use crate::client::{self, RequestEndpoint, TurnClient};
-use crate::provider::{Auth, Provider, config::ProviderRegistry, validate_model_id};
+use crate::provider::{Auth, Provider, config::ProviderRegistry};
 use crate::reasoning::{ReasoningCapabilities, ReasoningPlan};
-use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, StreamControl};
+use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, ProviderId, StreamControl};
 
 mod cost;
 
@@ -155,7 +155,7 @@ impl RequestGateway {
 /// provider 与 base_url 共同区分连接，凭据始终放在单次请求中。
 pub struct GatewayTurn {
     configuration: Arc<Configuration>,
-    clients: Mutex<BTreeMap<(String, String), Arc<TurnClient>>>,
+    clients: Mutex<BTreeMap<(ProviderId, String), Arc<TurnClient>>>,
 }
 
 impl GatewayTurn {
@@ -169,19 +169,18 @@ impl GatewayTurn {
         &self,
         target: &ModelTarget,
     ) -> Result<Vec<lattice_conversation::Effort>, LlmError> {
-        lattice_conversation::validate_provider_id(&target.provider)
-            .map_err(configuration_error)?;
-        validate_model_id(&target.model).map_err(configuration_error)?;
         let directory = self.configuration.directory.clone();
         let target = target.clone();
         tokio::task::spawn_blocking(move || {
             let registry = ProviderRegistry::load(directory.join("providers.toml"))
                 .map_err(configuration_error)?;
+            let provider_id = target.model.provider().as_str();
+            let model_id = target.model.model().as_str();
             let provider = registry
-                .get(&target.provider)
-                .ok_or_else(|| missing_provider_error(&registry, &target.provider))?;
+                .get(provider_id)
+                .ok_or_else(|| missing_provider_error(&registry, provider_id))?;
             let models = crate::metadata::Metadata::load(&directory).merge(provider);
-            crate::reasoning::supported_efforts(provider, &target.model, models.get(&target.model))
+            crate::reasoning::supported_efforts(provider, model_id, models.get(model_id))
         })
         .await
         .map_err(|_| configuration_error("model capabilities task failed"))?
@@ -189,12 +188,8 @@ impl GatewayTurn {
 
     /// 每次解析读取当前配置与凭据；发送句柄独占这一次解析结果。
     pub async fn resolve(&self, target: &ModelTarget) -> Result<ResolvedRequest, LlmError> {
-        let provider_id = target.provider.as_str();
-        lattice_conversation::validate_provider_id(provider_id).map_err(configuration_error)?;
-        validate_model_id(&target.model).map_err(configuration_error)?;
         let directory = self.configuration.directory.clone();
-        let provider_id = provider_id.to_owned();
-        let model_id = target.model.clone();
+        let model_ref = target.model.clone();
         let effort = target.effort;
         let LoadedProvider {
             provider,
@@ -203,7 +198,12 @@ impl GatewayTurn {
             model_reasoning,
             reasoning,
         } = tokio::task::spawn_blocking(move || {
-            load_provider(directory, &provider_id, &model_id, effort)
+            load_provider(
+                directory,
+                model_ref.provider().as_str(),
+                model_ref.model().as_str(),
+                effort,
+            )
         })
         .await
         .map_err(|_| configuration_error("provider configuration task failed"))??;
@@ -218,7 +218,7 @@ impl GatewayTurn {
             .entry((provider.id.clone(), provider.base_url.clone()))
             .or_default()
             .clone();
-        client::validate_configuration(provider.auth, &provider.id, &credentials)?;
+        client::validate_configuration(provider.auth, provider.id.as_str(), &credentials)?;
         Ok(ResolvedRequest {
             configuration: self.configuration.clone(),
             provider,
@@ -283,7 +283,7 @@ impl ResolvedRequest {
             request,
             RequestEndpoint {
                 provider: &self.provider.id,
-                model: &self.target.model,
+                model: self.target.model.model(),
                 base_url: &self.provider.base_url,
                 protocol: self.provider.protocol,
                 auth: self.provider.auth,
@@ -297,7 +297,7 @@ impl ResolvedRequest {
                 features: self
                     .provider
                     .models
-                    .get(&self.target.model)
+                    .get(self.target.model.model())
                     .map_or(self.provider.features, |model| model.features),
             },
             control,

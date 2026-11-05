@@ -20,11 +20,8 @@ fn status(level: NoticeLevel, text: String) -> Status {
     }
 }
 
-pub(crate) fn model_query_failed_status(error: &LocalError) -> Status {
-    status(
-        NoticeLevel::Warn,
-        format!("模型候选查询失败：{}", error.message),
-    )
+pub(crate) fn model_query_failed_status(message: &str) -> Status {
+    status(NoticeLevel::Warn, format!("模型候选查询失败：{message}"))
 }
 
 pub(crate) fn model_query_notice(message: &str) -> Status {
