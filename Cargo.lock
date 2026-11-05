@@ -2896,6 +2896,7 @@ version = "0.1.0"
 dependencies = [
  "lancet-protocol",
  "lattice-conversation",
+ "lattice-session",
  "rustix",
  "serde",
  "serde_json",
