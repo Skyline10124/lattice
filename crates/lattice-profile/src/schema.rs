@@ -6,21 +6,15 @@ use lancet_protocol::evidence::CapabilityAdmissionPolicy;
 use serde::{Deserialize, Serialize, de};
 use std::collections::BTreeMap;
 
-/// Strict v1 `agent.toml` profile. Only `schema_version = 1` is accepted.
+/// 已校验的 v1 `agent.toml` 配置，所有核心标量字段均已构造为领域类型。
 ///
-/// Removed sections: `[security]`, `[context]`, `[behavior]`, `[workspace]`.
-/// The `[tools]` section only supports explicit `enabled` — no `bundles`.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+/// 已移除顶层表：`[security]`、`[context]`、`[behavior]`、`[workspace]`。
+/// `[tools]` 仅支持显式 `enabled`，不支持 `bundles`。
+#[derive(Debug, Clone, PartialEq)]
 pub struct AgentProfile {
-    pub schema_version: u64,
     pub agent: AgentSection,
-    pub prompt: PromptSection,
-    #[serde(default)]
     pub tools: ToolsSection,
-    #[serde(default)]
     pub llm: LlmSection,
-    #[serde(default)]
     pub lancet: LancetSection,
 }
 
@@ -248,23 +242,12 @@ impl<'de> Deserialize<'de> for LancetSection {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AgentSection {
-    pub name: String,
-    pub model: Option<String>,
+    pub name: lattice_session::AgentName,
+    pub model: Option<lattice_conversation::ModelRef>,
     pub effort: Option<lattice_conversation::Effort>,
-    #[serde(default)]
     pub description: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq)]
-#[serde(deny_unknown_fields)]
-pub struct PromptSection {
-    #[serde(default)]
-    pub system: Option<String>,
-    #[serde(default)]
-    pub system_path: Option<String>,
 }
 
 /// Tool section: only explicit `enabled` tool names are supported.
@@ -278,25 +261,65 @@ pub struct ToolsSection {
 }
 
 /// LLM provider execution settings.
-#[derive(Debug, Clone, Deserialize, Serialize, Default, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct LlmSection {
+    /// 协作式单 Turn deadline；`agent.toml` 未显式配置时取
+    /// [`lattice_session::TurnTimeout::default()`]。生效时长在 Turn 接受时冻结；
+    /// 单调时钟 deadline 在接受事务提交后开始，限制 provider 请求、重试等待与
+    /// Tool 分发，不中断必须完成的持久关闭。observer idle timeout 是独立边界。
+    pub timeout_secs: lattice_session::TurnTimeout,
+    pub retry: lattice_session::RetryPolicy,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAgentProfile {
+    pub schema_version: u64,
+    pub agent: RawAgentSection,
+    pub prompt: RawPromptSection,
+    #[serde(default)]
+    pub tools: ToolsSection,
+    #[serde(default)]
+    pub llm: RawLlmSection,
+    #[serde(default)]
+    pub lancet: LancetSection,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawAgentSection {
+    pub name: String,
+    pub model: Option<String>,
+    pub effort: Option<lattice_conversation::Effort>,
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawPromptSection {
+    #[serde(default)]
+    pub system: Option<String>,
+    #[serde(default)]
+    pub system_path: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawLlmSection {
     /// 可选的协作式单 Turn deadline，单位为秒。
     ///
-    /// `None` 表示使用协调层内置的 300 秒默认值。生效时长在 Turn 接受时
-    /// 冻结；单调时钟 deadline 在接受事务提交后开始，限制
-    /// provider 请求、重试等待与 Tool 分发，不中断必须完成的持久关闭。
-    /// observer idle timeout 是独立边界。显式值在加载时按 1..=86400 校验。
+    /// `None` 表示使用 [`lattice_session::TurnTimeout::default()`]。显式值在加载时按
+    /// `1..=86400` 构造 [`lattice_session::TurnTimeout`]。
     #[serde(default)]
     pub timeout_secs: Option<u64>,
     #[serde(default)]
-    pub retry: LlmRetrySection,
+    pub retry: RawRetryPolicy,
 }
 
-/// `[llm.retry]` — retry policy for opening provider streams.
-#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub struct LlmRetrySection {
+pub(crate) struct RawRetryPolicy {
     #[serde(default = "default_llm_retry_max_retries")]
     pub max_retries: u32,
     #[serde(default = "default_llm_retry_initial_delay_ms")]
@@ -305,47 +328,75 @@ pub struct LlmRetrySection {
     pub max_delay_ms: u64,
 }
 
-impl Default for LlmRetrySection {
+impl Default for RawRetryPolicy {
     fn default() -> Self {
+        let default = lattice_session::RetryPolicy::default();
         Self {
-            max_retries: default_llm_retry_max_retries(),
-            initial_delay_ms: default_llm_retry_initial_delay_ms(),
-            max_delay_ms: default_llm_retry_max_delay_ms(),
+            max_retries: default.max_retries(),
+            initial_delay_ms: default.initial_delay_ms(),
+            max_delay_ms: default.max_delay_ms(),
         }
     }
 }
 
 fn default_llm_retry_max_retries() -> u32 {
-    3
+    lattice_session::RetryPolicy::default().max_retries()
 }
 
 fn default_llm_retry_initial_delay_ms() -> u64 {
-    500
+    lattice_session::RetryPolicy::default().initial_delay_ms()
 }
 
 fn default_llm_retry_max_delay_ms() -> u64 {
-    3_000
+    lattice_session::RetryPolicy::default().max_delay_ms()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{DiscoveryPaths, LoadedAgentProfile, ProfileError, load_agent_profile};
+    use lattice_conversation::{Effort, ModelRef};
+    use lattice_session::{AgentName, RetryPolicy, TurnTimeout};
     use std::collections::BTreeSet;
+    use std::os::unix::fs::MetadataExt;
 
-    fn parse(toml_str: &str) -> Result<AgentProfile, toml::de::Error> {
-        toml::from_str::<AgentProfile>(toml_str)
+    fn load_named(name: &str, toml_str: &str) -> Result<LoadedAgentProfile, ProfileError> {
+        let dir = tempfile::tempdir().unwrap();
+        let uid = std::fs::symlink_metadata(dir.path()).unwrap().uid();
+        let paths = DiscoveryPaths {
+            project_root: dir.path().join("project"),
+            global_agents_dir: dir.path().join("global-agents"),
+        };
+        let package = paths.project_agents_dir().join(name);
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("agent.toml"), toml_str).unwrap();
+        load_agent_profile(&AgentName::parse(name).unwrap(), &paths, uid)
+    }
+
+    fn parse(toml_str: &str) -> Result<AgentProfile, ProfileError> {
+        load_named("t", toml_str).map(|loaded| loaded.profile)
     }
 
     #[test]
     fn optional_model_and_reasoning_effort_are_strict() {
-        for effort in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
-            let profile = parse(&format!(
-                "schema_version=1\n[agent]\nname='test'\neffort='{effort}'\n[prompt]\nsystem='test'\n"
-            ))
+        for (raw, expected) in [
+            ("off", Effort::Off),
+            ("minimal", Effort::Minimal),
+            ("low", Effort::Low),
+            ("medium", Effort::Medium),
+            ("high", Effort::High),
+            ("xhigh", Effort::Xhigh),
+            ("max", Effort::Max),
+        ] {
+            let loaded = load_named(
+                "test",
+                &format!(
+                    "schema_version=1\n[agent]\nname='test'\neffort='{raw}'\n[prompt]\nsystem='test'\n"
+                ),
+            )
             .unwrap();
-            let value = serde_json::to_value(profile).unwrap();
-            assert_eq!(value["agent"]["model"], serde_json::Value::Null);
-            assert_eq!(value["agent"]["effort"], effort);
+            assert_eq!(loaded.profile.agent.model, None);
+            assert_eq!(loaded.profile.agent.effort, Some(expected));
         }
         for field in [
             "effort='default'",
@@ -354,9 +405,12 @@ mod tests {
             "effrot='high'",
         ] {
             assert!(
-                parse(&format!(
-                    "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n{field}\n[prompt]\nsystem='test'\n"
-                ))
+                load_named(
+                    "test",
+                    &format!(
+                        "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n{field}\n[prompt]\nsystem='test'\n"
+                    ),
+                )
                 .is_err(),
                 "{field}"
             );
@@ -384,17 +438,32 @@ max_retries = 2
 initial_delay_ms = 250
 max_delay_ms = 1000
 "#;
-        let profile = parse(toml).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let uid = std::fs::symlink_metadata(dir.path()).unwrap().uid();
+        let paths = DiscoveryPaths {
+            project_root: dir.path().join("project"),
+            global_agents_dir: dir.path().join("global-agents"),
+        };
+        let package = paths.project_agents_dir().join("full");
+        std::fs::create_dir_all(&package).unwrap();
+        std::fs::write(package.join("prompt.md"), "Prompt from file.").unwrap();
+        std::fs::write(package.join("agent.toml"), toml).unwrap();
+        let loaded = load_agent_profile(&AgentName::parse("full").unwrap(), &paths, uid).unwrap();
+        let profile = &loaded.profile;
+        assert_eq!(profile.agent.name, "full");
+        assert_eq!(
+            profile.agent.model,
+            Some(ModelRef::parse("anthropic/claude-opus-4-6").unwrap())
+        );
         assert_eq!(
             profile.agent.description.as_deref(),
             Some("A full-featured agent")
         );
-        assert_eq!(profile.prompt.system_path.as_deref(), Some("prompt.md"));
+        assert_eq!(loaded.system_prompt, "Prompt from file.");
         let tools = &profile.tools;
         assert_eq!(tools.enabled, vec!["observe__workspace", "mutate__create"]);
-        assert_eq!(profile.llm.retry.max_retries, 2);
-        assert_eq!(profile.llm.retry.initial_delay_ms, 250);
-        assert_eq!(profile.llm.retry.max_delay_ms, 1000);
+        assert_eq!(profile.llm.timeout_secs, TurnTimeout::default());
+        assert_eq!(profile.llm.retry, RetryPolicy::new(2, 250, 1000).unwrap());
     }
 
     // ── Top-level section rejection ───────────────────────────────────
@@ -737,9 +806,8 @@ max_web_response_bytes = 2048
     #[test]
     fn llm_retry_defaults_when_section_absent() {
         let profile = parse(minimal_profile_prefix()).unwrap();
-        assert_eq!(profile.llm.retry.max_retries, 3);
-        assert_eq!(profile.llm.retry.initial_delay_ms, 500);
-        assert_eq!(profile.llm.retry.max_delay_ms, 3_000);
+        assert_eq!(profile.llm.retry, RetryPolicy::default());
+        assert_eq!(profile.llm.timeout_secs, TurnTimeout::default());
     }
 
     #[test]
@@ -755,9 +823,7 @@ max_delay_ms = 2
             prefix = minimal_profile_prefix()
         );
         let profile = parse(&toml).unwrap();
-        assert_eq!(profile.llm.retry.max_retries, 0);
-        assert_eq!(profile.llm.retry.initial_delay_ms, 1);
-        assert_eq!(profile.llm.retry.max_delay_ms, 2);
+        assert_eq!(profile.llm.retry, RetryPolicy::new(0, 1, 2).unwrap());
     }
 
     // ── [lancet.workspace] policy section ─────────────────────────────
@@ -786,8 +852,6 @@ denied_read_patterns = ["secrets/**"]
         );
         assert_eq!(section.denied_read_patterns, vec!["secrets/**".to_string()]);
     }
-
-    // ── [llm.timeout_secs] ────────────────────────────────────────────
 
     // ── LancetPolicySection ────────────────────────────────────────────────
 

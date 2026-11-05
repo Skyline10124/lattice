@@ -548,7 +548,12 @@ mod turn_wiring {
     /// Write a real `agent.toml` under `dir` and load it through the profile
     /// loader — the production entry point, not a hand-built struct.
     fn write_and_load_profile(dir: &std::path::Path, capabilities: &str) -> LoadedAgentProfile {
-        let path = dir.join("agent.toml");
+        let paths = lattice_profile::DiscoveryPaths {
+            project_root: dir.to_path_buf(),
+            global_agents_dir: dir.join("global-agents"),
+        };
+        let path = paths.project_agents_dir().join("t/agent.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(
             &path,
             format!(
@@ -570,7 +575,12 @@ enabled = ["{tool}"]
             ),
         )
         .unwrap();
-        lattice_profile::load_agent_profile(&path).expect("profile loads")
+        lattice_profile::load_agent_profile(
+            &crate::AgentName::parse("t").unwrap(),
+            &paths,
+            crate::local::ipc::uid(),
+        )
+        .expect("profile loads")
     }
 
     async fn build_deps_for(
@@ -591,7 +601,7 @@ enabled = ["{tool}"]
             effort: None,
             input: "hi".into(),
             session_id: None,
-            agent: Some(crate::AgentName::parse(&profile.profile.agent.name).unwrap()),
+            agent: Some(profile.profile.agent.name.clone()),
             loaded_profile: Some(profile.clone()),
             cancel_flag: None,
             test_llm: Some((

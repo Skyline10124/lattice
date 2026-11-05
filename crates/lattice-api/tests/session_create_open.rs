@@ -15,7 +15,12 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let layout = StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let api = SessionApi::from_store(store.clone());
-    let profile = project.path().join("agent.toml");
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: project.path().to_path_buf(),
+        global_agents_dir: state.path().join("global-agents"),
+    };
+    let profile = paths.project_agents_dir().join("alpha/agent.toml");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(
         &profile,
         "schema_version=1\n[agent]\nname='alpha'\nmodel='local/test'\n[prompt]\nsystem='frozen'\n",
@@ -34,13 +39,17 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
             ])
             .build(),
     );
+    let uid =
+        std::os::unix::fs::MetadataExt::uid(&std::fs::symlink_metadata(project.path()).unwrap());
+    let alpha = AgentName::parse("alpha").unwrap();
+    let loaded_profile = lattice_profile::load_agent_profile(&alpha, &paths, uid).unwrap();
     let request = RunTurnRequest {
         model: None,
         effort: None,
         input: " original \n".into(),
         session_id: None,
-        agent: Some(AgentName::parse("alpha").unwrap()),
-        loaded_profile: Some(lattice_profile::load_agent_profile(&profile).unwrap()),
+        agent: Some(alpha),
+        loaded_profile: Some(loaded_profile),
         cancel_flag: None,
         test_llm: Some((
             llm.clone(),

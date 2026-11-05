@@ -39,18 +39,26 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let state = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(project.path().join("src")).unwrap();
     std::fs::write(project.path().join("src/lib.rs"), "pub fn hello() {}").unwrap();
-    let path = project.path().join("agent.toml");
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: project.path().to_path_buf(),
+        global_agents_dir: state.path().join("global-agents"),
+    };
+    let path = paths.project_agents_dir().join("test/agent.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
     std::fs::write(&path, format!("schema_version=1\n[agent]\nname='test'\nmodel='local/sonnet'\n[prompt]\nsystem='System from profile.'\n[tools]\nenabled={enabled_tools:?}\n")).unwrap();
     let layout = crate::StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
+    let agent = crate::AgentName::parse("test").unwrap();
+    let loaded_profile =
+        lattice_profile::load_agent_profile(&agent, &paths, crate::local::ipc::uid()).unwrap();
     let request = RunTurnRequest {
         model: None,
         effort: None,
         input: "hello".into(),
         session_id: None,
-        agent: Some(crate::AgentName::parse("test").unwrap()),
-        loaded_profile: Some(lattice_profile::load_agent_profile(&path).unwrap()),
+        agent: Some(agent),
+        loaded_profile: Some(loaded_profile),
         cancel_flag: None,
         test_llm: Some((
             llm,

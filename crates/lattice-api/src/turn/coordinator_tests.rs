@@ -470,7 +470,12 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     let layout = StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let api = crate::session::SessionApi::from_store(store.clone());
-    let profile = project.path().join("agent.toml");
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: project.path().to_path_buf(),
+        global_agents_dir: state.path().join("global-agents"),
+    };
+    let profile = paths.project_agents_dir().join("alpha/agent.toml");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(&profile, "schema_version = 1\n[agent]\nname = 'alpha'\nmodel = 'local/test'\n[prompt]\nsystem = 'frozen'\n[tools]\nenabled = []\n").unwrap();
     let llm = Arc::new(
         lattice_agent::testing::FakeStreamingLlmClient::builder()
@@ -485,13 +490,16 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
             ])
             .build(),
     );
+    let alpha = crate::AgentName::parse("alpha").unwrap();
+    let loaded_profile =
+        lattice_profile::load_agent_profile(&alpha, &paths, crate::local::ipc::uid()).unwrap();
     let request = RunTurnRequest {
         model: None,
         effort: None,
         input: " original \n".into(),
         session_id: None,
-        agent: Some(crate::AgentName::parse("alpha").unwrap()),
-        loaded_profile: Some(lattice_profile::load_agent_profile(&profile).unwrap()),
+        agent: Some(alpha),
+        loaded_profile: Some(loaded_profile),
         cancel_flag: None,
         test_llm: Some((
             llm.clone(),
