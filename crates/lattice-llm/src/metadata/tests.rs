@@ -90,10 +90,30 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
             .unwrap(),
         known.supported_efforts
     );
+    // 坏目录按缺目录处理：未登录时不提示，已经登录时说明原因。
     std::fs::write(&path, "{bad").unwrap();
     let invalid = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
     assert!(invalid.models.is_empty());
-    assert!(!invalid.warnings.is_empty());
+    assert!(invalid.warnings.is_empty());
+    let auth = directory.path().join("auth.json");
+    std::fs::write(&auth, json!({"version":1,"providers":{"chatgpt":{
+        "type":"chatgpt","host_id":"host","client_id":"client",
+        "account":{"subject":"subject","email":"user@example.com"},
+        "tokens":{"access_token":"access-secret","refresh_token":"refresh-secret","id_token":"id-secret",
+            "expires_at":"2020-01-01T00:00:00+00:00","scopes":["chatgpt.tokens.use.direct"]}
+    }}}).to_string()).unwrap();
+    std::fs::set_permissions(
+        &auth,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
+    let invalid = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    assert!(invalid.models.is_empty());
+    assert!(matches!(
+        invalid.warnings.as_slice(),
+        [warning] if warning.provider.as_deref() == Some("chatgpt")
+            && warning.message.starts_with("ChatGPT account model directory is unavailable: ")
+    ));
     std::fs::write(
         &path,
         json!({"version":1,"fetched_at":"2020-01-01T00:00:00Z","models":[]}).to_string(),
@@ -145,15 +165,10 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             .any(|warning| warning.provider.as_deref() == Some("empty")
                 && warning.message.contains("absent-catalog"))
     );
+    // 未登录时没有账号目录，也不提示登录。
     let chatgpt = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
     assert!(chatgpt.models.is_empty());
-    assert!(
-        chatgpt
-            .warnings
-            .iter()
-            .any(|warning| warning.provider.as_deref() == Some("chatgpt")
-                && warning.message.contains("run lattice auth login chatgpt"))
-    );
+    assert!(chatgpt.warnings.is_empty());
     let retired = crate::model_candidates(directory.path(), None, Some("local/old")).unwrap();
     assert_eq!(retired.models.len(), 1);
     assert_eq!(retired.models[0].model, "old");
@@ -183,12 +198,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
     assert_eq!(subscription.models.len(), 1);
     assert_eq!(subscription.models[0].provider, "chatgpt");
     assert!(subscription.models[0].supported_efforts.is_empty());
-    assert!(
-        subscription
-            .warnings
-            .iter()
-            .any(|warning| warning.message.contains("run lattice auth login chatgpt"))
-    );
+    assert!(subscription.warnings.is_empty());
     for (provider, target, expected) in [
         (
             Some("local"),

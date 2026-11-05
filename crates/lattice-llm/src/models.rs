@@ -94,17 +94,15 @@ pub fn model_candidates(
         };
         if provider.id == "chatgpt" {
             let catalog = crate::metadata::chatgpt::load(directory);
-            if let Err(error) = &catalog {
-                let reason = if credentials
+            // 未登录时不请求账号目录，也不提示；已经登录却缺目录时才说明原因。
+            if let Err(error) = &catalog
+                && credentials
                     .as_ref()
                     .is_ok_and(|credentials| credentials.chatgpt_logged_in())
-                {
-                    format!("ChatGPT account model directory is unavailable: {error}")
-                } else {
-                    "ChatGPT account model directory is unavailable; run lattice auth login chatgpt"
-                        .into()
-                };
-                warn(reason);
+            {
+                warn(format!(
+                    "ChatGPT account model directory is unavailable: {error}"
+                ));
             }
             let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
             let models = metadata.merge(provider);
