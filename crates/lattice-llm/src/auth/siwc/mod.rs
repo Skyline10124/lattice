@@ -422,7 +422,9 @@ impl Manager {
                     "token refresh failed ({code}); run lattice auth login chatgpt"
                 )));
             }
-            Err(RefreshFailure::Other(error)) => return Err(refresh_error(error, &credentials)),
+            Err(RefreshFailure::Other(error)) => {
+                return Err(Redaction::new(&credentials).apply(error));
+            }
         };
         match result {
             Ok(credentials) => Ok((self.advance_generation(), credentials)),
@@ -636,25 +638,6 @@ fn storage_error(error: AuthError) -> LlmError {
     LlmError::Config {
         message: format!("ChatGPT credential storage failed: {error}"),
     }
-}
-
-fn refresh_error(error: LlmError, credentials: &Credentials) -> LlmError {
-    let mut error = crate::client::redact_error(error, credentials);
-    match &mut error {
-        LlmError::Credential { message }
-        | LlmError::Config { message }
-        | LlmError::Dns { message }
-        | LlmError::Transport { message, .. }
-        | LlmError::Timeout { message }
-        | LlmError::ProviderHttp { message, .. }
-        | LlmError::StreamRead { message }
-        | LlmError::ProtocolLimit { message }
-        | LlmError::Other(message) => {
-            *message = crate::transport::bound_diagnostic(message);
-        }
-        LlmError::Projection(_) => {}
-    }
-    error
 }
 
 #[cfg(test)]

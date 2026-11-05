@@ -553,7 +553,7 @@ impl Manager {
             .as_ref()
             .is_some_and(|subject| subject != &identity.subject)
         {
-            return Err(failure("account mismatch or missing direct permission").into());
+            return Err(failure("account mismatch").into());
         }
         let status = ProviderAuthStatus {
             provider: "chatgpt".into(),

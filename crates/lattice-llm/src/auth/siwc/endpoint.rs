@@ -52,11 +52,6 @@ impl UnverifiedLogin {
         redaction.add(&self.tokens.refresh_token.0);
         redaction.add(&self.tokens.id_token.0);
     }
-
-    #[cfg(test)]
-    pub(super) fn new(tokens: format::Tokens) -> Self {
-        Self { tokens }
-    }
 }
 
 impl TokenReply {
@@ -718,4 +713,4 @@ fn invalid_identity(reason: &str) -> LlmError {
 #[cfg(test)]
 pub(super) mod identity_tests;
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

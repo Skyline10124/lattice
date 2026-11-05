@@ -4,6 +4,7 @@
 use super::super::endpoint::{
     RefreshFailure, UnverifiedLogin,
     identity_tests::{claims, keys, signed, verify_login},
+    tests::exchange_response,
 };
 use super::*;
 use crate::auth::tests::{fixture, write};
@@ -30,7 +31,7 @@ struct Endpoint {
     claims: Mutex<Value>,
     invalid_grant: Mutex<bool>,
     error: Mutex<Option<LlmError>>,
-    scopes: Mutex<Vec<String>>,
+    scopes: Mutex<Option<Vec<String>>>,
     calls: AtomicUsize,
     verify_calls: AtomicUsize,
     cancel_on_exchange: Mutex<Option<Arc<LoginControl>>>,
@@ -47,7 +48,7 @@ impl Endpoint {
             claims: Mutex::new(claims("client", "unset")),
             invalid_grant: Mutex::new(false),
             error: Mutex::new(None),
-            scopes: Mutex::new(vec![DIRECT_SCOPE.into()]),
+            scopes: Mutex::new(Some(vec![DIRECT_SCOPE.into()])),
             calls: AtomicUsize::new(0),
             verify_calls: AtomicUsize::new(0),
             cancel_on_exchange: Mutex::new(None),
@@ -112,7 +113,7 @@ impl Endpoint {
                 .into(),
             ),
             expires_at: (Utc::now() + TimeDelta::hours(1)).to_rfc3339(),
-            scopes: self.scopes.lock().unwrap().clone(),
+            scopes: self.scopes.lock().unwrap().clone().unwrap_or_default(),
         }
     }
 }
@@ -138,15 +139,21 @@ impl TokenEndpoint for Endpoint {
                 return Err(ExchangeFailure::Other(error));
             }
             let tokens = self.token(false, Secret(signed(&self.claims.lock().unwrap())));
-            if !tokens.scopes.iter().any(|scope| scope == DIRECT_SCOPE) {
-                return Err(ExchangeFailure::Other(LlmError::Other(
-                    "ChatGPT code exchange: ChatGPT OAuth failed: invalid token material or missing direct permission".into(),
-                )));
+            let mut body = json!({
+                "access_token": tokens.access_token.0,
+                "refresh_token": tokens.refresh_token.0,
+                "id_token": tokens.id_token.0,
+                "token_type": "Bearer",
+                "expires_in": 3600,
+            });
+            if let Some(scopes) = self.scopes.lock().unwrap().as_ref() {
+                body["scope"] = json!(scopes.join(" "));
             }
+            let login = exchange_response(&body, Utc::now())?;
             if let Some(control) = self.cancel_on_exchange.lock().unwrap().take() {
                 control.cancel();
             }
-            Ok(UnverifiedLogin::new(tokens))
+            Ok(login)
         })
     }
 
@@ -423,23 +430,30 @@ async fn nonce_scope_and_subject_failure_preserve_existing_login() {
         .unwrap();
     f.finish(&first).await.unwrap();
     let before = f.document();
-    for failure_case in 0..3 {
+    for failure_case in 0..4 {
         *f.endpoint.claims.lock().unwrap() = claims("client", "unset");
-        *f.endpoint.scopes.lock().unwrap() = vec![DIRECT_SCOPE.into()];
+        *f.endpoint.scopes.lock().unwrap() = Some(vec![DIRECT_SCOPE.into()]);
         let login = f.start().await;
         let callback = f.callback(&login, false);
         match failure_case {
             0 => f.endpoint.claims.lock().unwrap()["nonce"] = json!("wrong-nonce"),
             1 => f.endpoint.claims.lock().unwrap()["sub"] = json!("other-subject"),
-            _ => *f.endpoint.scopes.lock().unwrap() = vec!["openid".into()],
+            2 => *f.endpoint.scopes.lock().unwrap() = Some(vec!["openid".into()]),
+            _ => *f.endpoint.scopes.lock().unwrap() = None,
         }
         login.submit_callback(callback).await.unwrap();
-        assert!(f.finish(&login).await.is_err());
+        let error = f.finish(&login).await.err().unwrap();
+        if failure_case == 1 {
+            let LoginError::Failed(LlmError::Credential { message }) = error else {
+                panic!("账号不一致应报告凭据错误")
+            };
+            assert_eq!(message, "ChatGPT login: account mismatch");
+        }
         assert_eq!(f.document(), before);
     }
     *f.endpoint.claims.lock().unwrap() = claims("client", "unset");
     f.endpoint.claims.lock().unwrap()["email"] = json!("updated@example.test");
-    *f.endpoint.scopes.lock().unwrap() = vec![DIRECT_SCOPE.into()];
+    *f.endpoint.scopes.lock().unwrap() = Some(vec![DIRECT_SCOPE.into()]);
     let login = f.start().await;
     login
         .submit_callback(f.callback(&login, false))

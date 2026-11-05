@@ -64,18 +64,17 @@ async fn login_verification_propagates_failure_before_returning_identity() {
         (signed.as_str(), "wrong-nonce", false),
         ("invalid-jwt-header", "local-nonce", false),
     ] {
-        let tokens = parse_login_token(
-            &serde_json::to_vec(&json!({
+        let login = super::tests::exchange_response(
+            &json!({
                 "access_token": "new-access-secret", "refresh_token": "new-refresh-secret",
                 "token_type": "Bearer", "expires_in": 3600,
                 "scope": DIRECT_SCOPE, "id_token": id_token,
-            }))
-            .unwrap(),
+            }),
             Utc::now(),
         )
-        .unwrap();
+        .unwrap_or_else(|_| panic!("合法换码回复应返回待验签材料"));
         let result = super::verify_login(
-            UnverifiedLogin::new(tokens),
+            login,
             "local-client",
             nonce,
             async { Ok(url::Url::parse("https://auth.openai.com/local-test-jwks").unwrap()) },

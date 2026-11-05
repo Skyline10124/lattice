@@ -17,6 +17,19 @@ fn response() -> serde_json::Value {
     })
 }
 
+// 让登录流程测试通过真实换码解析取得材料，保持端点的生产条目私有。
+pub(in crate::auth::siwc) fn exchange_response(
+    body: &serde_json::Value,
+    now: DateTime<Utc>,
+) -> Result<UnverifiedLogin, ExchangeFailure> {
+    let reply = HttpReply {
+        status: 200,
+        headers: HeaderMap::new(),
+        body: Zeroizing::new(serde_json::to_vec(body).unwrap()),
+    };
+    exchange_reply(&reply, now)
+}
+
 #[test]
 fn grants_use_issued_client_and_encode_reserved_characters_without_scope() {
     let grant = RefreshGrant {
@@ -57,10 +70,18 @@ fn grants_use_issued_client_and_encode_reserved_characters_without_scope() {
 #[test]
 fn login_response_requires_identity_token_and_granted_permission() {
     let mut value = response();
-    let parsed = parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).unwrap();
-    assert_eq!(parsed.id_token.0, "ignored-id-secret");
+    let mut reply = HttpReply {
+        status: 200,
+        headers: HeaderMap::new(),
+        body: Zeroizing::new(serde_json::to_vec(&value).unwrap()),
+    };
+    let login =
+        exchange_reply(&reply, now()).unwrap_or_else(|_| panic!("合法换码回复应返回待验签材料"));
+    assert_eq!(login.tokens.id_token.0, "ignored-id-secret");
+    assert_eq!(login.tokens.access_token.0, "new-access-secret");
+    assert_eq!(login.tokens.refresh_token.0, "new-refresh-secret");
     assert_eq!(
-        parsed.expires_at,
+        login.tokens.expires_at,
         (now() + chrono::TimeDelta::seconds(3600)).to_rfc3339()
     );
     for id in [
@@ -69,14 +90,103 @@ fn login_response_requires_identity_token_and_granted_permission() {
         serde_json::json!({"token":"secret"}),
     ] {
         value["id_token"] = id;
-        assert!(parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).is_err());
+        reply.body = Zeroizing::new(serde_json::to_vec(&value).unwrap());
+        let Err(ExchangeFailure::Other(LlmError::Other(message))) = exchange_reply(&reply, now())
+        else {
+            panic!("无效 id token 应保留换码阶段的原错误分类")
+        };
+        assert_eq!(
+            message,
+            "ChatGPT code exchange: ChatGPT OAuth failed: missing or invalid ID token"
+        );
     }
-    let mut value = response();
-    value.as_object_mut().unwrap().remove("id_token");
-    assert!(parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).is_err());
-    let mut value = response();
-    value["scope"] = serde_json::json!("openid");
-    assert!(parse_login_token(&serde_json::to_vec(&value).unwrap(), now()).is_err());
+    for (field, replacement, expected) in [
+        ("id_token", None, "missing or invalid ID token"),
+        (
+            "scope",
+            Some(serde_json::json!("openid")),
+            "invalid token material or missing direct permission",
+        ),
+        ("scope", None, "invalid token response"),
+    ] {
+        let mut value = response();
+        if let Some(replacement) = replacement {
+            value[field] = replacement;
+        } else {
+            value.as_object_mut().unwrap().remove(field);
+        }
+        reply.body = Zeroizing::new(serde_json::to_vec(&value).unwrap());
+        let Err(ExchangeFailure::Other(LlmError::Other(message))) = exchange_reply(&reply, now())
+        else {
+            panic!("非法换码回复应保留原错误种类与阶段前缀")
+        };
+        assert_eq!(
+            message,
+            format!("ChatGPT code exchange: ChatGPT OAuth failed: {expected}")
+        );
+    }
+}
+
+#[test]
+fn exchange_reply_classifies_http_errors_and_preserves_diagnostics() {
+    let mut reply = HttpReply {
+        status: 400,
+        headers: HeaderMap::new(),
+        body: Zeroizing::new(Vec::new()),
+    };
+    for error in [
+        serde_json::json!("invalid_grant"),
+        serde_json::json!({"code": "invalid_grant"}),
+    ] {
+        reply.body =
+            Zeroizing::new(serde_json::to_vec(&serde_json::json!({"error":error})).unwrap());
+        assert!(matches!(
+            exchange_reply(&reply, now()),
+            Err(ExchangeFailure::InvalidGrant)
+        ));
+    }
+    for (status, code, retryable) in [
+        (400, "invalid_client", false),
+        (503, "invalid_client", false),
+        (400, "invalid_refresh_token", false),
+        (503, "invalid_refresh_token", true),
+        (503, "temporarily_unavailable", true),
+        (429, "unknown", true),
+        (400, "unknown", false),
+    ] {
+        reply.status = status;
+        reply
+            .headers
+            .insert("x-request-id", "exchange-request".parse().unwrap());
+        reply.headers.insert("retry-after", "3".parse().unwrap());
+        reply.body = Zeroizing::new(
+            serde_json::to_vec(&serde_json::json!({
+                "error": code, "error_description": "arbitrary-secret",
+            }))
+            .unwrap(),
+        );
+        let Err(ExchangeFailure::Other(error)) = exchange_reply(&reply, now()) else {
+            panic!("只有 invalid_grant 可返回专用换码分类")
+        };
+        let LlmError::ProviderHttp { message, .. } = &error else {
+            panic!("HTTP 换码错误应保留 ProviderHttp 分类")
+        };
+        assert_eq!(error.status_code(), Some(status));
+        assert_eq!(error.retryable(), retryable);
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+        let guidance = if code == "invalid_client" {
+            " invalid_client; run lattice auth remove chatgpt, then lattice auth login chatgpt"
+        } else {
+            ""
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "ChatGPT code exchange failed: HTTP {status}{guidance}; request_id=exchange-request"
+            )
+        );
+        assert!(!format!("{error:?} {error}").contains("arbitrary-secret"));
+    }
 }
 
 #[test]
@@ -169,6 +279,7 @@ fn token_response_validates_material_expiry_and_permission_while_ignoring_id_tok
 
 #[test]
 fn oauth_error_codes_are_exact_and_do_not_echo_error_descriptions() {
+    let previous = parse_login_token(&serde_json::to_vec(&response()).unwrap(), now()).unwrap();
     for code in [
         "invalid_grant",
         "invalid_refresh_token",
@@ -186,7 +297,7 @@ fn oauth_error_codes_are_exact_and_do_not_echo_error_descriptions() {
                 ),
             };
             assert!(
-                matches!(refresh_error(&reply, now()), RefreshFailure::InvalidToken(found) if found == code)
+                matches!(refresh_reply(&reply, &previous, now()), Err(RefreshFailure::InvalidToken(found)) if found == code)
             );
         }
     }
@@ -201,6 +312,7 @@ fn oauth_error_codes_are_exact_and_do_not_echo_error_descriptions() {
         let mut headers = HeaderMap::new();
         headers.insert("retry-after", "3".parse().unwrap());
         headers.insert("x-should-retry", "true".parse().unwrap());
+        headers.insert("x-request-id", "refresh-request".parse().unwrap());
         let reply = HttpReply {
             status,
             headers,
@@ -211,12 +323,26 @@ fn oauth_error_codes_are_exact_and_do_not_echo_error_descriptions() {
                 .unwrap(),
             ),
         };
-        let RefreshFailure::Other(error) = refresh_error(&reply, now()) else {
-            panic!("unexpected terminal error")
+        let Err(RefreshFailure::Other(error)) = refresh_reply(&reply, &previous, now()) else {
+            panic!("非终态刷新回复应保留 Other 分类")
+        };
+        let LlmError::ProviderHttp { message, .. } = &error else {
+            panic!("HTTP 刷新错误应保留 ProviderHttp 分类")
         };
         assert_eq!(error.status_code(), Some(status));
         assert_eq!(error.retryable(), retryable);
         assert_eq!(error.retry_after(), Some(Duration::from_secs(3)));
+        let guidance = if code == "invalid_client" {
+            " invalid_client; run lattice auth remove chatgpt, then lattice auth login chatgpt"
+        } else {
+            ""
+        };
+        assert_eq!(
+            message,
+            &format!(
+                "ChatGPT token refresh failed: HTTP {status}{guidance}; request_id=refresh-request"
+            )
+        );
         assert!(!format!("{error:?} {error}").contains("secret"));
     }
     let reply = HttpReply {
@@ -225,8 +351,8 @@ fn oauth_error_codes_are_exact_and_do_not_echo_error_descriptions() {
         body: Zeroizing::new(b"invalid_grant secret".to_vec()),
     };
     assert!(matches!(
-        refresh_error(&reply, now()),
-        RefreshFailure::Other(_)
+        refresh_reply(&reply, &previous, now()),
+        Err(RefreshFailure::Other(_))
     ));
 }
 
