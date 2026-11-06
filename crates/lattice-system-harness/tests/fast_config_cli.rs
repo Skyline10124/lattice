@@ -606,6 +606,7 @@ auto_refresh = false
 protocol = "chat-completions"
 base_url = "http://localhost:9/v1"
 auth = "bearer"
+catalog = "local-absent"
 [providers.local.models.current]
 [providers.empty]
 protocol = "chat-completions"
@@ -646,6 +647,14 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
             json!({"status":"unconfigured", "requirement":"api_key"}),
             "bearer provider without a key"
         );
+        assert!(
+            list["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|warning| warning["provider"] == "local"),
+            "unfiltered provider query should report missing catalog warning"
+        );
         let filtered = cli(
             &world,
             &spec,
@@ -658,6 +667,47 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
             filtered["models"].as_array().unwrap().is_empty(),
             "missing bearer credential stayed in --auth"
         );
+        assert!(
+            filtered["warnings"].as_array().unwrap().is_empty(),
+            "skipped provider warning leaked into --auth --provider: {filtered}"
+        );
+        let auth_before_key = cli(&world, &spec, &["--json", "models", "--auth"]);
+        evidence.record_command("models --auth before key json", &auth_before_key);
+        assert!(auth_before_key.is_clean_exit(0), "auth list failed");
+        let auth_before_key: Value = serde_json::from_slice(&auth_before_key.stdout).unwrap();
+        assert!(
+            auth_before_key["models"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|model| model["provider"] == "empty"),
+            "skipped providers leaked into --auth models: {auth_before_key}"
+        );
+        assert!(
+            auth_before_key["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|warning| warning["provider"] == "empty"),
+            "skipped providers leaked into --auth warnings: {auth_before_key}"
+        );
+        let auth_text = cli(&world, &spec, &["models", "--auth"]);
+        evidence.record_command("models --auth before key text", &auth_text);
+        assert!(auth_text.is_clean_exit(0), "auth text list failed");
+        let auth_stdout = String::from_utf8_lossy(&auth_text.stdout);
+        let auth_stderr = String::from_utf8_lossy(&auth_text.stderr);
+        assert!(auth_stdout.contains("empty/listed"), "{auth_stdout}");
+        assert!(auth_stderr.contains("empty: "), "{auth_stderr}");
+        for skipped in ["local", "anthropic", "lmstudio", "ollama"] {
+            assert!(
+                !auth_stdout.contains(&format!("{skipped}/")),
+                "skipped provider {skipped} in stdout: {auth_stdout}"
+            );
+            assert!(
+                !auth_stderr.contains(&format!("{skipped}:")),
+                "skipped provider {skipped} in stderr warnings: {auth_stderr}"
+            );
+        }
         world
             .register_key(
                 ProviderFixture::chat_completions("current"),
@@ -696,6 +746,14 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
         assert!(
             !models.iter().any(|model| model["provider"] == "anthropic"),
             "unready builtin provider leaked into --auth"
+        );
+        assert!(
+            mixed["warnings"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|warning| warning["provider"] == "empty" || warning["provider"] == "local"),
+            "unready provider warning leaked into --auth: {mixed}"
         );
         assert!(
             models
