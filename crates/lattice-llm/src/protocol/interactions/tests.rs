@@ -9,7 +9,7 @@ use lattice_conversation::{MessageSemantic, TokenUsage};
 fn origin() -> ReplayOrigin {
     ReplayOrigin {
         protocol: Protocol::Interactions,
-        provider_id: "test".into(),
+        provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
     }
 }
 
@@ -656,7 +656,8 @@ async fn encoded_signature_limit_applies_before_step_stop() {
 
 #[test]
 fn request_keeps_tool_schema_and_omits_unselected_controls() {
-    let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
+    let mut request =
+        ChatRequest::new(Vec::new(), crate::ModelTarget::test_target("test", "model"));
     request.tools.push(crate::ToolDefinition::new(
         "tool",
         "desc",

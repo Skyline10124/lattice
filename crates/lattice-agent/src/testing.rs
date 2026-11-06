@@ -89,7 +89,7 @@ impl LlmClient for FakeStreamingLlmClient {
             Some(FakeStreamingResponse::Events(events)) => Ok(script_stream(
                 lattice_conversation::ReplayOrigin {
                     protocol: lattice_conversation::Protocol::ChatCompletions,
-                    provider_id: request.target.provider,
+                    provider_id: request.target.model.provider().clone(),
                 },
                 events,
                 control,

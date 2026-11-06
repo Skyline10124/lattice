@@ -4,15 +4,20 @@
 //! LATTICE LLM vocabulary and functional call facade.
 
 pub mod auth;
+mod availability;
+pub use availability::{Availability, ConfigurationRequirement};
 mod client;
 mod tls;
 pub use tls::{load_tls_roots_der, usable_tls_roots_der};
 mod gateway;
-pub use gateway::{GatewayTurn, RequestGateway, ResolvedRequest};
+pub use gateway::{GatewayTurn, PrepareError, RequestGateway, ResolvedRequest};
 pub use protocol::Protocol;
 mod logging;
 mod models;
-pub use models::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning, model_candidates};
+pub use models::{
+    ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning,
+    model_candidates,
+};
 pub(crate) mod metadata;
 pub use metadata::{
     ChatgptCatalogState, MODELS_URL, MetadataError, MetadataRefreshControl, fetch_snapshot,
@@ -20,8 +25,12 @@ pub use metadata::{
 };
 pub mod protocol;
 pub(crate) mod provider;
-pub use provider::{MAX_MODEL_ID_BYTES, ModelRef, ModelRefError};
+pub use lattice_conversation::{
+    MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, ModelId, ModelIdError, ModelRef, ModelRefError,
+    ProviderId, ProviderIdError,
+};
 mod reasoning;
+pub use reasoning::{EffortPolicy, select_effort};
 mod reply;
 mod reply_stream;
 pub mod sse;

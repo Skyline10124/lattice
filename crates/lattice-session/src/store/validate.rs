@@ -4,19 +4,13 @@
 use super::*;
 use lancet_protocol::{CellEvidenceTriple, InvocationBinding, InvocationId, ModelMessageAddress};
 use lattice_conversation::{
-    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, RawToolCall, ToolCallState,
-    validate_tool_call_batch,
+    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderId, RawToolCall,
+    ToolCallState, validate_tool_call_batch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn provider_id(id: &str) -> Result<()> {
-    lattice_conversation::validate_provider_id(id)
-        .map_err(|error| invalid("provider", &error.to_string()))
-}
-
-pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &str) -> Result<()> {
-    provider_id(&origin.provider_id)?;
-    if origin.provider_id != provider {
+pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &ProviderId) -> Result<()> {
+    if &origin.provider_id != provider {
         return Err(invalid("origin", "attempt provider mismatch"));
     }
     Ok(())
@@ -26,7 +20,6 @@ pub(super) fn reply_origin<S: ToolCallState>(
     origin: &AttemptOrigin,
     message: &NativeMessage<S>,
 ) -> Result<()> {
-    provider_id(&origin.provider_id)?;
     if message.provider_origin.as_ref() != Some(origin) {
         return Err(invalid("origin", "reply source mismatch"));
     }
@@ -62,31 +55,10 @@ pub(super) fn stored_config(digest: &[u8; 32], stored: &StoredTurnConfig) -> Res
     Ok(())
 }
 
-pub(super) fn user_fields(
-    agent_name: &str,
-    model: &str,
-    provider_name: &str,
-    limits: &TurnExecutionLimits,
-) -> Result<()> {
-    if agent_name.is_empty() || agent_name.len() > 128 || model.is_empty() || model.len() > 4096 {
-        return Err(invalid("config", "configuration bound exceeded"));
-    }
-    limits.validate()?;
-    provider_id(provider_name)?;
-    super::profile_copy::model_id(model)?;
-    Ok(())
-}
-
 pub(super) fn config(config: &FrozenTurnConfig) -> Result<()> {
     config
         .validate()
         .map_err(|_| invalid("config", "invalid frozen configuration"))?;
-    user_fields(
-        &config.agent_name,
-        &config.model,
-        &config.provider,
-        &config.limits,
-    )?;
     let stored = config.stored();
     let digest = stored.digest()?;
     stored_config(&digest, &stored)
@@ -284,8 +256,6 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     let Some(Node::UserMessage {
         parent: user_parent,
         turn_id,
-        agent_name,
-        model,
         provider: provider_name,
         limits,
         config_digest,
@@ -297,7 +267,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
         return Err(err());
     }
-    user_fields(agent_name, model, provider_name, limits).map_err(|_| err())?;
+    limits.validate().map_err(|_| err())?;
     let stored = r.configs.get(config_digest).ok_or_else(err)?;
     let steps = r.turn_steps(s, t)?;
     if steps.is_empty() {

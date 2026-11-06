@@ -16,7 +16,7 @@ fn adjacent_text_merges_and_each_attempt_replaces_the_previous_segments() {
     observer.emit(TurnEvent::ModelStarted {
         key: first,
         origin: AttemptOrigin {
-            provider_id: "local".into(),
+            provider_id: crate::ProviderId::parse("local").unwrap(),
             protocol: AttemptProtocol::ChatCompletions,
         },
         model: "test".into(),
@@ -62,7 +62,7 @@ fn adjacent_text_merges_and_each_attempt_replaces_the_previous_segments() {
     observer.emit(TurnEvent::ModelStarted {
         key: second,
         origin: AttemptOrigin {
-            provider_id: "local".into(),
+            provider_id: crate::ProviderId::parse("local").unwrap(),
             protocol: AttemptProtocol::ChatCompletions,
         },
         model: "test".into(),

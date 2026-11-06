@@ -383,9 +383,9 @@ fn head_from_node(
     Ok(SessionHead {
         session_id,
         position,
-        agent: copy.profile.agent_name,
-        model: copy.current.model,
-        provider: copy.current.provider,
+        agent: copy.profile.agent_name.as_str().to_owned(),
+        model: copy.current.model.as_str().to_owned(),
+        provider: copy.current.provider.as_str().to_owned(),
         effort: copy.current.effort,
         profile_default_effort: copy.profile.default_effort,
         turn_id: current.turn_id(),

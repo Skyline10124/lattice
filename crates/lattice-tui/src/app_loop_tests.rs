@@ -1266,15 +1266,16 @@ struct Remote {
 impl Harness {
     fn new(new_session: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
+        let unused = lattice_api::AgentName::parse("unused").unwrap();
         let options = TuiOptions {
             session_id: (!new_session).then(|| SESSION.into()),
-            agent: "unused".into(),
+            agent: Some(unused.clone()),
             session_dir: root.path().join("history"),
             project_root: root.path().into(),
         };
         let app = App::new(
             SessionContext {
-                startup_agent: Some("unused".into()),
+                startup_agent: Some(unused),
                 session_id: (!new_session).then(sid),
                 active_agent: "unused".into(),
             },
@@ -2146,7 +2147,7 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
         "submit" => Reply::Now(accepted_reply(r)),
-        "models" => Reply::Now(model_reply(r["target"].as_str())),
+        "models" => Reply::Now(model_reply(&r["query"])),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
@@ -2266,8 +2267,9 @@ async fn existing_submission_keeps_explicit_agent() {
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
-    h.options.agent = "override-agent".into();
-    h.app.pending_agent = Some("override-agent".into());
+    let override_agent = lattice_api::AgentName::parse("override-agent").unwrap();
+    h.options.agent = Some(override_agent.clone());
+    h.app.pending_agent = Some(override_agent);
     let remote = h.remote.clone();
     let driver = async {
         remote.line("hi");
@@ -2342,18 +2344,18 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
     }
 }
 
-fn model_reply(target: Option<&str>) -> Value {
-    let models = match target {
-        None => vec![
-            json!({"provider":"p","model":"ignored","name":null,"context":null,"output":null,"cost":null,"credential_status":"missing","supported_efforts":[]}),
-            json!({"provider":"p","model":"chosen","name":null,"context":null,"output":null,"cost":null,"credential_status":"ready","supported_efforts":["off","low"]}),
-        ],
-        Some(target) => {
-            let (provider, model) = target.split_once('/').unwrap();
-            vec![
-                json!({"provider":provider,"model":model,"name":null,"context":null,"output":null,"cost":null,"credential_status":"ready","supported_efforts":["off","low"]}),
-            ]
-        }
+fn model_reply(query: &Value) -> Value {
+    let models = if let Some(target) = query["target"].as_str() {
+        let (provider, model) = target.split_once('/').unwrap();
+        vec![
+            json!({"provider":provider,"model":model,"name":null,"context":null,"output":null,"cost":null,"availability":{"status":"ready"},"supported_efforts":["off","low"]}),
+        ]
+    } else {
+        assert_eq!(query, &json!({"list":{"provider":null,"ready_only":true}}));
+        vec![
+            json!({"provider":"p","model":"ignored","name":null,"context":null,"output":null,"cost":null,"availability":{"status":"ready"},"supported_efforts":[]}),
+            json!({"provider":"p","model":"chosen","name":null,"context":null,"output":null,"cost":null,"availability":{"status":"ready"},"supported_efforts":["off","low"]}),
+        ]
     };
     response("models", json!({"models":models,"warnings":[]}))
 }
@@ -2361,7 +2363,7 @@ fn model_reply(target: Option<&str>) -> Value {
 #[tokio::test]
 async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input() {
     let peer = Peer::start(|r| match r["operation"].as_str().unwrap() {
-        "models" => Reply::Now(model_reply(r["target"].as_str())),
+        "models" => Reply::Now(model_reply(&r["query"])),
         "submit" => Reply::Now(error_reply(local_error(
             LocalErrorKind::Busy,
             "chosen busy",
@@ -2375,9 +2377,13 @@ async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input()
         remote.wait(|f| f.panel.contains("先用 /model")).await;
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
         remote.line("/model");
-        peer.wait(|s| count(s, "models") == 1).await;
+        let seen = peer.wait(|s| count(s, "models") == 1).await;
+        assert_eq!(
+            requests(&seen, "models").next().unwrap()["query"],
+            json!({"list":{"provider":null,"ready_only":true}})
+        );
         remote
-            .wait(|f| f.panel.contains("p/chosen") && f.panel.contains("无凭据"))
+            .wait(|f| f.panel.contains("p/chosen") && f.panel.contains("p/ignored"))
             .await;
         remote
             .keys
@@ -2393,8 +2399,8 @@ async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input()
         remote.line("/effort");
         let seen = peer.wait(|s| count(s, "models") == 2).await;
         assert_eq!(
-            requests(&seen, "models").nth(1).unwrap()["target"],
-            "p/chosen"
+            requests(&seen, "models").nth(1).unwrap()["query"],
+            json!({"target":"p/chosen"})
         );
         remote
             .wait(|f| f.panel.contains("off") && f.panel.contains("low"))
@@ -2510,8 +2516,8 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
             remote.line("/effort");
             let seen = peer.wait(|s| count(s, "models") == 1).await;
             assert_eq!(
-                requests(&seen, "models").next().unwrap()["target"],
-                "p/pending"
+                requests(&seen, "models").next().unwrap()["query"],
+                json!({"target":"p/pending"})
             );
             remote.press(KeyCode::Char('L'), KeyModifiers::NONE);
             remote
@@ -2558,13 +2564,13 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
                 "接受清除选择后必须精确查询新目标"
             );
             assert_eq!(
-                requests(&seen, "models").nth(1).unwrap()["target"],
-                "other/current"
+                requests(&seen, "models").nth(1).unwrap()["query"],
+                json!({"target":"other/current"})
             );
             assert!(retargeted.panel.contains("过滤：L"));
             assert!(retargeted.panel.contains("加载中"));
             let old = if old_success {
-                let mut result = model_reply(Some("p/pending"));
+                let mut result = model_reply(&json!({"target":"p/pending"}));
                 result["value"]["models"][0]["supported_efforts"] = json!(["low"]);
                 result
             } else {
@@ -2595,7 +2601,7 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
             assert!(
                 after_enter.statusline.contains("off") && !after_enter.statusline.contains("low")
             );
-            let mut result = model_reply(Some("other/current"));
+            let mut result = model_reply(&json!({"target":"other/current"}));
             result["value"]["models"][0]["supported_efforts"] = json!(["max"]);
             new_tx.send(result).unwrap();
             remote

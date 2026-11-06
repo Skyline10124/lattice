@@ -144,7 +144,7 @@ fn request(dir: &std::path::Path) -> TurnRequest {
         session: SubmitSession::New(super::super::new_session_id()),
         workspace: dir.into(),
         input: "测试".into(),
-        agent: Some("local-test".into()),
+        agent: Some(AgentName::parse("local-test").unwrap()),
     }
 }
 fn config(dir: &std::path::Path, endpoint: &str) {
@@ -171,32 +171,6 @@ async fn finish(backend: &Backend, task: tokio::task::JoinHandle<()>) {
     idle(backend).await;
     backend.closed.send_replace(true);
     bounded(task).await.unwrap();
-}
-
-#[tokio::test]
-async fn parent_agent_name_is_rejected_before_acceptance_and_dispatch() {
-    let (dir, backend, client, task) = backend().await;
-    let provider = Provider::start().await;
-    config(dir.path(), &provider.endpoint);
-    std::fs::write(
-        dir.path().join(".lattice/agent.toml"),
-        "schema_version=1\n[agent]\nname='..'\nmodel='local/local-test'\n[prompt]\nsystem='outside'\n",
-    ).unwrap();
-    let mut input = request(dir.path());
-    input.agent = Some("..".into());
-    let error = bounded(client.submit(input.clone())).await.unwrap_err();
-    assert_eq!(error.kind, LocalErrorKind::BadRequest);
-    assert!(
-        error.message.contains("single normal path component"),
-        "{error}"
-    );
-    idle(&backend).await;
-    assert_eq!(
-        client.turn(input.turn_id).await.unwrap_err().kind,
-        LocalErrorKind::NotFound
-    );
-    assert!(provider.finish().await.is_empty());
-    finish(&backend, task).await;
 }
 
 #[tokio::test]
@@ -666,13 +640,13 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
         api.store.accept_turn(&guard, {
             let config = FrozenTurnConfig {
                 effort: None,
-                agent_name: "local-test".into(),
-                model: "test".into(),
-                provider: "local".into(),
+                agent_name: AgentName::parse("local-test").unwrap(),
+                model: ModelId::parse("test").unwrap(),
+                provider: ProviderId::parse("local").unwrap(),
                 system_prompt: None,
                 catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                 limits: TurnExecutionLimits {
-                    timeout_secs: 300,
+                    timeout_secs: crate::TurnTimeout::default(),
                     max_model_steps: 32,
                     max_model_attempts: 2,
                 },
@@ -898,7 +872,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     };
     let attempt_origin = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "local".into(),
+        provider_id: ProviderId::parse("local").unwrap(),
     };
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
@@ -1807,7 +1781,7 @@ async fn existing_orphan_and_root_inherit_copy_without_mutating_old_nodes() {
     idle(&backend).await;
     assert_eq!(client.session_head(sid).await.unwrap().agent, "local-test");
     root_request.turn_id = super::super::new_turn_id();
-    root_request.agent = Some("local-test".into());
+    root_request.agent = Some(AgentName::parse("local-test").unwrap());
     client
         .submit({
             configure_source();

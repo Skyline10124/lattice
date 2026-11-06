@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::{Availability, ConfigurationRequirement};
 use std::{
     fs,
     os::unix::fs::{DirBuilderExt, PermissionsExt, symlink},
@@ -26,7 +27,7 @@ pub(super) fn write(store: &AuthStore, bytes: impl AsRef<[u8]>) {
     fs::set_permissions(path, fs::Permissions::from_mode(0o600)).unwrap();
 }
 
-fn state(store: &AuthStore, provider: &str) -> AuthState {
+fn state(store: &AuthStore, provider: &str) -> Availability {
     store
         .status()
         .unwrap()
@@ -34,7 +35,11 @@ fn state(store: &AuthStore, provider: &str) -> AuthState {
         .into_iter()
         .find(|row| row.provider == provider)
         .unwrap()
-        .status
+        .availability
+}
+
+fn is_invalid(store: &AuthStore, provider: &str) -> bool {
+    matches!(state(store, provider), Availability::Invalid { .. })
 }
 
 #[test]
@@ -100,7 +105,7 @@ fn login_transaction_preserves_other_keys_and_distinguishes_stale_registration()
     assert_eq!(fs::read(store.directory.join("auth.json")).unwrap(), before);
 }
 
-pub(super) fn chatgpt() -> serde_json::Value {
+pub(crate) fn chatgpt() -> serde_json::Value {
     serde_json::json!({"type":"chatgpt", "host_id":"host", "client_id":"client", "account":{"subject":"subject", "email":"user@example.com"}, "tokens":{
         "access_token":"access-test-secret", "refresh_token":"refresh-test-secret", "id_token":"id-test-secret",
         "expires_at":"2020-01-01T00:00:00+00:00", "scopes":["openid", "chatgpt.tokens.use.direct"]
@@ -114,7 +119,7 @@ fn credential_entries_reject_arrays() {
         &store,
         r#"{"version":1,"providers":{"openai":["api_key","example"]}}"#,
     );
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
 }
 
 #[test]
@@ -124,7 +129,7 @@ fn credential_entries_validate_the_entire_provider_id() {
         &store,
         r#"{"version":1,"providers":{"openai/extra":{"type":"api_key","key":"example"}}}"#,
     );
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
 }
 
 #[test]
@@ -148,12 +153,22 @@ fn provider_configuration_errors_keep_path_line_and_reason() {
 #[test]
 fn set_remove_and_current_registry_policy() {
     let (_directory, store) = fixture();
-    assert_eq!(state(&store, "deepseek"), AuthState::Missing);
-    assert_eq!(state(&store, "ollama"), AuthState::Ready);
+    assert_eq!(
+        state(&store, "deepseek"),
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::ApiKey
+        }
+    );
+    assert_eq!(
+        state(&store, "ollama"),
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::Declaration
+        }
+    );
     assert!(!store.directory.exists());
     for provider in ["openai", "anthropic", "google"] {
         store.set(provider, KEY).unwrap();
-        assert_eq!(state(&store, provider), AuthState::Ready);
+        assert_eq!(state(&store, provider), Availability::Ready);
     }
     let path = store.directory.join("auth.json");
     assert_eq!(
@@ -172,7 +187,7 @@ fn set_remove_and_current_registry_policy() {
         store.set("openai", KEY),
         Err(AuthError::UnsupportedAuth)
     ));
-    assert_eq!(state(&store, "openai"), AuthState::Ready);
+    assert_eq!(state(&store, "openai"), Availability::Ready);
     fs::write(
         store.directory.join("providers.toml"),
         "[providers.local]\nprotocol = 'anthropic-messages'\nbase_url = 'http://localhost:8000'\n",
@@ -183,8 +198,13 @@ fn set_remove_and_current_registry_policy() {
     store.remove_api_key("local").unwrap();
     store.remove_api_key("anthropic").unwrap();
     store.remove_api_key("anthropic").unwrap();
-    assert_eq!(state(&store, "anthropic"), AuthState::Missing);
-    assert_eq!(state(&store, "google"), AuthState::Ready);
+    assert_eq!(
+        state(&store, "anthropic"),
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::ApiKey
+        }
+    );
+    assert_eq!(state(&store, "google"), Availability::Ready);
 }
 
 #[test]
@@ -245,7 +265,7 @@ fn owner_read_only_credentials_are_accepted_without_permission_changes() {
     store.set("openai", KEY).unwrap();
     let path = store.directory.join("auth.json");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o400)).unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Ready);
+    assert_eq!(state(&store, "openai"), Availability::Ready);
     assert_eq!(
         fs::metadata(path).unwrap().permissions().mode() & 0o777,
         0o400
@@ -264,7 +284,7 @@ fn configuration_directory_permissions_are_private_and_not_repaired() {
     let path = store.directory.join("auth.json");
     let original = fs::read(&path).unwrap();
     fs::set_permissions(&store.directory, fs::Permissions::from_mode(0o755)).unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
     let reason = "configuration directory permissions are too broad; group and other permissions must be absent; permissions were not changed";
     assert_eq!(
         store.status().unwrap().error.unwrap(),
@@ -283,7 +303,7 @@ fn configuration_directory_permissions_are_private_and_not_repaired() {
     assert!(fs::read(&path).unwrap() == original);
     for mode in [0o700, 0o500, 0o700] {
         fs::set_permissions(&store.directory, fs::Permissions::from_mode(mode)).unwrap();
-        assert_eq!(state(&store, "openai"), AuthState::Ready);
+        assert_eq!(state(&store, "openai"), Availability::Ready);
         assert_eq!(
             fs::metadata(&store.directory).unwrap().permissions().mode() & 0o777,
             mode
@@ -312,8 +332,13 @@ fn invalid_files_are_never_overwritten_and_status_stays_safe() {
     ] {
         write(&store, &source);
         let status = store.status().unwrap();
-        assert_eq!(state(&store, "openai"), AuthState::Invalid);
-        assert_eq!(state(&store, "ollama"), AuthState::Ready);
+        assert!(is_invalid(&store, "openai"));
+        assert_eq!(
+            state(&store, "ollama"),
+            Availability::Unconfigured {
+                requirement: ConfigurationRequirement::Declaration
+            }
+        );
         assert!(status.error.is_some());
         let set = store.set("openai", "replacement").unwrap_err();
         let remove = store.remove_api_key("openai").unwrap_err();
@@ -342,7 +367,7 @@ fn chatgpt_material_survives_api_key_updates_and_logged_out_records_are_valid() 
         .iter()
         .find(|row| row.provider == "chatgpt")
         .unwrap();
-    assert_eq!(row.status, AuthState::Ready);
+    assert_eq!(row.availability, Availability::Ready);
     assert_eq!(row.email.as_deref(), Some("user@example.com"));
     assert_eq!(row.expires_at.as_deref(), Some("2020-01-01T00:00:00+00:00"));
     let document = format::parse(&fs::read(store.directory.join("auth.json")).unwrap()).unwrap();
@@ -372,7 +397,12 @@ fn chatgpt_material_survives_api_key_updates_and_logged_out_records_are_valid() 
             &store,
             serde_json::json!({"version":1,"providers":{"chatgpt":entry}}).to_string(),
         );
-        assert_eq!(state(&store, "chatgpt"), AuthState::Missing);
+        assert_eq!(
+            state(&store, "chatgpt"),
+            Availability::Unconfigured {
+                requirement: ConfigurationRequirement::ChatgptLogin
+            }
+        );
     }
     for path in ["expires_at", "access_token"] {
         let mut entry = chatgpt();
@@ -384,7 +414,7 @@ fn chatgpt_material_survives_api_key_updates_and_logged_out_records_are_valid() 
             &store,
             serde_json::json!({"version":1,"providers":{"chatgpt":entry}}).to_string(),
         );
-        assert_eq!(state(&store, "chatgpt"), AuthState::Invalid);
+        assert!(is_invalid(&store, "chatgpt"));
     }
 }
 
@@ -394,7 +424,7 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
     store.set("openai", KEY).unwrap();
     let path = store.directory.join("auth.json");
     fs::set_permissions(&path, fs::Permissions::from_mode(0o644)).unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
     assert!(store.set("openai", "replacement").is_err());
     assert!(store.remove_api_key("openai").is_err());
     assert_eq!(
@@ -408,7 +438,7 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
     )
     .unwrap();
     symlink("original", &path).unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
     assert!(
         store
             .status()
@@ -420,7 +450,7 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
     assert!(store.set("openai", "replacement").is_err());
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
     fs::remove_dir(&path).unwrap();
     rustix::fs::mknodat(
         rustix::fs::CWD,
@@ -430,14 +460,14 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
         0,
     )
     .unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
     fs::remove_file(&path).unwrap();
     fs::rename(store.directory.join("original"), &path).unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Ready);
+    assert_eq!(state(&store, "openai"), Availability::Ready);
     let alias = store.directory.with_file_name("alias");
     symlink(&store.directory, &alias).unwrap();
     let linked = AuthStore::new(alias);
-    assert_eq!(state(&linked, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&linked, "openai"));
     assert!(
         linked
             .status()
@@ -456,7 +486,7 @@ fn key_and_file_byte_limits_include_serialized_size() {
         assert!(store.set("openai", key).is_err());
     }
     store.set("openai", "k").unwrap();
-    assert_eq!(state(&store, "openai"), AuthState::Ready);
+    assert_eq!(state(&store, "openai"), Availability::Ready);
     store.set("openai", &"é".repeat(8_192)).unwrap();
     let original = fs::read(store.directory.join("auth.json")).unwrap();
     let mut document = format::Document::default();
@@ -476,10 +506,10 @@ fn key_and_file_byte_limits_include_serialized_size() {
     let mut padded = original;
     padded.resize(1_048_576, b' ');
     write(&store, &padded);
-    assert_eq!(state(&store, "openai"), AuthState::Ready);
+    assert_eq!(state(&store, "openai"), Availability::Ready);
     padded.push(b' ');
     write(&store, &padded);
-    assert_eq!(state(&store, "openai"), AuthState::Invalid);
+    assert!(is_invalid(&store, "openai"));
     assert!(store.set("openai", KEY).is_err());
 }
 

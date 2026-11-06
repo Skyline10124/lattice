@@ -61,47 +61,58 @@ async fn credential_cleanup_preserves_each_remote_revocation_result() {
 #[tokio::test]
 async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors() {
     use serde_json::json;
-    let old: Request =
-        serde_json::from_value(json!({"operation":"models","provider":"local"})).unwrap();
-    assert!(
-        matches!(old, Request::Models { provider: Some(provider), target: None } if provider == "local")
-    );
-    for target in [None, Some("local/org/model")] {
+    for requested_query in [
+        ModelCandidateQuery::List {
+            provider: Some(ProviderId::parse("local").unwrap()),
+            ready_only: false,
+        },
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true,
+        },
+        ModelCandidateQuery::Target(ModelRef::parse("local/org/model").unwrap()),
+    ] {
         let peer = Peer::new();
-        let efforts = if target.is_some() {
+        let is_target = matches!(requested_query, ModelCandidateQuery::Target(_));
+        let efforts = if is_target {
             json!([])
         } else {
             json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
         };
-        // 旧形状不带 config_error 仍可读；出错的模型带诊断随列表返回。
+        // 未配置与配置无效的模型随列表一并返回各自 availability。
         let expected: crate::ModelCandidates = serde_json::from_value(json!({
             "models":[{"provider":"local", "model":"org/model", "name":null, "context":null,
-                "output":null, "cost":null, "credential_status":"missing", "supported_efforts":efforts},
+                "output":null, "cost":null,
+                "availability":{"status":"unconfigured", "requirement":"api_key"},
+                "supported_efforts":efforts},
                 {"provider":"local", "model":"broken", "name":null, "context":null,
-                "output":null, "cost":null, "credential_status":"missing", "supported_efforts":[],
-                "config_error":"configuration error: invalid effort"}],
+                "output":null, "cost":null,
+                "availability":{"status":"invalid", "reason":"invalid effort"},
+                "supported_efforts":[]}],
             "warnings":[{"provider":"local", "message":"catalog has no metadata"}]
-        })).unwrap();
-        assert_eq!(expected.models[0].config_error, None);
+        }))
+        .unwrap();
+        assert_eq!(expected.models[0].provider, "local");
+        assert_eq!(expected.models[0].model, "org/model");
         assert_eq!(
-            expected.models[1].config_error.as_deref(),
-            Some("configuration error: invalid effort")
-        );
-        let query = async {
-            match target {
-                Some(target) => peer.client.model(target.into()).await,
-                None => peer.client.models(Some("local".into())).await,
+            expected.models[0].availability,
+            crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey
             }
-        };
+        );
+        assert_eq!(
+            expected.models[1].availability,
+            crate::Availability::Invalid {
+                reason: "invalid effort".into()
+            }
+        );
+        let expected_query = requested_query.clone();
+        let query = peer.client.models(requested_query);
         let server = async {
             let (mut wire, request) = peer.request().await;
             match request {
-                Request::Models {
-                    provider,
-                    target: requested,
-                } => {
-                    assert_eq!(provider.as_deref(), target.is_none().then_some("local"));
-                    assert_eq!(requested.as_deref(), target);
+                Request::Models { query } => {
+                    assert_eq!(query, expected_query);
                 }
                 _ => panic!("expected models query"),
             }
@@ -111,19 +122,18 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
         assert_eq!(actual.unwrap(), expected);
     }
     let peer = Peer::new();
+    let missing = ModelCandidateQuery::Target(ModelRef::parse("missing/model").unwrap());
+    let expected_missing = missing.clone();
     let server = async {
         let (mut wire, request) = peer.request().await;
-        assert!(
-            matches!(request, Request::Models { provider: None, target: Some(target) } if target == "missing/model")
-        );
+        assert!(matches!(request, Request::Models { query } if query == expected_missing));
         wire.reply(Response::Error(LocalError::new(
             LocalErrorKind::BadRequest,
             "provider is not registered",
         )))
         .await;
     };
-    let (result, ()) =
-        within(async { tokio::join!(peer.client.model("missing/model".into()), server) }).await;
+    let (result, ()) = within(async { tokio::join!(peer.client.models(missing), server) }).await;
     let error = result.unwrap_err();
     assert_eq!(error.kind, LocalErrorKind::BadRequest);
     assert_eq!(error.message, "provider is not registered");
@@ -190,7 +200,7 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
         session_id: sid(),
         turn_id: id,
         user_node: NodeId(1),
-        agent_name: "local-test".into(),
+        agent_name: AgentName::parse("local-test").unwrap(),
         accepted_at: "2026-10-17T00:00:00Z".parse().unwrap(),
         ended_at: "2026-10-17T00:00:01Z".parse().unwrap(),
         summary: TurnSummary {
@@ -287,7 +297,7 @@ fn request(peer: &Peer, id: TurnId) -> TurnRequest {
         session: SubmitSession::New(sid()),
         workspace: peer._directory.path().into(),
         input: "原始输入".into(),
-        agent: Some("local-test".into()),
+        agent: Some(AgentName::parse("local-test").unwrap()),
     }
 }
 fn accepted(id: TurnId) -> Response {
@@ -943,11 +953,11 @@ fn user_entry(id: TurnId) -> Box<ConversationEntry> {
             parent: NodeId(0),
             turn_id: id,
             accepted_at: detail(id, true).accepted_at,
-            agent_name: "local-test".into(),
-            model: "test".into(),
-            provider: "openai-compatible".into(),
+            agent_name: AgentName::parse("local-test").unwrap(),
+            model: ModelId::parse("test").unwrap(),
+            provider: ProviderId::parse("openai-compatible").unwrap(),
             limits: lattice_session::store::TurnExecutionLimits {
-                timeout_secs: 300,
+                timeout_secs: crate::TurnTimeout::default(),
                 max_model_steps: 32,
                 max_model_attempts: 2,
             },
@@ -1596,7 +1606,7 @@ async fn status_hints_when_the_backend_reads_the_request_and_closes_without_repl
 /// 从本版本起，后台读到别的魔数会先回写自己的魔数；更旧的魔数要明确报版本不兼容。
 #[tokio::test]
 async fn status_reports_an_older_backend_that_announces_its_magic() {
-    for magic in [b"LTLOCAL5", b"LTLOCAL;"] {
+    for magic in [b"LTLOCAL5", b"LTLOCAL<"] {
         let error = status_against(move |mut stream| {
             Box::pin(async move {
                 // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
@@ -1618,7 +1628,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL=").await.unwrap();
+            stream.write_all(b"LTLOCAL>").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;

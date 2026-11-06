@@ -22,7 +22,7 @@ pub(crate) fn build_request_json(
 ) -> Result<Value, ProjectionError> {
     let projected =
         request_messages_with_replay(origin, &request.messages, super::ReasoningReplay::None)?;
-    let mut body = json!({"model":request.target.model,"input":projected.messages,"stream":true,"store":false});
+    let mut body = json!({"model":request.target.model.model(),"input":projected.messages,"stream":true,"store":false});
     if let Some(system) = projected.system {
         body["system_instruction"] = system.into();
     }

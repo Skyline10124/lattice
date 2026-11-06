@@ -293,9 +293,9 @@ mod tests {
             .unwrap();
         let config = FrozenTurnConfig {
             effort: None,
-            agent_name: "test".into(),
-            model: "model".into(),
-            provider: "openai".into(),
+            agent_name: lattice_session::AgentName::parse("test").unwrap(),
+            model: lattice_conversation::ModelId::parse("model").unwrap(),
+            provider: lattice_conversation::ProviderId::parse("openai").unwrap(),
             system_prompt: None,
             catalog: ToolCatalogSnapshot::new(
                 "build".into(),
@@ -312,7 +312,7 @@ mod tests {
             )
             .unwrap(),
             limits: TurnExecutionLimits {
-                timeout_secs: 30,
+                timeout_secs: lattice_session::TurnTimeout::new(30).unwrap(),
                 max_model_steps: 32,
                 max_model_attempts: 1,
             },
@@ -341,7 +341,7 @@ mod tests {
         };
         let origin = lattice_session::store::AttemptOrigin {
             protocol: lattice_session::store::AttemptProtocol::ChatCompletions,
-            provider_id: "openai".into(),
+            provider_id: lattice_conversation::ProviderId::parse("openai").unwrap(),
         };
         env.db
             .start_request(&lock, key, origin.clone(), now)
@@ -360,7 +360,7 @@ mod tests {
                         MessageRole::Assistant,
                         Some(lattice_conversation::ReplayOrigin {
                             protocol: Protocol::ChatCompletions,
-                            provider_id: "openai".into(),
+                            provider_id: lattice_conversation::ProviderId::parse("openai").unwrap(),
                         }),
                         vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                             call: UnboundToolCall {

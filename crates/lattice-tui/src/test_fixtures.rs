@@ -30,15 +30,14 @@ pub(super) fn model_candidate(
     efforts: &[lattice_api::Effort],
 ) -> lattice_api::ModelCandidate {
     lattice_api::ModelCandidate {
-        provider: provider.into(),
-        model: model.into(),
+        provider: lattice_api::ProviderId::parse(provider).unwrap(),
+        model: lattice_api::ModelId::parse(model).unwrap(),
         name: None,
         context: None,
         output: None,
         supported_efforts: efforts.to_vec(),
         cost: None,
-        credential_status: lattice_api::local::AuthState::Ready,
-        config_error: None,
+        availability: lattice_api::Availability::Ready,
     }
 }
 
@@ -49,7 +48,7 @@ pub(super) fn sid() -> SessionId {
 pub(super) fn test_app(existing: bool) -> App {
     App::new(
         SessionContext {
-            startup_agent: Some("unused".into()),
+            startup_agent: Some(lattice_api::AgentName::parse("unused").unwrap()),
             session_id: existing.then(sid),
             active_agent: "unused".into(),
         },

@@ -3,12 +3,14 @@
 
 use super::*;
 use crate::blocks::BlockId;
-use lattice_api::{Effort, ModelCandidate, ModelCandidates, local::AuthState};
+use lattice_api::{
+    Availability, Effort, ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelRef,
+};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelQuery {
     pub(crate) id: u64,
-    pub(crate) target: Option<String>,
+    pub(crate) query: ModelCandidateQuery,
 }
 
 #[derive(Clone)]
@@ -34,34 +36,42 @@ pub(crate) enum Panel {
 
 /// 只保存这次打开的候选和导航；已选意图由 app 持有。
 pub(crate) struct Picker {
-    query: ModelQuery,
+    query: Option<ModelQuery>,
     filter: String,
     items: Vec<PanelChoice>,
     cursor: usize,
     current: Option<String>,
     loading: bool,
-    empty: &'static str,
+    empty: String,
 }
 
 const NO_EFFORT: &str =
     "该模型不能选择推理强度，可以在 providers.toml 中补充它的推理参数写法或档位";
 const NO_MODEL: &str = "先用 /model 选择模型";
-const CONFIG_ERROR: &str =
-    "该模型的档位配置无效，可以用 lattice models 查看原因并修改 providers.toml";
 
 impl Panel {
     pub(crate) fn models(id: u64, current: Option<String>) -> Self {
-        Self::Model(Picker::new(ModelQuery { id, target: None }, current, true))
+        Self::Model(Picker::new(
+            Some(ModelQuery {
+                id,
+                query: ModelCandidateQuery::List {
+                    provider: None,
+                    ready_only: true,
+                },
+            }),
+            current,
+            true,
+        ))
     }
 
-    pub(crate) fn efforts(id: u64, target: Option<String>, current: Option<Effort>) -> Self {
-        let loading = target.is_some();
-        let mut picker = Picker::new(
-            ModelQuery { id, target },
-            current.map(|effort| effort.to_string()),
-            loading,
-        );
-        picker.empty = NO_MODEL;
+    pub(crate) fn efforts(id: u64, target: Option<ModelRef>, current: Option<Effort>) -> Self {
+        let query = target.map(|target| ModelQuery {
+            id,
+            query: ModelCandidateQuery::Target(target),
+        });
+        let loading = query.is_some();
+        let mut picker = Picker::new(query, current.map(|effort| effort.to_string()), loading);
+        picker.empty = NO_MODEL.into();
         Self::Effort(picker)
     }
 
@@ -89,7 +99,7 @@ impl Panel {
 }
 
 impl Picker {
-    fn new(query: ModelQuery, current: Option<String>, loading: bool) -> Self {
+    fn new(query: Option<ModelQuery>, current: Option<String>, loading: bool) -> Self {
         Self {
             query,
             filter: String::new(),
@@ -97,7 +107,17 @@ impl Picker {
             cursor: 0,
             current,
             loading,
-            empty: "没有可选模型",
+            empty: "没有可选模型".into(),
+        }
+    }
+
+    fn empty_text(&self) -> &str {
+        if self.loading {
+            "加载中"
+        } else if !self.items.is_empty() {
+            "没有匹配项"
+        } else {
+            &self.empty
         }
     }
 
@@ -115,7 +135,7 @@ impl Picker {
             .collect()
     }
 
-    fn replace(&mut self, items: Vec<PanelChoice>, current: Option<String>, empty: &'static str) {
+    fn replace(&mut self, items: Vec<PanelChoice>, current: Option<String>, empty: String) {
         self.items = items;
         self.current = current;
         self.loading = false;
@@ -234,15 +254,20 @@ impl DockState {
 
     pub(crate) fn query(&self) -> Option<ModelQuery> {
         match self.panel.as_ref()? {
-            Panel::Model(picker) => Some(picker.query.clone()),
-            Panel::Effort(picker) if picker.query.target.is_some() => Some(picker.query.clone()),
-            _ => None,
+            Panel::Model(picker) | Panel::Effort(picker) => picker.query.clone(),
+            Panel::Help(_) => None,
         }
     }
 
-    pub(crate) fn effort_target(&self) -> Option<Option<&str>> {
+    pub(crate) fn effort_target(&self) -> Option<Option<&ModelRef>> {
         match self.panel.as_ref()? {
-            Panel::Effort(picker) => Some(picker.query.target.as_deref()),
+            Panel::Effort(picker) => Some(match &picker.query {
+                Some(ModelQuery {
+                    query: ModelCandidateQuery::Target(target),
+                    ..
+                }) => Some(target),
+                _ => None,
+            }),
             _ => None,
         }
     }
@@ -250,16 +275,19 @@ impl DockState {
     pub(crate) fn retarget_effort(
         &mut self,
         id: u64,
-        target: Option<String>,
+        target: Option<ModelRef>,
         current: Option<Effort>,
     ) {
         if let Some(Panel::Effort(picker)) = &mut self.panel {
-            picker.query = ModelQuery { id, target };
+            picker.query = target.map(|target| ModelQuery {
+                id,
+                query: ModelCandidateQuery::Target(target),
+            });
             picker.current = current.map(|effort| effort.to_string());
             picker.items.clear();
             picker.cursor = 0;
-            picker.loading = picker.query.target.is_some();
-            picker.empty = NO_MODEL;
+            picker.loading = picker.query.is_some();
+            picker.empty = NO_MODEL.into();
             self.changed = true;
         }
     }
@@ -273,29 +301,32 @@ impl DockState {
                     .map(|model| PanelChoice::Model(Box::new(model)))
                     .collect(),
                 current,
-                "没有可选模型",
+                "没有可选模型".into(),
             ),
             Some(Panel::Effort(picker)) => {
-                // 配置无效的模型没有可选档位，说明换成配置错误，不让人去补写法。
-                let empty = if result
-                    .models
-                    .iter()
-                    .any(|model| model.config_error.is_some())
-                {
-                    CONFIG_ERROR
-                } else {
-                    NO_EFFORT
-                };
-                picker.replace(
+                // 配置无效的模型显示具体原因且不提供可选档位；未配置的 provider 保留本地可推导档位。
+                if let Some(reason) =
                     result
                         .models
-                        .into_iter()
-                        .flat_map(|model| model.supported_efforts)
-                        .map(PanelChoice::Effort)
-                        .collect(),
-                    current,
-                    empty,
-                )
+                        .iter()
+                        .find_map(|model| match &model.availability {
+                            Availability::Invalid { reason } => Some(reason.clone()),
+                            _ => None,
+                        })
+                {
+                    picker.replace(Vec::new(), current, reason);
+                } else {
+                    picker.replace(
+                        result
+                            .models
+                            .into_iter()
+                            .flat_map(|model| model.supported_efforts)
+                            .map(PanelChoice::Effort)
+                            .collect(),
+                        current,
+                        NO_EFFORT.into(),
+                    );
+                }
             }
             _ => return,
         }
@@ -501,7 +532,15 @@ impl PanelModule<'_> {
         let rows = match self.panel {
             Panel::Help(lines) => body(&lines.join("\n"), content_w, Style::default()).len(),
             Panel::Model(picker) | Panel::Effort(picker) => {
-                picker.matches().len().max(1).saturating_add(1)
+                let matches = picker.matches();
+                let content_rows = if matches.is_empty() {
+                    body(picker.empty_text(), content_w, Style::default())
+                        .len()
+                        .max(1)
+                } else {
+                    matches.len()
+                };
+                content_rows.saturating_add(1)
             }
         };
         u16::try_from(rows.max(1)).unwrap_or(u16::MAX)
@@ -545,19 +584,11 @@ impl PanelModule<'_> {
             area.width,
         )];
         if matches.is_empty() {
-            shown.push(clip_spans(
-                vec![Span::styled(
-                    if picker.loading {
-                        "加载中"
-                    } else if !picker.items.is_empty() {
-                        "没有匹配项"
-                    } else {
-                        picker.empty
-                    },
-                    role_style(Role::Assistant),
-                )],
-                area.width,
-            ));
+            shown.extend(
+                body(picker.empty_text(), area.width, role_style(Role::Assistant))
+                    .into_iter()
+                    .take(height),
+            );
         } else {
             for &index in matches.iter().skip(start).take(height) {
                 let item = &picker.items[index];
@@ -565,14 +596,6 @@ impl PanelModule<'_> {
                 let mut spans = vec![Span::styled(label.clone(), role_style(Role::Assistant))];
                 if picker.current.as_ref() == Some(&label) {
                     spans.push(Span::styled(" · 当前", role_style(Role::DimMeta)));
-                }
-                if let PanelChoice::Model(model) = item {
-                    if model.config_error.is_some() {
-                        spans.push(Span::styled(" · 配置错误", role_style(Role::Warn)));
-                    }
-                    if model.credential_status != AuthState::Ready {
-                        spans.push(Span::styled(" · 无凭据", role_style(Role::DimMeta)));
-                    }
                 }
                 shown.push(clip_spans(spans, area.width));
             }

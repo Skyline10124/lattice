@@ -5,8 +5,8 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
-    #[error("agent name '{name}' must be a single normal path component without '/' or NUL")]
-    InvalidAgentName { name: String },
+    #[error("{path}: {reason}")]
+    Protection { path: PathBuf, reason: String },
 
     #[error("I/O error at {path}: {source}")]
     Io {
@@ -103,9 +103,4 @@ pub enum ProfileError {
         project_path: PathBuf,
         global_path: PathBuf,
     },
-
-    #[error(
-        "no default agent profile found: create {dir}/agent.toml, or specify an agent with `--agent <name>`"
-    )]
-    MissingDefault { dir: PathBuf, template: String },
 }

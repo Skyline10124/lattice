@@ -910,7 +910,7 @@ mod tests {
     pub(super) fn test_app() -> App {
         App::new(
             SessionContext {
-                startup_agent: Some("test".into()),
+                startup_agent: Some(lattice_api::AgentName::parse("test").unwrap()),
                 session_id: None,
                 active_agent: "agent".into(),
             },

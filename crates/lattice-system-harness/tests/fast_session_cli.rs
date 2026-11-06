@@ -204,6 +204,25 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             )
             .unwrap();
         }
+        let oversized_agent = "a".repeat(129);
+        for subcommand in [vec!["session", "send"], vec!["run"]] {
+            let mut args = subcommand;
+            args.extend(["oversized agent", "--agent", &oversized_agent]);
+            let rejected = cli(&world, &spec, &args);
+            evidence.record_command("oversized CLI --agent", &rejected);
+            assert!(rejected.is_clean_exit(2), "{}", rejected.summary());
+            let stdout = String::from_utf8_lossy(&rejected.stdout);
+            let stderr = String::from_utf8_lossy(&rejected.stderr);
+            assert!(
+                stderr.contains("agent name must be at most 128 bytes"),
+                "expected agent name length error in stderr, got: {stderr}"
+            );
+            assert!(
+                !stdout.contains("new Session requires explicit agent")
+                    && !stderr.contains("new Session requires explicit agent"),
+                "oversized --agent must not report missing explicit agent"
+            );
+        }
         assert_eq!(server.captured_requests().len(), 2);
         support::record_session(
             &send,
@@ -283,7 +302,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
     for (case, expected) in [
         ("missing-profile", "agent profile 'missing' not found"),
         ("toml", "line 2"),
-        ("missing-key", "credentials are missing"),
+        ("missing-key", "lattice auth set local"),
         ("invalid-auth", "auth.json:"),
         ("provider-missing-invalid-auth", "available providers:"),
         ("provider-config", "providers.toml"),
@@ -293,8 +312,11 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("tools", "unknown enabled tools [\"[REDACTED]\"]"),
         ("tools-known-key", "unknown enabled tools [\"[REDACTED]\"]"),
         ("short-key", "unknown enabled tools [\"EMPTY\"]"),
-        ("agent-name", "must match selected agent 'plain'"),
-        ("long-profile", "declares '[REDACTED]'"),
+        ("agent-name", "expected `plain`"),
+        (
+            "long-profile",
+            "invalid value `[REDACTED]` for `name` in [agent]",
+        ),
         ("oauth-chatgpt", "ChatGPT is not signed in"),
         ("cli-provider", "available providers:"),
         ("cli-effort", "does not support reasoning effort off"),
@@ -401,6 +423,9 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             ];
             let mut messages = Vec::new();
             for mut args in commands {
+                if case == "model-typo" {
+                    args.extend(["--model", &model]);
+                }
                 if case == "cli-provider" {
                     args.extend(["--model", "absent/model"]);
                 }
@@ -425,9 +450,24 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                     message.contains(expected),
                     "{case}: missing expected rejection reason"
                 );
+                if case == "model-typo" {
+                    let canonical_profile = path.canonicalize().unwrap();
+                    assert!(
+                        message.contains(&canonical_profile.display().to_string()),
+                        "{case}: missing profile path in {message}"
+                    );
+                    assert!(
+                        message.contains("for `model` in [agent]"),
+                        "{case}: missing [agent].model location in {message}"
+                    );
+                }
                 if case == "agent-name" {
                     // 后台按已知凭据值和密钥形状脱敏，前端不读取 key。
-                    assert!(message.contains("declares '[REDACTED]:[REDACTED]'"));
+                    assert!(
+                        message.contains(
+                            "invalid value `[REDACTED]:[REDACTED]` for `name` in [agent]"
+                        )
+                    );
                 }
                 if matches!(case, "tools" | "tools-known-key") {
                     assert!(message.contains("available catalog tools:"));

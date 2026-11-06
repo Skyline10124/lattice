@@ -9,10 +9,10 @@
 - `local/metadata.rs`：协调 models.dev 与账号模型目录的自动、手动、登录后和缺目录刷新，按来源共享在途操作，并由同一个任务调度；新鲜度、退避、开关与部分失败规则见[元数据合同](../../docs/architecture/llm.md#元数据的来源与合并)。停止时取消发布并排空目录文件工作，Turn 与认证的停止顺序仍由 server 负责。
 - `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
 - `local/server.rs`：serve 持实例资源和连接，并在启动时拉起元数据刷新任务。Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。`stop` 先取消刷新任务并停止登录，已接管 Turn 收尾后再关闭认证生命周期、排空连接。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
-- `models.rs`：公开模型候选类型，并转发日志初始化。
+- `models.rs`：重导出公开模型候选与查询类型（`ModelCandidateQuery`、`Availability`、`ConfigurationRequirement`），并转发日志初始化。
 - `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。
-- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：后台按项目根与启动时的配置目录查找 profile、校验名称一致性、加载系统提示并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session.md#配置拒绝的原因)。
-- `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；start_turn 用于后台执行接线，run_turn/stream_turn 仅供测试复用核心。
+- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：委托 `lattice-profile::load_agent_profile` 完成发现、权限检查与字段解析（API 层不再重复检查 profile 名称、超时或重试字段），再解析外部策略文件并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session.md#配置拒绝的原因)。
+- `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；准入经 `GatewayTurn::prepare` 一次完成可用性核对与 `EffortPolicy` 档位选择，并为不支持的档位标明来源（`--effort`、`agent.toml` 的 `[agent].effort` 或会话副本）；`start_turn` 用于后台执行接线，`run_turn`/`stream_turn` 仅供测试复用核心。
 - `turn/cep.rs`：profile→policy、Tool 事件映射及生产依赖接线；首次共享 Component 组成经 spawn_blocking，组装仍归 lancet-api。
 - coordinator/saga 模块：阻塞存储适配、可注入 IdSource、调用登记、顺序执行、槽位终态、Step/Turn 关闭及会话退回。
 - `stores.rs`：共享会话库句柄与库级停写、排空和重开；`turn/observer.rs`：当前尝试已生成的正文与 reasoning（段列表，视图从中推送生成中的文字），以及每个观察者待推送的条目与已发文字的位置。

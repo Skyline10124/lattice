@@ -11,9 +11,9 @@ use std::{
 
 use crate::auth::{AuthError, AuthStore, ChatgptAuth, Credentials};
 use crate::client::{self, RequestEndpoint, TurnClient};
-use crate::provider::{Auth, Provider, config::ProviderRegistry, validate_model_id};
+use crate::provider::{Auth, Provider, config::ProviderRegistry};
 use crate::reasoning::{ReasoningCapabilities, ReasoningPlan};
-use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, StreamControl};
+use crate::{ChatRequest, LlmError, LlmStream, ModelTarget, ProviderId, StreamControl};
 
 mod cost;
 
@@ -152,10 +152,71 @@ impl RequestGateway {
     }
 }
 
+/// 准入与每次请求前共用的单次配置准备错误。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PrepareError {
+    ProviderNotFound {
+        provider: ProviderId,
+        providers_path: PathBuf,
+        available: Vec<ProviderId>,
+    },
+    Unavailable {
+        model: crate::ModelRef,
+        availability: crate::Availability,
+        providers_path: PathBuf,
+    },
+    UnsupportedEffort {
+        model: crate::ModelRef,
+        effort: lattice_conversation::Effort,
+    },
+    Configuration {
+        message: String,
+    },
+}
+
+impl PrepareError {
+    fn detail(&self) -> String {
+        match self {
+            Self::ProviderNotFound {
+                provider,
+                providers_path,
+                available,
+            } => unregistered_provider_message(provider.as_str(), providers_path, available),
+            Self::Unavailable {
+                model,
+                availability,
+                providers_path,
+            } => availability
+                .diagnostic(model.provider().as_str(), providers_path)
+                .unwrap_or_else(|| format!("model {model} is unavailable")),
+            Self::UnsupportedEffort { model, effort } => format!(
+                "model {model} does not support reasoning effort {effort} with its current metadata and features"
+            ),
+            Self::Configuration { message } => message.clone(),
+        }
+    }
+}
+
+impl std::fmt::Display for PrepareError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "configuration error: {}", self.detail())
+    }
+}
+
+impl std::error::Error for PrepareError {}
+
+impl From<PrepareError> for LlmError {
+    fn from(error: PrepareError) -> Self {
+        Self::Config {
+            message: error.detail(),
+        }
+    }
+}
+
 /// provider 与 base_url 共同区分连接，凭据始终放在单次请求中。
 pub struct GatewayTurn {
     configuration: Arc<Configuration>,
-    clients: Mutex<BTreeMap<(String, String), Arc<TurnClient>>>,
+    clients: Mutex<BTreeMap<(ProviderId, String), Arc<TurnClient>>>,
 }
 
 impl GatewayTurn {
@@ -163,54 +224,30 @@ impl GatewayTurn {
         AuthStore::new(self.configuration.directory.clone())
     }
 
-    /// 只读当前 provider 与模型元数据，返回按强度排序的可表达档位；不要求凭据。
-    /// target 的 effort 不参与能力查询，发送前仍须 resolve 最终选择。
-    pub async fn supported_efforts(
+    /// 对注册表、凭据、元数据各最多读取一次，按顺序完成 provider 查找、模型层可用性判定、
+    /// TLS 根检查与档位选择，并构造本次请求的解析句柄。
+    pub async fn prepare(
         &self,
-        target: &ModelTarget,
-    ) -> Result<Vec<lattice_conversation::Effort>, LlmError> {
-        lattice_conversation::validate_provider_id(&target.provider)
-            .map_err(configuration_error)?;
-        validate_model_id(&target.model).map_err(configuration_error)?;
+        model: &crate::ModelRef,
+        policy: crate::EffortPolicy,
+    ) -> Result<ResolvedRequest, PrepareError> {
         let directory = self.configuration.directory.clone();
-        let target = target.clone();
-        tokio::task::spawn_blocking(move || {
-            let registry = ProviderRegistry::load(directory.join("providers.toml"))
-                .map_err(configuration_error)?;
-            let provider = registry
-                .get(&target.provider)
-                .ok_or_else(|| missing_provider_error(&registry, &target.provider))?;
-            let models = crate::metadata::Metadata::load(&directory).merge(provider);
-            crate::reasoning::supported_efforts(provider, &target.model, models.get(&target.model))
-        })
-        .await
-        .map_err(|_| configuration_error("model capabilities task failed"))?
-    }
-
-    /// 每次解析读取当前配置与凭据；发送句柄独占这一次解析结果。
-    pub async fn resolve(&self, target: &ModelTarget) -> Result<ResolvedRequest, LlmError> {
-        let provider_id = target.provider.as_str();
-        lattice_conversation::validate_provider_id(provider_id).map_err(configuration_error)?;
-        validate_model_id(&target.model).map_err(configuration_error)?;
-        let directory = self.configuration.directory.clone();
-        let provider_id = provider_id.to_owned();
-        let model_id = target.model.clone();
-        let effort = target.effort;
-        let LoadedProvider {
+        let has_usable_roots = self.configuration.has_usable_roots();
+        let model = model.clone();
+        let PreparedProvider {
             provider,
             credentials,
+            target,
             output_limit,
             model_reasoning,
             reasoning,
         } = tokio::task::spawn_blocking(move || {
-            load_provider(directory, &provider_id, &model_id, effort)
+            prepare_provider(directory, has_usable_roots, &model, policy)
         })
         .await
-        .map_err(|_| configuration_error("provider configuration task failed"))??;
-        // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
-        if !self.configuration.has_usable_roots() {
-            require_endpoint_without_tls_roots(&provider.base_url)?;
-        }
+        .map_err(|_| PrepareError::Configuration {
+            message: "provider configuration task failed".into(),
+        })??;
         let client = self
             .clients
             .lock()
@@ -218,17 +255,23 @@ impl GatewayTurn {
             .entry((provider.id.clone(), provider.base_url.clone()))
             .or_default()
             .clone();
-        client::validate_configuration(provider.auth, &provider.id, &credentials)?;
         Ok(ResolvedRequest {
             configuration: self.configuration.clone(),
             provider,
             credentials: Arc::new(credentials),
             client,
-            target: target.clone(),
+            target,
             output_limit,
             model_reasoning,
             reasoning,
         })
+    }
+
+    /// 每次请求前使用同一判定与严格策略重读当前配置与凭据。
+    pub async fn resolve(&self, target: &ModelTarget) -> Result<ResolvedRequest, LlmError> {
+        self.prepare(&target.model, crate::EffortPolicy::Strict(target.effort))
+            .await
+            .map_err(Into::into)
     }
 
     #[cfg(test)]
@@ -257,6 +300,10 @@ pub struct ResolvedRequest {
 }
 
 impl ResolvedRequest {
+    pub fn target(&self) -> &ModelTarget {
+        &self.target
+    }
+
     pub fn origin(&self) -> lattice_conversation::ReplayOrigin {
         lattice_conversation::ReplayOrigin {
             protocol: self.provider.protocol,
@@ -283,7 +330,7 @@ impl ResolvedRequest {
             request,
             RequestEndpoint {
                 provider: &self.provider.id,
-                model: &self.target.model,
+                model: self.target.model.model(),
                 base_url: &self.provider.base_url,
                 protocol: self.provider.protocol,
                 auth: self.provider.auth,
@@ -297,7 +344,7 @@ impl ResolvedRequest {
                 features: self
                     .provider
                     .models
-                    .get(&self.target.model)
+                    .get(self.target.model.model())
                     .map_or(self.provider.features, |model| model.features),
             },
             control,
@@ -316,13 +363,15 @@ impl ResolvedRequest {
 /// provider 载入时已用 `net_guard::validate_base_url_static` 校验 `base_url`（能解析、只允许
 /// http/https），按现有代码路径这里不会遇到无法解析的地址；仍按失败即关闭处理，避免日后载入
 /// 规则变化时把无法解析的地址当成 http 放行。
-fn require_endpoint_without_tls_roots(base_url: &str) -> Result<(), LlmError> {
+fn require_endpoint_without_tls_roots(base_url: &str) -> Result<(), PrepareError> {
     match url::Url::parse(base_url) {
         Ok(url) if url.scheme() == "http" => Ok(()),
-        Ok(_) => Err(configuration_error(NO_USABLE_TLS_ROOTS)),
-        Err(error) => Err(configuration_error(format!(
-            "invalid provider endpoint URL ({error}); {NO_USABLE_TLS_ROOTS}"
-        ))),
+        Ok(_) => Err(PrepareError::Configuration {
+            message: NO_USABLE_TLS_ROOTS.into(),
+        }),
+        Err(error) => Err(PrepareError::Configuration {
+            message: format!("invalid provider endpoint URL ({error}); {NO_USABLE_TLS_ROOTS}"),
+        }),
     }
 }
 
@@ -341,61 +390,122 @@ pub(crate) fn load_configuration(
     Ok((registry, credentials))
 }
 
-struct LoadedProvider {
+struct PreparedProvider {
     provider: Provider,
     credentials: Credentials,
+    target: ModelTarget,
     output_limit: Option<u64>,
     model_reasoning: Option<bool>,
     reasoning: Option<ReasoningPlan>,
 }
 
-fn load_provider(
+fn prepare_provider(
     directory: PathBuf,
-    id: &str,
-    model_id: &str,
-    effort: Option<lattice_conversation::Effort>,
-) -> Result<LoadedProvider, LlmError> {
-    let (registry, credentials) = load_configuration(&directory)?;
+    has_usable_roots: bool,
+    model: &crate::ModelRef,
+    policy: crate::EffortPolicy,
+) -> Result<PreparedProvider, PrepareError> {
+    let providers_path = directory.join("providers.toml");
+    let credentials = AuthStore::new(directory.clone()).load();
+    let registry =
+        ProviderRegistry::load(&providers_path).map_err(|error| PrepareError::Configuration {
+            message: error.to_string(),
+        })?;
+    let id = model.provider().as_str();
+    let model_id = model.model().as_str();
     let provider = registry
         .get(id)
         .cloned()
-        .ok_or_else(|| missing_provider_error(&registry, id))?;
+        .ok_or_else(|| PrepareError::ProviderNotFound {
+            provider: model.provider().clone(),
+            providers_path: providers_path.clone(),
+            available: registry
+                .iter()
+                .map(|provider| provider.id.clone())
+                .collect(),
+        })?;
+    let (availability, loaded_model) =
+        crate::availability::model_availability(&provider, credentials.as_ref(), || {
+            let models = crate::metadata::Metadata::load(&directory).merge(&provider);
+            let model_meta = models.get(model_id);
+            let limits = model_meta.and_then(|entry| entry.limit.as_ref());
+            let output_limit = limits.and_then(|limit| limit.output);
+            let model_reasoning = model_meta.and_then(|entry| entry.reasoning);
+            let features = provider
+                .models
+                .get(model_id)
+                .map_or(provider.features, |entry| entry.features);
+            let capabilities = ReasoningCapabilities::new(id, model_id, model_meta, features)?;
+            Ok((output_limit, model_reasoning, capabilities))
+        });
+    if availability != crate::Availability::Ready {
+        return Err(PrepareError::Unavailable {
+            model: model.clone(),
+            availability,
+            providers_path,
+        });
+    }
+    // 没有可用根证书时 https 端点按配置错误拒绝，不回退平台根；http 端点照常。
+    if !has_usable_roots {
+        require_endpoint_without_tls_roots(&provider.base_url)?;
+    }
+    let (output_limit, model_reasoning, capabilities) =
+        loaded_model.expect("ready model availability yields loaded model configuration");
+    let supported = capabilities.supported_efforts();
+    let effort = crate::reasoning::select_effort(&policy, &supported).map_err(|effort| {
+        PrepareError::UnsupportedEffort {
+            model: model.clone(),
+            effort,
+        }
+    })?;
+    let reasoning = effort.map(|effort| {
+        capabilities
+            .select(effort)
+            .expect("supported effort has reasoning plan")
+    });
     let credentials = match credentials {
         Ok(credentials) => credentials,
         Err(_) if provider.auth == Auth::None => Credentials::default(),
-        Err(error) => return Err(configuration_error(error)),
+        Err(_) => unreachable!("unavailable provider was already rejected"),
     };
-    let models = crate::metadata::Metadata::load(&directory).merge(&provider);
-    let model = models.get(model_id);
-    let limits = model.and_then(|model| model.limit.as_ref());
-    let output_limit = limits.and_then(|limit| limit.output);
-    let features = provider
-        .models
-        .get(model_id)
-        .map_or(provider.features, |model| model.features);
-    let capabilities = ReasoningCapabilities::new(id, model_id, model, features)?;
-    let reasoning = effort.map(|effort| {
-        capabilities.select(effort).ok_or_else(|| configuration_error(format!(
-            "model {id}/{model_id} does not support reasoning effort {effort} with its current metadata and features"
-        )))
-    }).transpose()?;
-    Ok(LoadedProvider {
+    Ok(PreparedProvider {
         provider,
         credentials,
+        target: ModelTarget {
+            model: model.clone(),
+            effort,
+        },
         output_limit,
-        model_reasoning: model.and_then(|model| model.reasoning),
+        model_reasoning,
         reasoning,
     })
 }
 
-pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {
-    configuration_error(format!(
-        "provider {id:?} is not registered; available providers: {}",
-        registry
-            .iter()
-            .map(|provider| provider.id.as_str())
-            .collect::<Vec<_>>()
-            .join(", ")
+fn unregistered_provider_message<'a>(
+    id: &str,
+    providers_path: &Path,
+    available: impl IntoIterator<Item = &'a ProviderId>,
+) -> String {
+    let available = available
+        .into_iter()
+        .map(ProviderId::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "provider {id:?} is not registered; add [providers.{id}] with required `protocol` and `base_url` in {} (available providers: {available})",
+        providers_path.display()
+    )
+}
+
+pub(crate) fn missing_provider_error(
+    registry: &ProviderRegistry,
+    id: &str,
+    providers_path: &Path,
+) -> LlmError {
+    configuration_error(unregistered_provider_message(
+        id,
+        providers_path,
+        registry.iter().map(|provider| &provider.id),
     ))
 }
 

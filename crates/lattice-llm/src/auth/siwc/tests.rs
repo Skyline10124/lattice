@@ -2,9 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::auth::{
-    AuthState, Secret,
-    tests::{chatgpt, fixture, write},
+use crate::{
+    Availability, ConfigurationRequirement,
+    auth::{
+        Secret,
+        tests::{chatgpt, fixture, write},
+    },
 };
 use futures::{
     future::{BoxFuture, join_all},
@@ -370,14 +373,14 @@ async fn inference_waits_for_refresh_publication_and_uses_its_header_and_redacti
     let auth = f.auth.clone();
     let credentials = Arc::new(f.store.load().unwrap());
     let send = tokio::spawn(async move {
-        let mut request =
-            crate::ChatRequest::new(vec![], crate::ModelTarget::new("chatgpt", "model"));
+        let target = crate::ModelTarget::test_target("chatgpt", "model");
+        let mut request = crate::ChatRequest::new(vec![], target.clone());
         request.client_request_id = Some("session".into());
         crate::client::dispatch(
             request,
             crate::client::RequestEndpoint {
-                provider: "chatgpt",
-                model: "model",
+                provider: target.model.provider(),
+                model: target.model.model(),
                 base_url: &url,
                 protocol: crate::protocol::Protocol::Responses,
                 auth: crate::provider::Auth::OauthChatgpt,
@@ -778,7 +781,12 @@ async fn cleanup_reports_revocation_and_keeps_exact_material_and_cache_rules() {
                 .into_iter()
                 .find(|row| row.provider == "chatgpt")
                 .unwrap();
-            assert_eq!(row.status, AuthState::Missing);
+            assert_eq!(
+                row.availability,
+                Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::ChatgptLogin
+                }
+            );
             assert!(row.expires_at.is_none());
             assert_eq!(row.email.is_none(), remove);
             assert_eq!(f.auth.logout().await.unwrap(), RevocationStatus::NotNeeded);
@@ -823,7 +831,7 @@ async fn refresh_diagnostics_redact_before_bounding_and_status_does_not_refresh(
         .into_iter()
         .find(|row| row.provider == "chatgpt")
         .unwrap();
-    assert_eq!(row.status, AuthState::Ready);
+    assert_eq!(row.availability, Availability::Ready);
     assert_eq!(f.endpoint.calls.load(Ordering::SeqCst), 0);
     *f.endpoint.outcome.lock().unwrap() = Outcome::Failure(LlmError::Transport {
         message: format!(

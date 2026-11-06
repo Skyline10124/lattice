@@ -26,10 +26,14 @@ pub mod turn;
 pub use lancet_api::CompositionError;
 pub use lattice_conversation::Effort;
 pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
-pub use lattice_session::{ProjectStoreKey, StateLayout};
+pub use lattice_session::{
+    AgentName, AgentNameError, ProjectStoreKey, RetryPolicy, RetryPolicyError, StateLayout,
+    TurnTimeout, TurnTimeoutError,
+};
 pub use models::{
-    ModelCandidate, ModelCandidates, ModelPrice, ModelRef, ModelRefError, ModelWarning,
-    init_logging,
+    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery, ModelCandidates,
+    ModelId, ModelIdError, ModelPrice, ModelRef, ModelRefError, ModelWarning, ProviderId,
+    ProviderIdError, init_logging,
 };
 pub use profile::LoadedAgentProfile;
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};

@@ -1,7 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::local::{self, AuthState, LocalClient, LocalErrorKind, Request, Response, ipc};
+use crate::local::{
+    self, Availability, ConfigurationRequirement, LocalClient, LocalErrorKind, Request, Response,
+    ipc,
+};
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
 const KEY: &str = "auth-ipc-test-secret-9E82";
@@ -66,11 +69,13 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
             .into_iter()
             .find(|row| row.provider == provider)
             .unwrap()
-            .status
+            .availability
     };
     assert_eq!(
         state(client.auth_status().await.unwrap(), "openai"),
-        AuthState::Missing
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::ApiKey
+        }
     );
     client.auth_set("openai", KEY.into()).await.unwrap();
     for key in ["".into(), "bad\nkey".into(), "k".repeat(16_385)] {
@@ -86,7 +91,7 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(denied.unwrap_err().kind, LocalErrorKind::Permission);
     let status = client.auth_status().await.unwrap();
-    assert_eq!(state(status.clone(), "openai"), AuthState::Ready);
+    assert_eq!(state(status.clone(), "openai"), Availability::Ready);
     assert!(!serde_json::to_string(&status).unwrap().contains(KEY));
     assert!(!format!("{status:?}").contains(KEY));
     for provider in ["not-registered", "ollama", "chatgpt"] {
@@ -142,7 +147,9 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     assert!(!client.auth_remove("openai").await.unwrap().removed);
     assert_eq!(
         state(client.auth_status().await.unwrap(), "openai"),
-        AuthState::Missing
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::ApiKey
+        }
     );
     fs::write(
         config.join("providers.toml"),
@@ -152,7 +159,7 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     client.auth_set("custom", KEY.into()).await.unwrap();
     assert_eq!(
         state(client.auth_status().await.unwrap(), "custom"),
-        AuthState::Ready
+        Availability::Ready
     );
     fs::write(config.join("providers.toml"), "[providers.custom]\nprotocol = 'generate-content'\nbase_url = 'http://localhost:8000'\nauth = 'none'\n").unwrap();
     assert_eq!(
@@ -169,8 +176,11 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     )
     .unwrap();
     let status = client.auth_status().await.unwrap();
-    assert_eq!(state(status.clone(), "openai"), AuthState::Invalid);
-    assert_eq!(state(status.clone(), "custom"), AuthState::Ready);
+    assert!(matches!(
+        state(status.clone(), "openai"),
+        Availability::Invalid { .. }
+    ));
+    assert_eq!(state(status.clone(), "custom"), Availability::Ready);
     assert!(!serde_json::to_string(&status).unwrap().contains(KEY));
     assert_eq!(
         client

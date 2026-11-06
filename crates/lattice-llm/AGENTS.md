@@ -6,12 +6,13 @@
 
 目录按职责划分，协议与 provider 分开：
 
-- `gateway.rs`：`GatewayTurn::resolve` 读取当前注册表与凭据，返回封装协议与认证的 `ResolvedRequest`；发送沿用该结果。`tls.rs` 原样载入平台根 DER，不筛选，可能为空；网关在 `RequestGateway::new` 中按 `select_roots` 筛选，并判定有没有可用的根（`has_usable_tls_roots`，`GatewayTurn::resolve` 用同一判定）；后台把网关筛选后的同一份 DER 交给 Tool Host。
+- `gateway.rs` 与 `gateway/`：`GatewayTurn::prepare` 在一次配置与凭据读取中完成准入可用性核对与 `EffortPolicy`（`Strict` / `Fallback`）档位选择；`GatewayTurn::resolve` 在每次请求尝试时读取当前注册表与凭据，返回封装协议与认证的 `ResolvedRequest`，发送沿用该结果。`tls.rs` 原样载入平台根 DER，不筛选，可能为空；网关在 `RequestGateway::new` 中按 `select_roots` 筛选，并判定有没有可用的根（`has_usable_tls_roots`，`prepare` 与 `resolve` 共用同一判定）；后台把网关筛选后的同一份 DER 交给 Tool Host。
+- `availability.rs`：统一的 provider 与模型可用性判定（`Availability`：`Ready`、`Unconfigured` 附 `ConfigurationRequirement`、`Invalid` 附 `reason`）及缺项补救提示，`prepare`、`resolve`、`models` 与 `auth status` 共用这一处判定。
 - `protocol/`：协议适配器，每个协议一个模块（`chat_completions`、`responses`、`anthropic_messages`、`generate_content`、`interactions`），负责该协议的请求体、流式事件、用量换算与 features；各适配器共用的消息投影 `protocol/projection/` 是唯一的生产消息 codec。这里不出现任何厂商名。
-- `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并、按 `id` 查找。这里不含协议代码。
+- `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并（含是否在 `providers.toml` 显式声明的 `declared` 事实）、按 `ProviderId` 查找。这里不含协议代码。
 - `metadata/`：内置快照、缓存与手写元数据的合并与刷新，以及账号目录的解析、缓存和单次拉取。定时与并发触发协调归 API；账号 GET 经共享认证对象取 token，发布时核对凭据生命周期。
-- `src/models.rs`：候选、限制、价格、凭据状态与缺失元数据提示。
-- `auth/`：凭据库，含 auth.json 格式、文件读写、API key 管理、状态与比较更新；`auth/siwc/` 封装 Sign in with ChatGPT，内部按生命周期、完整登录与 OpenAI 端点操作分文件；网关共享的认证生命周期对象管理登录、取可用 token、登出和移除。`stop_logins` 只停止登录，最终 `shutdown` 排空认证工作，顺序见会话合同。
+- `src/models.rs`：按 `ModelCandidateQuery`（`List { provider, ready_only }` 或 `Target(ModelRef)`）查询候选、限制、价格、`availability`、可选档位与缺失元数据警告。
+- `auth/`：凭据库，含 `auth.json` 格式、文件读写、API key 管理、凭据事实读取与比较更新；`auth/siwc/` 封装 Sign in with ChatGPT，内部按生命周期、完整登录与 OpenAI 端点操作分文件；网关共享的认证生命周期对象管理登录、取可用 token、登出和移除，`auth status` 组合凭据事实与 `availability` 输出状态。`stop_logins` 只停止登录，最终 `shutdown` 排空认证工作，顺序见会话合同。
 - `transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After；`client.rs`：HTTP 行为、Turn 内 client 复用与连接安全；`sse.rs`：流解析；`types.rs`：请求信封、工具定义与流事件。
 - `reply.rs`：同步回复累积器，统一有序部件、实时文字投影、限额与完整消息；`reply_stream.rs`：惰性流消费、取消与 deadline、唯一终态交付。
 - `stub.rs`：测试客户端；`logging.rs`：日志初始化。

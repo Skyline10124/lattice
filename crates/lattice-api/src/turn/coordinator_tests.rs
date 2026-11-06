@@ -21,9 +21,9 @@ fn iid(n: u64) -> InvocationId {
 fn input() -> AcceptTurn {
     let config = FrozenTurnConfig {
         effort: None,
-        agent_name: "alpha".into(),
-        model: "model".into(),
-        provider: "openai".into(),
+        agent_name: crate::AgentName::parse("alpha").unwrap(),
+        model: crate::ModelId::parse("model").unwrap(),
+        provider: crate::ProviderId::parse("openai").unwrap(),
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(
             "test-build".into(),
@@ -36,7 +36,7 @@ fn input() -> AcceptTurn {
         )
         .unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: 300,
+            timeout_secs: crate::TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 3,
         },
@@ -56,7 +56,7 @@ fn input() -> AcceptTurn {
 fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "openai".into(),
+        provider_id: crate::ProviderId::parse("openai").unwrap(),
     }
 }
 fn reply(turn_id: TurnId) -> CompleteReply {
@@ -74,7 +74,7 @@ fn reply(turn_id: TurnId) -> CompleteReply {
             MessageRole::Assistant,
             Some(lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
-                provider_id: "openai".into(),
+                provider_id: crate::ProviderId::parse("openai").unwrap(),
             }),
             vec![
                 MessagePart::semantic_only(MessageSemantic::Text {
@@ -266,7 +266,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             let mut requests = self.0.lock().unwrap();
             let source = lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
-                provider_id: request.target.provider.clone(),
+                provider_id: request.target.model.provider().clone(),
             };
             requests.push(request);
             let parts = if requests.len() == 1 {
@@ -330,7 +330,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         .unwrap();
     let mut accepted = input();
     accepted.project_store_key = key;
-    accepted.config.provider = "openai-compatible".into();
+    accepted.config.provider = crate::ProviderId::parse("openai-compatible").unwrap();
     accepted.config.system_prompt = Some("冻结提示".into());
     accepted.config.catalog = ToolCatalogSnapshot::new(
         "actual-build".into(),
@@ -359,7 +359,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             model: crate::turn::saga::ModelExecution::Injected {
                 driver: Arc::new(ModelStepDriver::new(llm.clone())),
                 origin: AttemptOrigin {
-                    provider_id: "openai-compatible".into(),
+                    provider_id: crate::ProviderId::parse("openai-compatible").unwrap(),
                     protocol: AttemptProtocol::ChatCompletions,
                 },
             },
@@ -470,7 +470,12 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     let layout = StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let api = crate::session::SessionApi::from_store(store.clone());
-    let profile = project.path().join("agent.toml");
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: project.path().to_path_buf(),
+        global_agents_dir: state.path().join("global-agents"),
+    };
+    let profile = paths.project_agents_dir().join("alpha/agent.toml");
+    std::fs::create_dir_all(profile.parent().unwrap()).unwrap();
     std::fs::write(&profile, "schema_version = 1\n[agent]\nname = 'alpha'\nmodel = 'local/test'\n[prompt]\nsystem = 'frozen'\n[tools]\nenabled = []\n").unwrap();
     let llm = Arc::new(
         lattice_agent::testing::FakeStreamingLlmClient::builder()
@@ -485,13 +490,16 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
             ])
             .build(),
     );
+    let alpha = crate::AgentName::parse("alpha").unwrap();
+    let loaded_profile =
+        lattice_profile::load_agent_profile(&alpha, &paths, crate::local::ipc::uid()).unwrap();
     let request = RunTurnRequest {
         model: None,
         effort: None,
         input: " original \n".into(),
         session_id: None,
-        agent: Some("alpha".into()),
-        loaded_profile: Some(lattice_profile::load_agent_profile(&profile).unwrap()),
+        agent: Some(alpha),
+        loaded_profile: Some(loaded_profile),
         cancel_flag: None,
         test_llm: Some((
             llm.clone(),
@@ -645,7 +653,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
         model: crate::turn::saga::ModelExecution::Injected {
             driver: Arc::new(ModelStepDriver::new(llm.clone())),
             origin: AttemptOrigin {
-                provider_id: "openai".into(),
+                provider_id: crate::ProviderId::parse("openai").unwrap(),
                 protocol: AttemptProtocol::ChatCompletions,
             },
         },

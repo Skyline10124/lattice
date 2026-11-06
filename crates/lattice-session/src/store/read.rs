@@ -4,7 +4,9 @@
 use super::*;
 use super::{codec::*, local::Selection};
 use lancet_protocol::{InvocationId, ModelAttemptKey};
-use lattice_conversation::{CostEstimate, TokenUsage, ToolResultOutcome, UsageCompleteness};
+use lattice_conversation::{
+    CostEstimate, ModelId, ProviderId, TokenUsage, ToolResultOutcome, UsageCompleteness,
+};
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
 
@@ -53,7 +55,7 @@ enum AttemptStateKind {
 struct TurnAgent {
     kind: CountedNodeKind,
     turn_id: TurnId,
-    agent_name: String,
+    agent_name: AgentName,
 }
 
 // 扁平投影跳过正文与执行材料，只保留父链、轮的模型身份和尝试计量。
@@ -62,8 +64,8 @@ struct UsageNode {
     kind: CountedNodeKind,
     parent: NodeId,
     turn_id: TurnId,
-    provider: Option<String>,
-    model: Option<String>,
+    provider: Option<ProviderId>,
+    model: Option<ModelId>,
     attempts: Option<Vec<UsageAttempt>>,
 }
 
@@ -213,10 +215,7 @@ fn detail(session_id: SessionId, node: NodeId, step: &Node) -> Result<StepDetail
             .iter()
             .enumerate()
             .map(|(index, a)| {
-                validate::provider_id(&a.origin.provider_id).map_err(|_| {
-                    corrupt("nodes", &node.0.to_string(), "invalid attempt provider id")
-                })?;
-                Ok(attempt(
+                attempt(
                     index,
                     a,
                     lancet_protocol::ModelMessageAddress {
@@ -224,9 +223,9 @@ fn detail(session_id: SessionId, node: NodeId, step: &Node) -> Result<StepDetail
                         turn_id: *turn_id,
                         model_step_ordinal: *step_ordinal,
                     },
-                ))
+                )
             })
-            .collect::<Result<_>>()?,
+            .collect(),
         slots: slots.iter().map(slot_detail).collect(),
         updated_at: *updated_at,
     })
@@ -288,10 +287,8 @@ fn entries(
     let mut entries = Vec::new();
     for (node, content) in path {
         match &content {
-            Node::UserMessage { provider, .. } => {
+            Node::UserMessage { .. } => {
                 ordinal += 1;
-                validate::provider_id(provider)
-                    .map_err(|_| corrupt("nodes", &node.0.to_string(), "invalid provider id"))?;
                 has_user = true;
                 entries.push(ConversationEntry::UserMessage {
                     node,
@@ -316,7 +313,7 @@ fn entries(
 }
 
 impl Records {
-    pub(super) fn current_agent(&self, s: SessionId) -> Result<Option<String>> {
+    pub(super) fn current_agent(&self, s: SessionId) -> Result<Option<AgentName>> {
         if !self.sessions.contains_key(&s) {
             return Err(missing("session", s));
         }
@@ -458,7 +455,6 @@ impl SessionRead {
                 return Err(invalid_turn());
             }
             let provider = user.provider.ok_or_else(invalid_turn)?;
-            validate::provider_id(&provider).map_err(|_| invalid_turn())?;
             let model = user.model.ok_or_else(invalid_turn)?;
             let mut attempts = Vec::new();
             while nodes
@@ -616,7 +612,7 @@ impl SessionRead {
         Ok(copy)
     }
 
-    pub fn current_agent(&self, session: SessionId) -> Result<Option<String>> {
+    pub fn current_agent(&self, session: SessionId) -> Result<Option<AgentName>> {
         self.local(session, Selection::Session)?
             .current_agent(session)
     }
@@ -805,16 +801,16 @@ impl SessionRead {
             }
             Node::Step { turn_id, .. } => {
                 let user = self.turn_user_node(node.session_id, *turn_id)?;
-                let Node::UserMessage { provider, .. } = self.path_node(node.session_id, user)?
-                else {
+                if !matches!(
+                    self.path_node(node.session_id, user)?,
+                    Node::UserMessage { .. }
+                ) {
                     return Err(corrupt(
                         "nodes",
                         &user.0.to_string(),
                         "expected user message",
                     ));
-                };
-                validate::provider_id(&provider)
-                    .map_err(|_| corrupt("nodes", &user.0.to_string(), "invalid provider id"))?;
+                }
                 step_entry(node.session_id, node.node, content)
             }
         }
@@ -872,7 +868,7 @@ impl SessionRead {
     }
 
     /// 经 TurnId 索引只读取本轮 agent，不装载输入与冻结配置。
-    pub fn turn_agent(&self, session: SessionId, turn: TurnId) -> Result<String> {
+    pub fn turn_agent(&self, session: SessionId, turn: TurnId) -> Result<AgentName> {
         let node = self.turn_user_node(session, turn)?;
         let user: TurnAgent = self.projected_node(session, node)?;
         if !matches!(user.kind, CountedNodeKind::UserMessage) || user.turn_id != turn {

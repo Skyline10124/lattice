@@ -41,7 +41,7 @@ fn state(output: &CommandOutcome, provider: &str) -> Result<String, String> {
     status["providers"]
         .as_array()
         .and_then(|rows| rows.iter().find(|row| row["provider"] == provider))
-        .and_then(|row| row["status"].as_str())
+        .and_then(|row| row["availability"]["status"].as_str())
         .map(str::to_owned)
         .ok_or_else(|| "provider status is missing".into())
 }
@@ -106,8 +106,8 @@ fn fast_auth_stdin_status_permissions_and_rejections() {
             None,
         )?;
         assert_exit_code(&initial, 0).map_err(|error| error.to_string())?;
-        if state(&initial, "openai")? != "missing" {
-            return Err("initial key must be missing".into());
+        if state(&initial, "openai")? != "unconfigured" {
+            return Err("initial key must be unconfigured".into());
         }
         let input = format!("{KEY}\n");
         let set = run(
@@ -290,8 +290,8 @@ fn fast_auth_stdin_status_permissions_and_rejections() {
             &["--json", "auth", "status"],
             None,
         )?;
-        if state(&status, "openai")? != "missing" {
-            return Err("removed key must be missing".into());
+        if state(&status, "openai")? != "unconfigured" {
+            return Err("removed key must be unconfigured".into());
         }
         fs::write(&path, format!(r#"{{"version":"{KEY}"}}"#)).map_err(|error| error.to_string())?;
         let status = run(

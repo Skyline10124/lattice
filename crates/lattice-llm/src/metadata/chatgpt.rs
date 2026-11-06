@@ -9,7 +9,7 @@ use chrono::Utc;
 use serde::{Deserialize, Serialize};
 
 use super::{MetadataError, MetadataRefreshControl, Object, fetch};
-use crate::{auth::ChatgptAuth, provider::validate_model_id};
+use crate::auth::ChatgptAuth;
 
 const MODELS_URL: &str = "https://api.openai.com/v1/models";
 pub(super) const CACHE_FILE: &str = "chatgpt-models.json";
@@ -57,7 +57,8 @@ fn invalid(reason: &'static str) -> MetadataError {
 fn validate(models: &[AccountModel]) -> Result<BTreeMap<String, String>, MetadataError> {
     let mut result = BTreeMap::new();
     for model in models {
-        validate_model_id(&model.slug).map_err(|_| invalid("invalid model ID"))?;
+        lattice_conversation::ModelId::parse(&model.slug)
+            .map_err(|_| invalid("invalid model ID"))?;
         if model.display_name.is_empty() || model.display_name.chars().any(char::is_control) {
             return Err(invalid("invalid display name"));
         }

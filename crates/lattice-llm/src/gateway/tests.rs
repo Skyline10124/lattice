@@ -19,7 +19,8 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::instrument::WithSubscriber;
 
-use super::RequestGateway;
+use super::{GatewayTurn, RequestGateway, TurnClient};
+use crate::models::test_support::{list_query, target_query};
 use crate::test_tls::TLS;
 use crate::{ChatRequest, LlmEvent, ModelTarget, ReplyOutcome, StreamControl};
 
@@ -40,32 +41,51 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     .unwrap();
     let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
     let turn = gateway.open_turn();
-    let target = ModelTarget::new("test", "model");
+    let target = ModelTarget::test_target("test", "model");
     assert_eq!(
-        turn.supported_efforts(&target).await.unwrap(),
+        crate::model_candidates(directory.path(), &target_query("test/model"))
+            .unwrap()
+            .models[0]
+            .supported_efforts,
         vec![Effort::Off, Effort::Low, Effort::High]
     );
-    assert!(turn.resolve(&target).await.is_err());
+    assert!(matches!(
+        turn.prepare(&target.model, crate::EffortPolicy::Strict(None))
+            .await,
+        Err(crate::PrepareError::Unavailable {
+            availability: crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey,
+            },
+            ..
+        })
+    ));
     std::fs::write(
         &path,
         format!("{base}[providers.test.models.model]\neffort=['medium']\n"),
     )
     .unwrap();
     assert_eq!(
-        turn.supported_efforts(&target).await.unwrap(),
+        crate::model_candidates(directory.path(), &target_query("test/model"))
+            .unwrap()
+            .models[0]
+            .supported_efforts,
         vec![Effort::Medium]
     );
     assert!(
-        turn.supported_efforts(&ModelTarget::new("test", "unknown"))
-            .await
+        crate::model_candidates(directory.path(), &target_query("test/unknown"))
             .unwrap()
+            .models[0]
+            .supported_efforts
             .is_empty()
     );
-    assert!(
-        turn.supported_efforts(&ModelTarget::new("missing", "model"))
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        turn.prepare(
+            &crate::ModelRef::parse("missing/model").unwrap(),
+            crate::EffortPolicy::Strict(None),
+        )
+        .await,
+        Err(crate::PrepareError::ProviderNotFound { .. })
+    ));
     std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n[providers.test.models.handwritten.features]\nthinking_toggle='none'\n")).unwrap();
     std::fs::create_dir_all(directory.path().join("cache")).unwrap();
     std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"test-capabilities":{"models":{
@@ -93,15 +113,8 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
         ("org/unknown", vec![]),
     ] {
-        assert_eq!(
-            turn.supported_efforts(&ModelTarget::new("test", model))
-                .await
-                .unwrap(),
-            expected,
-            "gateway: {model}"
-        );
         let candidates =
-            crate::model_candidates(directory.path(), None, Some(&format!("test/{model}")))
+            crate::model_candidates(directory.path(), &target_query(&format!("test/{model}")))
                 .unwrap();
         assert_eq!(candidates.models.len(), 1);
         assert_eq!(
@@ -109,8 +122,10 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             "candidate: {model}"
         );
         assert_eq!(
-            candidates.models[0].credential_status,
-            crate::auth::AuthState::Missing
+            candidates.models[0].availability,
+            crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey
+            }
         );
     }
     for (provider, configuration) in [
@@ -132,31 +147,43 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         } else {
             vec![]
         };
-        assert_eq!(
-            turn.supported_efforts(&ModelTarget::new(provider, "effort"))
-                .await
-                .unwrap(),
-            expected,
-            "gateway: {provider}"
-        );
-        let exact =
-            crate::model_candidates(directory.path(), None, Some(&format!("{provider}/effort")))
-                .unwrap();
+        let exact = crate::model_candidates(
+            directory.path(),
+            &target_query(&format!("{provider}/effort")),
+        )
+        .unwrap();
         assert_eq!(exact.models.len(), 1);
-        assert_eq!(exact.models[0].model, "effort");
+        assert_eq!(exact.models[0].model.as_str(), "effort");
         assert_eq!(
             exact.models[0].supported_efforts, expected,
             "candidate: {provider}"
         );
         if provider != "chatgpt" {
-            let listed = crate::model_candidates(directory.path(), Some(provider), None).unwrap();
+            for &effort in &expected {
+                let resolved = turn
+                    .prepare(
+                        &crate::ModelRef::parse(&format!("{provider}/effort")).unwrap(),
+                        crate::EffortPolicy::Strict(Some(effort)),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resolved.target().effort, Some(effort));
+            }
+            let listed =
+                crate::model_candidates(directory.path(), &list_query(Some(provider), false))
+                    .unwrap();
             assert!(listed.models.iter().all(|model| model.supported_efforts
-                == if model.model == "effort" {
+                == if model.model.as_str() == "effort" {
                     expected.clone()
                 } else {
                     vec![]
                 }));
-            assert!(listed.models.iter().any(|model| model.model == "effort"));
+            assert!(
+                listed
+                    .models
+                    .iter()
+                    .any(|model| model.model.as_str() == "effort")
+            );
         }
     }
     for (feature, effort, reason) in [
@@ -176,20 +203,86 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             format!("{base}[providers.test.features]\n{feature}\n[providers.test.models.model]\neffort=['{effort}']\n"),
         )
         .unwrap();
-        let error = turn.supported_efforts(&target).await.unwrap_err();
-        assert!(matches!(&error, crate::LlmError::Config { message } if message.contains(reason)));
-        // 列表与精确查询都保留该模型并带上同一诊断，不让整份查询失败。
-        for (provider, target) in [(Some("test"), None), (None, Some("test/model"))] {
-            let candidates = crate::model_candidates(directory.path(), provider, target).unwrap();
+        // provider 未配置且模型配置错误时，网关与候选都先报 Unconfigured。
+        assert!(matches!(
+            turn.prepare(&target.model, crate::EffortPolicy::Strict(None))
+                .await,
+            Err(crate::PrepareError::Unavailable {
+                availability: crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey,
+                },
+                ..
+            })
+        ));
+        let resolve_unconfigured = turn.resolve(&target).await.err().unwrap();
+        assert!(
+            matches!(
+                &resolve_unconfigured,
+                crate::LlmError::Config { message } if message.contains("lattice auth set test")
+            ),
+            "{resolve_unconfigured}"
+        );
+        for query in [
+            list_query(Some("test"), false),
+            crate::ModelCandidateQuery::Target(target.model.clone()),
+        ] {
+            let candidates = crate::model_candidates(directory.path(), &query).unwrap();
             let model = &candidates.models[0];
-            assert_eq!(model.model, "model");
+            assert_eq!(model.model.as_str(), "model");
             assert!(model.supported_efforts.is_empty());
-            let message = model.config_error.as_deref().unwrap();
-            assert_eq!(message, error.to_string());
+            assert_eq!(
+                model.availability,
+                crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey
+                }
+            );
+        }
+        // provider Ready 后，网关与候选才求值模型配置并返回同一 Invalid 原因。
+        turn.auth_store().set("test", "test-key").unwrap();
+        let prepare_invalid = turn
+            .prepare(&target.model, crate::EffortPolicy::Strict(None))
+            .await
+            .err()
+            .unwrap();
+        let crate::PrepareError::Unavailable {
+            availability:
+                crate::Availability::Invalid {
+                    reason: ref prepare_reason,
+                },
+            ..
+        } = prepare_invalid
+        else {
+            panic!("expected invalid availability, got {prepare_invalid:?}");
+        };
+        assert!(prepare_reason.contains(reason), "{prepare_reason}");
+        let resolve_invalid = turn.resolve(&target).await.err().unwrap();
+        assert_eq!(
+            resolve_invalid,
+            crate::LlmError::from(prepare_invalid.clone())
+        );
+        for query in [
+            list_query(Some("test"), false),
+            crate::ModelCandidateQuery::Target(target.model.clone()),
+        ] {
+            let candidates = crate::model_candidates(directory.path(), &query).unwrap();
+            let model = &candidates.models[0];
+            assert_eq!(model.model.as_str(), "model");
+            assert!(model.supported_efforts.is_empty());
+            let crate::Availability::Invalid {
+                reason: candidate_reason,
+            } = &model.availability
+            else {
+                panic!(
+                    "expected invalid availability, got {:?}",
+                    model.availability
+                );
+            };
+            assert_eq!(candidate_reason, prepare_reason);
             for detail in ["provider \"test\"", "model \"model\"", effort] {
-                assert!(message.contains(detail), "{message}");
+                assert!(candidate_reason.contains(detail), "{candidate_reason}");
             }
         }
+        turn.auth_store().remove_api_key("test").unwrap();
     }
 }
 
@@ -409,7 +502,7 @@ fn configure(dir: &std::path::Path, url: &str, protocol: &str, auth: &str) {
 }
 
 fn request(provider: &str) -> ChatRequest {
-    let mut request = ChatRequest::new(Vec::new(), ModelTarget::new(provider, "model-id"));
+    let mut request = ChatRequest::new(Vec::new(), ModelTarget::test_target(provider, "model-id"));
     request.client_request_id = Some("session-id".into());
     request
 }
@@ -810,7 +903,7 @@ async fn protocol_and_auth_independently_select_wire_requests() {
                     .unwrap();
             }
             let mut request = request("test");
-            request.target.model = "family/model id".into();
+            request.target.model = crate::ModelRef::parse("test/family/model id").unwrap();
             request
                 .messages
                 .push(lattice_conversation::ConversationItem::Message(
@@ -1152,7 +1245,7 @@ async fn reasoning_plan_reloads_metadata_and_model_features_for_each_resolution(
     assert!(matches!(error, crate::LlmError::Config { .. }));
     assert!(!error.retryable());
     assert!(server.received.try_recv().is_err());
-    request.target.model = "unknown-model".into();
+    request.target.model = crate::ModelRef::parse("test/unknown-model").unwrap();
     assert!(turn.resolve(&request.target).await.is_err());
     request.target.effort = None;
     complete(
@@ -1289,11 +1382,12 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
         let mut request = request("test");
         match expected {
             Ok(expected) => {
-                let listed = crate::model_candidates(directory.path(), Some("test"), None)
-                    .unwrap()
-                    .models;
+                let listed =
+                    crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                        .unwrap()
+                        .models;
                 assert_eq!(listed.len(), 1);
-                assert_eq!(listed[0].config_error, None);
+                assert_eq!(listed[0].availability, crate::Availability::Ready);
                 turn.resolve(&request.target).await.unwrap();
                 request.target.effort = Some(efforts[0]);
                 complete(
@@ -1326,12 +1420,20 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                 );
             }
             Err((invalid, reason)) => {
-                let listing_error = crate::model_candidates(directory.path(), Some("test"), None)
-                    .unwrap()
-                    .models
-                    .remove(0)
-                    .config_error
-                    .unwrap();
+                let candidate =
+                    crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                        .unwrap()
+                        .models
+                        .remove(0);
+                let crate::Availability::Invalid {
+                    reason: listing_error,
+                } = candidate.availability
+                else {
+                    panic!(
+                        "expected invalid availability, got {:?}",
+                        candidate.availability
+                    );
+                };
                 // 未选档位和选择另一合法档位，也必须拒绝整份手写列表。
                 for selected in [None, Some(efforts[0])] {
                     request.target.effort = selected;
@@ -1341,7 +1443,12 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                     };
                     assert!(matches!(error, crate::LlmError::Config { .. }));
                     assert!(!error.retryable());
-                    assert_eq!(error.to_string(), listing_error);
+                    assert_eq!(
+                        error,
+                        crate::LlmError::Config {
+                            message: listing_error.clone()
+                        }
+                    );
                     let diagnostic = error.to_string();
                     for detail in [
                         "provider \"test\"",
@@ -1502,7 +1609,7 @@ async fn replay_source_matrix_reaches_each_protocol_request_body() {
     for (protocol, fixture, call_ids, replay_material) in cases {
         let origin = ReplayOrigin {
             protocol,
-            provider_id: "test".into(),
+            provider_id: crate::ProviderId::parse("test").unwrap(),
         };
         let wire: serde_json::Value = serde_json::from_str(fixture).unwrap();
         let has_redacted = wire["content"].as_array().is_some_and(|blocks| {
@@ -1673,7 +1780,7 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
             }
         );
         assert_eq!(
-            crate::model_candidates(directory.path(), Some("test"), None)
+            crate::model_candidates(directory.path(), &list_query(Some("test"), false))
                 .unwrap()
                 .models[0]
                 .output,
@@ -1783,7 +1890,8 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
     )
     .unwrap();
-    let before = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+    let query = list_query(Some("test"), false);
+    let before = crate::model_candidates(directory.path(), &query).unwrap();
     assert!(before.models.is_empty());
     let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
         "id":"model-id","limit":{"output":65536}
@@ -1808,7 +1916,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         serde_json::from_slice(&std::fs::read(directory.path().join("cache/models.json")).unwrap())
             .unwrap();
     assert_eq!(cached, metadata);
-    let after = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+    let after = crate::model_candidates(directory.path(), &query).unwrap();
     assert_eq!(after.models.len(), 1);
     assert_eq!(after.models[0].model, "model-id");
     assert_eq!(after.models[0].output, Some(65536));
@@ -1966,7 +2074,7 @@ async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot()
 
 /// 没有可用根证书时，无法解析的端点不能被当成 http 放行（失败即关闭）。provider 载入已用
 /// `validate_base_url_static` 保证地址能解析，经 `providers.toml` 构造不出这种地址，所以直接检查
-/// `resolve` 在建立客户端之前调用的守卫：它返回错误时 `resolve` 不会构造客户端，也不会发出请求。
+/// `prepare` 在建立客户端之前调用的守卫：它返回错误时 `prepare` 不会构造客户端，也不会发出请求。
 #[test]
 fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
     for base_url in [
@@ -1980,10 +2088,13 @@ fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
             "unparseable endpoint {base_url:?} must be rejected"
         ));
         assert!(
-            matches!(error, crate::LlmError::Config { .. }),
+            matches!(error, crate::PrepareError::Configuration { .. }),
             "{base_url:?} is a configuration error: {error}"
         );
-        assert!(!error.retryable(), "{base_url:?} is not retryable");
+        assert!(
+            !crate::LlmError::from(error.clone()).retryable(),
+            "{base_url:?} is not retryable"
+        );
         assert!(
             error.to_string().contains("invalid provider endpoint URL"),
             "{base_url:?} says the endpoint URL is invalid: {error}"
@@ -1991,6 +2102,10 @@ fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
     }
     let other_scheme = super::require_endpoint_without_tls_roots("ftp://localhost/v1")
         .expect_err("a non-http scheme needs TLS roots too");
+    assert!(
+        matches!(other_scheme, crate::PrepareError::Configuration { .. }),
+        "non-http scheme is a configuration error: {other_scheme}"
+    );
     assert!(
         other_scheme
             .to_string()
@@ -2131,10 +2246,27 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     .unwrap();
     configuration_failure(&turn, "test", "providers.toml:2:", "broken protocol").await;
     std::fs::write(directory.path().join("providers.toml"), "").unwrap();
-    configuration_failure(&turn, "test", "not registered", "empty registry").await;
+    let missing_provider =
+        configuration_failure(&turn, "test", "not registered", "empty registry").await;
+    for detail in [
+        &directory
+            .path()
+            .join("providers.toml")
+            .display()
+            .to_string(),
+        "[providers.test]",
+        "protocol",
+        "base_url",
+        "available providers:",
+    ] {
+        assert!(
+            missing_provider.to_string().contains(detail),
+            "{missing_provider}"
+        );
+    }
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     auth.remove_api_key("test").unwrap();
-    configuration_failure(&turn, "test", "credentials are missing", "removed key").await;
+    configuration_failure(&turn, "test", "lattice auth set test", "removed key").await;
     auth.set("test", "restored-key").unwrap();
     std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
     configuration_failure(&turn, "test", "auth.json", "malformed auth file").await;
@@ -2184,13 +2316,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     );
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     std::fs::remove_file(directory.path().join("auth.json")).unwrap();
-    configuration_failure(
-        &turn,
-        "test",
-        "credentials are missing",
-        "deleted auth file",
-    )
-    .await;
+    configuration_failure(&turn, "test", "lattice auth set test", "deleted auth file").await;
     assert!(
         server.received.try_recv().is_err(),
         "deleted auth file: request reached the server"
@@ -2207,6 +2333,61 @@ async fn gateway_and_all_turns_share_the_same_credential_lifecycle() {
     assert!(first.configuration.chatgpt_auth.logout().await.is_err());
     assert!(second.configuration.chatgpt_auth.remove().await.is_err());
     assert!(gateway.chatgpt_auth().logout().await.is_err());
+}
+
+#[tokio::test]
+async fn prepare_does_not_cache_availability_across_subsequent_resolutions() {
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        "http://localhost:1/v1",
+        "chat-completions",
+        "bearer",
+    );
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "secret-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let keyed_model = crate::ModelRef::parse("test/model-id").unwrap();
+    let prepared = turn
+        .prepare(&keyed_model, crate::EffortPolicy::Strict(None))
+        .await
+        .expect("prepare succeeds while API key is present");
+    auth.remove_api_key("test").unwrap();
+    let missing_key = match turn.resolve(prepared.target()).await {
+        Ok(_) => panic!("resolve must reject after API key is withdrawn"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &missing_key,
+            crate::LlmError::Config { message } if message.contains("lattice auth set test")
+        ),
+        "expected unavailable diagnostic after key removal, got: {missing_key}"
+    );
+
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        "[providers.lmstudio]\nbase_url = 'http://localhost:1/v1'\n",
+    )
+    .unwrap();
+    let local_model = crate::ModelRef::parse("lmstudio/local-model").unwrap();
+    let prepared_local = turn
+        .prepare(&local_model, crate::EffortPolicy::Strict(None))
+        .await
+        .expect("prepare succeeds while local provider is declared");
+    std::fs::write(directory.path().join("providers.toml"), "").unwrap();
+    let undeclared = match turn.resolve(prepared_local.target()).await {
+        Ok(_) => panic!("resolve must reject after declaration is withdrawn"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &undeclared,
+            crate::LlmError::Config { message } if message.contains("[providers.lmstudio]")
+        ),
+        "expected undeclared local provider diagnostic after declaration removal, got: {undeclared}"
+    );
 }
 
 #[tokio::test]
@@ -2230,7 +2411,7 @@ async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_
     let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
     let mut resolved = gateway
         .open_turn()
-        .resolve(&ModelTarget::new("chatgpt", "model-id"))
+        .resolve(&ModelTarget::test_target("chatgpt", "model-id"))
         .await
         .unwrap();
     let mut server = Server::start(true).await;
@@ -2281,20 +2462,24 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
     let turn = gateway.open_turn();
     for effort in ["off", "xhigh", "max"] {
         std::fs::write(directory.path().join("providers.toml"),format!("[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\n[providers.test.models.model-id]\neffort=['{effort}']\n[providers.test.models.valid]\neffort=['minimal','low','medium','high']\n")).unwrap();
-        let candidates = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+        let candidates =
+            crate::model_candidates(directory.path(), &list_query(Some("test"), false)).unwrap();
         let invalid = candidates
             .models
             .iter()
             .find(|model| model.model == "model-id")
             .unwrap();
-        assert!(invalid.config_error.is_some());
+        assert!(matches!(
+            invalid.availability,
+            crate::Availability::Invalid { .. }
+        ));
         assert!(invalid.supported_efforts.is_empty());
         let valid = candidates
             .models
             .iter()
             .find(|model| model.model == "valid")
             .unwrap();
-        assert!(valid.config_error.is_none());
+        assert_eq!(valid.availability, crate::Availability::Ready);
         assert_eq!(
             valid.supported_efforts,
             vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
@@ -2375,20 +2560,21 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
             ("plain", vec![], false),
             ("unknown", vec![], false),
         ] {
-            let target = ModelTarget::new(id, model);
+            let target = ModelTarget::test_target(id, model);
+            let candidate = crate::model_candidates(
+                directory.path(),
+                &crate::ModelCandidateQuery::Target(target.model.clone()),
+            )
+            .unwrap()
+            .models
+            .remove(0);
+            assert_eq!(candidate.supported_efforts, expected, "{id}/{model}");
             assert_eq!(
-                turn.supported_efforts(&target).await.unwrap(),
-                expected,
-                "{id}/{model}"
+                candidate.availability,
+                crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey
+                }
             );
-            let candidate =
-                crate::model_candidates(directory.path(), None, Some(&format!("{id}/{model}")))
-                    .unwrap()
-                    .models
-                    .remove(0);
-            assert_eq!(candidate.supported_efforts, expected);
-            assert_eq!(candidate.credential_status, crate::auth::AuthState::Missing);
-            assert!(candidate.config_error.is_none());
 
             crate::auth::AuthStore::new(directory.path().into())
                 .set(id, "builtin-key")
@@ -2421,7 +2607,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                         } else {
                             crate::Protocol::Responses
                         },
-                        provider_id: id.into(),
+                        provider_id: crate::ProviderId::parse(id).unwrap(),
                     }
                 );
                 complete(
@@ -2539,27 +2725,26 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
         crate::auth::AuthStore::new(directory.path().into())
             .set(id, "builtin-key")
             .unwrap();
-        let invalid = ModelTarget::new(id, "invalid");
-        let candidate =
-            crate::model_candidates(directory.path(), None, Some(&format!("{id}/invalid")))
-                .unwrap()
-                .models
-                .remove(0);
+        let invalid = ModelTarget::test_target(id, "invalid");
+        let candidate = crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target(invalid.model.clone()),
+        )
+        .unwrap()
+        .models
+        .remove(0);
         if google {
-            assert!(
-                candidate
-                    .config_error
-                    .as_deref()
-                    .unwrap()
-                    .contains("thinking_level")
-            );
+            assert!(matches!(
+                &candidate.availability,
+                crate::Availability::Invalid { reason } if reason.contains("thinking_level")
+            ));
             assert!(matches!(
                 turn.resolve(&invalid).await,
                 Err(crate::LlmError::Config { message }) if message.contains("thinking_level")
             ));
         } else {
             assert_eq!(candidate.supported_efforts, vec![Effort::Xhigh]);
-            assert!(candidate.config_error.is_none());
+            assert_eq!(candidate.availability, crate::Availability::Ready);
         }
     }
 }
@@ -2598,7 +2783,7 @@ async fn builtin_protocol_switch_preserves_old_tool_ids() {
         let source = wire_to_native(
             &ReplayOrigin {
                 protocol: old,
-                provider_id: id.into(),
+                provider_id: crate::ProviderId::parse(id).unwrap(),
             },
             &serde_json::from_str(fixture).unwrap(),
         )
@@ -2726,7 +2911,14 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
             }
             if protocol == "responses" {
                 assert_eq!(
-                    turn.supported_efforts(&request.target).await.unwrap(),
+                    crate::model_candidates(
+                        directory.path(),
+                        &crate::ModelCandidateQuery::Target(request.target.model.clone()),
+                    )
+                    .unwrap()
+                    .models
+                    .remove(0)
+                    .supported_efforts,
                     if present {
                         vec![Effort::Off, Effort::High]
                     } else {
@@ -2949,13 +3141,7 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
         }
         server.next().await;
         // loopback 服务无法观察公网 DNS，直接核对地址固定所用的 client 已被丢弃。
-        let slot = turn
-            .clients
-            .lock()
-            .unwrap()
-            .get(&("test".into(), server.url.clone()))
-            .unwrap()
-            .clone();
+        let slot = client_slot(&turn, &server.url);
         assert!(!slot.is_cached(), "{name}");
         complete(
             turn.stream_chat(request("test"), StreamControl::default())
@@ -2995,13 +3181,7 @@ async fn done_tail_above_64_kib_discards_the_pinned_client() {
     release.send(()).unwrap();
     complete(stream).await;
     let previous = server.next().await.connection;
-    let slot = turn
-        .clients
-        .lock()
-        .unwrap()
-        .get(&("test".into(), server.url.clone()))
-        .unwrap()
-        .clone();
+    let slot = client_slot(&turn, &server.url);
     assert!(!slot.is_cached());
     complete(
         turn.stream_chat(request("test"), StreamControl::default())
@@ -3028,13 +3208,7 @@ async fn dropping_an_opening_request_discards_its_pinned_client() {
             _ = &mut opening => panic!("provider has not sent response headers"),
         }
     }
-    let slot = turn
-        .clients
-        .lock()
-        .unwrap()
-        .get(&("test".into(), server.url.clone()))
-        .unwrap()
-        .clone();
+    let slot = client_slot(&turn, &server.url);
     assert!(!slot.is_cached());
     complete(
         turn.stream_chat(request("test"), StreamControl::default())
@@ -3171,12 +3345,15 @@ async fn stream_control_reaches_the_shared_reply_assembler() {
             }
         ]
     ));
-    let slot = turn
-        .clients
+    let slot = client_slot(&turn, &server.url);
+    assert!(!slot.is_cached());
+}
+
+fn client_slot(turn: &GatewayTurn, url: &str) -> Arc<TurnClient> {
+    turn.clients
         .lock()
         .unwrap()
-        .get(&("test".into(), server.url.clone()))
+        .get(&(crate::ProviderId::parse("test").unwrap(), url.to_owned()))
         .unwrap()
-        .clone();
-    assert!(!slot.is_cached());
+        .clone()
 }

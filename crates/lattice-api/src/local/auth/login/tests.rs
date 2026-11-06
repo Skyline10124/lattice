@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::local::AuthState;
+use crate::local::Availability;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -36,7 +36,7 @@ struct Attempt {
 fn signed_in() -> ProviderAuthStatus {
     ProviderAuthStatus {
         provider: "chatgpt".into(),
-        status: AuthState::Ready,
+        availability: Availability::Ready,
         email: Some("user@example.com".into()),
         expires_at: None,
     }
@@ -178,7 +178,7 @@ fn login_envelopes_payloads_and_outcomes_reject_unknown_fields() {
         r#"{"response":"auth_login_authorization","value":{"authorization_url":"secret","token":"secret"}}"#,
         r#"{"response":"auth_login_authorization","value":{"authorization_url":"secret"},"token":"secret"}"#,
         r#"{"response":"auth_login_result","value":{"outcome":"cancelled","token":"secret"}}"#,
-        r#"{"response":"auth_login_result","value":{"outcome":"signed_in","status":{"provider":"chatgpt","status":"ready","token":"secret"},"catalog":{"status":"refreshed","model_count":0}}}"#,
+        r#"{"response":"auth_login_result","value":{"outcome":"signed_in","status":{"provider":"chatgpt","availability":{"status":"ready"},"token":"secret"},"catalog":{"status":"refreshed","model_count":0}}}"#,
     ] {
         assert!(serde_json::from_str::<LoginResponse>(wire).is_err());
     }

@@ -23,7 +23,7 @@ pub(crate) fn build_request_json(
     let projected =
         request_messages_with_replay(origin, &request.messages, super::ReasoningReplay::None)?;
     let mut body = json!({
-        "model":request.target.model, "input":projected.messages,
+        "model":request.target.model.model(), "input":projected.messages,
         "stream":true, "store":false,
     });
     if let Some(system) = projected.system {

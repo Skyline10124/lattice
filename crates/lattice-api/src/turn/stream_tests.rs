@@ -120,11 +120,8 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
     let llm = timed(3);
     let fixture = setup_fixture(llm.clone(), &[]);
     let mut request = fixture.request.clone();
-    request.loaded_profile.as_mut().unwrap().profile.llm.retry = lattice_profile::LlmRetrySection {
-        max_retries: 3,
-        initial_delay_ms: 40,
-        max_delay_ms: 60,
-    };
+    request.loaded_profile.as_mut().unwrap().profile.llm.retry =
+        crate::RetryPolicy::new(3, 40, 60).unwrap();
     let (detail, events) = fixture.run(request).await;
     let delays: Vec<_> = events
         .iter()
@@ -243,11 +240,7 @@ async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
         let fixture = setup_fixture(Arc::new(builder.build()), &[]);
         let mut request = fixture.request.clone();
         request.loaded_profile.as_mut().unwrap().profile.llm.retry =
-            lattice_profile::LlmRetrySection {
-                max_retries: 2,
-                initial_delay_ms: 1,
-                max_delay_ms: 1,
-            };
+            crate::RetryPolicy::new(2, 1, 1).unwrap();
         let (detail, events) = fixture.run(request).await;
         let attempts = &detail.steps[0].attempts;
         assert_eq!(attempts.len(), count);
@@ -318,11 +311,8 @@ async fn stream_turn_retry_cancellation_closes_without_another_request() {
     let cancel = Arc::new(AtomicBool::new(false));
     let mut request = fixture.request.clone();
     request.cancel_flag = Some(cancel.clone());
-    request.loaded_profile.as_mut().unwrap().profile.llm.retry = lattice_profile::LlmRetrySection {
-        max_retries: 1,
-        initial_delay_ms: 10_000,
-        max_delay_ms: 10_000,
-    };
+    request.loaded_profile.as_mut().unwrap().profile.llm.retry =
+        crate::RetryPolicy::new(1, 10_000, 10_000).unwrap();
     let (execution, observer) = fixture.start(request);
     execution.acceptance.await.unwrap().unwrap();
     wait_retry(&observer).await;
@@ -344,17 +334,16 @@ async fn stream_turn_retry_cancellation_closes_without_another_request() {
 }
 #[tokio::test(start_paused = true)]
 async fn stream_turn_retry_respects_explicit_and_default_deadlines() {
-    for (timeout, seconds, count) in [(Some(1), 1, 1), (None, 300, 5)] {
+    for (timeout, seconds, count) in [
+        (crate::TurnTimeout::new(1).unwrap(), 1, 1),
+        (crate::TurnTimeout::default(), 300, 5),
+    ] {
         let llm = timed(10);
         let fixture = setup_fixture(llm.clone(), &[]);
         let mut request = fixture.request.clone();
         let config = &mut request.loaded_profile.as_mut().unwrap().profile.llm;
         config.timeout_secs = timeout;
-        config.retry = lattice_profile::LlmRetrySection {
-            max_retries: 10,
-            initial_delay_ms: 60_000,
-            max_delay_ms: 60_000,
-        };
+        config.retry = crate::RetryPolicy::new(10, 60_000, 60_000).unwrap();
         let (detail, events) =
             tokio::time::timeout(Duration::from_secs(seconds + 1), fixture.run(request))
                 .await

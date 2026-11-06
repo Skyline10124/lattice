@@ -137,7 +137,7 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
                 require(
                     sent.rejection().is_some_and(|error| {
                         error.kind == "bad_request"
-                            && error.message.contains("credentials are missing")
+                            && error.message.contains(&format!("lattice auth set {id}"))
                     }),
                     "environment key cannot accept Turn",
                 )?;

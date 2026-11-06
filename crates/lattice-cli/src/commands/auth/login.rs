@@ -241,7 +241,7 @@ fn render(
     let mut value = serde_json::json!({"type":"auth","action":"login","provider":"chatgpt"});
     let code = match outcome {
         AuthLoginOutcome::SignedIn { status, catalog } => {
-            value["status"] = serde_json::to_value(status.status)?;
+            value["status"] = status.availability.status_str().into();
             if let Some(email) = &status.email {
                 value["email"] = email.clone().into();
             }
@@ -282,7 +282,7 @@ mod output_tests {
         let outcome = AuthLoginOutcome::SignedIn {
             status: lattice_api::local::ProviderAuthStatus {
                 provider: "chatgpt".into(),
-                status: lattice_api::local::AuthState::Ready,
+                availability: lattice_api::local::Availability::Ready,
                 email: None,
                 expires_at: None,
             },
@@ -338,7 +338,7 @@ mod output_tests {
             &AuthLoginOutcome::SignedIn {
                 status: lattice_api::local::ProviderAuthStatus {
                     provider: "chatgpt".into(),
-                    status: lattice_api::local::AuthState::Ready,
+                    availability: lattice_api::local::Availability::Ready,
                     email: Some("user@example.com".into()),
                     expires_at: None,
                 },

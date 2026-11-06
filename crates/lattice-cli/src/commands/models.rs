@@ -4,8 +4,8 @@
 use anyhow::Result;
 use clap::Subcommand;
 use lattice_api::{
-    StateLayout,
-    local::{AuthState, LocalClient},
+    ModelCandidateQuery, ProviderId, StateLayout,
+    local::{Availability, LocalClient},
 };
 use std::io::Write;
 
@@ -16,7 +16,7 @@ pub enum ModelsAction {
 }
 
 pub async fn run(
-    provider: Option<String>,
+    provider: Option<ProviderId>,
     auth_only: bool,
     action: Option<ModelsAction>,
     json: bool,
@@ -26,12 +26,12 @@ pub async fn run(
     if let Some(ModelsAction::Refresh) = action {
         return refresh(&client, json, &mut std::io::stdout()).await;
     }
-    let mut candidates = client.models(provider).await?;
-    if auth_only {
-        candidates
-            .models
-            .retain(|model| model.credential_status == AuthState::Ready);
-    }
+    let candidates = client
+        .models(ModelCandidateQuery::List {
+            provider,
+            ready_only: auth_only,
+        })
+        .await?;
 
     if json {
         println!("{}", serde_json::to_string(&candidates)?);
@@ -48,9 +48,10 @@ pub async fn run(
         let price =
             |value: Option<f64>| value.map_or_else(|| "-".into(), |value| value.to_string());
         let cost = model.cost.unwrap_or_default();
+        let auth_status = model.availability.status_str();
         // 配置无效的模型仍列出，档位列标记出错，诊断随警告写到 stderr。
-        let efforts = if let Some(error) = model.config_error {
-            config_errors.push((format!("{}/{}", model.provider, model.model), error));
+        let efforts = if let Availability::Invalid { reason } = model.availability {
+            config_errors.push((format!("{}/{}", model.provider, model.model), reason));
             "config-error".into()
         } else if model.supported_efforts.is_empty() {
             "-".into()
@@ -73,7 +74,7 @@ pub async fn run(
             price(cost.output),
             price(cost.cache_read),
             price(cost.cache_write),
-            model.credential_status
+            auth_status
         );
     }
     for (model, error) in config_errors {

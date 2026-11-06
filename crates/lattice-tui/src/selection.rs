@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use lattice_api::{
-    Effort, ModelCandidate,
+    Effort, ModelCandidate, ModelRef,
     local::{SessionHead, TurnId},
 };
 
@@ -11,9 +11,14 @@ struct Chosen<T> {
     generation: u64,
 }
 
+pub(crate) struct SelectedModel {
+    pub(crate) model: ModelRef,
+    pub(crate) supported_efforts: Vec<Effort>,
+}
+
 #[derive(Default)]
 pub(crate) struct Selection {
-    model: Option<Chosen<ModelCandidate>>,
+    model: Option<Chosen<SelectedModel>>,
     effort: Option<Chosen<Effort>>,
     generation: u64,
     /// 请求正文由 LocalTurn 持有；这里只按发送顺序记录字段代次，避免旧接受消费重选。
@@ -21,14 +26,18 @@ pub(crate) struct Selection {
 }
 
 impl Selection {
-    pub(crate) fn model(&self) -> Option<&ModelCandidate> {
-        self.model.as_ref().map(|choice| &choice.value)
+    pub(crate) fn model(&self) -> Option<&ModelRef> {
+        self.model.as_ref().map(|choice| &choice.value.model)
     }
 
-    pub(crate) fn choose_model(&mut self, model: ModelCandidate) {
+    pub(crate) fn choose_model(&mut self, candidate: ModelCandidate) {
+        let model = ModelRef::new(candidate.provider, candidate.model);
         self.generation += 1;
         self.model = Some(Chosen {
-            value: model,
+            value: SelectedModel {
+                model,
+                supported_efforts: candidate.supported_efforts,
+            },
             generation: self.generation,
         });
     }
@@ -46,26 +55,28 @@ impl Selection {
             return Some(effort.value);
         }
         let head = head?;
-        match self.model() {
-            Some(model) if model.provider != head.provider || model.model != head.model => {
+        match &self.model {
+            Some(choice)
+                if choice.value.model.provider().as_str() != head.provider
+                    || choice.value.model.model().as_str() != head.model =>
+            {
                 [head.effort, head.profile_default_effort]
                     .into_iter()
                     .flatten()
-                    .find(|effort| model.supported_efforts.contains(effort))
+                    .find(|effort| choice.value.supported_efforts.contains(effort))
             }
             _ => head.effort,
         }
     }
 
-    pub(crate) fn submission(&mut self, turn: TurnId) -> (Option<String>, Option<Effort>) {
+    pub(crate) fn submission(&mut self, turn: TurnId) -> (Option<ModelRef>, Option<Effort>) {
         self.sent.push((
             turn,
             self.model.as_ref().map(|choice| choice.generation),
             self.effort.as_ref().map(|choice| choice.generation),
         ));
         (
-            self.model()
-                .map(|model| format!("{}/{}", model.provider, model.model)),
+            self.model().cloned(),
             self.effort.as_ref().map(|choice| choice.value),
         )
     }
@@ -90,7 +101,10 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_api::local::{AuthState, NodeId, SessionId};
+    use lattice_api::{
+        Availability, ModelId, ProviderId,
+        local::{NodeId, SessionId},
+    };
 
     fn head(effort: Option<Effort>) -> SessionHead {
         SessionHead {
@@ -110,15 +124,14 @@ mod tests {
 
     fn candidate(provider: &str, model: &str, efforts: &[Effort]) -> ModelCandidate {
         ModelCandidate {
-            provider: provider.into(),
-            model: model.into(),
+            provider: ProviderId::parse(provider).unwrap(),
+            model: ModelId::parse(model).unwrap(),
             name: None,
             context: None,
             output: None,
             supported_efforts: efforts.to_vec(),
             cost: None,
-            credential_status: AuthState::Ready,
-            config_error: None,
+            availability: Availability::Ready,
         }
     }
 
@@ -129,7 +142,10 @@ mod tests {
         selection.choose_model(candidate("p", "b", &[Effort::Low]));
         assert_eq!(selection.preview_effort(Some(&head)), Some(Effort::Low));
         let turn = lattice_api::local::new_turn_id();
-        assert_eq!(selection.submission(turn), (Some("p/b".into()), None));
+        assert_eq!(
+            selection.submission(turn),
+            (Some(ModelRef::parse("p/b").unwrap()), None)
+        );
         selection.choose_model(candidate("p", "c", &[]));
         assert_eq!(selection.preview_effort(Some(&head)), None);
         selection.choose_model(candidate("p", "a", &[Effort::Low]));
@@ -146,7 +162,7 @@ mod tests {
         assert_eq!(selection.preview_effort(Some(&head)), Some(Effort::Max));
         assert_eq!(
             selection.submission(lattice_api::local::new_turn_id()),
-            (Some("p/keep".into()), Some(Effort::Max))
+            (Some(ModelRef::parse("p/keep").unwrap()), Some(Effort::Max))
         );
     }
 }

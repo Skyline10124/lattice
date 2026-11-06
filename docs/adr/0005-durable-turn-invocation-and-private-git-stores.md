@@ -891,12 +891,12 @@ Layer 0:    lancet-protocol   net-guard   lattice-store
 Layer 0.5:  lattice-conversation(->lancet-protocol)
             lattice-llm(->net-guard,lattice-conversation)
 Layer 1:    lancet-catalog(->lancet-protocol)
-            lattice-profile(->lancet-protocol)
             lattice-agent(->lattice-llm,lattice-conversation)
             lattice-session(->lancet-protocol,lattice-conversation,lattice-store)
 Layer 2:    lancet-dispatch(->lancet-protocol,lancet-catalog)
             lancet-audit(->lancet-protocol,lancet-catalog,lattice-store)
             lancet-authority(->lancet-protocol,lancet-catalog,net-guard)
+            lattice-profile(->lancet-protocol,lattice-conversation,lattice-session)
 Layer 2.5:  lancet-cep(->lancet-protocol,lancet-catalog,lancet-dispatch)
             lancet-runtime(->lancet-protocol,lancet-dispatch,
                             lancet-authority,lattice-store)
@@ -921,11 +921,11 @@ After #34 removes `lancet-catalog`, `lancet-dispatch`, `lancet-cep`, and
 Layer 0:    lancet-protocol   net-guard   lattice-store
 Layer 0.5:  lattice-conversation(->lancet-protocol)
             lattice-llm(->net-guard,lattice-conversation)
-Layer 1:    lattice-profile(->lancet-protocol)
-            lattice-agent(->lattice-llm,lattice-conversation)
+Layer 1:    lattice-agent(->lattice-llm,lattice-conversation)
             lattice-session(->lancet-protocol,lattice-conversation,lattice-store)
 Layer 2:    lancet-audit(->lancet-protocol,lattice-store)
             lancet-authority(->lancet-protocol,net-guard)
+            lattice-profile(->lancet-protocol,lattice-conversation,lattice-session)
 Layer 2.5:  lancet-runtime(->lancet-protocol,lancet-authority,net-guard,
                             lattice-store)
 Layer 3:    lancet-api(->lancet-protocol,lancet-audit,lancet-authority,

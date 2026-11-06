@@ -51,6 +51,7 @@ fn build_auth_headers(
         // OAuth 的认证头由每次发送前取得的 token 构造。
         Auth::None | Auth::OauthChatgpt => return Ok(Vec::new()),
     };
+    // 面向用户的可用性已在网关 resolve 阶段统一判定，此处保留为内部不变量。
     let key = api_key.ok_or_else(|| LlmError::Config {
         message: "provider credentials are missing from auth.json".into(),
     })?;
@@ -120,7 +121,7 @@ impl ProtocolParser {
                 };
                 protocol::chat_completions::build_request_json(
                     request,
-                    &request.target.model,
+                    request.target.model.model().as_str(),
                     features,
                     reasoning,
                     origin,
@@ -132,7 +133,7 @@ impl ProtocolParser {
                 };
                 return protocol::anthropic_messages::build_request_json(
                     request,
-                    &request.target.model,
+                    request.target.model.model().as_str(),
                     output_limit,
                     features,
                     reasoning,
@@ -760,8 +761,8 @@ pub(crate) fn load_bounded_roots(
 
 /// 网关为单次请求提供解析结果，包含该 Turn 对应 endpoint 的 client。
 pub(crate) struct RequestEndpoint<'a> {
-    pub(crate) provider: &'a str,
-    pub(crate) model: &'a str,
+    pub(crate) provider: &'a lattice_conversation::ProviderId,
+    pub(crate) model: &'a lattice_conversation::ModelId,
     pub(crate) base_url: &'a str,
     pub(crate) protocol: Protocol,
     pub(crate) auth: Auth,
@@ -773,20 +774,6 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) model_reasoning: Option<bool>,
     pub(crate) features: Features,
     pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
-}
-
-pub(crate) fn validate_configuration(
-    auth: Auth,
-    provider: &str,
-    credentials: &Credentials,
-) -> Result<(), LlmError> {
-    if auth == Auth::OauthChatgpt && !credentials.chatgpt_logged_in() {
-        return Err(LlmError::Config {
-            message: "ChatGPT is not signed in; run lattice auth login chatgpt".into(),
-        });
-    }
-    build_auth_headers(auth, credentials.api_key(provider))?;
-    Ok(())
 }
 
 pub(crate) async fn dispatch(
@@ -807,14 +794,17 @@ pub(crate) async fn dispatch(
     let headers = if access_token.is_some() {
         Vec::new()
     } else {
-        build_auth_headers(endpoint.auth, credentials.api_key(endpoint.provider))?
+        build_auth_headers(
+            endpoint.auth,
+            credentials.api_key(endpoint.provider.as_str()),
+        )?
     };
-    let provider = credentials.redact(endpoint.provider);
+    let provider = credentials.redact(endpoint.provider.as_str());
     let origin = lattice_conversation::ReplayOrigin {
         protocol: endpoint.protocol,
-        provider_id: endpoint.provider.into(),
+        provider_id: endpoint.provider.clone(),
     };
-    let url = parser.endpoint_url(endpoint.base_url, endpoint.model);
+    let url = parser.endpoint_url(endpoint.base_url, endpoint.model.as_str());
     let body = parser.request_body(
         &request,
         endpoint.output_limit,
@@ -969,7 +959,8 @@ mod tests {
     use crate::{LlmEvent, ReplyOutcome, ReplyStop};
 
     fn chat_request() -> ChatRequest {
-        let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
+        let mut request =
+            ChatRequest::new(Vec::new(), crate::ModelTarget::test_target("test", "model"));
         request.client_request_id = Some("test-session".into());
         request
     }
@@ -1334,7 +1325,7 @@ mod tests {
                         .map(|effort| capabilities.select(effort).expect("supported source"));
                     let origin = lattice_conversation::ReplayOrigin {
                         protocol,
-                        provider_id: "test".into(),
+                        provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
                     };
                     let body = ProtocolParser::new(protocol)
                         .request_body(&request, output, model.reasoning, features, plan, &origin)
@@ -1378,7 +1369,7 @@ mod tests {
         use crate::protocol::{Cache, ChatCompletionsFeatures, MessagesFeatures, ReasoningReplay};
         use crate::test_reply::{bind_replay_step, cache_controls, wire_to_native};
         use lattice_conversation::{
-            ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+            ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage, ProviderId,
             ReplayOrigin, StepContent,
         };
         use serde_json::json;
@@ -1410,7 +1401,7 @@ mod tests {
         ] {
             let origin = ReplayOrigin {
                 protocol,
-                provider_id: "test".into(),
+                provider_id: ProviderId::parse("test").unwrap(),
             };
             for enabled in [false, true] {
                 let features = match protocol {
@@ -1460,7 +1451,8 @@ mod tests {
             .unwrap()
             .bind_zero_tool()
             .unwrap();
-        signed.provider_origin.as_mut().unwrap().provider_id = "historical-source".into();
+        signed.provider_origin.as_mut().unwrap().provider_id =
+            ProviderId::parse("historical-source").unwrap();
         for with_system in [true, false] {
             let mut prefix = if with_system {
                 vec![message(MessageRole::System, "system")]
@@ -1500,7 +1492,7 @@ mod tests {
                 let history = request.messages.clone();
                 let origin = ReplayOrigin {
                     protocol,
-                    provider_id: "other".into(),
+                    provider_id: ProviderId::parse("other").unwrap(),
                 };
                 let body = ProtocolParser::new(protocol)
                     .request_body(&request, None, None, features, None, &origin)
@@ -1573,7 +1565,7 @@ mod tests {
                 let history = request.messages.clone();
                 let origin = ReplayOrigin {
                     protocol: Protocol::ChatCompletions,
-                    provider_id: "test".into(),
+                    provider_id: ProviderId::parse("test").unwrap(),
                 };
                 let body = ProtocolParser::new(Protocol::ChatCompletions)
                     .request_body(
@@ -1632,7 +1624,7 @@ mod tests {
         crate::RequestGateway::new(directory.path().into(), vec![])
             .unwrap()
             .open_turn()
-            .resolve(&crate::ModelTarget::new("test", "model"))
+            .resolve(&crate::ModelTarget::test_target("test", "model"))
             .await
             .unwrap()
     }

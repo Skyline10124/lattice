@@ -19,13 +19,13 @@ fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::
         .accept_turn(&fixture.store.try_lock_session(sid).unwrap(), {
             let config = FrozenTurnConfig {
                 effort: None,
-                agent_name: "test".into(),
-                model: "old-model".into(),
-                provider: "openai-compatible".into(),
+                agent_name: crate::AgentName::parse("test").unwrap(),
+                model: crate::ModelId::parse("old-model").unwrap(),
+                provider: crate::ProviderId::parse("openai-compatible").unwrap(),
                 system_prompt: None,
                 catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
                 limits: TurnExecutionLimits {
-                    timeout_secs: 300,
+                    timeout_secs: crate::TurnTimeout::default(),
                     max_model_steps: 32,
                     max_model_attempts: 1,
                 },
@@ -118,7 +118,7 @@ async fn injected_model_changes_share_effort_fallback() {
     request.loaded_profile = None;
     request.session_id = Some(first.session_id);
     request.effort = None;
-    request.model = Some("local/both".into());
+    request.model = Some(crate::ModelRef::parse("local/both").unwrap());
     let (preserved, _) = fixture.run(request.clone()).await;
     assert_eq!(
         fixture
@@ -130,7 +130,7 @@ async fn injected_model_changes_share_effort_fallback() {
             .effort,
         Some(High)
     );
-    request.model = Some("local/low-only".into());
+    request.model = Some(crate::ModelRef::parse("local/low-only").unwrap());
     request.test_llm.as_mut().unwrap().2 = vec![Low];
     let (fallback, _) = fixture.run(request).await;
     assert_eq!(
@@ -390,7 +390,7 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
             MessageRole::Assistant,
             Some(lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
-                provider_id: "local".into(),
+                provider_id: crate::ProviderId::parse("local").unwrap(),
             }),
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {

@@ -1305,8 +1305,9 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
 
 #[test]
 fn startup_agent_is_consumed_only_by_its_accepted_submission() {
+    let unused = lattice_api::AgentName::parse("unused").unwrap();
     let options = TuiOptions {
-        agent: "unused".into(),
+        agent: Some(unused.clone()),
         session_id: None,
         session_dir: "/tmp/unused-tui-history".into(),
         project_root: "/tmp".into(),
@@ -1317,24 +1318,24 @@ fn startup_agent_is_consumed_only_by_its_accepted_submission() {
         app.input.set_text("first");
         let prompt = app.submit().unwrap();
         let request = begin_turn(&options, &mut app, prompt).unwrap();
-        assert_eq!(request.agent.as_deref(), Some("unused"));
+        assert_eq!(request.agent.as_ref(), Some(&unused));
         app.apply_submission(receipt(
             request.turn_id,
             SubmissionResult::Rejected {
                 error: local_error(LocalErrorKind::BadRequest, "bad profile"),
             },
         ));
-        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        assert_eq!(app.pending_agent.as_ref(), Some(&unused));
         let prompt = app.submit().unwrap();
         let retry = begin_turn(&options, &mut app, prompt).unwrap();
-        assert_eq!(retry.agent.as_deref(), Some("unused"));
+        assert_eq!(retry.agent.as_ref(), Some(&unused));
         app.apply_submission(receipt(
             retry.turn_id,
             SubmissionResult::Unknown { error: None },
         ));
-        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        assert_eq!(app.pending_agent.as_ref(), Some(&unused));
         app.apply_recovery(turn(99), Ok(turn_detail(turn(99))));
-        assert_eq!(app.pending_agent.as_deref(), Some("unused"));
+        assert_eq!(app.pending_agent.as_ref(), Some(&unused));
         match proof {
             0 => app.apply_submission(receipt(retry.turn_id, accepted(retry.turn_id))),
             1 => app.apply_recovery(retry.turn_id, Ok(turn_detail(retry.turn_id))),
@@ -1419,11 +1420,12 @@ fn accepted_selection_consumes_only_matching_field_generations() {
         begin_turn(options, app, prompt).unwrap()
     }
     let options = TuiOptions {
-        agent: "unused".into(),
+        agent: Some(lattice_api::AgentName::parse("unused").unwrap()),
         session_id: None,
         session_dir: "/tmp/unused-tui-history".into(),
         project_root: "/tmp".into(),
     };
+    let same = lattice_api::ModelRef::parse("p/same").unwrap();
     for proof in 0..4 {
         for reselect in 0..4 {
             let mut app = test_app(true);
@@ -1434,8 +1436,8 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             let prompt = app.submit().unwrap();
             let first = begin_turn(&options, &mut app, prompt).unwrap();
             assert_eq!(
-                (first.model.as_deref(), first.effort),
-                (Some("p/same"), Some(Low))
+                (first.model.as_ref(), first.effort),
+                (Some(&same), Some(Low))
             );
             app.apply_submission(receipt(
                 first.turn_id,
@@ -1451,6 +1453,10 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             }
             app.apply_builtin("/effort");
             let old_query = app.model_query.take().unwrap();
+            assert_eq!(
+                old_query.query,
+                lattice_api::ModelCandidateQuery::Target(same.clone())
+            );
             app.apply_models(
                 old_query.clone(),
                 Ok(lattice_api::ModelCandidates {
@@ -1459,7 +1465,7 @@ fn accepted_selection_consumes_only_matching_field_generations() {
                 }),
             );
             app.apply_view(LocalUpdate::Head(current()));
-            assert_eq!(app.next_target().as_deref(), Some("p/same"));
+            assert_eq!(app.next_target().as_ref(), Some(&same));
             confirm(&mut app, first.turn_id, proof, 1);
             let query = app.dock.query().unwrap();
             let mut terminal =
@@ -1477,19 +1483,21 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             let second = next(&mut app, &options);
             let expected = match reselect {
                 0 => (None, None),
-                1 => (Some("p/same"), None),
+                1 => (Some(&same), None),
                 2 => (None, Some(Low)),
-                _ => (Some("p/same"), Some(Low)),
+                _ => (Some(&same), Some(Low)),
             };
             assert_eq!(
-                (second.model.as_deref(), second.effort),
+                (second.model.as_ref(), second.effort),
                 expected,
                 "proof {proof}, reselect {reselect}"
             );
             if reselect & 1 == 0 {
                 assert_eq!(
-                    query.target.as_deref(),
-                    Some("other/current"),
+                    query.query,
+                    lattice_api::ModelCandidateQuery::Target(
+                        lattice_api::ModelRef::parse("other/current").unwrap()
+                    ),
                     "proof {proof}, reselect {reselect}"
                 );
                 assert_ne!(query.id, old_query.id);
@@ -1546,8 +1554,8 @@ fn accepted_selection_consumes_only_matching_field_generations() {
     ));
     let second = next(&mut app, &options);
     assert_eq!(
-        (second.model.as_deref(), second.effort),
-        (Some("p/same"), Some(Low)),
+        (second.model.as_ref(), second.effort),
+        (Some(&same), Some(Low)),
         "T1 未知时，T2 仍携带全部待提交字段"
     );
     confirm(&mut app, second.turn_id, 0, 3);
@@ -1557,18 +1565,25 @@ fn accepted_selection_consumes_only_matching_field_generations() {
     confirm(&mut app, first.turn_id, 0, 1);
     let third = next(&mut app, &options);
     assert_eq!(
-        (third.model.as_deref(), third.effort),
-        (Some("p/same"), Some(Off)),
+        (third.model.as_ref(), third.effort),
+        (Some(&same), Some(Off)),
         "T2 接受后，迟到的 T1 接受不能改变新选择"
     );
 }
 
 #[test]
 fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
-    use lattice_api::{Effort::Low, ModelCandidates};
+    use lattice_api::{Effort::Low, ModelCandidateQuery, ModelCandidates, ModelRef};
     let mut app = test_app(false);
     app.apply_builtin("/model");
     let closed = app.model_query.take().unwrap();
+    assert_eq!(
+        closed.query,
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true
+        }
+    );
     app.apply_action(KeyAction::Clear);
     app.apply_models(
         closed.clone(),
@@ -1580,6 +1595,13 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     assert!(app.dock.shows_input(), "迟到成功不能重开面板");
     app.apply_builtin("/model");
     let current = app.model_query.take().unwrap();
+    assert_eq!(
+        current.query,
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true
+        }
+    );
     app.apply_models(
         current,
         Ok(ModelCandidates {
@@ -1601,13 +1623,16 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     assert!(app.dock.message_id().is_none(), "迟到失败不能发 Warn");
     app.apply_action(KeyAction::Submit);
     assert_eq!(
-        app.next_target().as_deref(),
-        Some("p/fresh"),
+        app.next_target(),
+        Some(ModelRef::parse("p/fresh").unwrap()),
         "旧响应不能取代新候选"
     );
     app.apply_builtin("/effort");
     let old_effort = app.model_query.take().unwrap();
-    assert_eq!(old_effort.target.as_deref(), Some("p/fresh"));
+    assert_eq!(
+        old_effort.query,
+        ModelCandidateQuery::Target(ModelRef::parse("p/fresh").unwrap())
+    );
     app.apply_action(KeyAction::Clear);
     // 已有会话当前模型不在普通列表也可以精确查询。
     app.selection = Default::default();
@@ -1616,13 +1641,19 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     app.apply_view(LocalUpdate::Head(current));
     app.apply_builtin("/effort");
     let current = app.model_query.take().unwrap();
-    assert_eq!(current.target.as_deref(), Some("openai/deprecated"));
+    assert_eq!(
+        current.query,
+        ModelCandidateQuery::Target(ModelRef::parse("openai/deprecated").unwrap())
+    );
     let mut changed = head(0, None, false);
     changed.provider = "other".into();
     changed.model = "unknown/model".into();
     app.apply_view(LocalUpdate::Head(changed));
     let changed = app.model_query.take().unwrap();
-    assert_eq!(changed.target.as_deref(), Some("other/unknown/model"));
+    assert_eq!(
+        changed.query,
+        ModelCandidateQuery::Target(ModelRef::parse("other/unknown/model").unwrap())
+    );
     app.apply_models(
         current,
         Err(local_error(

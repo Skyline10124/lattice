@@ -21,6 +21,7 @@ pub mod effort;
 pub mod history;
 pub mod limits;
 pub mod message;
+pub mod model_selection;
 pub mod outcome;
 pub mod result;
 pub mod tool_call;
@@ -45,9 +46,12 @@ pub use limits::{
     validate_assistant_bounds,
 };
 pub use message::{
-    MAX_OPAQUE_REPLAY_STATE_BYTES, MAX_PROVIDER_ID_BYTES, MessagePart, MessageRole,
-    MessageSemantic, NativeMessage, OpaqueProviderState, OpaqueReplayStateError, Protocol,
-    ProviderIdError, ReplayOrigin, ToolCallState, validate_provider_id,
+    MAX_OPAQUE_REPLAY_STATE_BYTES, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    OpaqueProviderState, OpaqueReplayStateError, Protocol, ReplayOrigin, ToolCallState,
+};
+pub use model_selection::{
+    MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, ModelId, ModelIdError, ModelRef, ModelRefError,
+    ProviderId, ProviderIdError,
 };
 pub use outcome::ToolResultOutcome;
 pub use result::{

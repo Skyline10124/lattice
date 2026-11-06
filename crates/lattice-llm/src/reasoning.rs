@@ -25,7 +25,43 @@ pub(crate) fn supported_efforts(
         .models
         .get(model_id)
         .map_or(provider.features, |model| model.features);
-    Ok(ReasoningCapabilities::new(&provider.id, model_id, model, features)?.supported_efforts())
+    Ok(
+        ReasoningCapabilities::new(provider.id.as_str(), model_id, model, features)?
+            .supported_efforts(),
+    )
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffortPolicy {
+    Strict(Option<Effort>),
+    Fallback {
+        current: Option<Effort>,
+        profile_default: Option<Effort>,
+    },
+}
+
+/// 按策略与目标模型支持的档位列表确定实际发送的档位；严格策略不支持时返回所拒绝的档位。
+pub fn select_effort(
+    policy: &EffortPolicy,
+    supported: &[Effort],
+) -> Result<Option<Effort>, Effort> {
+    match *policy {
+        EffortPolicy::Strict(None) => Ok(None),
+        EffortPolicy::Strict(Some(effort)) => {
+            if supported.contains(&effort) {
+                Ok(Some(effort))
+            } else {
+                Err(effort)
+            }
+        }
+        EffortPolicy::Fallback {
+            current,
+            profile_default,
+        } => Ok([current, profile_default]
+            .into_iter()
+            .flatten()
+            .find(|effort| supported.contains(effort))),
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -635,5 +671,44 @@ mod tests {
                 enable_toggle: false
             })
         );
+    }
+
+    #[test]
+    fn select_effort_enforces_strict_and_evaluates_fallback_order() {
+        use Effort::{High, Low, Max, Medium, Off};
+
+        for (requested, supported, expected) in [
+            (Some(High), &[Low, High][..], Ok(Some(High))),
+            (Some(High), &[Low], Err(High)),
+            (Some(Max), &[Low, High], Err(Max)),
+            (Some(Off), &[], Err(Off)),
+            (None, &[Low, High], Ok(None)),
+            (None, &[], Ok(None)),
+        ] {
+            let policy = EffortPolicy::Strict(requested);
+            assert_eq!(
+                select_effort(&policy, supported),
+                expected,
+                "{policy:?} / {supported:?}"
+            );
+        }
+
+        for (current, profile_default, supported, expected) in [
+            (Some(High), Some(Low), &[Low, High][..], Ok(Some(High))),
+            (Some(Off), Some(Low), &[Low, High], Ok(Some(Low))),
+            (None, Some(Low), &[Low, High], Ok(Some(Low))),
+            (Some(High), Some(Low), &[Medium], Ok(None)),
+            (None, None, &[Low, High], Ok(None)),
+        ] {
+            let policy = EffortPolicy::Fallback {
+                current,
+                profile_default,
+            };
+            assert_eq!(
+                select_effort(&policy, supported),
+                expected,
+                "{policy:?} / {supported:?}"
+            );
+        }
     }
 }

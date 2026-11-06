@@ -185,7 +185,8 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         for (output, reason) in [(&rj, &rj.stdout), (&rt, &rt.stderr)] {
             assert!(output.is_clean_exit(2), "configuration rejection exits 2");
             assert!(
-                String::from_utf8_lossy(reason).contains("declares '[REDACTED]'"),
+                String::from_utf8_lossy(reason)
+                    .contains("invalid value `[REDACTED]` for `name` in [agent]"),
                 "rejection reason must show the declared name redacted"
             );
         }

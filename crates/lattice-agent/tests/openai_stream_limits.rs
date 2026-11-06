@@ -38,7 +38,7 @@ impl LlmClient for OpenAiFrames {
         Ok(lattice_llm::testing::assemble_reply_stream(
             Some(lattice_conversation::ReplayOrigin {
                 protocol: lattice_conversation::Protocol::ChatCompletions,
-                provider_id: request.target.provider,
+                provider_id: request.target.model.provider().clone(),
             }),
             input,
             control,
@@ -84,8 +84,8 @@ async fn run(frames: Vec<String>) -> (ModelStepAttempt, usize) {
                 effort: None,
                 system_prompt: None,
                 history: vec![],
-                model: "test-model".to_string(),
-                provider: "openai".into(),
+                model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                provider: lattice_conversation::ProviderId::parse("openai").unwrap(),
                 tools: vec![],
                 cancel: None,
                 deadline: None,

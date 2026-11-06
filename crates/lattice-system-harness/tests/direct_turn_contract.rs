@@ -173,7 +173,8 @@ fn direct_turn_registered_model_with_missing_credentials_rejects_before_acceptan
                 && routing["models"].as_array().unwrap().iter().any(|model| {
                     model["provider"] == "anthropic"
                         && model["model"] == "claude-sonnet-4-6"
-                        && model["credential_status"] == "missing"
+                        && model["availability"]
+                            == serde_json::json!({"status":"unconfigured","requirement":"api_key"})
                 }),
             "formal sonnet routing with missing credential",
         )?;
@@ -213,4 +214,240 @@ fn direct_turn_registered_model_with_missing_credentials_rejects_before_acceptan
         vec![],
         result,
     );
+}
+
+#[test]
+fn direct_turn_availability_requirements_gate_submission_and_status() {
+    use lattice_system_harness::{FAKE_API_KEY, FakeLlmServer, LatticeCommand};
+    use serde_json::json;
+
+    let driver = driver();
+    let spec = ScenarioSpec::direct_local("direct-turn-availability");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    let budget = world.budget(&spec);
+    world.init_git_project().unwrap();
+
+    let ollama_default = std::net::TcpListener::bind("127.0.0.1:11434")
+        .expect("127.0.0.1:11434 must be bindable for undeclared ollama check");
+    ollama_default
+        .set_nonblocking(true)
+        .expect("set_nonblocking on 127.0.0.1:11434 listener");
+
+    let server = FakeLlmServer::start_plain_http1(sequence(vec![
+        SseScript::plain("custom key reply"),
+        SseScript::plain("declared ollama reply"),
+    ]))
+    .unwrap();
+    let providers_path = world.home().join(".lattice/providers.toml");
+    let initial_providers = format!(
+        "[metadata]\nauto_refresh = false\n\n\
+         [providers.custom-key]\n\
+         protocol = 'chat-completions'\n\
+         base_url = '{}'\n\
+         auth = 'bearer'\n\n\
+         [providers.custom-key.models.chat]\n",
+        server.base_url()
+    );
+    std::fs::write(&providers_path, &initial_providers).unwrap();
+    world
+        .write_agent_profile("dl-avail", "custom-key/chat")
+        .unwrap();
+
+    let mut evidence = evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let auth_text = cli(&world, &spec, &["auth", "status"]);
+        evidence.record_command("auth status text", &auth_text);
+        assert!(auth_text.is_clean_exit(0), "{}", auth_text.summary());
+        let auth_stdout = String::from_utf8(auth_text.stdout).unwrap();
+        assert!(
+            auth_stdout.lines().any(|line| {
+                line.starts_with("custom-key unconfigured")
+                    && line.contains("lattice auth set custom-key")
+            }),
+            "custom key provider row missing unconfigured diagnostic: {auth_stdout}"
+        );
+        assert!(
+            auth_stdout.lines().any(|line| {
+                line.starts_with("chatgpt unconfigured")
+                    && line.contains("lattice auth login chatgpt")
+            }),
+            "chatgpt row missing unconfigured diagnostic: {auth_stdout}"
+        );
+
+        let auth_json = cli(&world, &spec, &["--json", "auth", "status"]);
+        evidence.record_command("auth status json", &auth_json);
+        assert!(auth_json.is_clean_exit(0), "{}", auth_json.summary());
+        let status_doc: Value = serde_json::from_slice(&auth_json.stdout).unwrap();
+        let rows = status_doc["providers"].as_array().unwrap();
+        assert_eq!(
+            rows.iter()
+                .find(|row| row["provider"] == "custom-key")
+                .unwrap()["availability"],
+            json!({"status": "unconfigured", "requirement": "api_key"})
+        );
+        assert_eq!(
+            rows.iter()
+                .find(|row| row["provider"] == "chatgpt")
+                .unwrap()["availability"],
+            json!({"status": "unconfigured", "requirement": "chatgpt_login"})
+        );
+
+        let models_json = cli(
+            &world,
+            &spec,
+            &["--json", "models", "--provider", "custom-key"],
+        );
+        evidence.record_command("models custom-key json", &models_json);
+        assert!(models_json.is_clean_exit(0), "{}", models_json.summary());
+        let models_doc: Value = serde_json::from_slice(&models_json.stdout).unwrap();
+        let candidate = models_doc["models"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["provider"] == "custom-key" && row["model"] == "chat")
+            .expect("custom-key/chat candidate");
+        assert_eq!(
+            candidate["availability"],
+            json!({"status": "unconfigured", "requirement": "api_key"})
+        );
+        let models_text = cli(&world, &spec, &["models", "--provider", "custom-key"]);
+        evidence.record_command("models custom-key text", &models_text);
+        assert!(models_text.is_clean_exit(0), "{}", models_text.summary());
+        let models_stdout = String::from_utf8(models_text.stdout).unwrap();
+        assert!(
+            models_stdout.lines().any(|line| {
+                line.starts_with("custom-key/chat\t") && line.ends_with("\tunconfigured")
+            }),
+            "models text did not mark custom-key/chat unconfigured: {models_stdout}"
+        );
+
+        let undeclared = cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "undeclared ollama",
+                "--agent",
+                "dl-avail",
+                "--model",
+                "ollama/llama3",
+            ],
+        );
+        evidence.record_command("send undeclared ollama", &undeclared);
+        assert!(undeclared.is_clean_exit(2), "{}", undeclared.summary());
+        let undeclared_parsed = parse_send_stdout(&undeclared.stdout, undeclared.exit_code());
+        let undeclared_msg = &undeclared_parsed.rejection().unwrap().message;
+        assert!(
+            undeclared_msg.contains(&providers_path.display().to_string()),
+            "missing providers.toml path in {undeclared_msg}"
+        );
+        assert!(
+            undeclared_msg.contains("[providers.ollama]"),
+            "missing [providers.ollama] in {undeclared_msg}"
+        );
+        let mut accepted_on_default = 0usize;
+        loop {
+            match ollama_default.accept() {
+                Ok(_) => accepted_on_default += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) => panic!("127.0.0.1:11434 listener error: {error}"),
+            }
+        }
+        assert_eq!(
+            accepted_on_default, 0,
+            "undeclared ollama must not connect to default 127.0.0.1:11434 endpoint"
+        );
+        drop(ollama_default);
+
+        let missing_key = cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "missing key",
+                "--agent",
+                "dl-avail",
+            ],
+        );
+        evidence.record_command("send custom-key without key", &missing_key);
+        assert!(missing_key.is_clean_exit(2), "{}", missing_key.summary());
+        let missing_key_parsed = parse_send_stdout(&missing_key.stdout, missing_key.exit_code());
+        assert!(
+            missing_key_parsed
+                .rejection()
+                .unwrap()
+                .message
+                .contains("lattice auth set custom-key")
+        );
+
+        let auth_set = driver
+            .run_with_stdin(
+                &world,
+                &LatticeCommand {
+                    args: vec!["auth".into(), "set".into(), "custom-key".into()],
+                    timeout: Some(budget.cap_timeout(spec.step_timeout())),
+                },
+                format!("{FAKE_API_KEY}\n").as_bytes(),
+            )
+            .unwrap();
+        evidence.record_command("auth set custom-key", &auth_set);
+        assert!(auth_set.is_clean_exit(0), "{}", auth_set.summary());
+
+        let with_key = cli(
+            &world,
+            &spec,
+            &[
+                "--json", "session", "send", "with key", "--agent", "dl-avail",
+            ],
+        );
+        evidence.record_command("send custom-key with key", &with_key);
+        assert!(with_key.is_clean_exit(0), "{}", with_key.summary());
+        let with_key_parsed = parse_send_stdout(&with_key.stdout, with_key.exit_code());
+        assert_accepted_and_closed(&with_key_parsed).unwrap();
+        assert!(with_key_parsed.has_completed());
+        assert_eq!(server.captured_requests().len(), 1);
+        assert_eq!(server.captured_requests()[0].model, "chat");
+
+        std::fs::write(
+            &providers_path,
+            format!(
+                "{initial_providers}\n[providers.ollama]\nbase_url = '{}'\n",
+                server.base_url()
+            ),
+        )
+        .unwrap();
+        let declared_ollama = cli(
+            &world,
+            &spec,
+            &[
+                "--json",
+                "session",
+                "send",
+                "declared ollama",
+                "--agent",
+                "dl-avail",
+                "--model",
+                "ollama/llama3",
+            ],
+        );
+        evidence.record_command("send declared ollama", &declared_ollama);
+        assert!(
+            declared_ollama.is_clean_exit(0),
+            "{}",
+            declared_ollama.summary()
+        );
+        let declared_parsed =
+            parse_send_stdout(&declared_ollama.stdout, declared_ollama.exit_code());
+        assert_accepted_and_closed(&declared_parsed).unwrap();
+        assert!(declared_parsed.has_completed());
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 2);
+        assert_eq!(captures[1].model, "llama3");
+    }));
+    evidence.record_captures(server.captured_requests());
+    finish_recorded(evidence, result);
 }

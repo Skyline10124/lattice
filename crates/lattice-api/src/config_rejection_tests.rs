@@ -23,8 +23,15 @@ fn profile_local(error: ProfileError) -> LocalError {
 #[test]
 fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent.toml");
-    let prefix = format!("schema_version=1\n[agent]\nname='test'\nmodel='{SENTINEL}'\n");
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: dir.path().join("project"),
+        global_agents_dir: dir.path().join("global-agents"),
+    };
+    let path = paths.project_agents_dir().join("test/agent.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let test_agent = crate::AgentName::parse("test").unwrap();
+    let uid = crate::local::ipc::uid();
+    let prefix = format!("schema_version=1\n[agent]\nname='test'\nmodel='local/{SENTINEL}'\n");
     let cases = [
         (
             format!("{prefix}[prompt]\nsystem='hi'\n[llm.retry]\nmax_retries=11"),
@@ -98,7 +105,7 @@ fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
     ];
     for (source, expected) in cases {
         std::fs::write(&path, source).unwrap();
-        let error = lattice_profile::load_agent_profile(&path).unwrap_err();
+        let error = lattice_profile::load_agent_profile(&test_agent, &paths, uid).unwrap_err();
         let result = profile_local(error);
         assert_eq!(result.kind, LocalErrorKind::BadRequest);
         assert!(result.message.contains(path.to_str().unwrap()));
@@ -116,13 +123,20 @@ fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
 #[test]
 fn toml_locations_keep_parser_message_without_source_excerpt() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("agent.toml");
+    let paths = lattice_profile::DiscoveryPaths {
+        project_root: dir.path().join("project"),
+        global_agents_dir: dir.path().join("global-agents"),
+    };
+    let path = paths.project_agents_dir().join("test/agent.toml");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    let test_agent = crate::AgentName::parse("test").unwrap();
+    let uid = crate::local::ipc::uid();
     for source in [
         format!("# 中文\r\nschema_version = @{SENTINEL}\r\n"),
         format!("# 中文\nschema_version = '{SENTINEL}'\n"),
     ] {
         std::fs::write(&path, source).unwrap();
-        let error = lattice_profile::load_agent_profile(&path).unwrap_err();
+        let error = lattice_profile::load_agent_profile(&test_agent, &paths, uid).unwrap_err();
         let ProfileError::Toml { source: parser, .. } = &error else {
             panic!("expected TOML error");
         };
@@ -196,11 +210,11 @@ fn profile_payloads_are_redacted_and_legacy_bad_requests_stay_fixed() {
             "forbidden field",
         ),
         (
-            ProfileError::MissingDefault {
-                dir: "/profiles/default".into(),
-                template: SENTINEL.into(),
+            ProfileError::Protection {
+                path: path.clone(),
+                reason: SENTINEL.into(),
             },
-            "create /profiles/default/agent.toml",
+            "/profiles/agent.toml: [REDACTED]",
         ),
         (
             ProfileError::ProfileNotFound {
@@ -238,17 +252,19 @@ fn named_profile_validation_shows_redacted_declared_name() {
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
     .unwrap();
+    let selected = crate::AgentName::parse("selected").unwrap();
+    let missing = crate::AgentName::parse("missing").unwrap();
     let result = LocalError::from(
-        crate::profile::load_for_turn("selected", &root, &configuration_dir).unwrap_err(),
+        crate::profile::load_for_turn(&selected, &root, &configuration_dir).unwrap_err(),
     );
-    assert!(result.message.contains("[agent].name"));
-    assert!(result.message.contains("selected"));
-    assert!(result.message.contains("declares '[REDACTED]'"));
+    assert!(result.message.contains("for `name` in [agent]"));
+    assert!(result.message.contains("expected `selected`"));
+    assert!(result.message.contains("invalid value `[REDACTED]`"));
     assert!(result.message.contains(profile.to_str().unwrap()));
     assert!(!result.message.contains(SENTINEL));
 
     let result = LocalError::from(
-        crate::profile::load_for_turn("missing", &root, &configuration_dir).unwrap_err(),
+        crate::profile::load_for_turn(&missing, &root, &configuration_dir).unwrap_err(),
     );
     assert!(result.message.contains("agent profile 'missing' not found"));
     assert!(
@@ -278,10 +294,10 @@ fn named_profile_validation_shows_redacted_declared_name() {
         ),
     )
     .unwrap();
-    let error = crate::profile::load_for_turn("selected", &root, &configuration_dir).unwrap_err();
+    let error = crate::profile::load_for_turn(&selected, &root, &configuration_dir).unwrap_err();
     assert!(!format!("{error:?}").contains(key));
     let result = LocalError::from(error);
-    assert!(result.message.contains("declares '[REDACTED]'"));
+    assert!(result.message.contains("invalid value `[REDACTED]`"));
     assert!(!result.message.contains(key));
 }
 

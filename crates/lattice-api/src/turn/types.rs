@@ -14,8 +14,8 @@ use lattice_session::store::{TurnDetail, TurnSummary, UsageSummary};
 pub struct RunTurnRequest {
     pub input: String,
     pub session_id: Option<SessionId>,
-    pub agent: Option<String>,
-    pub model: Option<String>,
+    pub agent: Option<crate::AgentName>,
+    pub model: Option<crate::ModelRef>,
     pub effort: Option<lattice_conversation::Effort>,
     pub loaded_profile: Option<LoadedAgentProfile>,
     pub cancel_flag: Option<Arc<AtomicBool>>,

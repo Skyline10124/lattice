@@ -8,7 +8,7 @@ use crate::{AttemptReport, LlmEvent, ReplyOutcome};
 fn origin() -> ReplayOrigin {
     ReplayOrigin {
         protocol: Protocol::Responses,
-        provider_id: "test".into(),
+        provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
     }
 }
 fn message(id: &str, phase: &str, text: &str) -> Value {
@@ -91,7 +91,8 @@ fn siwc_function_call_stream_uses_finished_items_when_completed_output_is_empty(
 
 #[test]
 fn request_controls_preserve_session_tools_metadata_and_effort() {
-    let mut request = ChatRequest::new(Vec::new(), crate::ModelTarget::new("test", "model"));
+    let mut request =
+        ChatRequest::new(Vec::new(), crate::ModelTarget::test_target("test", "model"));
     request.client_request_id = Some("session-id".into());
     request.tools.push(crate::ToolDefinition::new(
         "observe__workspace",
@@ -163,7 +164,7 @@ fn official_output_round_trips_item_boundaries_phase_cipher_and_call_ids() {
     );
     let target = ReplayOrigin {
         protocol: Protocol::Responses,
-        provider_id: "another-provider".into(),
+        provider_id: lattice_conversation::ProviderId::parse("another-provider").unwrap(),
     };
     let projected = crate::protocol::projection::project_cross_provider(&native, &target);
     let plain = crate::protocol::projection::native_to_wire(&target, &projected).unwrap();

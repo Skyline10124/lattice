@@ -1,15 +1,20 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::models::ModelCandidates;
+pub use crate::models::{ModelCandidateQuery, ModelCandidates};
 pub use crate::turn::{TextSegment, TurnRef};
+pub use crate::{
+    AgentName, AgentNameError, ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId,
+    ProviderIdError,
+};
 pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{
     CostEstimate, CostSummary, Effort, ResultPayload, StepContent, StoredToolResult,
     SuccessContent, TokenSummary, UsageCompleteness,
 };
-pub use lattice_llm::auth::{
-    AuthState, AuthStatus, ProviderAuthStatus, RevocationStatus, SensitiveLoginUrl,
+pub use lattice_llm::{
+    Availability, ConfigurationRequirement,
+    auth::{AuthStatus, ProviderAuthStatus, RevocationStatus, SensitiveLoginUrl},
 };
 pub use lattice_session::store::{
     AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,
@@ -59,7 +64,7 @@ impl From<&TurnDetail> for TurnView {
             session_id: turn.session_id,
             turn_id: turn.turn_id,
             user_node: turn.user_node,
-            agent_name: turn.agent_name.clone(),
+            agent_name: turn.agent_name.as_str().to_owned(),
             accepted_at: turn.accepted_at,
             ended_at: turn.ended_at,
             summary: turn.summary.clone(),
@@ -406,8 +411,8 @@ pub struct TurnRequest {
     pub session: SubmitSession,
     pub workspace: PathBuf,
     pub input: String,
-    pub agent: Option<String>,
-    pub model: Option<String>,
+    pub agent: Option<AgentName>,
+    pub model: Option<ModelRef>,
     pub effort: Option<lattice_conversation::Effort>,
 }
 impl TurnRequest {
@@ -416,7 +421,7 @@ impl TurnRequest {
         session_id: Option<SessionId>,
         workspace: PathBuf,
         input: String,
-        agent: Option<String>,
+        agent: Option<AgentName>,
     ) -> Self {
         Self {
             turn_id: super::new_turn_id(),
@@ -494,8 +499,7 @@ pub(super) enum Request {
     // 空结构让 serde 拒绝额外字段，避免静默忽略误发给查询的 key。
     AuthStatus {},
     Models {
-        provider: Option<String>,
-        target: Option<String>,
+        query: ModelCandidateQuery,
     },
     ModelsRefresh {},
     ResolveSession {
@@ -592,15 +596,22 @@ mod tests {
     fn request_shapes_preserve_selections_and_explicit_session_identity() {
         let sid = super::super::new_session_id();
         let tid = super::super::new_turn_id();
-        for session in [SubmitSession::New(sid), SubmitSession::Existing(sid)] {
+        for (session, model, effort) in [
+            (SubmitSession::New(sid), None, None),
+            (
+                SubmitSession::Existing(sid),
+                Some(ModelRef::parse("local/org/model").unwrap()),
+                Some(Effort::High),
+            ),
+        ] {
             let request = TurnRequest {
-                model: None,
-                effort: None,
+                model,
+                effort,
                 turn_id: tid,
                 session,
                 workspace: "/tmp/project".into(),
                 input: "original".into(),
-                agent: Some("local-test".into()),
+                agent: Some(AgentName::parse("local-test").unwrap()),
             };
             let wire = serde_json::to_value(&request).unwrap();
             assert_eq!(
@@ -619,6 +630,36 @@ mod tests {
             extra["configuration"] = serde_json::json!({"profile_toml":"untrusted"});
             assert!(serde_json::from_value::<Request>(extra).is_err());
         }
+        for (query, expected_wire) in [
+            (
+                ModelCandidateQuery::List {
+                    provider: Some(ProviderId::parse("local").unwrap()),
+                    ready_only: true,
+                },
+                serde_json::json!({"operation":"models","query":{"list":{"provider":"local","ready_only":true}}}),
+            ),
+            (
+                ModelCandidateQuery::Target(ModelRef::parse("local/org/model").unwrap()),
+                serde_json::json!({"operation":"models","query":{"target":"local/org/model"}}),
+            ),
+        ] {
+            assert_eq!(
+                serde_json::to_value(Request::Models {
+                    query: query.clone()
+                })
+                .unwrap(),
+                expected_wire
+            );
+            assert!(
+                matches!(serde_json::from_value::<Request>(expected_wire).unwrap(), Request::Models { query: decoded } if decoded == query)
+            );
+        }
+        assert!(
+            serde_json::from_value::<Request>(
+                serde_json::json!({"operation":"models","provider":"local"})
+            )
+            .is_err()
+        );
         assert!(
             matches!(serde_json::from_value::<Request>(serde_json::json!({"operation":"turn","turn_id":tid})).unwrap(), Request::Turn { turn_id } if turn_id == tid)
         );

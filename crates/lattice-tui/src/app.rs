@@ -26,13 +26,13 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use lattice_api::UsageSummary;
 use lattice_api::local::{
     CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, LocalClient, LocalError,
     LocalErrorKind, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId, NoticeLevel,
     PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt, SubmissionResult,
     SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId, TurnRequest, ViewUpdate,
 };
+use lattice_api::{ModelCandidateQuery, ModelId, ModelRef, ProviderId, UsageSummary};
 use tokio::time::Instant;
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -142,7 +142,7 @@ pub(crate) struct App {
     pub(crate) connected: bool,
     pub(crate) model: Option<String>,
     pub(crate) provider: Option<String>,
-    pending_agent: Option<String>,
+    pending_agent: Option<lattice_api::AgentName>,
     agent_submissions: HashSet<TurnId>,
     pub(crate) selection: crate::selection::Selection,
     query_generation: u64,
@@ -466,7 +466,7 @@ impl App {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
             "/reconnect" => { self.view_wanted = self.ctx.session_id.is_some(); true }
             "/help" | "/?" => { self.dock.open_panel(Panel::Help(help_lines(self.kitty_keyboard))); true }
-            "/model" => { self.query_generation += 1; self.dock.open_panel(Panel::models(self.query_generation, self.next_target())); self.model_query = self.dock.query(); true }
+            "/model" => { self.query_generation += 1; self.dock.open_panel(Panel::models(self.query_generation, self.next_target().map(|target| target.to_string()))); self.model_query = self.dock.query(); true }
             "/effort" => { self.query_generation += 1; self.dock.open_panel(Panel::efforts(self.query_generation, self.next_target(), self.next_effort())); self.model_query = self.dock.query(); true }
             _ => false,
         }
@@ -480,27 +480,24 @@ impl App {
         self.selection.preview_effort(self.configuration_head())
     }
 
-    fn next_target(&self) -> Option<String> {
-        self.selection
-            .model()
-            .map(|model| format!("{}/{}", model.provider, model.model))
-            .or_else(|| {
-                Some(format!(
-                    "{}/{}",
-                    self.provider.as_ref()?,
-                    self.model.as_ref()?
-                ))
-            })
+    fn next_target(&self) -> Option<ModelRef> {
+        self.selection.model().cloned().or_else(|| {
+            Some(ModelRef::new(
+                ProviderId::parse(self.provider.as_deref()?).ok()?,
+                ModelId::parse(self.model.as_deref()?).ok()?,
+            ))
+        })
     }
 
     fn sync_selection(&mut self) {
         let target = self.next_target();
         let effort = self.next_effort();
-        self.dock.update_current(target.clone(), effort);
+        self.dock
+            .update_current(target.as_ref().map(ToString::to_string), effort);
         if self
             .dock
             .effort_target()
-            .is_some_and(|previous| previous != target.as_deref())
+            .is_some_and(|previous| previous != target.as_ref())
         {
             self.query_generation += 1;
             self.dock
@@ -529,16 +526,19 @@ impl App {
                 for warning in &result.warnings {
                     self.push_status(model_query_notice(&warning.message));
                 }
-                let current = if request.target.is_some() {
-                    self.next_effort().map(|effort| effort.to_string())
-                } else {
-                    self.next_target()
+                let current = match &request.query {
+                    ModelCandidateQuery::Target(_) => {
+                        self.next_effort().map(|effort| effort.to_string())
+                    }
+                    ModelCandidateQuery::List { .. } => {
+                        self.next_target().map(|target| target.to_string())
+                    }
                 };
                 self.dock.populate(result, current);
             }
             Err(error) => {
                 self.dock.close_panel();
-                self.push_status(model_query_failed_status(&error));
+                self.push_status(model_query_failed_status(&error.message));
             }
         }
     }
@@ -1762,10 +1762,7 @@ where
             let client = client.clone();
             models.push(
                 async move {
-                    let result = match &request.target {
-                        Some(target) => client.model(target.clone()).await,
-                        None => client.models(None).await,
-                    };
+                    let result = client.models(request.query.clone()).await;
                     (request, result)
                 }
                 .boxed(),
@@ -2046,6 +2043,13 @@ mod tests {
         app.input.set_text("/model");
         assert!(app.submit().is_none(), "命令不能成为 Turn 输入");
         assert_eq!(dock_title(&mut app), "MODEL");
+        assert_eq!(
+            app.model_query.as_ref().map(|q| &q.query),
+            Some(&ModelCandidateQuery::List {
+                provider: None,
+                ready_only: true,
+            })
+        );
         assert!(app.input.is_empty());
         assert_eq!(app.phase, TurnPhase::Idle);
     }
@@ -2062,6 +2066,13 @@ mod tests {
         let open_models = |app: &mut App| {
             app.apply_builtin("/model");
             let query = app.model_query.take().unwrap();
+            assert_eq!(
+                query.query,
+                ModelCandidateQuery::List {
+                    provider: None,
+                    ready_only: true,
+                }
+            );
             app.apply_models(
                 query,
                 Ok(ModelCandidates {
@@ -2094,7 +2105,10 @@ mod tests {
         assert!(!down.contains("p/m3"), "Down 越过原可见区时内部滚动");
         assert_eq!((cursor.x, cursor.y), (0, 6));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_target().as_deref(), Some("p/m7"));
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m7".into())
+        );
         open_models(&mut app);
         for _ in 0..5 {
             app.apply_action(KeyAction::Up);
@@ -2104,7 +2118,10 @@ mod tests {
         assert!(up.contains("p/m0") && !up.contains("p/m7"));
         assert_eq!((cursor.x, cursor.y), (0, 5));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_target().as_deref(), Some("p/m2"));
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m2".into())
+        );
         open_models(&mut app);
         for _ in 0..20 {
             app.apply_action(KeyAction::Up);
@@ -2113,7 +2130,11 @@ mod tests {
         assert_eq!(first.lines().nth(3).unwrap().trim(), "p/m0");
         assert_eq!((cursor.x, cursor.y), (0, 3));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_target().as_deref(), Some("p/m0"), "顶部夹紧");
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m0".into()),
+            "顶部夹紧"
+        );
         open_models(&mut app);
         for _ in 0..20 {
             app.apply_action(KeyAction::Down);
@@ -2122,7 +2143,11 @@ mod tests {
         assert_eq!(last.lines().nth(6).unwrap().trim(), "p/m9");
         assert_eq!((cursor.x, cursor.y), (0, 6));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_target().as_deref(), Some("p/m9"), "底部夹紧");
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m9".into()),
+            "底部夹紧"
+        );
         open_models(&mut app);
         let (small, cursor) = screen(&mut app, 7, 5);
         assert_eq!(small.lines().nth(2).unwrap().trim(), "过滤：");
@@ -2149,7 +2174,10 @@ mod tests {
         assert!(!restored.contains("invisible"));
         assert_eq!(app.input.text(), "hidden draft");
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_target().as_deref(), Some("p/m9"));
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m9".into())
+        );
         app.apply_builtin("/model");
         let query = app.model_query.take().unwrap();
         app.apply_models(
@@ -2170,7 +2198,11 @@ mod tests {
             screen(&mut app, width, height);
         }
         app.apply_action(KeyAction::Clear);
-        assert_eq!(app.next_target().as_deref(), Some("p/m9"), "Esc 保留原选择");
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m9".into()),
+            "Esc 保留原选择"
+        );
     }
 
     #[test]
@@ -2178,7 +2210,9 @@ mod tests {
         use lattice_api::ModelCandidates;
         let mut app = test_app(true);
         let broken = lattice_api::ModelCandidate {
-            config_error: Some("configuration error: effort low".into()),
+            availability: lattice_api::Availability::Invalid {
+                reason: "effort low".into(),
+            },
             ..model_candidate("p", "broken", &[])
         };
         let candidates = ModelCandidates {
@@ -2195,16 +2229,30 @@ mod tests {
         };
         app.apply_builtin("/model");
         let query = app.model_query.take().unwrap();
+        assert_eq!(
+            query.query,
+            ModelCandidateQuery::List {
+                provider: None,
+                ready_only: true,
+            }
+        );
         app.apply_models(query, Ok(candidates.clone()));
         let shown = screen(&mut app);
-        assert!(shown.contains("p/broken · 配置错误"), "{shown}");
+        assert!(shown.contains("p/broken"), "{shown}");
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_target().as_deref(), Some("p/broken"));
+        assert_eq!(
+            app.next_target().map(|target| target.to_string()),
+            Some("p/broken".into())
+        );
         app.apply_builtin("/effort");
         let query = app.model_query.take().unwrap();
+        assert_eq!(
+            query.query,
+            ModelCandidateQuery::Target("p/broken".parse().unwrap())
+        );
         app.apply_models(query, Ok(candidates));
         let shown = screen(&mut app);
-        assert!(shown.contains("档位配置无效"), "{shown}");
+        assert!(shown.contains("effort low"), "{shown}");
         app.apply_action(KeyAction::Submit);
         assert_eq!(app.next_effort(), None, "没有可选档位，Enter 不选定");
     }

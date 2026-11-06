@@ -7,27 +7,34 @@ use lattice_conversation::Effort;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    LlmError, ModelRef,
-    auth::AuthState,
+    Availability, LlmError, ModelId, ModelRef, ProviderId,
+    auth::{AuthError, Credentials},
     metadata::{Metadata, Model},
     provider::Provider,
     reasoning::supported_efforts,
 };
 
-/// 候选只包含模型元数据与凭据状态，连接配置和秘密不跨过后台边界。
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ModelCandidateQuery {
+    List {
+        provider: Option<ProviderId>,
+        ready_only: bool,
+    },
+    Target(ModelRef),
+}
+
+/// 候选只包含模型元数据与可用性状态，连接配置和秘密不跨过后台边界。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ModelCandidate {
-    pub provider: String,
-    pub model: String,
+    pub provider: ProviderId,
+    pub model: ModelId,
     pub name: Option<String>,
     pub context: Option<u64>,
     pub output: Option<u64>,
     pub supported_efforts: Vec<Effort>,
     pub cost: Option<ModelPrice>,
-    pub credential_status: AuthState,
-    /// 手写配置对该模型无效时的诊断；此时没有可选档位，其他模型照常列出。
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub config_error: Option<String>,
+    pub availability: Availability,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -53,42 +60,43 @@ pub struct ModelCandidates {
 /// 查询只读取当前注册表、元数据与凭据状态，不发起网络请求。
 pub fn model_candidates(
     directory: &Path,
-    selected: Option<&str>,
-    target: Option<&str>,
+    query: &ModelCandidateQuery,
 ) -> Result<ModelCandidates, LlmError> {
-    if selected.is_some() && target.is_some() {
-        return Err(LlmError::Config {
-            message: "provider and target cannot be used together".into(),
-        });
-    }
-    let target = target
-        .map(ModelRef::parse)
-        .transpose()
-        .map_err(|error| LlmError::Config {
-            message: error.to_string(),
-        })?;
-    let selected = target.as_ref().map(ModelRef::provider).or(selected);
+    let providers_path = directory.join("providers.toml");
     let (registry, credentials) = crate::gateway::load_configuration(directory)?;
+    let selected = match query {
+        ModelCandidateQuery::List { provider, .. } => provider.as_ref(),
+        ModelCandidateQuery::Target(target) => Some(target.provider()),
+    };
     if let Some(id) = selected
-        && registry.get(id).is_none()
+        && registry.get(id.as_str()).is_none()
     {
-        return Err(crate::gateway::missing_provider_error(&registry, id));
+        return Err(crate::gateway::missing_provider_error(
+            &registry,
+            id.as_str(),
+            &providers_path,
+        ));
     }
     let metadata = Metadata::load(directory);
     let mut result = ModelCandidates::default();
-    if let Err(error) = &credentials {
-        result.warnings.push(ModelWarning {
-            provider: None,
-            message: format!("provider credentials are not ready: {error}"),
-        });
-    }
     for provider in registry
         .iter_for_candidates()
-        .filter(|provider| selected.is_none_or(|id| id == provider.id))
+        .filter(|provider| selected.is_none_or(|id| &provider.id == id))
     {
+        if matches!(
+            query,
+            ModelCandidateQuery::List {
+                ready_only: true,
+                ..
+            }
+        ) && !crate::availability::provider_availability(provider, credentials.as_ref())
+            .is_ready()
+        {
+            continue;
+        }
         let mut warn = |message: String| {
             result.warnings.push(ModelWarning {
-                provider: Some(provider.id.clone()),
+                provider: Some(provider.id.as_str().to_owned()),
                 message,
             })
         };
@@ -104,28 +112,46 @@ pub fn model_candidates(
                     "ChatGPT account model directory is unavailable: {error}"
                 ));
             }
-            let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
             let models = metadata.merge(provider);
-            if let Some(target) = &target {
-                let mut model =
-                    candidate(provider, target.model(), models.get(target.model()), status);
-                if let Some(name) = catalog
-                    .as_ref()
-                    .ok()
-                    .and_then(|catalog| catalog.models.get(target.model()))
-                {
-                    model.name = Some(name.clone());
-                }
-                result.models.push(model);
-            } else if let Ok(catalog) = catalog {
-                for (id, name) in catalog.models {
-                    let model = models.get(&id);
-                    if model.is_some_and(|model| model.status.as_deref() == Some("deprecated")) {
-                        continue;
+            match query {
+                ModelCandidateQuery::Target(target) => {
+                    let model_id = target.model();
+                    let mut model = candidate(
+                        provider,
+                        model_id.clone(),
+                        models.get(model_id.as_str()),
+                        credentials.as_ref(),
+                    );
+                    if let Some(name) = catalog
+                        .as_ref()
+                        .ok()
+                        .and_then(|catalog| catalog.models.get(model_id.as_str()))
+                    {
+                        model.name = Some(name.clone());
                     }
-                    let mut model = candidate(provider, &id, model, status);
-                    model.name = Some(name);
                     result.models.push(model);
+                }
+                ModelCandidateQuery::List { ready_only, .. } => {
+                    if let Ok(catalog) = catalog {
+                        for (id, name) in catalog.models {
+                            let Ok(model_id) = ModelId::parse(&id) else {
+                                continue;
+                            };
+                            let model = models.get(&id);
+                            if model
+                                .is_some_and(|model| model.status.as_deref() == Some("deprecated"))
+                            {
+                                continue;
+                            }
+                            let mut model =
+                                candidate(provider, model_id, model, credentials.as_ref());
+                            if *ready_only && !model.availability.is_ready() {
+                                continue;
+                            }
+                            model.name = Some(name);
+                            result.models.push(model);
+                        }
+                    }
                 }
             }
             continue;
@@ -137,45 +163,53 @@ pub fn model_candidates(
                 "catalog {catalog:?} has no metadata; only handwritten models are available"
             ));
         }
-        let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
         let models = metadata.merge(provider);
-        if let Some(target) = &target {
-            result.models.push(candidate(
-                provider,
-                target.model(),
-                models.get(target.model()),
-                status,
-            ));
-        } else {
-            // 先滤掉已弃用模型再校验，隐藏的模型不因配置问题出错。
-            for (id, model) in models
-                .iter()
-                .filter(|(_, model)| model.status.as_deref() != Some("deprecated"))
-            {
-                result
-                    .models
-                    .push(candidate(provider, id, Some(model), status));
+        match query {
+            ModelCandidateQuery::Target(target) => {
+                let model_id = target.model();
+                result.models.push(candidate(
+                    provider,
+                    model_id.clone(),
+                    models.get(model_id.as_str()),
+                    credentials.as_ref(),
+                ));
+            }
+            ModelCandidateQuery::List { ready_only, .. } => {
+                // 先滤掉已弃用模型再校验，隐藏的模型不因配置问题出错。
+                for (id, model) in models
+                    .iter()
+                    .filter(|(_, model)| model.status.as_deref() != Some("deprecated"))
+                {
+                    let Ok(model_id) = ModelId::parse(id) else {
+                        continue;
+                    };
+                    let model = candidate(provider, model_id, Some(model), credentials.as_ref());
+                    if *ready_only && !model.availability.is_ready() {
+                        continue;
+                    }
+                    result.models.push(model);
+                }
             }
         }
     }
     Ok(result)
 }
 
-/// 档位校验只拒绝出错的那个模型：保留候选并带上诊断，请求路径仍按所选模型拒绝。
+/// 档位校验只拒绝出错的那个模型：保留候选并带上可用性状态，请求路径仍按所选模型拒绝。
 fn candidate(
     provider: &Provider,
-    id: &str,
+    id: ModelId,
     model: Option<&Model>,
-    status: AuthState,
+    credentials: Result<&Credentials, &AuthError>,
 ) -> ModelCandidate {
     let limits = model.and_then(|model| model.limit.as_ref());
-    let (supported_efforts, config_error) = match supported_efforts(provider, id, model) {
-        Ok(efforts) => (efforts, None),
-        Err(error) => (Vec::new(), Some(error.to_string())),
-    };
+    let efforts_result = supported_efforts(provider, id.as_str(), model);
+    let supported_efforts = efforts_result.as_ref().cloned().unwrap_or_default();
+    let (availability, _) =
+        crate::availability::model_availability(provider, credentials, || efforts_result);
     ModelCandidate {
         provider: provider.id.clone(),
-        model: id.into(),
+        model: id,
         name: model.and_then(|model| model.name.clone()),
         context: limits.and_then(|limit| limit.context),
         output: limits.and_then(|limit| limit.output),
@@ -188,7 +222,23 @@ fn candidate(
                 cache_read: cost.cache_read,
                 cache_write: cost.cache_write,
             }),
-        credential_status: status,
-        config_error,
+        availability,
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn list_query(
+        provider: Option<&str>,
+        ready_only: bool,
+    ) -> super::ModelCandidateQuery {
+        super::ModelCandidateQuery::List {
+            provider: provider.map(|id| crate::ProviderId::parse(id).unwrap()),
+            ready_only,
+        }
+    }
+
+    pub(crate) fn target_query(target: &str) -> super::ModelCandidateQuery {
+        super::ModelCandidateQuery::Target(crate::ModelRef::parse(target).unwrap())
     }
 }
