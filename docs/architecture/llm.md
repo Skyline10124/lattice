@@ -39,12 +39,13 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 | 部分 | 负责的工作 |
 | --- | --- |
-| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件、用量与费用估算。下面四项都在网关内部 |
+| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、档位策略或推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件、用量与费用估算。协议适配、注册表、元数据、凭据与可用性判定都在网关内部 |
 | 协议适配器（网关内部） | 按协议与 features 构造请求、解析流式事件、换算用量；把线上事件翻译为部件增量，交给回复组装 |
-| provider 注册表（网关内部） | 合并内置表与 `providers.toml`，校验字段，按 `id` 找到 provider |
+| provider 注册表（网关内部） | 合并内置表与 `providers.toml`，记录声明事实并校验字段，按 `id` 找到 provider |
 | 元数据（网关内部） | 合并内置快照、缓存与 `providers.toml` 中手写的元数据；后台定时刷新缓存 |
 | 凭据库（网关内部） | 读写 `auth.json`；SIWC 的登录、刷新与撤销 |
-| 后台（`lattice-api`） | 接受 Turn 时读取 profile，核对 provider、模型、档位与凭据可用；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
+| 可用性与请求准备（网关内部） | 统一判定 provider 与模型的可用性（`ready`、`unconfigured`、`invalid`）；`GatewayTurn::prepare` 单次读取配置完成准入核对与档位选择 |
+| 后台（`lattice-api`） | 接受 Turn 时读取 profile，经请求网关完成模型准备与档位选择；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
 | 前端（CLI、TUI） | 交出用户的选择；凭据录入与登录只负责界面，经私有 IPC 交给后台 |
 
 调用方不接触 endpoint、key 与 features。网关每次请求按当前的内置表、`providers.toml`、元数据与凭据解析，不按 Turn 冻结；一轮固定的只有记在 UserMessage 节点上的 provider `id`、模型 `id` 与推理档位，见[会话合同](session.md#执行配置冻结)。地址固定与连接复用由网关内部按 Turn 维护，规则见[会话合同的模型 HTTP 传输](session.md#输入与传输限制)。
@@ -190,6 +191,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 
 - **严格解析。** 未知字段、未知 feature 或取值、类型不符、格式错误都使整个文件无效。文件无效时，用到 provider 配置的操作在接受前按配置错误拒绝，诊断写明文件路径、行号与原因；不使用部分有效的内容。
 - **文件不存在**等于空配置，只使用内置表。
+- **免凭据内置项的声明要求。** 内置表中 `auth = "none"` 的免凭据 provider 须在 `providers.toml` 中出现对应的 `[providers.<id>]` 表才视为已声明并可使用，仅写 `models` 等子表形成的隐式父表同样有效，详情见[可用性判定](#可用性判定)。
 - **内置 provider 不能改协议。** 覆盖内置 provider 的表写了 `protocol` 时，即使取值与内置相同，整个文件也无效；要用其他协议，新建一个 provider `id`。
 - **`chatgpt` 不能改写。** 文件中出现 `[providers.chatgpt]` 的 `protocol`、`base_url`、`auth` 或 `features`，或其他 provider 设置 `auth = "oauth:chatgpt"`，整个文件无效。`chatgpt` 只能写 `models` 下的手写元数据。
 - **不写凭据。** 文件中没有 key 字段；凭据只在 `auth.json` 中。
@@ -276,19 +278,28 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 - **按来源调度。** models.dev 与已经登录的账号目录由同一个后台任务调度，各自记录新鲜度、失败次数和下一次时间。同一来源的并发触发共享结果；一个来源成功不清除另一个的失败。显式刷新分别尝试两者，成功来源照常发布，部分失败返回来源、原因及已经更新的部分。`auto_refresh` 只影响自动触发，登录、手动刷新和缺目录补拉继续有效。
 - **请求路径上不联网。** 接受 Turn 与每次请求时只读上述数据。
 
+### 可用性判定
+
+请求网关（`availability`）统一判定 provider 与模型的可用性，准入与请求准备（`GatewayTurn::prepare`）、模型候选查询及 `lattice auth status` 共用同一规则，只按认证方式与配置事实判定：
+
+| 状态 | 附加字段 | 含义与提示 |
+| --- | --- | --- |
+| `ready` | — | 配置与凭据齐备，可用于模型请求 |
+| `unconfigured` | `requirement` | 尚未完成配置：`declaration` 表示 `auth = "none"` 的免凭据 provider 未在 `providers.toml` 中声明（提示写出实际 `providers.toml` 路径与 `[providers.<id>]`）；`api_key` 表示 key 类认证未在 `auth.json` 中录入凭据（提示 `lattice auth set <id>`）；`chatgpt_login` 表示 `auth = "oauth:chatgpt"` 尚未登录（提示 `lattice auth login chatgpt`） |
+| `invalid` | `reason` | `auth.json` 解析或权限失败，或模型元数据与手写档位配置无效，附具体原因 |
+
+内置表中免凭据的 provider 默认未声明，`providers.toml` 中出现对应的 `[providers.<id>]` 表（含仅写 `models` 等子表的隐式父表）即视为已声明。模型层判定先取所属 provider 的状态：provider 非 `ready` 时模型直接沿用该状态；provider 为 `ready` 时再校验该模型的推理档位配置，通过为 `ready`，出错为 `invalid`。
+
 ### 模型候选
 
-模型候选查询列出可用的 `<provider>/<model>`，供 TUI 的 `/model` 与 CLI 的 `lattice models` 使用：
+模型候选查询 `ModelCandidateQuery` 提供两种互斥形状，供 CLI 的 `lattice models` 与 TUI 的 `/model`、`/effort` 使用：
 
-- provider 来自内置表与 `providers.toml`，模型来自上述合并结果；`chatgpt` 只列出[账号模型列表](#账号模型列表)中的模型。
-- `status` 为 `deprecated` 的模型不列出（精确 `target` 查询除外，见下一条），仍可按名字使用。
-- 精确 `target` 查询使用完整 `<provider>/<model>`，与 provider 筛选互斥，返回该模型的一项候选；包括 deprecated 和没有元数据的模型，后者的元数据字段为空、档位为 `[]`。`chatgpt` 的精确查询只描述本地元数据，不补拉目录，也不要求目标在账号目录中。
-- 普通查询包含 `chatgpt` 时，已经登录且没有合法目录则先在异步层补拉，再在阻塞阶段做本地合并。缺目录或补拉失败给实际警告，其他 provider 照常列出；未登录不请求账号目录，也不给警告。合法空目录和旧的有效目录均可直接使用。候选显示名取账号目录，限制、reasoning、档位和价格按同名 openai 元数据与 chatgpt 手写字段合并；无同名元数据或手写值时字段为空、档位为 `[]`。手写模型和 openai 列表不能额外增加账号候选。
-- 候选先按内置 provider 表的顺序列出，再按新增 provider id 排序；同一 provider 内按模型 id 排序。
-- 配置有效时，provider 写了 `catalog`，元数据中却没有对应条目，候选查询为它给出提示。
-- 手写档位无法表达的模型只标出它自己：普通列表先去掉 deprecated 模型再校验，出错的候选带 `config_error`（诊断含 provider、模型、档位和原因，已脱敏），可用档位为 `[]`，其他模型照常列出；精确查询同样返回带 `config_error` 的候选，不报错。`config_error` 为空时不序列化。提交选了这个模型仍在接受前按配置错误拒绝。
-- 每个候选带上下文窗口、输出上限、可用的推理档位、价格，以及凭据是否就绪（`auth = "none"` 的 provider 总是就绪）。
-- 可用档位按模型元数据与协议 features 推导；`GatewayTurn::supported_efforts` 使用相同规则。能力查询不要求凭据就绪，也不使用或刷新 token；`chatgpt` 按同名 `openai` 元数据与自己的手写覆盖推导。发送前仍须解析并校验当前配置。
+- **候选集合与列表过滤。** 候选由已注册 provider（内置表与 `providers.toml` 合并结果）与已知模型组合得出，每项携带上下文窗口、输出上限、可用的推理档位、价格与 `availability`。普通列表额外执行两项列表过滤：隐藏 `status` 为 `deprecated` 的模型；`chatgpt` 只取[账号模型列表](#账号模型列表)中的模型。列表过滤只控制普通列表展示，与可用性判定独立；被隐藏或不在目录中的模型仍可按完整 `<provider>/<model>` 直接请求或用 `Target` 查询。指定未注册的 provider 时按配置错误拒绝并列出可用 provider。
+- **`List { provider: Option<ProviderId>, ready_only: bool }`。** 按可选 `provider` 限定范围，先过滤 deprecated 模型再计算 `availability`。`ready_only = false`（`lattice models`）返回范围内全部候选及其 `availability`；手写档位无法表达的模型自身标为 `invalid`（附原因），可用档位为 `[]`，其他模型照常列出。`ready_only = true`（`lattice models --auth` 与 TUI `/model`）在生成候选前跳过 provider 层非 `ready` 的 provider，生成后再去掉模型层非 `ready` 的候选；警告（缺 `catalog` 元数据、ChatGPT 账号目录不可用）只对保留在结果范围内的 provider 生成，被跳过的 provider 不产生模型或警告。
+- **`Target(ModelRef)`。** 查询指定的 `<provider>/<model>`，保留 deprecated、账号目录外和无元数据的模型（无元数据时限制与价格为空、档位为 `[]`），返回单项候选及其 `availability` 与本地可推导的 `supported_efforts`。`chatgpt` 的 `Target` 查询只读本地元数据与缓存目录显示名，不补拉账号目录。
+- **`chatgpt` 目录补拉。** `List` 查询范围包含已登录的 `chatgpt`（`ready_only = true` 下未被跳过）且本地没有合法目录时，先在异步层补拉，再在阻塞阶段合并。缺目录或补拉失败给实际警告，其他 provider 照常列出；未登录时不请求账号目录、不给警告。合法空目录和旧的有效目录均可直接使用。候选显示名取账号目录，限制、reasoning、档位和价格按同名 `openai` 元数据与 `chatgpt` 手写字段合并；无同名元数据或手写值时字段为空、档位为 `[]`。手写模型和 `openai` 列表不增加账号候选。
+- **排序与目录提示。** 候选先按内置 provider 表的顺序列出，再按新增 provider `id` 排序；同一 provider 内按模型 `id` 排序。位于结果范围内的 provider 写了 `catalog` 而元数据中没有对应条目时，候选查询为它给出警告。
+- **能力推导与单次准备。** 可用档位按模型元数据与协议 features 推导，不要求凭据就绪，也不使用或刷新 token；`chatgpt` 按同名 `openai` 元数据与手写覆盖推导。准入与每次发送前统一调用 `GatewayTurn::prepare`，单次读取注册表、凭据与元数据，完成 provider 查找、模型可用性核对、HTTPS 根证书检查与档位选择。
 
 ## 推理档位
 
@@ -300,12 +311,12 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 
 | 有效 features | 手写档位的写法 |
 | --- | --- |
-| 只有 `thinking_toggle` | `off` 关闭、`high` 开启；其他档位为配置错误 |
-| 只有 `thinking_budget` | `low`、`medium`、`high`、`max` 按预算表与输出上限写预算，无元数据上下界；`off`、`minimal`、`xhigh` 为配置错误 |
-| 两者都有 | `off` 关闭；`low`、`medium`、`high`、`max` 写预算并开启；`minimal`、`xhigh` 为配置错误 |
+| 只有 `thinking_toggle` | `off` 关闭、`high` 开启；其他档位无效 |
+| 只有 `thinking_budget` | `low`、`medium`、`high`、`max` 按预算表与输出上限写预算，无元数据上下界；`off`、`minimal`、`xhigh` 无效 |
+| 两者都有 | `off` 关闭；`low`、`medium`、`high`、`max` 写预算并开启；`minimal`、`xhigh` 无效 |
 | 两者都未启用，或协议没有这两个 feature | 按 effort 项写档位 |
 
-上述 feature 推断只适用于缺少元数据来源的档位。无法表达的手写档位使该模型的配置无效：提交选了这个模型时，即使未选该档位也在接受前按不可重试的配置错误拒绝，诊断含 provider、模型、档位和原因；其他模型不受影响。请求解析与候选查询共用此校验，候选查询只把出错的模型标为配置错误，见[模型候选](#模型候选)。上例的 `my-vllm` 用 `thinking_toggle = "enable-thinking"` 使 `off`/`high` 写开关。
+上述 feature 推断只适用于缺少元数据来源的档位。无法表达的手写档位使该模型的可用性变为 `invalid`：提交选了这个模型时，即使未选该档位也在接受前按不可重试的配置错误拒绝，诊断含 provider、模型、档位和原因；其他模型不受影响。`GatewayTurn::prepare` 与候选查询共用此校验，候选查询在 `ready_only = false` 与 `Target` 下将该候选标为 `invalid`，见[模型候选](#模型候选)。上例的 `my-vllm` 用 `thinking_toggle = "enable-thinking"` 使 `off`/`high` 写开关。
 
 | `reasoning_options` 中的项 | 增加的档位 |
 | --- | --- |
@@ -315,7 +326,7 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 
 - 每个档位只用产生它的那一项对应的字段表达，不跨类型回退：来自 toggle 项的 `off` 与 `high` 只写开关字段，来自 effort 项的档位（包括取值 `none` 得到的 `off`）只写档位字段，来自 budget_tokens 项的档位只写预算字段。所选协议与 features 写不出某一档时，它不出现在可用档位中。
 - `reasoning` 为 true 而没有 `reasoning_options` 的模型总在推理，没有可选档位。
-- 选了模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位。
+- 按严格策略请求模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位；换模型未显式选档位时的回退策略见[会话合同](session.md#会话的-profile-副本)。
 - profile 的 `[agent].effort` 设默认档位；没有档位时不发送档位参数，由 provider 使用默认推理强度。Responses、generateContent 与 Interactions 请求推理文字与是否选择档位无关，不改变推理强度；Messages 的例外见下方映射。
 
 按 token 数限制的档位取以下预算：
@@ -463,7 +474,7 @@ Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含
 - **权限。** 文件与所在目录属于当前用户。配置目录（默认 `~/.lattice`）新建时为 0700，`auth.json` 为 0600；二者都不能向同组或其他用户开放。属主不符、权限更宽或是符号链接时，后台拒绝使用并说明原因，不自动修改。目录不满足时，`lattice auth set` 与需要 key 的提交被拒绝。
 - **写入。** 后台进程内串行写入：先在同目录写临时文件（0600）并 fsync，再改名替换，最后 fsync 目录。
 - **大小。** 文件最多 1 MiB；单个 key 1～16,384 字节，不含控制字符。
-- **严格解析。** 不认识的 `version` 或结构错误时整个文件无效，所有需要凭据的操作按配置错误拒绝；`lattice auth status` 报告文件无效。
+- **严格解析。** 不认识的 `version` 或结构错误时整个文件无效，所有需要凭据的操作按配置错误拒绝；`lattice auth status` 将依赖凭据的 provider 标为 `invalid` 并报告文件错误。
 - **不外泄。** 凭据不进入会话库、profile 副本、日志、诊断、公开 DTO 或 Debug 输出。配置拒绝的脱敏以 `auth.json` 中的全部凭据值为已知值，见[会话合同的配置拒绝](session.md#配置拒绝的原因)。
 
 ### 凭据命令
@@ -476,7 +487,7 @@ Chat Completions 中，元数据给出来源的档位在 `reasoning_options` 含
 | `lattice auth remove <provider>` | 删除该 provider 的 key；对 `chatgpt` 先按[登出](#登出)处理，再删除 `client_id` 与账号信息，保留 host ID |
 | `lattice auth login chatgpt` | SIWC 登录，见下节 |
 | `lattice auth logout chatgpt` | SIWC 登出 |
-| `lattice auth status` | 每个 provider 的凭据状态：`ready`（已录入或已登录）、`missing`（没有凭据）或 `invalid`（`auth.json` 无效）；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
+| `lattice auth status` | 每个已注册 provider 的[可用性状态](#可用性判定)：`ready`、`unconfigured`（附所缺要求 `declaration`、`api_key` 或 `chatgpt_login` 及操作提示）或 `invalid`（`auth.json` 无效及原因）；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
 
 只有 `auth` 为 `bearer`、`x-api-key` 或 `x-goog-api-key` 的 provider 能 `set`。
 
@@ -484,7 +495,7 @@ ChatGPT 的 logout 与 remove 都返回远端撤销状态：`confirmed`（撤销
 
 登录的授权 URL 只交给专用交互界面，打开浏览器失败或无头时写入 stderr；粘贴输入不回显，Ctrl-C 或输入结束取消登录。`--json` 只输出最终的非敏感结果，登录取消退出 2；授权 URL、回调 URL 和 token 不进入日志或最终 JSON。连接交换和停止顺序由[会话合同](session.md#凭据命令与私有交换)维护。
 
-原顶层命令 `lattice doctor` 只诊断环境变量与工作区 `.env` 中的凭据与 endpoint 来源，随这两个来源一起删除；按别名解析 endpoint 的 `lattice resolve` 随别名表一起删除；凭据状态由 `lattice auth status` 给出，可用的 provider 与模型由 `lattice models` 给出。
+原顶层命令 `lattice doctor` 只诊断环境变量与工作区 `.env` 中的凭据与 endpoint 来源，随这两个来源一起删除；按别名解析 endpoint 的 `lattice resolve` 随别名表一起删除；provider 可用性状态由 `lattice auth status` 给出，模型候选与可用性由 `lattice models` 给出。
 
 ## Sign in with ChatGPT
 
