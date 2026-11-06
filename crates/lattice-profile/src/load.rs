@@ -1210,7 +1210,7 @@ x = 1
         let message = err.to_string();
         assert!(
             message.contains("/agents: global agents directory must belong to the current user"),
-            "期望属主与当前 euid 不同时必须拒绝，实际 {message}"
+            "期望属主 {other} ≠ 当前 euid {euid} 时必须拒绝，实际 {message}"
         );
     }
 }
