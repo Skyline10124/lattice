@@ -42,30 +42,49 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     let turn = gateway.open_turn();
     let target = ModelTarget::test_target("test", "model");
     assert_eq!(
-        turn.supported_efforts(&target).await.unwrap(),
+        crate::model_candidates(directory.path(), None, Some("test/model"))
+            .unwrap()
+            .models[0]
+            .supported_efforts,
         vec![Effort::Off, Effort::Low, Effort::High]
     );
-    assert!(turn.resolve(&target).await.is_err());
+    assert!(matches!(
+        turn.prepare(&target.model, crate::EffortPolicy::Strict(None))
+            .await,
+        Err(crate::PrepareError::Unavailable {
+            availability: crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey,
+            },
+            ..
+        })
+    ));
     std::fs::write(
         &path,
         format!("{base}[providers.test.models.model]\neffort=['medium']\n"),
     )
     .unwrap();
     assert_eq!(
-        turn.supported_efforts(&target).await.unwrap(),
+        crate::model_candidates(directory.path(), None, Some("test/model"))
+            .unwrap()
+            .models[0]
+            .supported_efforts,
         vec![Effort::Medium]
     );
     assert!(
-        turn.supported_efforts(&ModelTarget::test_target("test", "unknown"))
-            .await
+        crate::model_candidates(directory.path(), None, Some("test/unknown"))
             .unwrap()
+            .models[0]
+            .supported_efforts
             .is_empty()
     );
-    assert!(
-        turn.supported_efforts(&ModelTarget::test_target("missing", "model"))
-            .await
-            .is_err()
-    );
+    assert!(matches!(
+        turn.prepare(
+            &crate::ModelRef::parse("missing/model").unwrap(),
+            crate::EffortPolicy::Strict(None),
+        )
+        .await,
+        Err(crate::PrepareError::ProviderNotFound { .. })
+    ));
     std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n[providers.test.models.handwritten.features]\nthinking_toggle='none'\n")).unwrap();
     std::fs::create_dir_all(directory.path().join("cache")).unwrap();
     std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"test-capabilities":{"models":{
@@ -93,13 +112,6 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
         ("org/unknown", vec![]),
     ] {
-        assert_eq!(
-            turn.supported_efforts(&ModelTarget::test_target("test", model))
-                .await
-                .unwrap(),
-            expected,
-            "gateway: {model}"
-        );
         let candidates =
             crate::model_candidates(directory.path(), None, Some(&format!("test/{model}")))
                 .unwrap();
@@ -134,13 +146,6 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         } else {
             vec![]
         };
-        assert_eq!(
-            turn.supported_efforts(&ModelTarget::test_target(provider, "effort"))
-                .await
-                .unwrap(),
-            expected,
-            "gateway: {provider}"
-        );
         let exact =
             crate::model_candidates(directory.path(), None, Some(&format!("{provider}/effort")))
                 .unwrap();
@@ -151,6 +156,16 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             "candidate: {provider}"
         );
         if provider != "chatgpt" {
+            for &effort in &expected {
+                let resolved = turn
+                    .prepare(
+                        &crate::ModelRef::parse(&format!("{provider}/effort")).unwrap(),
+                        crate::EffortPolicy::Strict(Some(effort)),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resolved.target().effort, Some(effort));
+            }
             let listed = crate::model_candidates(directory.path(), Some(provider), None).unwrap();
             assert!(listed.models.iter().all(|model| model.supported_efforts
                 == if model.model == "effort" {
@@ -178,9 +193,17 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             format!("{base}[providers.test.features]\n{feature}\n[providers.test.models.model]\neffort=['{effort}']\n"),
         )
         .unwrap();
-        let error = turn.supported_efforts(&target).await.unwrap_err();
-        assert!(matches!(&error, crate::LlmError::Config { message } if message.contains(reason)));
         // provider 未配置且模型配置错误时，网关与候选都先报 Unconfigured。
+        assert!(matches!(
+            turn.prepare(&target.model, crate::EffortPolicy::Strict(None))
+                .await,
+            Err(crate::PrepareError::Unavailable {
+                availability: crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey,
+                },
+                ..
+            })
+        ));
         let resolve_unconfigured = turn.resolve(&target).await.err().unwrap();
         assert!(
             matches!(
@@ -204,8 +227,27 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         }
         // provider Ready 后，网关与候选才求值模型配置并返回同一 Invalid 原因。
         turn.auth_store().set("test", "test-key").unwrap();
+        let prepare_invalid = turn
+            .prepare(&target.model, crate::EffortPolicy::Strict(None))
+            .await
+            .err()
+            .unwrap();
+        let crate::PrepareError::Unavailable {
+            availability:
+                crate::Availability::Invalid {
+                    reason: ref prepare_reason,
+                },
+            ..
+        } = prepare_invalid
+        else {
+            panic!("expected invalid availability, got {prepare_invalid:?}");
+        };
+        assert!(prepare_reason.contains(reason), "{prepare_reason}");
         let resolve_invalid = turn.resolve(&target).await.err().unwrap();
-        assert_eq!(resolve_invalid, error);
+        assert_eq!(
+            resolve_invalid,
+            crate::LlmError::from(prepare_invalid.clone())
+        );
         for (provider, query_target) in [(Some("test"), None), (None, Some("test/model"))] {
             let candidates =
                 crate::model_candidates(directory.path(), provider, query_target).unwrap();
@@ -221,12 +263,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
                     model.availability
                 );
             };
-            assert_eq!(
-                crate::LlmError::Config {
-                    message: candidate_reason.clone()
-                },
-                error
-            );
+            assert_eq!(candidate_reason, prepare_reason);
             for detail in ["provider \"test\"", "model \"model\"", effort] {
                 assert!(candidate_reason.contains(detail), "{candidate_reason}");
             }
@@ -2020,7 +2057,7 @@ async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot()
 
 /// 没有可用根证书时，无法解析的端点不能被当成 http 放行（失败即关闭）。provider 载入已用
 /// `validate_base_url_static` 保证地址能解析，经 `providers.toml` 构造不出这种地址，所以直接检查
-/// `resolve` 在建立客户端之前调用的守卫：它返回错误时 `resolve` 不会构造客户端，也不会发出请求。
+/// `prepare` 在建立客户端之前调用的守卫：它返回错误时 `prepare` 不会构造客户端，也不会发出请求。
 #[test]
 fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
     for base_url in [
@@ -2034,10 +2071,13 @@ fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
             "unparseable endpoint {base_url:?} must be rejected"
         ));
         assert!(
-            matches!(error, crate::LlmError::Config { .. }),
+            matches!(error, crate::PrepareError::Configuration { .. }),
             "{base_url:?} is a configuration error: {error}"
         );
-        assert!(!error.retryable(), "{base_url:?} is not retryable");
+        assert!(
+            !crate::LlmError::from(error.clone()).retryable(),
+            "{base_url:?} is not retryable"
+        );
         assert!(
             error.to_string().contains("invalid provider endpoint URL"),
             "{base_url:?} says the endpoint URL is invalid: {error}"
@@ -2045,6 +2085,10 @@ fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
     }
     let other_scheme = super::require_endpoint_without_tls_roots("ftp://localhost/v1")
         .expect_err("a non-http scheme needs TLS roots too");
+    assert!(
+        matches!(other_scheme, crate::PrepareError::Configuration { .. }),
+        "non-http scheme is a configuration error: {other_scheme}"
+    );
     assert!(
         other_scheme
             .to_string()
@@ -2196,6 +2240,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
         "[providers.test]",
         "protocol",
         "base_url",
+        "available providers:",
     ] {
         assert!(
             missing_provider.to_string().contains(detail),
@@ -2271,6 +2316,61 @@ async fn gateway_and_all_turns_share_the_same_credential_lifecycle() {
     assert!(first.configuration.chatgpt_auth.logout().await.is_err());
     assert!(second.configuration.chatgpt_auth.remove().await.is_err());
     assert!(gateway.chatgpt_auth().logout().await.is_err());
+}
+
+#[tokio::test]
+async fn prepare_does_not_cache_availability_across_subsequent_resolutions() {
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        "http://localhost:1/v1",
+        "chat-completions",
+        "bearer",
+    );
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "secret-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let keyed_model = crate::ModelRef::parse("test/model-id").unwrap();
+    let prepared = turn
+        .prepare(&keyed_model, crate::EffortPolicy::Strict(None))
+        .await
+        .expect("prepare succeeds while API key is present");
+    auth.remove_api_key("test").unwrap();
+    let missing_key = match turn.resolve(prepared.target()).await {
+        Ok(_) => panic!("resolve must reject after API key is withdrawn"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &missing_key,
+            crate::LlmError::Config { message } if message.contains("lattice auth set test")
+        ),
+        "expected unavailable diagnostic after key removal, got: {missing_key}"
+    );
+
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        "[providers.lmstudio]\nbase_url = 'http://localhost:1/v1'\n",
+    )
+    .unwrap();
+    let local_model = crate::ModelRef::parse("lmstudio/local-model").unwrap();
+    let prepared_local = turn
+        .prepare(&local_model, crate::EffortPolicy::Strict(None))
+        .await
+        .expect("prepare succeeds while local provider is declared");
+    std::fs::write(directory.path().join("providers.toml"), "").unwrap();
+    let undeclared = match turn.resolve(prepared_local.target()).await {
+        Ok(_) => panic!("resolve must reject after declaration is withdrawn"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &undeclared,
+            crate::LlmError::Config { message } if message.contains("[providers.lmstudio]")
+        ),
+        "expected undeclared local provider diagnostic after declaration removal, got: {undeclared}"
+    );
 }
 
 #[tokio::test]
@@ -2443,17 +2543,12 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
             ("unknown", vec![], false),
         ] {
             let target = ModelTarget::test_target(id, model);
-            assert_eq!(
-                turn.supported_efforts(&target).await.unwrap(),
-                expected,
-                "{id}/{model}"
-            );
             let candidate =
                 crate::model_candidates(directory.path(), None, Some(&format!("{id}/{model}")))
                     .unwrap()
                     .models
                     .remove(0);
-            assert_eq!(candidate.supported_efforts, expected);
+            assert_eq!(candidate.supported_efforts, expected, "{id}/{model}");
             assert_eq!(
                 candidate.availability,
                 crate::Availability::Unconfigured {
@@ -2794,7 +2889,11 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
             }
             if protocol == "responses" {
                 assert_eq!(
-                    turn.supported_efforts(&request.target).await.unwrap(),
+                    crate::model_candidates(directory.path(), None, Some("test/model-id"))
+                        .unwrap()
+                        .models
+                        .remove(0)
+                        .supported_efforts,
                     if present {
                         vec![Effort::Off, Effort::High]
                     } else {

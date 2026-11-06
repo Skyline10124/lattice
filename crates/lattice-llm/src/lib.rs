@@ -10,7 +10,7 @@ mod client;
 mod tls;
 pub use tls::{load_tls_roots_der, usable_tls_roots_der};
 mod gateway;
-pub use gateway::{GatewayTurn, RequestGateway, ResolvedRequest};
+pub use gateway::{GatewayTurn, PrepareError, RequestGateway, ResolvedRequest};
 pub use protocol::Protocol;
 mod logging;
 mod models;
@@ -27,6 +27,7 @@ pub use lattice_conversation::{
     ProviderId, ProviderIdError,
 };
 mod reasoning;
+pub use reasoning::{EffortPolicy, select_effort};
 mod reply;
 mod reply_stream;
 pub mod sse;

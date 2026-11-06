@@ -32,6 +32,39 @@ pub(crate) fn supported_efforts(
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EffortPolicy {
+    Strict(Option<Effort>),
+    Fallback {
+        current: Option<Effort>,
+        profile_default: Option<Effort>,
+    },
+}
+
+/// 按策略与目标模型支持的档位列表确定实际发送的档位；严格策略不支持时返回所拒绝的档位。
+pub fn select_effort(
+    policy: &EffortPolicy,
+    supported: &[Effort],
+) -> Result<Option<Effort>, Effort> {
+    match *policy {
+        EffortPolicy::Strict(None) => Ok(None),
+        EffortPolicy::Strict(Some(effort)) => {
+            if supported.contains(&effort) {
+                Ok(Some(effort))
+            } else {
+                Err(effort)
+            }
+        }
+        EffortPolicy::Fallback {
+            current,
+            profile_default,
+        } => Ok([current, profile_default]
+            .into_iter()
+            .flatten()
+            .find(|effort| supported.contains(effort))),
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum ReasoningPlan {
     Effort {
         effort: Effort,
@@ -638,5 +671,69 @@ mod tests {
                 enable_toggle: false
             })
         );
+    }
+
+    #[test]
+    fn select_effort_enforces_strict_and_evaluates_fallback_order() {
+        use Effort::{High, Low, Max, Medium, Off};
+
+        for (policy, supported, expected) in [
+            (
+                EffortPolicy::Strict(Some(High)),
+                vec![Low, High],
+                Ok(Some(High)),
+            ),
+            (EffortPolicy::Strict(Some(High)), vec![Low], Err(High)),
+            (EffortPolicy::Strict(Some(Max)), vec![Low, High], Err(Max)),
+            (EffortPolicy::Strict(Some(Off)), vec![], Err(Off)),
+            (EffortPolicy::Strict(None), vec![Low, High], Ok(None)),
+            (EffortPolicy::Strict(None), vec![], Ok(None)),
+            (
+                EffortPolicy::Fallback {
+                    current: Some(High),
+                    profile_default: Some(Low),
+                },
+                vec![Low, High],
+                Ok(Some(High)),
+            ),
+            (
+                EffortPolicy::Fallback {
+                    current: Some(Off),
+                    profile_default: Some(Low),
+                },
+                vec![Low, High],
+                Ok(Some(Low)),
+            ),
+            (
+                EffortPolicy::Fallback {
+                    current: None,
+                    profile_default: Some(Low),
+                },
+                vec![Low, High],
+                Ok(Some(Low)),
+            ),
+            (
+                EffortPolicy::Fallback {
+                    current: Some(High),
+                    profile_default: Some(Low),
+                },
+                vec![Medium],
+                Ok(None),
+            ),
+            (
+                EffortPolicy::Fallback {
+                    current: None,
+                    profile_default: None,
+                },
+                vec![Low, High],
+                Ok(None),
+            ),
+        ] {
+            assert_eq!(
+                select_effort(&policy, &supported),
+                expected,
+                "{policy:?} / {supported:?}"
+            );
+        }
     }
 }

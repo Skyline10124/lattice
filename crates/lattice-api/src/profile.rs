@@ -22,6 +22,7 @@ pub(crate) struct PreparedProfile {
     pub configuration: TurnProfile,
     pub previous: Option<lattice_session::store::SessionProfileCopy>,
     pub inherited: bool,
+    pub source_path: Option<std::path::PathBuf>,
 }
 
 impl TurnProfile {

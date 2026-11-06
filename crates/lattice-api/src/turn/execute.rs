@@ -44,8 +44,15 @@ pub(crate) struct PreparedModel {
     gateway: Arc<lattice_llm::RequestGateway>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum EffortSource {
+    Explicit,
+    ProfileFile(std::path::PathBuf),
+    SessionCopy,
+}
+
 impl PreparedModel {
-    /// 在建库与接受前完成解析；同一 Turn 随后沿用这个网关句柄。
+    /// 在建库与接受前完成单次准入与档位选择；同一 Turn 随后沿用这个网关句柄。
     pub(crate) async fn resolve(
         gateway: &Arc<lattice_llm::RequestGateway>,
         profile: &crate::profile::PreparedProfile,
@@ -53,95 +60,114 @@ impl PreparedModel {
         effort: Option<lattice_conversation::Effort>,
     ) -> Result<Self> {
         let auth = gateway.auth_store();
-        let (mut target, changed) = selected_target(profile, model, Some(&auth))?;
+        let (chosen_model, policy, source) =
+            select_model_and_policy(profile, model, effort, Some(&auth))?;
         let turn = gateway.open_turn();
-        let supported = if changed && effort.is_none() {
-            turn.supported_efforts(&target).await.map_err(|error| {
-                ApiError::Configuration(crate::ConfigRejection::new(
-                    &error.to_string(),
-                    Some(&auth),
-                ))
-            })?
-        } else {
-            Vec::new()
-        };
-        target.effort = selected_effort(
-            target.effort,
-            profile.configuration.effective.default_effort,
-            effort,
-            changed,
-            &supported,
-        );
-        let resolved = turn.resolve(&target).await.map_err(|error| {
-            ApiError::Configuration(crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
-        })?;
+        let resolved = turn
+            .prepare(&chosen_model, policy)
+            .await
+            .map_err(|error| prepare_rejection(&error, &source, Some(&auth)))?;
         Ok(Self {
-            target,
+            target: resolved.target().clone(),
             execution: super::saga::ModelExecution::gateway(turn, &resolved),
             gateway: gateway.clone(),
         })
     }
 }
 
-fn selected_effort(
-    current: Option<Effort>,
-    profile_default: Option<Effort>,
-    requested: Option<Effort>,
-    model_changed: bool,
-    supported: &[Effort],
-) -> Option<Effort> {
-    if requested.is_some() {
-        return requested;
+fn prepare_error_message(error: &lattice_llm::PrepareError, source: &EffortSource) -> String {
+    match error {
+        lattice_llm::PrepareError::UnsupportedEffort { .. } => match source {
+            EffortSource::Explicit => format!("{error} (from --effort)"),
+            EffortSource::ProfileFile(path) => {
+                format!("{error} (from [agent].effort in {})", path.display())
+            }
+            EffortSource::SessionCopy => format!("{error} (from session profile copy)"),
+        },
+        _ => error.to_string(),
     }
-    // 同模型保留原值，包括空值；支持性仍由最终 resolve 校验。
-    if !model_changed {
-        return current;
-    }
-    [current, profile_default]
-        .into_iter()
-        .flatten()
-        .find(|effort| supported.contains(effort))
 }
 
-fn selected_target(
+fn prepare_rejection(
+    error: &lattice_llm::PrepareError,
+    source: &EffortSource,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> ApiError {
+    ApiError::Configuration(crate::ConfigRejection::new(
+        &prepare_error_message(error, source),
+        auth,
+    ))
+}
+
+fn select_model_and_policy(
     profile: &crate::profile::PreparedProfile,
     model: Option<&crate::ModelRef>,
+    effort: Option<Effort>,
     auth: Option<&lattice_llm::auth::AuthStore>,
-) -> Result<(lattice_llm::ModelTarget, bool)> {
+) -> Result<(crate::ModelRef, lattice_llm::EffortPolicy, EffortSource)> {
+    let profile_default = profile.configuration.effective.default_effort;
     let base = if profile.inherited {
         let current = &profile.previous.as_ref().expect("inherited copy").current;
-        let mut target = lattice_llm::ModelTarget::new(crate::ModelRef::new(
-            current.provider.clone(),
-            current.model.clone(),
-        ));
-        target.effort = current.effort;
-        Some(target)
+        Some((
+            crate::ModelRef::new(current.provider.clone(), current.model.clone()),
+            current.effort,
+        ))
     } else {
         profile
             .configuration
             .effective
             .default_model
             .clone()
-            .map(|model| {
-                let mut target = lattice_llm::ModelTarget::new(model);
-                target.effort = profile.configuration.effective.default_effort;
-                target
-            })
+            .map(|default_model| (default_model, profile_default))
     };
-    let mut target = match model {
-        Some(model) => lattice_llm::ModelTarget::new(model.clone()),
-        None => base.clone().ok_or_else(|| {
-            ApiError::Configuration(crate::ConfigRejection::new(
-                "model selection or [agent].model is required",
-                auth,
-            ))
-        })?,
+    let chosen_model = match model {
+        Some(model) => model.clone(),
+        None => base
+            .as_ref()
+            .map(|(base_model, _)| base_model.clone())
+            .ok_or_else(|| {
+                ApiError::Configuration(crate::ConfigRejection::new(
+                    "model selection or [agent].model is required",
+                    auth,
+                ))
+            })?,
     };
-    let changed = base.as_ref().is_none_or(|base| base.model != target.model);
-    target.effort = base.map_or(profile.configuration.effective.default_effort, |base| {
-        base.effort
-    });
-    Ok((target, changed))
+    let changed = base
+        .as_ref()
+        .is_none_or(|(base_model, _)| *base_model != chosen_model);
+    let base_effort = base
+        .as_ref()
+        .map_or(profile_default, |(_, base_effort)| *base_effort);
+    let profile_source = || {
+        if profile.inherited {
+            EffortSource::SessionCopy
+        } else {
+            EffortSource::ProfileFile(
+                profile
+                    .source_path
+                    .clone()
+                    .expect("loaded profile source path"),
+            )
+        }
+    };
+    let (policy, source) = match effort {
+        Some(explicit) => (
+            lattice_llm::EffortPolicy::Strict(Some(explicit)),
+            EffortSource::Explicit,
+        ),
+        None if !changed => (
+            lattice_llm::EffortPolicy::Strict(base_effort),
+            profile_source(),
+        ),
+        None => (
+            lattice_llm::EffortPolicy::Fallback {
+                current: base_effort,
+                profile_default,
+            },
+            profile_source(),
+        ),
+    };
+    Ok((chosen_model, policy, source))
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
@@ -282,21 +308,24 @@ async fn execute_owned(
             let (previous, prompt) =
                 snapshot.map_or((None, None), |(copy, prompt)| (Some(copy), prompt));
             let inherited = request.agent.is_none() && previous.is_some();
-            let configuration = if inherited {
+            let (configuration, source_path) = if inherited {
                 let copy = previous.as_ref().expect("inherited copy");
-                crate::profile::TurnProfile::from_copy(copy, prompt)
+                (crate::profile::TurnProfile::from_copy(copy, prompt), None)
             } else {
-                crate::profile::TurnProfile::from_loaded(
-                    request.loaded_profile.as_ref().ok_or_else(|| {
-                        ApiError::BadRequest("frozen configuration required".into())
-                    })?,
-                    &workspace,
-                )?
+                let loaded = request
+                    .loaded_profile
+                    .as_ref()
+                    .ok_or_else(|| ApiError::BadRequest("frozen configuration required".into()))?;
+                (
+                    crate::profile::TurnProfile::from_loaded(loaded, &workspace)?,
+                    Some(loaded.path.clone()),
+                )
             };
             crate::profile::PreparedProfile {
                 configuration,
                 previous,
                 inherited,
+                source_path,
             }
         }
     };
@@ -322,15 +351,24 @@ async fn execute_owned(
         }) => (target, execution, Some(gateway)),
         None => match request.injected_llm() {
             Some((client, protocol, supported)) => {
-                let (mut target, changed) =
-                    selected_target(&profile, request.model.as_ref(), None)?;
-                target.effort = selected_effort(
-                    target.effort,
-                    profile.configuration.effective.default_effort,
+                let (chosen_model, policy, source) = select_model_and_policy(
+                    &profile,
+                    request.model.as_ref(),
                     request.effort,
-                    changed,
-                    &supported,
-                );
+                    None,
+                )?;
+                let effort = lattice_llm::select_effort(&policy, &supported).map_err(|effort| {
+                    prepare_rejection(
+                        &lattice_llm::PrepareError::UnsupportedEffort {
+                            model: chosen_model.clone(),
+                            effort,
+                        },
+                        &source,
+                        None,
+                    )
+                })?;
+                let mut target = lattice_llm::ModelTarget::new(chosen_model);
+                target.effort = effort;
                 let origin = lattice_session::store::AttemptOrigin {
                     provider_id: target.model.provider().clone(),
                     protocol,
@@ -556,7 +594,9 @@ pub async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_conversation::Effort::{High, Low, Max, Medium, Off};
+    use lattice_conversation::Effort::{High, Low, Max, Off};
+    use lattice_llm::EffortPolicy;
+    use std::path::PathBuf;
 
     fn profile() -> crate::profile::PreparedProfile {
         let config = FrozenTurnConfig {
@@ -577,23 +617,31 @@ mod tests {
             configuration: crate::profile::TurnProfile::from_copy(&copy, None),
             previous: Some(copy),
             inherited: false,
+            source_path: Some(PathBuf::from("/workspace/.lattice/agents/test/agent.toml")),
         }
     }
 
     #[test]
     fn selected_target_uses_profile_or_copy_before_request_override() {
+        let agent_toml = PathBuf::from("/workspace/.lattice/agents/test/agent.toml");
         let mut profile = profile();
-        let (target, changed) = selected_target(&profile, None, None).unwrap();
+        let (chosen, policy, source) = select_model_and_policy(&profile, None, None, None).unwrap();
         assert_eq!(
             (
-                target.model.provider().as_str(),
-                target.model.model().as_str(),
-                target.effort,
-                changed
+                chosen.provider().as_str(),
+                chosen.model().as_str(),
+                policy,
+                source
             ),
-            ("profile", "default", Some(Low), false)
+            (
+                "profile",
+                "default",
+                EffortPolicy::Strict(Some(Low)),
+                EffortSource::ProfileFile(agent_toml.clone())
+            )
         );
         profile.inherited = true;
+        profile.source_path = None;
         profile.previous.as_mut().unwrap().current = SessionModelChoice {
             provider: crate::ProviderId::parse("saved").unwrap(),
             model: crate::ModelId::parse("same").unwrap(),
@@ -606,77 +654,114 @@ mod tests {
             (Some("saved/org/model"), "saved", "org/model", true),
         ] {
             let parsed = request.map(|value| crate::ModelRef::parse(value).unwrap());
-            let (target, actual_changed) =
-                selected_target(&profile, parsed.as_ref(), None).unwrap();
+            let (chosen, policy, source) =
+                select_model_and_policy(&profile, parsed.as_ref(), None, None).unwrap();
+            let expected_policy = if changed {
+                EffortPolicy::Fallback {
+                    current: Some(High),
+                    profile_default: Some(Low),
+                }
+            } else {
+                EffortPolicy::Strict(Some(High))
+            };
             assert_eq!(
                 (
-                    target.model.provider().as_str(),
-                    target.model.model().as_str(),
-                    target.effort,
-                    actual_changed
+                    chosen.provider().as_str(),
+                    chosen.model().as_str(),
+                    policy,
+                    source
                 ),
-                (provider, model, Some(High), changed)
+                (provider, model, expected_policy, EffortSource::SessionCopy)
+            );
+            let (_, explicit_policy, explicit_source) =
+                select_model_and_policy(&profile, parsed.as_ref(), Some(Max), None).unwrap();
+            assert_eq!(
+                (explicit_policy, explicit_source),
+                (EffortPolicy::Strict(Some(Max)), EffortSource::Explicit)
             );
         }
         profile.inherited = false;
-        let (target, changed) = selected_target(&profile, None, None).unwrap();
+        profile.source_path = Some(agent_toml.clone());
+        let (chosen, policy, source) = select_model_and_policy(&profile, None, None, None).unwrap();
         assert_eq!(
             (
-                target.model.provider().as_str(),
-                target.model.model().as_str(),
-                target.effort,
-                changed
+                chosen.provider().as_str(),
+                chosen.model().as_str(),
+                policy,
+                source
             ),
-            ("profile", "default", Some(Low), false)
+            (
+                "profile",
+                "default",
+                EffortPolicy::Strict(Some(Low)),
+                EffortSource::ProfileFile(agent_toml.clone())
+            )
         );
         profile.configuration.effective.default_model = None;
         assert!(matches!(
-            selected_target(&profile, None, None),
+            select_model_and_policy(&profile, None, None, None),
             Err(ApiError::Configuration(_))
         ));
-        let chosen = crate::ModelRef::parse("chosen/org/model").unwrap();
-        let (target, changed) = selected_target(&profile, Some(&chosen), None).unwrap();
+        let override_model = crate::ModelRef::parse("chosen/org/model").unwrap();
+        let (chosen, policy, _) =
+            select_model_and_policy(&profile, Some(&override_model), None, None).unwrap();
         assert_eq!(
+            (chosen.provider().as_str(), chosen.model().as_str(), policy),
             (
-                target.model.provider().as_str(),
-                target.model.model().as_str(),
-                target.effort,
-                changed
-            ),
-            ("chosen", "org/model", Some(Low), true)
+                "chosen",
+                "org/model",
+                EffortPolicy::Fallback {
+                    current: Some(Low),
+                    profile_default: Some(Low),
+                }
+            )
         );
     }
 
     #[test]
-    fn selected_effort_preserves_current_before_profile_default() {
-        for (current, default, requested, changed, supported, expected) in [
+    fn unsupported_effort_attaches_source_attribution() {
+        let agent_toml = PathBuf::from("/workspace/.lattice/agents/coder/agent.toml");
+        let unsupported = lattice_llm::PrepareError::UnsupportedEffort {
+            model: crate::ModelRef::parse("openai/gpt-5").unwrap(),
+            effort: Off,
+        };
+        let profile_attribution = format!("(from [agent].effort in {})", agent_toml.display());
+        for (source, expected, forbidden) in [
             (
-                Some(High),
-                Some(Low),
-                None,
-                true,
-                vec![Low, High],
-                Some(High),
+                EffortSource::Explicit,
+                "(from --effort)",
+                &["[agent].effort", "session profile copy"][..],
             ),
-            (Some(Off), Some(Low), None, true, vec![Low, High], Some(Low)),
-            (Some(High), Some(Low), None, true, vec![Medium], None),
-            (None, Some(Low), None, true, vec![Low, High], Some(Low)),
-            (None, Some(Low), None, false, vec![Low], None),
-            (Some(High), Some(Low), None, false, vec![Low], Some(High)),
             (
-                Some(High),
-                Some(Low),
-                Some(Max),
-                true,
-                vec![Low, High],
-                Some(Max),
+                EffortSource::ProfileFile(agent_toml),
+                profile_attribution.as_str(),
+                &["--effort", "session profile copy"][..],
             ),
-            (Some(High), Some(Low), Some(Off), false, vec![], Some(Off)),
+            (
+                EffortSource::SessionCopy,
+                "(from session profile copy)",
+                &["--effort", "[agent].effort"][..],
+            ),
         ] {
-            assert_eq!(
-                selected_effort(current, default, requested, changed, &supported),
-                expected
+            let ApiError::Configuration(rejection) = prepare_rejection(&unsupported, &source, None)
+            else {
+                panic!("expected configuration rejection for {source:?}");
+            };
+            let message = rejection.to_string();
+            assert!(
+                message.contains(&unsupported.to_string()),
+                "missing base UnsupportedEffort message in: {message}"
             );
+            assert!(
+                message.contains(expected),
+                "expected {expected:?} for {source:?}, got: {message}"
+            );
+            for unexpected in forbidden {
+                assert!(
+                    !message.contains(unexpected),
+                    "unexpected {unexpected:?} for {source:?}, got: {message}"
+                );
+            }
         }
     }
 }

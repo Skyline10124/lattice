@@ -86,15 +86,6 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
             1
         );
     }
-    let gateway = crate::RequestGateway::new(directory.path().into(), vec![]).unwrap();
-    assert_eq!(
-        gateway
-            .open_turn()
-            .supported_efforts(&crate::ModelTarget::test_target("chatgpt", "known"))
-            .await
-            .unwrap(),
-        known.supported_efforts
-    );
     // 坏目录按缺目录处理：未登录时不提示，已经登录时说明原因。
     std::fs::write(&path, "{bad").unwrap();
     let invalid = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();

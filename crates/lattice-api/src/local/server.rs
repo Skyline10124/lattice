@@ -487,9 +487,9 @@ impl Backend {
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
         let inherited = request.agent.is_none() && previous.is_some();
-        let configuration = if inherited {
+        let (configuration, source_path) = if inherited {
             let copy = previous.as_ref().expect("inherited copy");
-            crate::profile::TurnProfile::from_copy(copy, prompt)
+            (crate::profile::TurnProfile::from_copy(copy, prompt), None)
         } else {
             let selected = request.agent.clone().ok_or_else(|| {
                 LocalError::new(
@@ -502,7 +502,8 @@ impl Backend {
             blocking(move || {
                 let loaded =
                     crate::profile::load_for_turn(&selected, &project, &configuration_dir)?;
-                crate::profile::TurnProfile::from_loaded(&loaded, &project).map_err(Into::into)
+                let configuration = crate::profile::TurnProfile::from_loaded(&loaded, &project)?;
+                Ok((configuration, Some(loaded.path)))
             })
             .await?
         };
@@ -510,6 +511,7 @@ impl Backend {
             configuration,
             previous,
             inherited,
+            source_path,
         };
         let gateway = self
             .gateway
