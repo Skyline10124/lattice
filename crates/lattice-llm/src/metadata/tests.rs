@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use serde_json::json;
 
 use super::*;
+use crate::models::test_support::{list_query, target_query};
 
 fn cache(dir: &Path, source: &serde_json::Value) {
     std::fs::create_dir_all(dir.join("cache")).unwrap();
@@ -14,17 +15,6 @@ fn cache(dir: &Path, source: &serde_json::Value) {
         serde_json::to_vec(source).unwrap(),
     )
     .unwrap();
-}
-
-fn list_query(provider: Option<&str>, ready_only: bool) -> crate::ModelCandidateQuery {
-    crate::ModelCandidateQuery::List {
-        provider: provider.map(|id| crate::ProviderId::parse(id).unwrap()),
-        ready_only,
-    }
-}
-
-fn target_query(target: &str) -> crate::ModelCandidateQuery {
-    crate::ModelCandidateQuery::Target(crate::ModelRef::parse(target).unwrap())
 }
 
 #[tokio::test]

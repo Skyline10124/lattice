@@ -27,7 +27,8 @@ pub enum ProviderIdError {
     InvalidCharacter,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct ProviderId(String);
 
 impl ProviderId {
@@ -52,12 +53,6 @@ impl ProviderId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl AsRef<str> for ProviderId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
     }
 }
 
@@ -93,12 +88,6 @@ impl FromStr for ProviderId {
     }
 }
 
-impl Serialize for ProviderId {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
 impl<'de> Deserialize<'de> for ProviderId {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
@@ -118,7 +107,8 @@ pub enum ModelIdError {
 }
 
 /// 不透明的远端模型标识；保留空格、Unicode 与后续 `/`，仅拒绝空串、超长与控制字符。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct ModelId(String);
 
 impl ModelId {
@@ -137,12 +127,6 @@ impl ModelId {
 
     pub fn as_str(&self) -> &str {
         &self.0
-    }
-}
-
-impl AsRef<str> for ModelId {
-    fn as_ref(&self) -> &str {
-        self.as_str()
     }
 }
 
@@ -175,12 +159,6 @@ impl FromStr for ModelId {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         Self::parse(value)
-    }
-}
-
-impl Serialize for ModelId {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
     }
 }
 
@@ -230,10 +208,6 @@ impl ModelRef {
 
     pub fn model(&self) -> &ModelId {
         &self.model
-    }
-
-    pub fn into_parts(self) -> (ProviderId, ModelId) {
-        (self.provider, self.model)
     }
 }
 

@@ -19,7 +19,8 @@ use tokio::{
 use tokio_rustls::TlsAcceptor;
 use tracing::instrument::WithSubscriber;
 
-use super::RequestGateway;
+use super::{GatewayTurn, RequestGateway, TurnClient};
+use crate::models::test_support::{list_query, target_query};
 use crate::test_tls::TLS;
 use crate::{ChatRequest, LlmEvent, ModelTarget, ReplyOutcome, StreamControl};
 
@@ -42,12 +43,9 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     let turn = gateway.open_turn();
     let target = ModelTarget::test_target("test", "model");
     assert_eq!(
-        crate::model_candidates(
-            directory.path(),
-            &crate::ModelCandidateQuery::Target("test/model".parse().unwrap()),
-        )
-        .unwrap()
-        .models[0]
+        crate::model_candidates(directory.path(), &target_query("test/model"))
+            .unwrap()
+            .models[0]
             .supported_efforts,
         vec![Effort::Off, Effort::Low, Effort::High]
     );
@@ -67,22 +65,16 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     )
     .unwrap();
     assert_eq!(
-        crate::model_candidates(
-            directory.path(),
-            &crate::ModelCandidateQuery::Target("test/model".parse().unwrap()),
-        )
-        .unwrap()
-        .models[0]
+        crate::model_candidates(directory.path(), &target_query("test/model"))
+            .unwrap()
+            .models[0]
             .supported_efforts,
         vec![Effort::Medium]
     );
     assert!(
-        crate::model_candidates(
-            directory.path(),
-            &crate::ModelCandidateQuery::Target("test/unknown".parse().unwrap()),
-        )
-        .unwrap()
-        .models[0]
+        crate::model_candidates(directory.path(), &target_query("test/unknown"))
+            .unwrap()
+            .models[0]
             .supported_efforts
             .is_empty()
     );
@@ -121,11 +113,9 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
         ("org/unknown", vec![]),
     ] {
-        let candidates = crate::model_candidates(
-            directory.path(),
-            &crate::ModelCandidateQuery::Target(format!("test/{model}").parse().unwrap()),
-        )
-        .unwrap();
+        let candidates =
+            crate::model_candidates(directory.path(), &target_query(&format!("test/{model}")))
+                .unwrap();
         assert_eq!(candidates.models.len(), 1);
         assert_eq!(
             candidates.models[0].supported_efforts, expected,
@@ -159,7 +149,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         };
         let exact = crate::model_candidates(
             directory.path(),
-            &crate::ModelCandidateQuery::Target(format!("{provider}/effort").parse().unwrap()),
+            &target_query(&format!("{provider}/effort")),
         )
         .unwrap();
         assert_eq!(exact.models.len(), 1);
@@ -179,14 +169,9 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
                     .unwrap();
                 assert_eq!(resolved.target().effort, Some(effort));
             }
-            let listed = crate::model_candidates(
-                directory.path(),
-                &crate::ModelCandidateQuery::List {
-                    provider: Some(crate::ProviderId::parse(provider).unwrap()),
-                    ready_only: false,
-                },
-            )
-            .unwrap();
+            let listed =
+                crate::model_candidates(directory.path(), &list_query(Some(provider), false))
+                    .unwrap();
             assert!(listed.models.iter().all(|model| model.supported_efforts
                 == if model.model.as_str() == "effort" {
                     expected.clone()
@@ -238,10 +223,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             "{resolve_unconfigured}"
         );
         for query in [
-            crate::ModelCandidateQuery::List {
-                provider: Some(crate::ProviderId::parse("test").unwrap()),
-                ready_only: false,
-            },
+            list_query(Some("test"), false),
             crate::ModelCandidateQuery::Target(target.model.clone()),
         ] {
             let candidates = crate::model_candidates(directory.path(), &query).unwrap();
@@ -279,10 +261,7 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             crate::LlmError::from(prepare_invalid.clone())
         );
         for query in [
-            crate::ModelCandidateQuery::List {
-                provider: Some(crate::ProviderId::parse("test").unwrap()),
-                ready_only: false,
-            },
+            list_query(Some("test"), false),
             crate::ModelCandidateQuery::Target(target.model.clone()),
         ] {
             let candidates = crate::model_candidates(directory.path(), &query).unwrap();
@@ -1403,15 +1382,10 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
         let mut request = request("test");
         match expected {
             Ok(expected) => {
-                let listed = crate::model_candidates(
-                    directory.path(),
-                    &crate::ModelCandidateQuery::List {
-                        provider: Some(crate::ProviderId::parse("test").unwrap()),
-                        ready_only: false,
-                    },
-                )
-                .unwrap()
-                .models;
+                let listed =
+                    crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                        .unwrap()
+                        .models;
                 assert_eq!(listed.len(), 1);
                 assert_eq!(listed[0].availability, crate::Availability::Ready);
                 turn.resolve(&request.target).await.unwrap();
@@ -1446,16 +1420,11 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                 );
             }
             Err((invalid, reason)) => {
-                let candidate = crate::model_candidates(
-                    directory.path(),
-                    &crate::ModelCandidateQuery::List {
-                        provider: Some(crate::ProviderId::parse("test").unwrap()),
-                        ready_only: false,
-                    },
-                )
-                .unwrap()
-                .models
-                .remove(0);
+                let candidate =
+                    crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                        .unwrap()
+                        .models
+                        .remove(0);
                 let crate::Availability::Invalid {
                     reason: listing_error,
                 } = candidate.availability
@@ -1811,15 +1780,9 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
             }
         );
         assert_eq!(
-            crate::model_candidates(
-                directory.path(),
-                &crate::ModelCandidateQuery::List {
-                    provider: Some(crate::ProviderId::parse("test").unwrap()),
-                    ready_only: false,
-                },
-            )
-            .unwrap()
-            .models[0]
+            crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                .unwrap()
+                .models[0]
                 .output,
             Some(expected)
         );
@@ -1927,10 +1890,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
     )
     .unwrap();
-    let query = crate::ModelCandidateQuery::List {
-        provider: Some(crate::ProviderId::parse("test").unwrap()),
-        ready_only: false,
-    };
+    let query = list_query(Some("test"), false);
     let before = crate::model_candidates(directory.path(), &query).unwrap();
     assert!(before.models.is_empty());
     let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
@@ -2502,14 +2462,8 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
     let turn = gateway.open_turn();
     for effort in ["off", "xhigh", "max"] {
         std::fs::write(directory.path().join("providers.toml"),format!("[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\n[providers.test.models.model-id]\neffort=['{effort}']\n[providers.test.models.valid]\neffort=['minimal','low','medium','high']\n")).unwrap();
-        let candidates = crate::model_candidates(
-            directory.path(),
-            &crate::ModelCandidateQuery::List {
-                provider: Some(crate::ProviderId::parse("test").unwrap()),
-                ready_only: false,
-            },
-        )
-        .unwrap();
+        let candidates =
+            crate::model_candidates(directory.path(), &list_query(Some("test"), false)).unwrap();
         let invalid = candidates
             .models
             .iter()
@@ -3187,16 +3141,7 @@ async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
         }
         server.next().await;
         // loopback 服务无法观察公网 DNS，直接核对地址固定所用的 client 已被丢弃。
-        let slot = turn
-            .clients
-            .lock()
-            .unwrap()
-            .get(&(
-                crate::ProviderId::parse("test").unwrap(),
-                server.url.clone(),
-            ))
-            .unwrap()
-            .clone();
+        let slot = client_slot(&turn, &server.url);
         assert!(!slot.is_cached(), "{name}");
         complete(
             turn.stream_chat(request("test"), StreamControl::default())
@@ -3236,16 +3181,7 @@ async fn done_tail_above_64_kib_discards_the_pinned_client() {
     release.send(()).unwrap();
     complete(stream).await;
     let previous = server.next().await.connection;
-    let slot = turn
-        .clients
-        .lock()
-        .unwrap()
-        .get(&(
-            crate::ProviderId::parse("test").unwrap(),
-            server.url.clone(),
-        ))
-        .unwrap()
-        .clone();
+    let slot = client_slot(&turn, &server.url);
     assert!(!slot.is_cached());
     complete(
         turn.stream_chat(request("test"), StreamControl::default())
@@ -3272,16 +3208,7 @@ async fn dropping_an_opening_request_discards_its_pinned_client() {
             _ = &mut opening => panic!("provider has not sent response headers"),
         }
     }
-    let slot = turn
-        .clients
-        .lock()
-        .unwrap()
-        .get(&(
-            crate::ProviderId::parse("test").unwrap(),
-            server.url.clone(),
-        ))
-        .unwrap()
-        .clone();
+    let slot = client_slot(&turn, &server.url);
     assert!(!slot.is_cached());
     complete(
         turn.stream_chat(request("test"), StreamControl::default())
@@ -3418,15 +3345,15 @@ async fn stream_control_reaches_the_shared_reply_assembler() {
             }
         ]
     ));
-    let slot = turn
-        .clients
+    let slot = client_slot(&turn, &server.url);
+    assert!(!slot.is_cached());
+}
+
+fn client_slot(turn: &GatewayTurn, url: &str) -> Arc<TurnClient> {
+    turn.clients
         .lock()
         .unwrap()
-        .get(&(
-            crate::ProviderId::parse("test").unwrap(),
-            server.url.clone(),
-        ))
+        .get(&(crate::ProviderId::parse("test").unwrap(), url.to_owned()))
         .unwrap()
-        .clone();
-    assert!(!slot.is_cached());
+        .clone()
 }

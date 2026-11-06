@@ -225,3 +225,20 @@ fn candidate(
         availability,
     }
 }
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    pub(crate) fn list_query(
+        provider: Option<&str>,
+        ready_only: bool,
+    ) -> super::ModelCandidateQuery {
+        super::ModelCandidateQuery::List {
+            provider: provider.map(|id| crate::ProviderId::parse(id).unwrap()),
+            ready_only,
+        }
+    }
+
+    pub(crate) fn target_query(target: &str) -> super::ModelCandidateQuery {
+        super::ModelCandidateQuery::Target(crate::ModelRef::parse(target).unwrap())
+    }
+}

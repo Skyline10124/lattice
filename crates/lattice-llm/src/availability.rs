@@ -174,165 +174,20 @@ mod tests {
 
     #[test]
     fn provider_availability_matrix() {
-        #[derive(Clone, Copy)]
+        #[derive(Clone, Copy, Debug)]
         enum StoreState {
             Empty,
-            WithApiKey(&'static str),
+            WithApiKey,
             ChatgptLoggedOut,
             ChatgptSignedIn,
             Corrupted,
         }
 
-        for (label, id, auth, declared, store_state, expected) in [
-            (
-                "none undeclared",
-                "custom-local",
-                Auth::None,
-                false,
-                StoreState::Empty,
-                Availability::Unconfigured {
-                    requirement: ConfigurationRequirement::Declaration,
-                },
-            ),
-            (
-                "none declared",
-                "custom-local",
-                Auth::None,
-                true,
-                StoreState::Empty,
-                Availability::Ready,
-            ),
-            (
-                "none declared with corrupted auth.json",
-                "custom-local",
-                Auth::None,
-                true,
-                StoreState::Corrupted,
-                Availability::Ready,
-            ),
-            (
-                "bearer missing key",
-                "custom-bearer",
-                Auth::Bearer,
-                true,
-                StoreState::Empty,
-                Availability::Unconfigured {
-                    requirement: ConfigurationRequirement::ApiKey,
-                },
-            ),
-            (
-                "bearer with key",
-                "custom-bearer",
-                Auth::Bearer,
-                true,
-                StoreState::WithApiKey("custom-bearer"),
-                Availability::Ready,
-            ),
-            (
-                "bearer corrupted auth.json",
-                "custom-bearer",
-                Auth::Bearer,
-                true,
-                StoreState::Corrupted,
-                Availability::Invalid {
-                    reason: "auth.json: invalid credential structure".to_owned(),
-                },
-            ),
-            (
-                "x-api-key missing key",
-                "custom-header",
-                Auth::XApiKey,
-                true,
-                StoreState::Empty,
-                Availability::Unconfigured {
-                    requirement: ConfigurationRequirement::ApiKey,
-                },
-            ),
-            (
-                "x-api-key with key",
-                "custom-header",
-                Auth::XApiKey,
-                true,
-                StoreState::WithApiKey("custom-header"),
-                Availability::Ready,
-            ),
-            (
-                "x-api-key corrupted auth.json",
-                "custom-header",
-                Auth::XApiKey,
-                true,
-                StoreState::Corrupted,
-                Availability::Invalid {
-                    reason: "auth.json: invalid credential structure".to_owned(),
-                },
-            ),
-            (
-                "x-goog-api-key missing key",
-                "custom-google",
-                Auth::XGoogApiKey,
-                true,
-                StoreState::Empty,
-                Availability::Unconfigured {
-                    requirement: ConfigurationRequirement::ApiKey,
-                },
-            ),
-            (
-                "x-goog-api-key with key",
-                "custom-google",
-                Auth::XGoogApiKey,
-                true,
-                StoreState::WithApiKey("custom-google"),
-                Availability::Ready,
-            ),
-            (
-                "x-goog-api-key corrupted auth.json",
-                "custom-google",
-                Auth::XGoogApiKey,
-                true,
-                StoreState::Corrupted,
-                Availability::Invalid {
-                    reason: "auth.json: invalid credential structure".to_owned(),
-                },
-            ),
-            (
-                "chatgpt not signed in (empty)",
-                "custom-chatgpt",
-                Auth::OauthChatgpt,
-                false,
-                StoreState::Empty,
-                Availability::Unconfigured {
-                    requirement: ConfigurationRequirement::ChatgptLogin,
-                },
-            ),
-            (
-                "chatgpt not signed in (logged-out registration)",
-                "custom-chatgpt",
-                Auth::OauthChatgpt,
-                false,
-                StoreState::ChatgptLoggedOut,
-                Availability::Unconfigured {
-                    requirement: ConfigurationRequirement::ChatgptLogin,
-                },
-            ),
-            (
-                "chatgpt signed in",
-                "custom-chatgpt",
-                Auth::OauthChatgpt,
-                false,
-                StoreState::ChatgptSignedIn,
-                Availability::Ready,
-            ),
-            (
-                "chatgpt corrupted auth.json",
-                "custom-chatgpt",
-                Auth::OauthChatgpt,
-                false,
-                StoreState::Corrupted,
-                Availability::Invalid {
-                    reason: "auth.json: invalid credential structure".to_owned(),
-                },
-            ),
-        ] {
+        let check = |id: &str,
+                     auth: Auth,
+                     declared: bool,
+                     store_state: StoreState,
+                     expected: Availability| {
             let tempdir = tempfile::tempdir().unwrap();
             let config = tempdir.path().join("config");
             fs::create_dir(&config).unwrap();
@@ -344,51 +199,98 @@ mod tests {
             };
             match store_state {
                 StoreState::Empty => {}
-                StoreState::WithApiKey(provider_id) => {
-                    write_auth(
-                        json!({
-                            "version": 1,
-                            "providers": {
-                                provider_id: { "type": "api_key", "key": "matrix-test-key" }
-                            }
-                        })
+                StoreState::WithApiKey => write_auth(
+                    json!({"version": 1, "providers": {id: {"type": "api_key", "key": "matrix-test-key"}}})
                         .to_string()
                         .as_bytes(),
-                    );
-                }
-                StoreState::ChatgptLoggedOut => {
-                    write_auth(
-                        json!({
-                            "version": 1,
-                            "providers": {
-                                "chatgpt": { "type": "chatgpt", "host_id": "host" }
-                            }
-                        })
+                ),
+                StoreState::ChatgptLoggedOut => write_auth(
+                    json!({"version": 1, "providers": {"chatgpt": {"type": "chatgpt", "host_id": "host"}}})
                         .to_string()
                         .as_bytes(),
-                    );
-                }
-                StoreState::ChatgptSignedIn => {
-                    write_auth(
-                        json!({
-                            "version": 1,
-                            "providers": {
-                                "chatgpt": crate::auth::tests::chatgpt()
-                            }
-                        })
+                ),
+                StoreState::ChatgptSignedIn => write_auth(
+                    json!({"version": 1, "providers": {"chatgpt": crate::auth::tests::chatgpt()}})
                         .to_string()
                         .as_bytes(),
-                    );
-                }
-                StoreState::Corrupted => {
-                    write_auth(b"{corrupted");
-                }
+                ),
+                StoreState::Corrupted => write_auth(b"{corrupted"),
             }
-            let store = AuthStore::new(config.clone());
-            let credentials = store.load();
+            let credentials = AuthStore::new(config).load();
             let provider = test_provider(id, auth, declared);
-            let actual = provider_availability(&provider, credentials.as_ref());
-            assert_eq!(actual, expected, "{label}");
+            assert_eq!(
+                provider_availability(&provider, credentials.as_ref()),
+                expected,
+                "provider={id} auth={auth:?} store={store_state:?} declared={declared}"
+            );
+        };
+
+        for (declared, store_state, expected) in [
+            (
+                false,
+                StoreState::Empty,
+                Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::Declaration,
+                },
+            ),
+            (true, StoreState::Empty, Availability::Ready),
+            (true, StoreState::Corrupted, Availability::Ready),
+        ] {
+            check("custom-local", Auth::None, declared, store_state, expected);
+        }
+
+        for (id, auth) in [
+            ("custom-bearer", Auth::Bearer),
+            ("custom-header", Auth::XApiKey),
+            ("custom-google", Auth::XGoogApiKey),
+        ] {
+            for (store_state, expected) in [
+                (
+                    StoreState::Empty,
+                    Availability::Unconfigured {
+                        requirement: ConfigurationRequirement::ApiKey,
+                    },
+                ),
+                (StoreState::WithApiKey, Availability::Ready),
+                (
+                    StoreState::Corrupted,
+                    Availability::Invalid {
+                        reason: "auth.json: invalid credential structure".to_owned(),
+                    },
+                ),
+            ] {
+                check(id, auth, true, store_state, expected);
+            }
+        }
+
+        for (store_state, expected) in [
+            (
+                StoreState::Empty,
+                Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::ChatgptLogin,
+                },
+            ),
+            (
+                StoreState::ChatgptLoggedOut,
+                Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::ChatgptLogin,
+                },
+            ),
+            (StoreState::ChatgptSignedIn, Availability::Ready),
+            (
+                StoreState::Corrupted,
+                Availability::Invalid {
+                    reason: "auth.json: invalid credential structure".to_owned(),
+                },
+            ),
+        ] {
+            check(
+                "custom-chatgpt",
+                Auth::OauthChatgpt,
+                false,
+                store_state,
+                expected,
+            );
         }
     }
 }

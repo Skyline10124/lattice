@@ -2106,11 +2106,8 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (0, 6));
         app.apply_action(KeyAction::Submit);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/m7")
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m7".into())
         );
         open_models(&mut app);
         for _ in 0..5 {
@@ -2122,11 +2119,8 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (0, 5));
         app.apply_action(KeyAction::Submit);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/m2")
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m2".into())
         );
         open_models(&mut app);
         for _ in 0..20 {
@@ -2137,11 +2131,8 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (0, 3));
         app.apply_action(KeyAction::Submit);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/m0"),
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m0".into()),
             "顶部夹紧"
         );
         open_models(&mut app);
@@ -2153,11 +2144,8 @@ mod tests {
         assert_eq!((cursor.x, cursor.y), (0, 6));
         app.apply_action(KeyAction::Submit);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/m9"),
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m9".into()),
             "底部夹紧"
         );
         open_models(&mut app);
@@ -2187,11 +2175,8 @@ mod tests {
         assert_eq!(app.input.text(), "hidden draft");
         app.apply_action(KeyAction::Submit);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/m9")
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m9".into())
         );
         app.apply_builtin("/model");
         let query = app.model_query.take().unwrap();
@@ -2214,11 +2199,8 @@ mod tests {
         }
         app.apply_action(KeyAction::Clear);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/m9"),
+            app.next_target().map(|target| target.to_string()),
+            Some("p/m9".into()),
             "Esc 保留原选择"
         );
     }
@@ -2259,11 +2241,8 @@ mod tests {
         assert!(shown.contains("p/broken"), "{shown}");
         app.apply_action(KeyAction::Submit);
         assert_eq!(
-            app.next_target()
-                .as_ref()
-                .map(ToString::to_string)
-                .as_deref(),
-            Some("p/broken")
+            app.next_target().map(|target| target.to_string()),
+            Some("p/broken".into())
         );
         app.apply_builtin("/effort");
         let query = app.model_query.take().unwrap();

@@ -677,60 +677,35 @@ mod tests {
     fn select_effort_enforces_strict_and_evaluates_fallback_order() {
         use Effort::{High, Low, Max, Medium, Off};
 
-        for (policy, supported, expected) in [
-            (
-                EffortPolicy::Strict(Some(High)),
-                vec![Low, High],
-                Ok(Some(High)),
-            ),
-            (EffortPolicy::Strict(Some(High)), vec![Low], Err(High)),
-            (EffortPolicy::Strict(Some(Max)), vec![Low, High], Err(Max)),
-            (EffortPolicy::Strict(Some(Off)), vec![], Err(Off)),
-            (EffortPolicy::Strict(None), vec![Low, High], Ok(None)),
-            (EffortPolicy::Strict(None), vec![], Ok(None)),
-            (
-                EffortPolicy::Fallback {
-                    current: Some(High),
-                    profile_default: Some(Low),
-                },
-                vec![Low, High],
-                Ok(Some(High)),
-            ),
-            (
-                EffortPolicy::Fallback {
-                    current: Some(Off),
-                    profile_default: Some(Low),
-                },
-                vec![Low, High],
-                Ok(Some(Low)),
-            ),
-            (
-                EffortPolicy::Fallback {
-                    current: None,
-                    profile_default: Some(Low),
-                },
-                vec![Low, High],
-                Ok(Some(Low)),
-            ),
-            (
-                EffortPolicy::Fallback {
-                    current: Some(High),
-                    profile_default: Some(Low),
-                },
-                vec![Medium],
-                Ok(None),
-            ),
-            (
-                EffortPolicy::Fallback {
-                    current: None,
-                    profile_default: None,
-                },
-                vec![Low, High],
-                Ok(None),
-            ),
+        for (requested, supported, expected) in [
+            (Some(High), &[Low, High][..], Ok(Some(High))),
+            (Some(High), &[Low], Err(High)),
+            (Some(Max), &[Low, High], Err(Max)),
+            (Some(Off), &[], Err(Off)),
+            (None, &[Low, High], Ok(None)),
+            (None, &[], Ok(None)),
         ] {
+            let policy = EffortPolicy::Strict(requested);
             assert_eq!(
-                select_effort(&policy, &supported),
+                select_effort(&policy, supported),
+                expected,
+                "{policy:?} / {supported:?}"
+            );
+        }
+
+        for (current, profile_default, supported, expected) in [
+            (Some(High), Some(Low), &[Low, High][..], Ok(Some(High))),
+            (Some(Off), Some(Low), &[Low, High], Ok(Some(Low))),
+            (None, Some(Low), &[Low, High], Ok(Some(Low))),
+            (Some(High), Some(Low), &[Medium], Ok(None)),
+            (None, None, &[Low, High], Ok(None)),
+        ] {
+            let policy = EffortPolicy::Fallback {
+                current,
+                profile_default,
+            };
+            assert_eq!(
+                select_effort(&policy, supported),
                 expected,
                 "{policy:?} / {supported:?}"
             );

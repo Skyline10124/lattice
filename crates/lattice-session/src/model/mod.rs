@@ -3,9 +3,9 @@
 
 //! 会话树模型与有效 profile 共享的纯字段类型，不依赖存储引擎、编解码或外部配置加载器。
 
-use std::{borrow::Borrow, fmt, str::FromStr};
+use std::{fmt, str::FromStr};
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
 /// Agent 名称的最大 UTF-8 字节数。
@@ -36,7 +36,8 @@ pub enum AgentNameError {
 }
 
 /// 单个正常路径分量的 Agent 名称；保留原始大小写、空格与合法 Unicode。
-#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct AgentName(String);
 
 impl AgentName {
@@ -67,18 +68,6 @@ impl AgentName {
     }
 }
 
-impl AsRef<str> for AgentName {
-    fn as_ref(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl Borrow<str> for AgentName {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
 impl PartialEq<str> for AgentName {
     fn eq(&self, other: &str) -> bool {
         self.0 == other
@@ -105,12 +94,6 @@ impl FromStr for AgentName {
     }
 }
 
-impl Serialize for AgentName {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_str(&self.0)
-    }
-}
-
 impl<'de> Deserialize<'de> for AgentName {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
@@ -128,7 +111,8 @@ pub enum TurnTimeoutError {
 }
 
 /// 有效的 Turn 超时秒数（`1..=86_400`）；未显式配置时统一经 [`Default`] 取 300 秒。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
+#[serde(transparent)]
 pub struct TurnTimeout(u64);
 
 impl TurnTimeout {
@@ -159,12 +143,6 @@ impl fmt::Display for TurnTimeout {
     }
 }
 
-impl Serialize for TurnTimeout {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        serializer.serialize_u64(self.0)
-    }
-}
-
 impl<'de> Deserialize<'de> for TurnTimeout {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let seconds = u64::deserialize(deserializer)?;
@@ -186,14 +164,14 @@ pub enum RetryPolicyError {
 }
 
 /// 模型步骤的重试上限与指数退避参数。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize)]
 pub struct RetryPolicy {
     max_retries: u32,
     initial_delay_ms: u64,
     max_delay_ms: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RetryPolicyWire {
     max_retries: u32,
@@ -250,17 +228,6 @@ impl Default for RetryPolicy {
             initial_delay_ms: 500,
             max_delay_ms: 3_000,
         }
-    }
-}
-
-impl Serialize for RetryPolicy {
-    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        RetryPolicyWire {
-            max_retries: self.max_retries,
-            initial_delay_ms: self.initial_delay_ms,
-            max_delay_ms: self.max_delay_ms,
-        }
-        .serialize(serializer)
     }
 }
 

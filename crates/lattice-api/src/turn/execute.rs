@@ -75,8 +75,12 @@ impl PreparedModel {
     }
 }
 
-fn prepare_error_message(error: &lattice_llm::PrepareError, source: &EffortSource) -> String {
-    match error {
+fn prepare_rejection(
+    error: &lattice_llm::PrepareError,
+    source: &EffortSource,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> ApiError {
+    let message = match error {
         lattice_llm::PrepareError::UnsupportedEffort { .. } => match source {
             EffortSource::Explicit => format!("{error} (from --effort)"),
             EffortSource::ProfileFile(path) => {
@@ -85,18 +89,8 @@ fn prepare_error_message(error: &lattice_llm::PrepareError, source: &EffortSourc
             EffortSource::SessionCopy => format!("{error} (from session profile copy)"),
         },
         _ => error.to_string(),
-    }
-}
-
-fn prepare_rejection(
-    error: &lattice_llm::PrepareError,
-    source: &EffortSource,
-    auth: Option<&lattice_llm::auth::AuthStore>,
-) -> ApiError {
-    ApiError::Configuration(crate::ConfigRejection::new(
-        &prepare_error_message(error, source),
-        auth,
-    ))
+    };
+    ApiError::Configuration(crate::ConfigRejection::new(&message, auth))
 }
 
 fn select_model_and_policy(
@@ -627,17 +621,11 @@ mod tests {
         let mut profile = profile();
         let (chosen, policy, source) = select_model_and_policy(&profile, None, None, None).unwrap();
         assert_eq!(
+            (chosen, policy, source),
             (
-                chosen.provider().as_str(),
-                chosen.model().as_str(),
-                policy,
-                source
-            ),
-            (
-                "profile",
-                "default",
+                crate::ModelRef::parse("profile/default").unwrap(),
                 EffortPolicy::Strict(Some(Low)),
-                EffortSource::ProfileFile(agent_toml.clone())
+                EffortSource::ProfileFile(agent_toml.clone()),
             )
         );
         profile.inherited = true;
@@ -647,11 +635,11 @@ mod tests {
             model: crate::ModelId::parse("same").unwrap(),
             effort: Some(High),
         };
-        for (request, provider, model, changed) in [
-            (None, "saved", "same", false),
-            (Some("saved/same"), "saved", "same", false),
-            (Some("other/same"), "other", "same", true),
-            (Some("saved/org/model"), "saved", "org/model", true),
+        for (request, expected_model, changed) in [
+            (None, "saved/same", false),
+            (Some("saved/same"), "saved/same", false),
+            (Some("other/same"), "other/same", true),
+            (Some("saved/org/model"), "saved/org/model", true),
         ] {
             let parsed = request.map(|value| crate::ModelRef::parse(value).unwrap());
             let (chosen, policy, source) =
@@ -665,13 +653,12 @@ mod tests {
                 EffortPolicy::Strict(Some(High))
             };
             assert_eq!(
+                (chosen, policy, source),
                 (
-                    chosen.provider().as_str(),
-                    chosen.model().as_str(),
-                    policy,
-                    source
-                ),
-                (provider, model, expected_policy, EffortSource::SessionCopy)
+                    crate::ModelRef::parse(expected_model).unwrap(),
+                    expected_policy,
+                    EffortSource::SessionCopy,
+                )
             );
             let (_, explicit_policy, explicit_source) =
                 select_model_and_policy(&profile, parsed.as_ref(), Some(Max), None).unwrap();
@@ -684,17 +671,11 @@ mod tests {
         profile.source_path = Some(agent_toml.clone());
         let (chosen, policy, source) = select_model_and_policy(&profile, None, None, None).unwrap();
         assert_eq!(
+            (chosen, policy, source),
             (
-                chosen.provider().as_str(),
-                chosen.model().as_str(),
-                policy,
-                source
-            ),
-            (
-                "profile",
-                "default",
+                crate::ModelRef::parse("profile/default").unwrap(),
                 EffortPolicy::Strict(Some(Low)),
-                EffortSource::ProfileFile(agent_toml.clone())
+                EffortSource::ProfileFile(agent_toml.clone()),
             )
         );
         profile.configuration.effective.default_model = None;
@@ -706,14 +687,13 @@ mod tests {
         let (chosen, policy, _) =
             select_model_and_policy(&profile, Some(&override_model), None, None).unwrap();
         assert_eq!(
-            (chosen.provider().as_str(), chosen.model().as_str(), policy),
+            (chosen, policy),
             (
-                "chosen",
-                "org/model",
+                override_model,
                 EffortPolicy::Fallback {
                     current: Some(Low),
                     profile_default: Some(Low),
-                }
+                },
             )
         );
     }

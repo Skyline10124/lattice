@@ -1765,13 +1765,8 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     assert_eq!(records(&db).configs.len(), 1);
     assert_eq!(node_at(&db, 2), old);
     assert_eq!(
-        db.begin_read()
-            .unwrap()
-            .current_agent(sid(1))
-            .unwrap()
-            .as_ref()
-            .map(AgentName::as_str),
-        Some("beta")
+        db.begin_read().unwrap().current_agent(sid(1)).unwrap(),
+        Some(agent("beta"))
     );
     assert!(matches!(
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now()),
@@ -2772,29 +2767,12 @@ fn last_accepted_agent_survives_rewind() {
     for target in [NodeId(2), NodeId(1), NodeId(0)] {
         db.rewind(&lock, target, now()).unwrap();
         let read = db.begin_read().unwrap();
+        assert_eq!(read.current_agent(sid(1)).unwrap(), Some(agent("beta")));
         assert_eq!(
-            read.current_agent(sid(1))
-                .unwrap()
-                .as_ref()
-                .map(AgentName::as_str),
-            Some("beta")
+            read.view(sid(1), 10).unwrap().current_agent,
+            Some(agent("beta"))
         );
-        assert_eq!(
-            read.view(sid(1), 10)
-                .unwrap()
-                .current_agent
-                .as_ref()
-                .map(AgentName::as_str),
-            Some("beta")
-        );
-        assert_eq!(
-            read.log(sid(1))
-                .unwrap()
-                .current_agent
-                .as_ref()
-                .map(AgentName::as_str),
-            Some("beta")
-        );
+        assert_eq!(read.log(sid(1)).unwrap().current_agent, Some(agent("beta")));
     }
     drop(lock);
     drop(db);
@@ -2804,10 +2782,8 @@ fn last_accepted_agent_survives_rewind() {
             .begin_read()
             .unwrap()
             .current_agent(sid(1))
-            .unwrap()
-            .as_ref()
-            .map(AgentName::as_str),
-        Some("beta")
+            .unwrap(),
+        Some(agent("beta"))
     );
 }
 
@@ -2829,10 +2805,7 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     assert_eq!(entry_nodes(&view.entries), vec![4, 5, 6, 7]);
     assert_eq!(entry_ordinals(&view.entries), vec![2, 3]);
     assert_eq!(view.session.current, NodeId(7));
-    assert_eq!(
-        view.current_agent.as_ref().map(AgentName::as_str),
-        Some("beta")
-    );
+    assert_eq!(view.current_agent.as_ref(), Some(&agent("beta")));
     assert!(
         matches!(&view.entries[3], ConversationEntry::Step { step, summary: Some(summary), .. }
         if step.progress == StepProgress::Reserved && summary.progress == StepProgress::Reserved)
@@ -2871,18 +2844,12 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     db.rewind(&lock, NodeId(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1]);
-    assert_eq!(
-        view.current_agent.as_ref().map(AgentName::as_str),
-        Some("alpha")
-    );
+    assert_eq!(view.current_agent, Some(agent("alpha")));
     db.rewind(&lock, NodeId(0), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
-    assert_eq!(
-        view.current_agent.as_ref().map(AgentName::as_str),
-        Some("alpha")
-    );
+    assert_eq!(view.current_agent, Some(agent("alpha")));
 }
 
 #[test]
@@ -5285,9 +5252,8 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
             .unwrap()
             .current_agent(sid(1))
             .unwrap()
-            .as_ref()
-            .map(AgentName::as_str),
-        Some(unchanged.profile.agent_name.as_str())
+            .as_ref(),
+        Some(&unchanged.profile.agent_name)
     );
     assert_eq!(
         db.begin_read().unwrap().profile_copy(sid(1)).unwrap(),
