@@ -173,7 +173,8 @@ fn direct_turn_registered_model_with_missing_credentials_rejects_before_acceptan
                 && routing["models"].as_array().unwrap().iter().any(|model| {
                     model["provider"] == "anthropic"
                         && model["model"] == "claude-sonnet-4-6"
-                        && model["credential_status"] == "missing"
+                        && model["availability"]
+                            == serde_json::json!({"status":"unconfigured","requirement":"api_key"})
                 }),
             "formal sonnet routing with missing credential",
         )?;

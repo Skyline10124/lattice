@@ -12,8 +12,9 @@ pub use lattice_conversation::{
     CostEstimate, CostSummary, Effort, ResultPayload, StepContent, StoredToolResult,
     SuccessContent, TokenSummary, UsageCompleteness,
 };
-pub use lattice_llm::auth::{
-    AuthState, AuthStatus, ProviderAuthStatus, RevocationStatus, SensitiveLoginUrl,
+pub use lattice_llm::{
+    Availability, ConfigurationRequirement,
+    auth::{AuthStatus, ProviderAuthStatus, RevocationStatus, SensitiveLoginUrl},
 };
 pub use lattice_session::store::{
     AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,

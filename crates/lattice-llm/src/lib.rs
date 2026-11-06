@@ -4,6 +4,8 @@
 //! LATTICE LLM vocabulary and functional call facade.
 
 pub mod auth;
+mod availability;
+pub use availability::{Availability, ConfigurationRequirement};
 mod client;
 mod tls;
 pub use tls::{load_tls_roots_der, usable_tls_roots_der};

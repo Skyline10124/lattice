@@ -283,7 +283,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
     for (case, expected) in [
         ("missing-profile", "agent profile 'missing' not found"),
         ("toml", "line 2"),
-        ("missing-key", "credentials are missing"),
+        ("missing-key", "lattice auth set local"),
         ("invalid-auth", "auth.json:"),
         ("provider-missing-invalid-auth", "available providers:"),
         ("provider-config", "providers.toml"),

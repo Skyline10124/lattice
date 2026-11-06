@@ -322,7 +322,7 @@ catalog = "arbitrary-entry"
             assert_eq!(models.len(), 1);
             assert_eq!(models[0]["model"], model);
             assert_eq!(models[0]["supported_efforts"], efforts);
-            assert_eq!(models[0]["credential_status"], "ready");
+            assert_eq!(models[0]["availability"], json!({"status":"ready"}));
             if model == "org/unknown" {
                 for field in ["name", "context", "output", "cost"] {
                     assert!(models[0][field].is_null());
@@ -434,8 +434,9 @@ catalog = "arbitrary-entry"
                 assert_eq!(listed["response"], "models");
                 let candidate = &listed["value"]["models"][0];
                 assert_eq!(candidate["supported_efforts"], expected, "{target}");
-                assert!(
-                    candidate.get("config_error").is_none(),
+                assert_eq!(
+                    candidate["availability"],
+                    json!({"status":"unconfigured", "requirement":"api_key"}),
                     "{target}: {candidate}"
                 );
             }
@@ -462,8 +463,9 @@ catalog = "arbitrary-entry"
             .iter()
             .find(|model| model["model"] == "invalid")
             .unwrap();
+        assert_eq!(invalid["availability"]["status"], "invalid");
         assert!(
-            invalid["config_error"]
+            invalid["availability"]["reason"]
                 .as_str()
                 .unwrap()
                 .contains("thinking_level")
@@ -522,7 +524,7 @@ catalog = "arbitrary-entry"
             .find(|model| model["model"] == "good")
             .unwrap();
         assert_eq!(good["supported_efforts"], json!(["off", "high"]));
-        assert!(good.get("config_error").is_none(), "{good}");
+        assert_eq!(good["availability"], json!({"status":"ready"}), "{good}");
         let listed = models
             .iter()
             .find(|model| model["model"] == "listed")
@@ -538,17 +540,19 @@ catalog = "arbitrary-entry"
             .unwrap();
         assert_eq!(exact["response"], "models");
         assert_eq!(exact["value"]["models"][0]["supported_efforts"], json!([]));
-        for message in [
-            &listed["config_error"],
-            &exact["value"]["models"][0]["config_error"],
+        for availability in [
+            &listed["availability"],
+            &exact["value"]["models"][0]["availability"],
         ] {
+            assert_eq!(availability["status"], "invalid", "{availability}");
+            let message = availability["reason"].as_str().unwrap();
             for expected in [
                 "provider \"empty\"",
                 "model \"listed\"",
                 "effort low",
                 "thinking_toggle",
             ] {
-                assert!(message.as_str().unwrap().contains(expected), "{message}");
+                assert!(message.contains(expected), "{message}");
             }
         }
         let text = cli(&world, &spec, &["models", "--provider", "empty"]);
@@ -585,7 +589,7 @@ catalog = "arbitrary-entry"
         assert!(
             local
                 .iter()
-                .all(|model| model.get("config_error").is_none()),
+                .all(|model| model["availability"] == json!({"status":"ready"})),
             "{local:?}"
         );
     }));
@@ -639,7 +643,8 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
             .find(|model| model["model"] == "current")
             .expect("handwritten local model");
         assert_eq!(
-            current["credential_status"], "missing",
+            current["availability"],
+            json!({"status":"unconfigured", "requirement":"api_key"}),
             "bearer provider without a key"
         );
         let filtered = cli(
@@ -673,7 +678,7 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
                 .as_array()
                 .unwrap()
                 .iter()
-                .all(|model| model["credential_status"] == "ready"),
+                .all(|model| model["availability"] == json!({"status":"ready"})),
             "stored key did not mark local ready: {ready}"
         );
         let mixed = cli(&world, &spec, &["--json", "models", "--auth"]);
@@ -696,7 +701,7 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
         assert!(
             models
                 .iter()
-                .all(|model| model["credential_status"] == "ready"),
+                .all(|model| model["availability"] == json!({"status":"ready"})),
             "--auth listed a provider that is not ready"
         );
     }));

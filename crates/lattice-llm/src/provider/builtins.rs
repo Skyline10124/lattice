@@ -215,6 +215,7 @@ fn provider(
         protocol: features.protocol(),
         base_url: base_url.to_owned(),
         auth,
+        declared: false,
         catalog: catalog.map(str::to_owned),
         features,
         models: BTreeMap::new(),

@@ -172,13 +172,13 @@ impl GatewayTurn {
         let directory = self.configuration.directory.clone();
         let target = target.clone();
         tokio::task::spawn_blocking(move || {
-            let registry = ProviderRegistry::load(directory.join("providers.toml"))
-                .map_err(configuration_error)?;
+            let providers_path = directory.join("providers.toml");
+            let registry = ProviderRegistry::load(&providers_path).map_err(configuration_error)?;
             let provider_id = target.model.provider().as_str();
             let model_id = target.model.model().as_str();
             let provider = registry
                 .get(provider_id)
-                .ok_or_else(|| missing_provider_error(&registry, provider_id))?;
+                .ok_or_else(|| missing_provider_error(&registry, provider_id, &providers_path))?;
             let models = crate::metadata::Metadata::load(&directory).merge(provider);
             crate::reasoning::supported_efforts(provider, model_id, models.get(model_id))
         })
@@ -218,7 +218,6 @@ impl GatewayTurn {
             .entry((provider.id.clone(), provider.base_url.clone()))
             .or_default()
             .clone();
-        client::validate_configuration(provider.auth, provider.id.as_str(), &credentials)?;
         Ok(ResolvedRequest {
             configuration: self.configuration.clone(),
             provider,
@@ -355,42 +354,62 @@ fn load_provider(
     model_id: &str,
     effort: Option<lattice_conversation::Effort>,
 ) -> Result<LoadedProvider, LlmError> {
+    let providers_path = directory.join("providers.toml");
     let (registry, credentials) = load_configuration(&directory)?;
     let provider = registry
         .get(id)
         .cloned()
-        .ok_or_else(|| missing_provider_error(&registry, id))?;
+        .ok_or_else(|| missing_provider_error(&registry, id, &providers_path))?;
+    let (availability, loaded_model) =
+        crate::availability::model_availability(&provider, credentials.as_ref(), || {
+            let models = crate::metadata::Metadata::load(&directory).merge(&provider);
+            let model = models.get(model_id);
+            let limits = model.and_then(|model| model.limit.as_ref());
+            let output_limit = limits.and_then(|limit| limit.output);
+            let model_reasoning = model.and_then(|model| model.reasoning);
+            let features = provider
+                .models
+                .get(model_id)
+                .map_or(provider.features, |model| model.features);
+            let capabilities = ReasoningCapabilities::new(id, model_id, model, features)?;
+            Ok((output_limit, model_reasoning, capabilities))
+        });
+    if let Some(diagnostic) = availability.diagnostic(id, &providers_path) {
+        return Err(configuration_error(diagnostic));
+    }
+    let (output_limit, model_reasoning, capabilities) =
+        loaded_model.expect("ready model availability yields loaded model configuration");
     let credentials = match credentials {
         Ok(credentials) => credentials,
         Err(_) if provider.auth == Auth::None => Credentials::default(),
-        Err(error) => return Err(configuration_error(error)),
+        Err(_) => unreachable!("unavailable provider was already rejected"),
     };
-    let models = crate::metadata::Metadata::load(&directory).merge(&provider);
-    let model = models.get(model_id);
-    let limits = model.and_then(|model| model.limit.as_ref());
-    let output_limit = limits.and_then(|limit| limit.output);
-    let features = provider
-        .models
-        .get(model_id)
-        .map_or(provider.features, |model| model.features);
-    let capabilities = ReasoningCapabilities::new(id, model_id, model, features)?;
-    let reasoning = effort.map(|effort| {
-        capabilities.select(effort).ok_or_else(|| configuration_error(format!(
-            "model {id}/{model_id} does not support reasoning effort {effort} with its current metadata and features"
-        )))
-    }).transpose()?;
+    let reasoning = effort
+        .map(|effort| {
+            capabilities.select(effort).ok_or_else(|| {
+                configuration_error(format!(
+                    "model {id}/{model_id} does not support reasoning effort {effort} with its current metadata and features"
+                ))
+            })
+        })
+        .transpose()?;
     Ok(LoadedProvider {
         provider,
         credentials,
         output_limit,
-        model_reasoning: model.and_then(|model| model.reasoning),
+        model_reasoning,
         reasoning,
     })
 }
 
-pub(crate) fn missing_provider_error(registry: &ProviderRegistry, id: &str) -> LlmError {
+pub(crate) fn missing_provider_error(
+    registry: &ProviderRegistry,
+    id: &str,
+    providers_path: &Path,
+) -> LlmError {
     configuration_error(format!(
-        "provider {id:?} is not registered; available providers: {}",
+        "provider {id:?} is not registered; add [providers.{id}] with required `protocol` and `base_url` in {} (available providers: {})",
+        providers_path.display(),
         registry
             .iter()
             .map(|provider| provider.id.as_str())

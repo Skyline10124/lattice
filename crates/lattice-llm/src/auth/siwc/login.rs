@@ -18,7 +18,7 @@ use tokio::{io::AsyncReadExt, net::TcpListener, sync::mpsc};
 
 use super::endpoint::{CodeGrant, ExchangeFailure};
 use super::*;
-use crate::auth::{AuthState, ProviderAuthStatus};
+use crate::auth::ProviderAuthStatus;
 
 /// 只在专用登录交互中借用，不进入 Debug、状态或通用序列化。
 pub struct SensitiveLoginUrl(Secret);
@@ -557,7 +557,7 @@ impl Manager {
         }
         let status = ProviderAuthStatus {
             provider: "chatgpt".into(),
-            status: AuthState::Ready,
+            availability: crate::Availability::Ready,
             email: Some(identity.email.clone()),
             expires_at: Some(tokens.expires_at.clone()),
         };

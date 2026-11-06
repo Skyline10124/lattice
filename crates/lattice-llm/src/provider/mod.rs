@@ -64,6 +64,7 @@ pub(crate) struct Provider {
     pub(crate) protocol: Protocol,
     pub(crate) base_url: String,
     pub(crate) auth: Auth,
+    pub(crate) declared: bool,
     pub(crate) catalog: Option<String>,
     pub(crate) features: Features,
     pub(crate) models: BTreeMap<ModelId, ModelMetadata>,

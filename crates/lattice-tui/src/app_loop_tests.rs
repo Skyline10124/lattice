@@ -2348,13 +2348,13 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
 fn model_reply(target: Option<&str>) -> Value {
     let models = match target {
         None => vec![
-            json!({"provider":"p","model":"ignored","name":null,"context":null,"output":null,"cost":null,"credential_status":"missing","supported_efforts":[]}),
-            json!({"provider":"p","model":"chosen","name":null,"context":null,"output":null,"cost":null,"credential_status":"ready","supported_efforts":["off","low"]}),
+            json!({"provider":"p","model":"ignored","name":null,"context":null,"output":null,"cost":null,"availability":{"status":"unconfigured","requirement":"api_key"},"supported_efforts":[]}),
+            json!({"provider":"p","model":"chosen","name":null,"context":null,"output":null,"cost":null,"availability":{"status":"ready"},"supported_efforts":["off","low"]}),
         ],
         Some(target) => {
             let (provider, model) = target.split_once('/').unwrap();
             vec![
-                json!({"provider":provider,"model":model,"name":null,"context":null,"output":null,"cost":null,"credential_status":"ready","supported_efforts":["off","low"]}),
+                json!({"provider":provider,"model":model,"name":null,"context":null,"output":null,"cost":null,"availability":{"status":"ready"},"supported_efforts":["off","low"]}),
             ]
         }
     };

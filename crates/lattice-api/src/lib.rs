@@ -31,8 +31,8 @@ pub use lattice_session::{
     TurnTimeout, TurnTimeoutError,
 };
 pub use models::{
-    ModelCandidate, ModelCandidates, ModelId, ModelIdError, ModelPrice, ModelRef, ModelRefError,
-    ModelWarning, ProviderId, ProviderIdError, init_logging,
+    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidates, ModelId, ModelIdError,
+    ModelPrice, ModelRef, ModelRefError, ModelWarning, ProviderId, ProviderIdError, init_logging,
 };
 pub use profile::LoadedAgentProfile;
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};

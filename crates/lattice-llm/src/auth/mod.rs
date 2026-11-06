@@ -64,29 +64,11 @@ impl AuthError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthState {
-    Ready,
-    Missing,
-    Invalid,
-}
-
-impl fmt::Display for AuthState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Ready => "ready",
-            Self::Missing => "missing",
-            Self::Invalid => "invalid",
-        })
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ProviderAuthStatus {
     pub provider: String,
-    pub status: AuthState,
+    pub availability: crate::Availability,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -95,6 +77,7 @@ pub struct ProviderAuthStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthStatus {
+    pub providers_path: PathBuf,
     pub providers: Vec<ProviderAuthStatus>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<String>,
@@ -283,6 +266,7 @@ impl AuthStore {
     }
 
     pub fn status(&self) -> Result<AuthStatus, AuthError> {
+        let providers_path = self.directory.join("providers.toml");
         let registry = self.registry()?;
         let credentials = self.load();
         let error = credentials.as_ref().err().map(ToString::to_string);
@@ -290,7 +274,11 @@ impl AuthStore {
             .iter()
             .map(|provider| provider_status(provider, credentials.as_ref()))
             .collect();
-        Ok(AuthStatus { providers, error })
+        Ok(AuthStatus {
+            providers_path,
+            providers,
+            error,
+        })
     }
 }
 
@@ -298,34 +286,23 @@ pub(crate) fn provider_status(
     provider: &crate::provider::Provider,
     credentials: Result<&Credentials, &AuthError>,
 ) -> ProviderAuthStatus {
-    let mut row = ProviderAuthStatus {
-        provider: provider.id.as_str().to_owned(),
-        status: AuthState::Missing,
-        email: None,
-        expires_at: None,
-    };
-    if provider.auth == Auth::None {
-        row.status = AuthState::Ready;
-    } else if let Ok(credentials) = credentials {
-        match credentials.0.providers.get(provider.id.as_str()) {
-            Some(format::Credential::ApiKey { .. }) if provider.auth != Auth::OauthChatgpt => {
-                row.status = AuthState::Ready
-            }
-            Some(format::Credential::Chatgpt {
-                account, tokens, ..
-            }) if provider.auth == Auth::OauthChatgpt => {
-                row.email = account.as_ref().map(|account| account.email.clone());
-                row.expires_at = tokens.as_ref().map(|tokens| tokens.expires_at.clone());
-                if tokens.is_some() {
-                    row.status = AuthState::Ready;
-                }
-            }
-            _ => {}
-        }
-    } else {
-        row.status = AuthState::Invalid;
+    let mut email = None;
+    let mut expires_at = None;
+    if provider.auth == Auth::OauthChatgpt
+        && let Ok(credentials) = credentials
+        && let Some(format::Credential::Chatgpt {
+            account, tokens, ..
+        }) = credentials.0.providers.get("chatgpt")
+    {
+        email = account.as_ref().map(|account| account.email.clone());
+        expires_at = tokens.as_ref().map(|tokens| tokens.expires_at.clone());
     }
-    row
+    ProviderAuthStatus {
+        provider: provider.id.as_str().to_owned(),
+        availability: crate::availability::provider_availability(provider, credentials),
+        email,
+        expires_at,
+    }
 }
 
 /// 一次请求使用的凭据快照；已知值只供内部认证与诊断脱敏。
@@ -356,4 +333,4 @@ impl Credentials {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

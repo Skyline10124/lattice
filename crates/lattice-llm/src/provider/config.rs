@@ -229,6 +229,7 @@ impl ProviderRegistry {
                     protocol,
                     base_url,
                     auth,
+                    declared: true,
                     catalog,
                     features,
                     models,

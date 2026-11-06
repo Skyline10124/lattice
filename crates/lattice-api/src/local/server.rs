@@ -1250,12 +1250,10 @@ pub(super) fn redact_model_candidates(
     for warning in &mut candidates.warnings {
         redact(&mut warning.message);
     }
-    for message in candidates
-        .models
-        .iter_mut()
-        .filter_map(|model| model.config_error.as_mut())
-    {
-        redact(message);
+    for model in &mut candidates.models {
+        if let lattice_llm::Availability::Invalid { reason } = &mut model.availability {
+            redact(reason);
+        }
     }
 }
 

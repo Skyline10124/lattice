@@ -98,12 +98,23 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
                 println!("{}", serde_json::to_string(&status)?);
             } else {
                 for row in status.providers {
-                    print!("{} {}", row.provider, row.status);
+                    print!("{} {}", row.provider, row.availability.status_str());
+                    if let lattice_api::local::Availability::Unconfigured { requirement } =
+                        row.availability
+                    {
+                        print!(" requirement={requirement}");
+                    }
                     if let Some(email) = row.email {
                         print!(" email={email}");
                     }
                     if let Some(expiry) = row.expires_at {
                         print!(" expires_at={expiry}");
+                    }
+                    if let Some(diagnostic) = row
+                        .availability
+                        .diagnostic(&row.provider, &status.providers_path)
+                    {
+                        print!(": {diagnostic}");
                     }
                     println!();
                 }

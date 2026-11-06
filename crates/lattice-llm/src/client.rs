@@ -51,6 +51,7 @@ fn build_auth_headers(
         // OAuth 的认证头由每次发送前取得的 token 构造。
         Auth::None | Auth::OauthChatgpt => return Ok(Vec::new()),
     };
+    // 面向用户的可用性已在网关 resolve 阶段统一判定，此处保留为内部不变量。
     let key = api_key.ok_or_else(|| LlmError::Config {
         message: "provider credentials are missing from auth.json".into(),
     })?;
@@ -773,20 +774,6 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) model_reasoning: Option<bool>,
     pub(crate) features: Features,
     pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
-}
-
-pub(crate) fn validate_configuration(
-    auth: Auth,
-    provider: &str,
-    credentials: &Credentials,
-) -> Result<(), LlmError> {
-    if auth == Auth::OauthChatgpt && !credentials.chatgpt_logged_in() {
-        return Err(LlmError::Config {
-            message: "ChatGPT is not signed in; run lattice auth login chatgpt".into(),
-        });
-    }
-    build_auth_headers(auth, credentials.api_key(provider))?;
-    Ok(())
 }
 
 pub(crate) async fn dispatch(

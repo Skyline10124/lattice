@@ -4,7 +4,10 @@
 pub use lattice_conversation::{
     ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId, ProviderIdError,
 };
-pub use lattice_llm::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning};
+pub use lattice_llm::{
+    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidates, ModelPrice,
+    ModelWarning,
+};
 
 /// 通过公开 API 初始化日志。
 pub fn init_logging(verbose: bool) -> std::io::Result<()> {

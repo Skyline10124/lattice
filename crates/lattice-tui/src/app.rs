@@ -2179,7 +2179,9 @@ mod tests {
         use lattice_api::ModelCandidates;
         let mut app = test_app(true);
         let broken = lattice_api::ModelCandidate {
-            config_error: Some("configuration error: effort low".into()),
+            availability: lattice_api::Availability::Invalid {
+                reason: "effort low".into(),
+            },
             ..model_candidate("p", "broken", &[])
         };
         let candidates = ModelCandidates {

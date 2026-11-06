@@ -60,7 +60,12 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
     assert_eq!(known.supported_efforts, vec![Effort::Low, Effort::High]);
     assert_eq!(known.cost.as_ref().unwrap().input, Some(0.0));
     assert_eq!(known.cost.as_ref().unwrap().output, Some(2.0));
-    assert_eq!(known.credential_status, crate::auth::AuthState::Missing);
+    assert_eq!(
+        known.availability,
+        crate::Availability::Unconfigured {
+            requirement: crate::ConfigurationRequirement::ChatgptLogin
+        }
+    );
     let unknown = &candidates.models[1];
     assert_eq!(unknown.name.as_deref(), Some("Account unknown"));
     assert_eq!(
@@ -147,15 +152,16 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
     let broken = &candidates.models[1];
     assert_eq!(broken.model, "broken");
     assert!(broken.supported_efforts.is_empty());
-    assert!(broken.config_error.as_deref().is_some_and(
-        |message| message.contains("thinking_toggle") && message.contains("model \"broken\"")
+    assert!(matches!(
+        &broken.availability,
+        crate::Availability::Invalid { reason }
+            if reason.contains("thinking_toggle") && reason.contains("model \"broken\"")
     ));
     let model = &candidates.models[0];
     assert_eq!((&*model.provider, &*model.model), ("local", "active"));
-    assert_eq!(model.config_error, None);
     assert_eq!((model.context, model.output), (Some(456), Some(45)));
     assert_eq!(model.cost.as_ref().unwrap().input, Some(1.0));
-    assert_eq!(model.credential_status, crate::auth::AuthState::Ready);
+    assert_eq!(model.availability, crate::Availability::Ready);
     let empty = crate::model_candidates(directory.path(), Some("empty"), None).unwrap();
     assert_eq!(empty.models[0].model, "handwritten");
     assert!(
@@ -182,7 +188,10 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         .models;
     assert_eq!(exact.len(), 1);
     assert!(exact[0].supported_efforts.is_empty());
-    assert!(exact[0].config_error.is_some());
+    assert!(matches!(
+        exact[0].availability,
+        crate::Availability::Invalid { .. }
+    ));
     let unknown =
         crate::model_candidates(directory.path(), None, Some("local/org/unknown")).unwrap();
     assert_eq!(
@@ -190,7 +199,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         json!([{
             "provider":"local", "model":"org/unknown", "name":null,
             "context":null, "output":null, "supported_efforts":[], "cost":null,
-            "credential_status":"ready"
+            "availability":{"status":"ready"}
         }])
     );
     let subscription =
@@ -223,10 +232,10 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
     )
     .unwrap();
     let invalid = crate::model_candidates(directory.path(), None, Some("empty/unknown")).unwrap();
-    assert_eq!(
-        invalid.models[0].credential_status,
-        crate::auth::AuthState::Invalid
-    );
+    assert!(matches!(
+        invalid.models[0].availability,
+        crate::Availability::Invalid { .. }
+    ));
     assert!(
         invalid
             .warnings
@@ -241,10 +250,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
                 && warning.message.contains("absent-catalog"))
     );
     let no_auth = crate::model_candidates(directory.path(), None, Some("local/unknown")).unwrap();
-    assert_eq!(
-        no_auth.models[0].credential_status,
-        crate::auth::AuthState::Ready
-    );
+    assert_eq!(no_auth.models[0].availability, crate::Availability::Ready);
 }
 
 #[test]

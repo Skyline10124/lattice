@@ -115,6 +115,7 @@ fn builtin_protocols_match_their_endpoints_and_auth() {
 #[test]
 fn merges_fields_and_model_features_without_losing_metadata_presence() {
     let builtin = ProviderRegistry::builtins();
+    assert!(builtin.iter().all(|provider| !provider.declared));
     let original = builtin.get("deepseek").unwrap();
     let registry = parse(
         r#"
@@ -132,6 +133,8 @@ cost = { input = 1, output = 2.5, cache_read = 0.1, cache_write = 0.5 }
 [providers.deepseek.models."deepseek-v4-flash".features]
 reasoning_replay = "none"
 [providers.deepseek.models."no-metadata"]
+[providers.groq]
+[providers.xai.models."only-subtable"]
 [providers.my-vllm]
 protocol = "chat-completions"
 base_url = "http://localhost:8000/v1"
@@ -140,6 +143,7 @@ catalog = "custom-catalog"
 "#,
     );
     let provider = registry.get("deepseek").unwrap();
+    assert!(provider.declared);
     assert_eq!(provider.base_url, "https://gateway.invalid/deepseek");
     assert_eq!(
         (provider.protocol, provider.auth, &provider.catalog),
@@ -200,11 +204,22 @@ catalog = "custom-catalog"
     );
     assert_eq!(absent.features, provider.features);
     let custom = registry.get("my-vllm").unwrap();
+    assert!(custom.declared);
     assert_eq!(
         (custom.auth, custom.catalog.as_deref()),
         (Auth::None, Some("custom-catalog"))
     );
+    assert!(registry.get("groq").unwrap().declared);
+    assert!(registry.get("xai").unwrap().declared);
+    assert!(
+        registry
+            .get("xai")
+            .unwrap()
+            .models
+            .contains_key("only-subtable")
+    );
     assert!(registry.get("missing").is_none());
+    assert!(!registry.get("anthropic").unwrap().declared);
     assert_eq!(registry.get("anthropic"), builtin.get("anthropic"));
 }
 

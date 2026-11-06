@@ -5,7 +5,7 @@ use anyhow::Result;
 use clap::Subcommand;
 use lattice_api::{
     StateLayout,
-    local::{AuthState, LocalClient},
+    local::{Availability, LocalClient},
 };
 use std::io::Write;
 
@@ -30,7 +30,7 @@ pub async fn run(
     if auth_only {
         candidates
             .models
-            .retain(|model| model.credential_status == AuthState::Ready);
+            .retain(|model| model.availability == Availability::Ready);
     }
 
     if json {
@@ -48,9 +48,10 @@ pub async fn run(
         let price =
             |value: Option<f64>| value.map_or_else(|| "-".into(), |value| value.to_string());
         let cost = model.cost.unwrap_or_default();
+        let auth_status = model.availability.status_str();
         // 配置无效的模型仍列出，档位列标记出错，诊断随警告写到 stderr。
-        let efforts = if let Some(error) = model.config_error {
-            config_errors.push((format!("{}/{}", model.provider, model.model), error));
+        let efforts = if let Availability::Invalid { reason } = model.availability {
+            config_errors.push((format!("{}/{}", model.provider, model.model), reason));
             "config-error".into()
         } else if model.supported_efforts.is_empty() {
             "-".into()
@@ -73,7 +74,7 @@ pub async fn run(
             price(cost.output),
             price(cost.cache_read),
             price(cost.cache_write),
-            model.credential_status
+            auth_status
         );
     }
     for (model, error) in config_errors {

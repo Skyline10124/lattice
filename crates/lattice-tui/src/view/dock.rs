@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::blocks::BlockId;
-use lattice_api::{Effort, ModelCandidate, ModelCandidates, local::AuthState};
+use lattice_api::{Availability, Effort, ModelCandidate, ModelCandidates};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ModelQuery {
@@ -280,7 +280,7 @@ impl DockState {
                 let empty = if result
                     .models
                     .iter()
-                    .any(|model| model.config_error.is_some())
+                    .any(|model| matches!(model.availability, Availability::Invalid { .. }))
                 {
                     CONFIG_ERROR
                 } else {
@@ -567,11 +567,14 @@ impl PanelModule<'_> {
                     spans.push(Span::styled(" · 当前", role_style(Role::DimMeta)));
                 }
                 if let PanelChoice::Model(model) = item {
-                    if model.config_error.is_some() {
-                        spans.push(Span::styled(" · 配置错误", role_style(Role::Warn)));
-                    }
-                    if model.credential_status != AuthState::Ready {
-                        spans.push(Span::styled(" · 无凭据", role_style(Role::DimMeta)));
+                    match model.availability {
+                        Availability::Ready => {}
+                        Availability::Unconfigured { .. } => {
+                            spans.push(Span::styled(" · 无凭据", role_style(Role::DimMeta)));
+                        }
+                        Availability::Invalid { .. } => {
+                            spans.push(Span::styled(" · 配置错误", role_style(Role::Warn)));
+                        }
                     }
                 }
                 shown.push(clip_spans(spans, area.width));

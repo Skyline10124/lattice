@@ -318,7 +318,7 @@ async fn login_commits_version_one_identity_and_preserves_parallel_api_key_write
     assert!(receipt.contains("已收到登录回调"));
     assert!(!receipt.contains("local-code"));
     let result = f.finish(&login).await.unwrap();
-    assert_eq!(result.status, AuthState::Ready);
+    assert_eq!(result.availability, crate::Availability::Ready);
     let public = serde_json::to_string(&result).unwrap();
     for secret in [
         "local-subject",

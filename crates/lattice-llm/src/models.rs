@@ -7,14 +7,14 @@ use lattice_conversation::Effort;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    LlmError, ModelRef,
-    auth::AuthState,
+    Availability, LlmError, ModelRef,
+    auth::{AuthError, Credentials},
     metadata::{Metadata, Model},
     provider::Provider,
     reasoning::supported_efforts,
 };
 
-/// 候选只包含模型元数据与凭据状态，连接配置和秘密不跨过后台边界。
+/// 候选只包含模型元数据与可用性状态，连接配置和秘密不跨过后台边界。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ModelCandidate {
     pub provider: String,
@@ -24,10 +24,7 @@ pub struct ModelCandidate {
     pub output: Option<u64>,
     pub supported_efforts: Vec<Effort>,
     pub cost: Option<ModelPrice>,
-    pub credential_status: AuthState,
-    /// 手写配置对该模型无效时的诊断；此时没有可选档位，其他模型照常列出。
-    #[serde(skip_serializing_if = "Option::is_none", default)]
-    pub config_error: Option<String>,
+    pub availability: Availability,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -71,11 +68,16 @@ pub fn model_candidates(
         .as_ref()
         .map(|target| target.provider().as_str())
         .or(selected);
+    let providers_path = directory.join("providers.toml");
     let (registry, credentials) = crate::gateway::load_configuration(directory)?;
     if let Some(id) = selected
         && registry.get(id).is_none()
     {
-        return Err(crate::gateway::missing_provider_error(&registry, id));
+        return Err(crate::gateway::missing_provider_error(
+            &registry,
+            id,
+            &providers_path,
+        ));
     }
     let metadata = Metadata::load(directory);
     let mut result = ModelCandidates::default();
@@ -107,11 +109,15 @@ pub fn model_candidates(
                     "ChatGPT account model directory is unavailable: {error}"
                 ));
             }
-            let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
             let models = metadata.merge(provider);
             if let Some(target) = &target {
                 let model_id = target.model().as_str();
-                let mut model = candidate(provider, model_id, models.get(model_id), status);
+                let mut model = candidate(
+                    provider,
+                    model_id,
+                    models.get(model_id),
+                    credentials.as_ref(),
+                );
                 if let Some(name) = catalog
                     .as_ref()
                     .ok()
@@ -126,7 +132,7 @@ pub fn model_candidates(
                     if model.is_some_and(|model| model.status.as_deref() == Some("deprecated")) {
                         continue;
                     }
-                    let mut model = candidate(provider, &id, model, status);
+                    let mut model = candidate(provider, &id, model, credentials.as_ref());
                     model.name = Some(name);
                     result.models.push(model);
                 }
@@ -140,13 +146,15 @@ pub fn model_candidates(
                 "catalog {catalog:?} has no metadata; only handwritten models are available"
             ));
         }
-        let status = crate::auth::provider_status(provider, credentials.as_ref()).status;
         let models = metadata.merge(provider);
         if let Some(target) = &target {
             let model_id = target.model().as_str();
-            result
-                .models
-                .push(candidate(provider, model_id, models.get(model_id), status));
+            result.models.push(candidate(
+                provider,
+                model_id,
+                models.get(model_id),
+                credentials.as_ref(),
+            ));
         } else {
             // 先滤掉已弃用模型再校验，隐藏的模型不因配置问题出错。
             for (id, model) in models
@@ -155,25 +163,25 @@ pub fn model_candidates(
             {
                 result
                     .models
-                    .push(candidate(provider, id, Some(model), status));
+                    .push(candidate(provider, id, Some(model), credentials.as_ref()));
             }
         }
     }
     Ok(result)
 }
 
-/// 档位校验只拒绝出错的那个模型：保留候选并带上诊断，请求路径仍按所选模型拒绝。
+/// 档位校验只拒绝出错的那个模型：保留候选并带上可用性状态，请求路径仍按所选模型拒绝。
 fn candidate(
     provider: &Provider,
     id: &str,
     model: Option<&Model>,
-    status: AuthState,
+    credentials: Result<&Credentials, &AuthError>,
 ) -> ModelCandidate {
     let limits = model.and_then(|model| model.limit.as_ref());
-    let (supported_efforts, config_error) = match supported_efforts(provider, id, model) {
-        Ok(efforts) => (efforts, None),
-        Err(error) => (Vec::new(), Some(error.to_string())),
-    };
+    let efforts_result = supported_efforts(provider, id, model);
+    let supported_efforts = efforts_result.as_ref().cloned().unwrap_or_default();
+    let (availability, _) =
+        crate::availability::model_availability(provider, credentials, || efforts_result);
     ModelCandidate {
         provider: provider.id.as_str().to_owned(),
         model: id.into(),
@@ -189,7 +197,6 @@ fn candidate(
                 cache_read: cost.cache_read,
                 cache_write: cost.cache_write,
             }),
-        credential_status: status,
-        config_error,
+        availability,
     }
 }

@@ -105,7 +105,10 @@ impl Selection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_api::local::{AuthState, NodeId, SessionId};
+    use lattice_api::{
+        Availability,
+        local::{NodeId, SessionId},
+    };
 
     fn head(effort: Option<Effort>) -> SessionHead {
         SessionHead {
@@ -132,8 +135,7 @@ mod tests {
             output: None,
             supported_efforts: efforts.to_vec(),
             cost: None,
-            credential_status: AuthState::Ready,
-            config_error: None,
+            availability: Availability::Ready,
         }
     }
 

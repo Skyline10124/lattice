@@ -109,8 +109,10 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             "candidate: {model}"
         );
         assert_eq!(
-            candidates.models[0].credential_status,
-            crate::auth::AuthState::Missing
+            candidates.models[0].availability,
+            crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey
+            }
         );
     }
     for (provider, configuration) in [
@@ -178,18 +180,58 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         .unwrap();
         let error = turn.supported_efforts(&target).await.unwrap_err();
         assert!(matches!(&error, crate::LlmError::Config { message } if message.contains(reason)));
-        // 列表与精确查询都保留该模型并带上同一诊断，不让整份查询失败。
-        for (provider, target) in [(Some("test"), None), (None, Some("test/model"))] {
-            let candidates = crate::model_candidates(directory.path(), provider, target).unwrap();
+        // provider 未配置且模型配置错误时，网关与候选都先报 Unconfigured。
+        let resolve_unconfigured = turn.resolve(&target).await.err().unwrap();
+        assert!(
+            matches!(
+                &resolve_unconfigured,
+                crate::LlmError::Config { message } if message.contains("lattice auth set test")
+            ),
+            "{resolve_unconfigured}"
+        );
+        for (provider, query_target) in [(Some("test"), None), (None, Some("test/model"))] {
+            let candidates =
+                crate::model_candidates(directory.path(), provider, query_target).unwrap();
             let model = &candidates.models[0];
             assert_eq!(model.model, "model");
             assert!(model.supported_efforts.is_empty());
-            let message = model.config_error.as_deref().unwrap();
-            assert_eq!(message, error.to_string());
+            assert_eq!(
+                model.availability,
+                crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey
+                }
+            );
+        }
+        // provider Ready 后，网关与候选才求值模型配置并返回同一 Invalid 原因。
+        turn.auth_store().set("test", "test-key").unwrap();
+        let resolve_invalid = turn.resolve(&target).await.err().unwrap();
+        assert_eq!(resolve_invalid, error);
+        for (provider, query_target) in [(Some("test"), None), (None, Some("test/model"))] {
+            let candidates =
+                crate::model_candidates(directory.path(), provider, query_target).unwrap();
+            let model = &candidates.models[0];
+            assert_eq!(model.model, "model");
+            assert!(model.supported_efforts.is_empty());
+            let crate::Availability::Invalid {
+                reason: candidate_reason,
+            } = &model.availability
+            else {
+                panic!(
+                    "expected invalid availability, got {:?}",
+                    model.availability
+                );
+            };
+            assert_eq!(
+                crate::LlmError::Config {
+                    message: candidate_reason.clone()
+                },
+                error
+            );
             for detail in ["provider \"test\"", "model \"model\"", effort] {
-                assert!(message.contains(detail), "{message}");
+                assert!(candidate_reason.contains(detail), "{candidate_reason}");
             }
         }
+        turn.auth_store().remove_api_key("test").unwrap();
     }
 }
 
@@ -1293,7 +1335,7 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                     .unwrap()
                     .models;
                 assert_eq!(listed.len(), 1);
-                assert_eq!(listed[0].config_error, None);
+                assert_eq!(listed[0].availability, crate::Availability::Ready);
                 turn.resolve(&request.target).await.unwrap();
                 request.target.effort = Some(efforts[0]);
                 complete(
@@ -1326,12 +1368,19 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                 );
             }
             Err((invalid, reason)) => {
-                let listing_error = crate::model_candidates(directory.path(), Some("test"), None)
+                let candidate = crate::model_candidates(directory.path(), Some("test"), None)
                     .unwrap()
                     .models
-                    .remove(0)
-                    .config_error
-                    .unwrap();
+                    .remove(0);
+                let crate::Availability::Invalid {
+                    reason: listing_error,
+                } = candidate.availability
+                else {
+                    panic!(
+                        "expected invalid availability, got {:?}",
+                        candidate.availability
+                    );
+                };
                 // 未选档位和选择另一合法档位，也必须拒绝整份手写列表。
                 for selected in [None, Some(efforts[0])] {
                     request.target.effort = selected;
@@ -1341,7 +1390,12 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                     };
                     assert!(matches!(error, crate::LlmError::Config { .. }));
                     assert!(!error.retryable());
-                    assert_eq!(error.to_string(), listing_error);
+                    assert_eq!(
+                        error,
+                        crate::LlmError::Config {
+                            message: listing_error.clone()
+                        }
+                    );
                     let diagnostic = error.to_string();
                     for detail in [
                         "provider \"test\"",
@@ -2131,10 +2185,26 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     .unwrap();
     configuration_failure(&turn, "test", "providers.toml:2:", "broken protocol").await;
     std::fs::write(directory.path().join("providers.toml"), "").unwrap();
-    configuration_failure(&turn, "test", "not registered", "empty registry").await;
+    let missing_provider =
+        configuration_failure(&turn, "test", "not registered", "empty registry").await;
+    for detail in [
+        &directory
+            .path()
+            .join("providers.toml")
+            .display()
+            .to_string(),
+        "[providers.test]",
+        "protocol",
+        "base_url",
+    ] {
+        assert!(
+            missing_provider.to_string().contains(detail),
+            "{missing_provider}"
+        );
+    }
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     auth.remove_api_key("test").unwrap();
-    configuration_failure(&turn, "test", "credentials are missing", "removed key").await;
+    configuration_failure(&turn, "test", "lattice auth set test", "removed key").await;
     auth.set("test", "restored-key").unwrap();
     std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
     configuration_failure(&turn, "test", "auth.json", "malformed auth file").await;
@@ -2184,13 +2254,7 @@ async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
     );
     configure(directory.path(), &server.url, "chat-completions", "bearer");
     std::fs::remove_file(directory.path().join("auth.json")).unwrap();
-    configuration_failure(
-        &turn,
-        "test",
-        "credentials are missing",
-        "deleted auth file",
-    )
-    .await;
+    configuration_failure(&turn, "test", "lattice auth set test", "deleted auth file").await;
     assert!(
         server.received.try_recv().is_err(),
         "deleted auth file: request reached the server"
@@ -2287,14 +2351,17 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
             .iter()
             .find(|model| model.model == "model-id")
             .unwrap();
-        assert!(invalid.config_error.is_some());
+        assert!(matches!(
+            invalid.availability,
+            crate::Availability::Invalid { .. }
+        ));
         assert!(invalid.supported_efforts.is_empty());
         let valid = candidates
             .models
             .iter()
             .find(|model| model.model == "valid")
             .unwrap();
-        assert!(valid.config_error.is_none());
+        assert_eq!(valid.availability, crate::Availability::Ready);
         assert_eq!(
             valid.supported_efforts,
             vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
@@ -2387,8 +2454,12 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                     .models
                     .remove(0);
             assert_eq!(candidate.supported_efforts, expected);
-            assert_eq!(candidate.credential_status, crate::auth::AuthState::Missing);
-            assert!(candidate.config_error.is_none());
+            assert_eq!(
+                candidate.availability,
+                crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey
+                }
+            );
 
             crate::auth::AuthStore::new(directory.path().into())
                 .set(id, "builtin-key")
@@ -2546,20 +2617,17 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                 .models
                 .remove(0);
         if google {
-            assert!(
-                candidate
-                    .config_error
-                    .as_deref()
-                    .unwrap()
-                    .contains("thinking_level")
-            );
+            assert!(matches!(
+                &candidate.availability,
+                crate::Availability::Invalid { reason } if reason.contains("thinking_level")
+            ));
             assert!(matches!(
                 turn.resolve(&invalid).await,
                 Err(crate::LlmError::Config { message }) if message.contains("thinking_level")
             ));
         } else {
             assert_eq!(candidate.supported_efforts, vec![Effort::Xhigh]);
-            assert!(candidate.config_error.is_none());
+            assert_eq!(candidate.availability, crate::Availability::Ready);
         }
     }
 }
