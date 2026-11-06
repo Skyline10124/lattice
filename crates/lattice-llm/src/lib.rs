@@ -14,7 +14,10 @@ pub use gateway::{GatewayTurn, PrepareError, RequestGateway, ResolvedRequest};
 pub use protocol::Protocol;
 mod logging;
 mod models;
-pub use models::{ModelCandidate, ModelCandidates, ModelPrice, ModelWarning, model_candidates};
+pub use models::{
+    ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning,
+    model_candidates,
+};
 pub(crate) mod metadata;
 pub use metadata::{
     ChatgptCatalogState, MODELS_URL, MetadataError, MetadataRefreshControl, fetch_snapshot,

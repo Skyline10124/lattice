@@ -61,14 +61,20 @@ async fn credential_cleanup_preserves_each_remote_revocation_result() {
 #[tokio::test]
 async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors() {
     use serde_json::json;
-    let old: Request =
-        serde_json::from_value(json!({"operation":"models","provider":"local"})).unwrap();
-    assert!(
-        matches!(old, Request::Models { provider: Some(provider), target: None } if provider == "local")
-    );
-    for target in [None, Some("local/org/model")] {
+    for requested_query in [
+        ModelCandidateQuery::List {
+            provider: Some(ProviderId::parse("local").unwrap()),
+            ready_only: false,
+        },
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true,
+        },
+        ModelCandidateQuery::Target(ModelRef::parse("local/org/model").unwrap()),
+    ] {
         let peer = Peer::new();
-        let efforts = if target.is_some() {
+        let is_target = matches!(requested_query, ModelCandidateQuery::Target(_));
+        let efforts = if is_target {
             json!([])
         } else {
             json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
@@ -86,6 +92,8 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
             "warnings":[{"provider":"local", "message":"catalog has no metadata"}]
         }))
         .unwrap();
+        assert_eq!(expected.models[0].provider, "local");
+        assert_eq!(expected.models[0].model, "org/model");
         assert_eq!(
             expected.models[0].availability,
             crate::Availability::Unconfigured {
@@ -98,21 +106,13 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
                 reason: "invalid effort".into()
             }
         );
-        let query = async {
-            match target {
-                Some(target) => peer.client.model(target.into()).await,
-                None => peer.client.models(Some("local".into())).await,
-            }
-        };
+        let expected_query = requested_query.clone();
+        let query = peer.client.models(requested_query);
         let server = async {
             let (mut wire, request) = peer.request().await;
             match request {
-                Request::Models {
-                    provider,
-                    target: requested,
-                } => {
-                    assert_eq!(provider.as_deref(), target.is_none().then_some("local"));
-                    assert_eq!(requested.as_deref(), target);
+                Request::Models { query } => {
+                    assert_eq!(query, expected_query);
                 }
                 _ => panic!("expected models query"),
             }
@@ -122,19 +122,18 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
         assert_eq!(actual.unwrap(), expected);
     }
     let peer = Peer::new();
+    let missing = ModelCandidateQuery::Target(ModelRef::parse("missing/model").unwrap());
+    let expected_missing = missing.clone();
     let server = async {
         let (mut wire, request) = peer.request().await;
-        assert!(
-            matches!(request, Request::Models { provider: None, target: Some(target) } if target == "missing/model")
-        );
+        assert!(matches!(request, Request::Models { query } if query == expected_missing));
         wire.reply(Response::Error(LocalError::new(
             LocalErrorKind::BadRequest,
             "provider is not registered",
         )))
         .await;
     };
-    let (result, ()) =
-        within(async { tokio::join!(peer.client.model("missing/model".into()), server) }).await;
+    let (result, ()) = within(async { tokio::join!(peer.client.models(missing), server) }).await;
     let error = result.unwrap_err();
     assert_eq!(error.kind, LocalErrorKind::BadRequest);
     assert_eq!(error.message, "provider is not registered");
@@ -1607,7 +1606,7 @@ async fn status_hints_when_the_backend_reads_the_request_and_closes_without_repl
 /// 从本版本起，后台读到别的魔数会先回写自己的魔数；更旧的魔数要明确报版本不兼容。
 #[tokio::test]
 async fn status_reports_an_older_backend_that_announces_its_magic() {
-    for magic in [b"LTLOCAL5", b"LTLOCAL;"] {
+    for magic in [b"LTLOCAL5", b"LTLOCAL<"] {
         let error = status_against(move |mut stream| {
             Box::pin(async move {
                 // 字面量不能从当前魔数推导，否则以后升级会把这条回归一起改掉。
@@ -1629,7 +1628,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
 async fn status_reports_a_backend_newer_than_the_client() {
     let error = status_against(|mut stream| {
         Box::pin(async move {
-            stream.write_all(b"LTLOCAL=").await.unwrap();
+            stream.write_all(b"LTLOCAL>").await.unwrap();
             stream.write_u32(4).await.unwrap();
             stream.write_all(b"null").await.unwrap();
             let _held = stream;

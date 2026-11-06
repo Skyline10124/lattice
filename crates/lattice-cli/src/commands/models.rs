@@ -4,7 +4,7 @@
 use anyhow::Result;
 use clap::Subcommand;
 use lattice_api::{
-    StateLayout,
+    ModelCandidateQuery, ProviderId, StateLayout,
     local::{Availability, LocalClient},
 };
 use std::io::Write;
@@ -16,7 +16,7 @@ pub enum ModelsAction {
 }
 
 pub async fn run(
-    provider: Option<String>,
+    provider: Option<ProviderId>,
     auth_only: bool,
     action: Option<ModelsAction>,
     json: bool,
@@ -26,12 +26,12 @@ pub async fn run(
     if let Some(ModelsAction::Refresh) = action {
         return refresh(&client, json, &mut std::io::stdout()).await;
     }
-    let mut candidates = client.models(provider).await?;
-    if auth_only {
-        candidates
-            .models
-            .retain(|model| model.availability == Availability::Ready);
-    }
+    let candidates = client
+        .models(ModelCandidateQuery::List {
+            provider,
+            ready_only: auth_only,
+        })
+        .await?;
 
     if json {
         println!("{}", serde_json::to_string(&candidates)?);

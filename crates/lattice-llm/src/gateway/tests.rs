@@ -42,9 +42,12 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     let turn = gateway.open_turn();
     let target = ModelTarget::test_target("test", "model");
     assert_eq!(
-        crate::model_candidates(directory.path(), None, Some("test/model"))
-            .unwrap()
-            .models[0]
+        crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target("test/model".parse().unwrap()),
+        )
+        .unwrap()
+        .models[0]
             .supported_efforts,
         vec![Effort::Off, Effort::Low, Effort::High]
     );
@@ -64,16 +67,22 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
     )
     .unwrap();
     assert_eq!(
-        crate::model_candidates(directory.path(), None, Some("test/model"))
-            .unwrap()
-            .models[0]
+        crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target("test/model".parse().unwrap()),
+        )
+        .unwrap()
+        .models[0]
             .supported_efforts,
         vec![Effort::Medium]
     );
     assert!(
-        crate::model_candidates(directory.path(), None, Some("test/unknown"))
-            .unwrap()
-            .models[0]
+        crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target("test/unknown".parse().unwrap()),
+        )
+        .unwrap()
+        .models[0]
             .supported_efforts
             .is_empty()
     );
@@ -112,9 +121,11 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
         ("org/unknown", vec![]),
     ] {
-        let candidates =
-            crate::model_candidates(directory.path(), None, Some(&format!("test/{model}")))
-                .unwrap();
+        let candidates = crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target(format!("test/{model}").parse().unwrap()),
+        )
+        .unwrap();
         assert_eq!(candidates.models.len(), 1);
         assert_eq!(
             candidates.models[0].supported_efforts, expected,
@@ -146,11 +157,13 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
         } else {
             vec![]
         };
-        let exact =
-            crate::model_candidates(directory.path(), None, Some(&format!("{provider}/effort")))
-                .unwrap();
+        let exact = crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target(format!("{provider}/effort").parse().unwrap()),
+        )
+        .unwrap();
         assert_eq!(exact.models.len(), 1);
-        assert_eq!(exact.models[0].model, "effort");
+        assert_eq!(exact.models[0].model.as_str(), "effort");
         assert_eq!(
             exact.models[0].supported_efforts, expected,
             "candidate: {provider}"
@@ -166,14 +179,26 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
                     .unwrap();
                 assert_eq!(resolved.target().effort, Some(effort));
             }
-            let listed = crate::model_candidates(directory.path(), Some(provider), None).unwrap();
+            let listed = crate::model_candidates(
+                directory.path(),
+                &crate::ModelCandidateQuery::List {
+                    provider: Some(crate::ProviderId::parse(provider).unwrap()),
+                    ready_only: false,
+                },
+            )
+            .unwrap();
             assert!(listed.models.iter().all(|model| model.supported_efforts
-                == if model.model == "effort" {
+                == if model.model.as_str() == "effort" {
                     expected.clone()
                 } else {
                     vec![]
                 }));
-            assert!(listed.models.iter().any(|model| model.model == "effort"));
+            assert!(
+                listed
+                    .models
+                    .iter()
+                    .any(|model| model.model.as_str() == "effort")
+            );
         }
     }
     for (feature, effort, reason) in [
@@ -212,11 +237,16 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             ),
             "{resolve_unconfigured}"
         );
-        for (provider, query_target) in [(Some("test"), None), (None, Some("test/model"))] {
-            let candidates =
-                crate::model_candidates(directory.path(), provider, query_target).unwrap();
+        for query in [
+            crate::ModelCandidateQuery::List {
+                provider: Some(crate::ProviderId::parse("test").unwrap()),
+                ready_only: false,
+            },
+            crate::ModelCandidateQuery::Target(target.model.clone()),
+        ] {
+            let candidates = crate::model_candidates(directory.path(), &query).unwrap();
             let model = &candidates.models[0];
-            assert_eq!(model.model, "model");
+            assert_eq!(model.model.as_str(), "model");
             assert!(model.supported_efforts.is_empty());
             assert_eq!(
                 model.availability,
@@ -248,11 +278,16 @@ async fn supported_efforts_reads_current_metadata_without_credentials() {
             resolve_invalid,
             crate::LlmError::from(prepare_invalid.clone())
         );
-        for (provider, query_target) in [(Some("test"), None), (None, Some("test/model"))] {
-            let candidates =
-                crate::model_candidates(directory.path(), provider, query_target).unwrap();
+        for query in [
+            crate::ModelCandidateQuery::List {
+                provider: Some(crate::ProviderId::parse("test").unwrap()),
+                ready_only: false,
+            },
+            crate::ModelCandidateQuery::Target(target.model.clone()),
+        ] {
+            let candidates = crate::model_candidates(directory.path(), &query).unwrap();
             let model = &candidates.models[0];
-            assert_eq!(model.model, "model");
+            assert_eq!(model.model.as_str(), "model");
             assert!(model.supported_efforts.is_empty());
             let crate::Availability::Invalid {
                 reason: candidate_reason,
@@ -1368,9 +1403,15 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
         let mut request = request("test");
         match expected {
             Ok(expected) => {
-                let listed = crate::model_candidates(directory.path(), Some("test"), None)
-                    .unwrap()
-                    .models;
+                let listed = crate::model_candidates(
+                    directory.path(),
+                    &crate::ModelCandidateQuery::List {
+                        provider: Some(crate::ProviderId::parse("test").unwrap()),
+                        ready_only: false,
+                    },
+                )
+                .unwrap()
+                .models;
                 assert_eq!(listed.len(), 1);
                 assert_eq!(listed[0].availability, crate::Availability::Ready);
                 turn.resolve(&request.target).await.unwrap();
@@ -1405,10 +1446,16 @@ async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_sele
                 );
             }
             Err((invalid, reason)) => {
-                let candidate = crate::model_candidates(directory.path(), Some("test"), None)
-                    .unwrap()
-                    .models
-                    .remove(0);
+                let candidate = crate::model_candidates(
+                    directory.path(),
+                    &crate::ModelCandidateQuery::List {
+                        provider: Some(crate::ProviderId::parse("test").unwrap()),
+                        ready_only: false,
+                    },
+                )
+                .unwrap()
+                .models
+                .remove(0);
                 let crate::Availability::Invalid {
                     reason: listing_error,
                 } = candidate.availability
@@ -1764,9 +1811,15 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
             }
         );
         assert_eq!(
-            crate::model_candidates(directory.path(), Some("test"), None)
-                .unwrap()
-                .models[0]
+            crate::model_candidates(
+                directory.path(),
+                &crate::ModelCandidateQuery::List {
+                    provider: Some(crate::ProviderId::parse("test").unwrap()),
+                    ready_only: false,
+                },
+            )
+            .unwrap()
+            .models[0]
                 .output,
             Some(expected)
         );
@@ -1874,7 +1927,11 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
     )
     .unwrap();
-    let before = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+    let query = crate::ModelCandidateQuery::List {
+        provider: Some(crate::ProviderId::parse("test").unwrap()),
+        ready_only: false,
+    };
+    let before = crate::model_candidates(directory.path(), &query).unwrap();
     assert!(before.models.is_empty());
     let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
         "id":"model-id","limit":{"output":65536}
@@ -1899,7 +1956,7 @@ async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages
         serde_json::from_slice(&std::fs::read(directory.path().join("cache/models.json")).unwrap())
             .unwrap();
     assert_eq!(cached, metadata);
-    let after = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+    let after = crate::model_candidates(directory.path(), &query).unwrap();
     assert_eq!(after.models.len(), 1);
     assert_eq!(after.models[0].model, "model-id");
     assert_eq!(after.models[0].output, Some(65536));
@@ -2445,7 +2502,14 @@ async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model
     let turn = gateway.open_turn();
     for effort in ["off", "xhigh", "max"] {
         std::fs::write(directory.path().join("providers.toml"),format!("[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\n[providers.test.models.model-id]\neffort=['{effort}']\n[providers.test.models.valid]\neffort=['minimal','low','medium','high']\n")).unwrap();
-        let candidates = crate::model_candidates(directory.path(), Some("test"), None).unwrap();
+        let candidates = crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::List {
+                provider: Some(crate::ProviderId::parse("test").unwrap()),
+                ready_only: false,
+            },
+        )
+        .unwrap();
         let invalid = candidates
             .models
             .iter()
@@ -2543,11 +2607,13 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
             ("unknown", vec![], false),
         ] {
             let target = ModelTarget::test_target(id, model);
-            let candidate =
-                crate::model_candidates(directory.path(), None, Some(&format!("{id}/{model}")))
-                    .unwrap()
-                    .models
-                    .remove(0);
+            let candidate = crate::model_candidates(
+                directory.path(),
+                &crate::ModelCandidateQuery::Target(target.model.clone()),
+            )
+            .unwrap()
+            .models
+            .remove(0);
             assert_eq!(candidate.supported_efforts, expected, "{id}/{model}");
             assert_eq!(
                 candidate.availability,
@@ -2706,11 +2772,13 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
             .set(id, "builtin-key")
             .unwrap();
         let invalid = ModelTarget::test_target(id, "invalid");
-        let candidate =
-            crate::model_candidates(directory.path(), None, Some(&format!("{id}/invalid")))
-                .unwrap()
-                .models
-                .remove(0);
+        let candidate = crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target(invalid.model.clone()),
+        )
+        .unwrap()
+        .models
+        .remove(0);
         if google {
             assert!(matches!(
                 &candidate.availability,
@@ -2889,11 +2957,14 @@ async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
             }
             if protocol == "responses" {
                 assert_eq!(
-                    crate::model_candidates(directory.path(), None, Some("test/model-id"))
-                        .unwrap()
-                        .models
-                        .remove(0)
-                        .supported_efforts,
+                    crate::model_candidates(
+                        directory.path(),
+                        &crate::ModelCandidateQuery::Target(request.target.model.clone()),
+                    )
+                    .unwrap()
+                    .models
+                    .remove(0)
+                    .supported_efforts,
                     if present {
                         vec![Effort::Off, Effort::High]
                     } else {

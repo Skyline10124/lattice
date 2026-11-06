@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use lattice_api::{
-    Effort, ModelCandidate, ModelId, ModelRef, ModelRefError, ProviderId,
+    Effort, ModelCandidate, ModelRef,
     local::{SessionHead, TurnId},
 };
 
@@ -30,11 +30,8 @@ impl Selection {
         self.model.as_ref().map(|choice| &choice.value.model)
     }
 
-    pub(crate) fn choose_model(&mut self, candidate: ModelCandidate) -> Result<(), ModelRefError> {
-        let model = ModelRef::new(
-            ProviderId::parse(&candidate.provider)?,
-            ModelId::parse(&candidate.model)?,
-        );
+    pub(crate) fn choose_model(&mut self, candidate: ModelCandidate) {
+        let model = ModelRef::new(candidate.provider, candidate.model);
         self.generation += 1;
         self.model = Some(Chosen {
             value: SelectedModel {
@@ -43,7 +40,6 @@ impl Selection {
             },
             generation: self.generation,
         });
-        Ok(())
     }
 
     pub(crate) fn choose_effort(&mut self, effort: Effort) {
@@ -106,7 +102,7 @@ impl Selection {
 mod tests {
     use super::*;
     use lattice_api::{
-        Availability,
+        Availability, ModelId, ProviderId,
         local::{NodeId, SessionId},
     };
 
@@ -128,8 +124,8 @@ mod tests {
 
     fn candidate(provider: &str, model: &str, efforts: &[Effort]) -> ModelCandidate {
         ModelCandidate {
-            provider: provider.into(),
-            model: model.into(),
+            provider: ProviderId::parse(provider).unwrap(),
+            model: ModelId::parse(model).unwrap(),
             name: None,
             context: None,
             output: None,
@@ -143,32 +139,24 @@ mod tests {
     fn model_fallback_is_only_a_preview_and_same_model_keeps_none() {
         let mut selection = Selection::default();
         let head = head(Some(Effort::High));
-        selection
-            .choose_model(candidate("p", "b", &[Effort::Low]))
-            .unwrap();
+        selection.choose_model(candidate("p", "b", &[Effort::Low]));
         assert_eq!(selection.preview_effort(Some(&head)), Some(Effort::Low));
         let turn = lattice_api::local::new_turn_id();
         assert_eq!(
             selection.submission(turn),
             (Some(ModelRef::parse("p/b").unwrap()), None)
         );
-        selection.choose_model(candidate("p", "c", &[])).unwrap();
+        selection.choose_model(candidate("p", "c", &[]));
         assert_eq!(selection.preview_effort(Some(&head)), None);
-        selection
-            .choose_model(candidate("p", "a", &[Effort::Low]))
-            .unwrap();
+        selection.choose_model(candidate("p", "a", &[Effort::Low]));
         assert_eq!(
             selection.preview_effort(Some(&super::tests::head(None))),
             None
         );
         assert_eq!(selection.preview_effort(None), None);
-        selection
-            .choose_model(candidate("other", "a", &[Effort::Low]))
-            .unwrap();
+        selection.choose_model(candidate("other", "a", &[Effort::Low]));
         assert_eq!(selection.preview_effort(Some(&head)), Some(Effort::Low));
-        selection
-            .choose_model(candidate("p", "keep", &[Effort::High]))
-            .unwrap();
+        selection.choose_model(candidate("p", "keep", &[Effort::High]));
         assert_eq!(selection.preview_effort(Some(&head)), Some(Effort::High));
         selection.choose_effort(Effort::Max);
         assert_eq!(selection.preview_effort(Some(&head)), Some(Effort::Max));

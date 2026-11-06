@@ -702,21 +702,62 @@ impl Backend {
                 })
                 .await
             }
-            Request::Models { provider, target } => {
+            Request::Models { query } => {
                 let directory = super::auth::directory(self.home.as_deref())?;
                 let mut warning = None;
-                if target.is_none() && provider.as_deref().is_none_or(|id| id == "chatgpt") {
-                    let check_directory = directory.clone();
-                    let check_provider = provider.clone();
-                    // 先校验本地请求，错误配置或非法筛选不能触发目录网络请求。
-                    blocking(move || {
-                        let auth = lattice_llm::auth::AuthStore::new(check_directory.clone());
-                        lattice_llm::model_candidates(
-                            &check_directory,
-                            check_provider.as_deref(),
-                            None,
-                        )
-                        .map(|_| ())
+                let ready_only = match &query {
+                    ModelCandidateQuery::List {
+                        provider,
+                        ready_only,
+                    } if provider.as_ref().is_none_or(|id| id == "chatgpt") => {
+                        let check_directory = directory.clone();
+                        let check_query = query.clone();
+                        // 先校验本地请求，错误配置或非法筛选不能触发目录网络请求。
+                        blocking(move || {
+                            let auth = lattice_llm::auth::AuthStore::new(check_directory.clone());
+                            lattice_llm::model_candidates(&check_directory, &check_query)
+                                .map(|_| ())
+                                .map_err(|error| {
+                                    crate::ApiError::Configuration(crate::ConfigRejection::new(
+                                        &error.to_string(),
+                                        Some(&auth),
+                                    ))
+                                    .into()
+                                })
+                        })
+                        .await?;
+                        if let Err(error) = self.metadata.ensure_chatgpt().await {
+                            warning = Some(error.message);
+                        }
+                        Some(*ready_only)
+                    }
+                    _ => None,
+                };
+                blocking(move || {
+                    let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                    lattice_llm::model_candidates(&directory, &query)
+                        .map(|mut candidates| {
+                            if let Some(message) = warning {
+                                let chatgpt_in_scope = ready_only != Some(true)
+                                    || auth.status().is_ok_and(|status| {
+                                        status.providers.iter().any(|provider| {
+                                            provider.provider == "chatgpt"
+                                                && provider.availability.is_ready()
+                                        })
+                                    });
+                                if chatgpt_in_scope {
+                                    candidates.warnings.retain(|warning| {
+                                        warning.provider.as_deref() != Some("chatgpt")
+                                    });
+                                    candidates.warnings.push(lattice_llm::ModelWarning {
+                                        provider: Some("chatgpt".into()),
+                                        message,
+                                    });
+                                }
+                            }
+                            redact_model_candidates(&mut candidates, &auth);
+                            Response::Models(candidates)
+                        })
                         .map_err(|error| {
                             crate::ApiError::Configuration(crate::ConfigRejection::new(
                                 &error.to_string(),
@@ -724,39 +765,6 @@ impl Backend {
                             ))
                             .into()
                         })
-                    })
-                    .await?;
-                    if let Err(error) = self.metadata.ensure_chatgpt().await {
-                        warning = Some(error.message);
-                    }
-                }
-                blocking(move || {
-                    let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-                    lattice_llm::model_candidates(
-                        &directory,
-                        provider.as_deref(),
-                        target.as_deref(),
-                    )
-                    .map(|mut candidates| {
-                        if let Some(message) = warning {
-                            candidates
-                                .warnings
-                                .retain(|warning| warning.provider.as_deref() != Some("chatgpt"));
-                            candidates.warnings.push(lattice_llm::ModelWarning {
-                                provider: Some("chatgpt".into()),
-                                message,
-                            });
-                        }
-                        redact_model_candidates(&mut candidates, &auth);
-                        Response::Models(candidates)
-                    })
-                    .map_err(|error| {
-                        crate::ApiError::Configuration(crate::ConfigRejection::new(
-                            &error.to_string(),
-                            Some(&auth),
-                        ))
-                        .into()
-                    })
                 })
                 .await
             }

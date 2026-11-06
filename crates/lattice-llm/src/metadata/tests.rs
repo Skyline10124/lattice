@@ -16,6 +16,17 @@ fn cache(dir: &Path, source: &serde_json::Value) {
     .unwrap();
 }
 
+fn list_query(provider: Option<&str>, ready_only: bool) -> crate::ModelCandidateQuery {
+    crate::ModelCandidateQuery::List {
+        provider: provider.map(|id| crate::ProviderId::parse(id).unwrap()),
+        ready_only,
+    }
+}
+
+fn target_query(target: &str) -> crate::ModelCandidateQuery {
+    crate::ModelCandidateQuery::Target(crate::ModelRef::parse(target).unwrap())
+}
+
 #[tokio::test]
 async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() {
     let directory = tempfile::tempdir().unwrap();
@@ -44,7 +55,8 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
         .to_string(),
     )
     .unwrap();
-    let candidates = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    let candidates =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
     assert!(candidates.warnings.is_empty());
     assert_eq!(
         candidates
@@ -79,7 +91,7 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
         "chatgpt/org/unknown",
     ] {
         assert_eq!(
-            crate::model_candidates(directory.path(), None, Some(target))
+            crate::model_candidates(directory.path(), &target_query(target))
                 .unwrap()
                 .models
                 .len(),
@@ -88,7 +100,8 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
     }
     // 坏目录按缺目录处理：未登录时不提示，已经登录时说明原因。
     std::fs::write(&path, "{bad").unwrap();
-    let invalid = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    let invalid =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
     assert!(invalid.models.is_empty());
     assert!(invalid.warnings.is_empty());
     let auth = directory.path().join("auth.json");
@@ -103,7 +116,8 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
     )
     .unwrap();
-    let invalid = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    let invalid =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
     assert!(invalid.models.is_empty());
     assert!(matches!(
         invalid.warnings.as_slice(),
@@ -115,7 +129,8 @@ async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() 
         json!({"version":1,"fetched_at":"2020-01-01T00:00:00Z","models":[]}).to_string(),
     )
     .unwrap();
-    let empty = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    let empty =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
     assert!(empty.models.is_empty());
     assert!(empty.warnings.is_empty());
 }
@@ -138,7 +153,8 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         }}}),
     );
     // 手写档位无效的模型单独标出；已弃用的 retired-broken 同样无效，但先被滤掉，不出现也不报错。
-    let candidates = crate::model_candidates(directory.path(), Some("local"), None).unwrap();
+    let candidates =
+        crate::model_candidates(directory.path(), &list_query(Some("local"), false)).unwrap();
     assert_eq!(candidates.models.len(), 2);
     let broken = &candidates.models[1];
     assert_eq!(broken.model, "broken");
@@ -149,12 +165,22 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             if reason.contains("thinking_toggle") && reason.contains("model \"broken\"")
     ));
     let model = &candidates.models[0];
-    assert_eq!((&*model.provider, &*model.model), ("local", "active"));
+    assert_eq!(
+        (model.provider.as_str(), model.model.as_str()),
+        ("local", "active")
+    );
     assert_eq!((model.context, model.output), (Some(456), Some(45)));
     assert_eq!(model.cost.as_ref().unwrap().input, Some(1.0));
     assert_eq!(model.availability, crate::Availability::Ready);
-    let empty = crate::model_candidates(directory.path(), Some("empty"), None).unwrap();
+    let empty =
+        crate::model_candidates(directory.path(), &list_query(Some("empty"), false)).unwrap();
     assert_eq!(empty.models[0].model, "handwritten");
+    assert_eq!(
+        empty.models[0].availability,
+        crate::Availability::Unconfigured {
+            requirement: crate::ConfigurationRequirement::ApiKey
+        }
+    );
     assert!(
         empty
             .warnings
@@ -162,11 +188,44 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             .any(|warning| warning.provider.as_deref() == Some("empty")
                 && warning.message.contains("absent-catalog"))
     );
+    // 全量列表包含 Ready / Unconfigured / Invalid 三种状态；ready_only 去掉不可用项且不残留被跳过 provider 的警告。
+    let all = crate::model_candidates(directory.path(), &list_query(None, false)).unwrap();
+    assert!(
+        all.models
+            .iter()
+            .any(|m| m.provider == "local" && m.model == "active" && m.availability.is_ready())
+    );
+    assert!(all.models.iter().any(|m| {
+        m.provider == "empty"
+            && m.model == "handwritten"
+            && matches!(m.availability, crate::Availability::Unconfigured { .. })
+    }));
+    assert!(all.models.iter().any(|m| {
+        m.provider == "local"
+            && m.model == "broken"
+            && matches!(m.availability, crate::Availability::Invalid { .. })
+    }));
+    assert!(
+        all.warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("empty"))
+    );
+    let ready_only = crate::model_candidates(directory.path(), &list_query(None, true)).unwrap();
+    assert_eq!(
+        ready_only
+            .models
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.model))
+            .collect::<Vec<_>>(),
+        vec!["local/active"]
+    );
+    assert!(ready_only.warnings.is_empty());
     // 未登录时没有账号目录，也不提示登录。
-    let chatgpt = crate::model_candidates(directory.path(), Some("chatgpt"), None).unwrap();
+    let chatgpt =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
     assert!(chatgpt.models.is_empty());
     assert!(chatgpt.warnings.is_empty());
-    let retired = crate::model_candidates(directory.path(), None, Some("local/old")).unwrap();
+    let retired = crate::model_candidates(directory.path(), &target_query("local/old")).unwrap();
     assert_eq!(retired.models.len(), 1);
     assert_eq!(retired.models[0].model, "old");
     assert_eq!(
@@ -174,7 +233,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         vec![Effort::Off, Effort::High]
     );
     // 精确查询与列表一致：返回带诊断的候选，不让查询失败。
-    let exact = crate::model_candidates(directory.path(), None, Some("local/retired-broken"))
+    let exact = crate::model_candidates(directory.path(), &target_query("local/retired-broken"))
         .unwrap()
         .models;
     assert_eq!(exact.len(), 1);
@@ -184,7 +243,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         crate::Availability::Invalid { .. }
     ));
     let unknown =
-        crate::model_candidates(directory.path(), None, Some("local/org/unknown")).unwrap();
+        crate::model_candidates(directory.path(), &target_query("local/org/unknown")).unwrap();
     assert_eq!(
         serde_json::to_value(&unknown.models).unwrap(),
         json!([{
@@ -194,25 +253,18 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         }])
     );
     let subscription =
-        crate::model_candidates(directory.path(), None, Some("chatgpt/unknown")).unwrap();
+        crate::model_candidates(directory.path(), &target_query("chatgpt/unknown")).unwrap();
     assert_eq!(subscription.models.len(), 1);
     assert_eq!(subscription.models[0].provider, "chatgpt");
     assert!(subscription.models[0].supported_efforts.is_empty());
     assert!(subscription.warnings.is_empty());
-    for (provider, target, expected) in [
-        (
-            Some("local"),
-            Some("local/active"),
-            "cannot be used together",
-        ),
-        (None, Some("invalid"), "<provider>/<model>"),
-        (None, Some("local/"), "model id"),
-        (None, Some("missing/model"), "available providers:"),
-        (Some("missing"), None, "available providers:"),
+    for query in [
+        target_query("missing/model"),
+        list_query(Some("missing"), false),
     ] {
-        let error = crate::model_candidates(directory.path(), provider, target).unwrap_err();
+        let error = crate::model_candidates(directory.path(), &query).unwrap_err();
         assert!(
-            matches!(&error, crate::LlmError::Config { message } if message.contains(expected)),
+            matches!(&error, crate::LlmError::Config { message } if message.contains("available providers:")),
             "{error}"
         );
     }
@@ -222,13 +274,14 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
     )
     .unwrap();
-    let invalid = crate::model_candidates(directory.path(), None, Some("empty/unknown")).unwrap();
+    let invalid =
+        crate::model_candidates(directory.path(), &target_query("empty/unknown")).unwrap();
     assert!(matches!(
         invalid.models[0].availability,
         crate::Availability::Invalid { .. }
     ));
     assert!(
-        invalid
+        !invalid
             .warnings
             .iter()
             .any(|warning| warning.provider.is_none())
@@ -240,7 +293,19 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
             .any(|warning| warning.provider.as_deref() == Some("empty")
                 && warning.message.contains("absent-catalog"))
     );
-    let no_auth = crate::model_candidates(directory.path(), None, Some("local/unknown")).unwrap();
+    let ready_with_bad_auth =
+        crate::model_candidates(directory.path(), &list_query(None, true)).unwrap();
+    assert_eq!(
+        ready_with_bad_auth
+            .models
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.model))
+            .collect::<Vec<_>>(),
+        vec!["local/active"]
+    );
+    assert!(ready_with_bad_auth.warnings.is_empty());
+    let no_auth =
+        crate::model_candidates(directory.path(), &target_query("local/unknown")).unwrap();
     assert_eq!(no_auth.models[0].availability, crate::Availability::Ready);
 }
 
@@ -278,11 +343,11 @@ catalog='sort-catalog'
             "sort-z":{"id":"sort-z", "name":"A Model"}
         }}}),
     );
-    let candidates = crate::model_candidates(directory.path(), None, None).unwrap();
+    let candidates = crate::model_candidates(directory.path(), &list_query(None, false)).unwrap();
     let names: Vec<_> = candidates
         .models
         .iter()
-        .filter(|model| model.model.starts_with("sort-"))
+        .filter(|model| model.model.as_str().starts_with("sort-"))
         .map(|model| format!("{}/{}", model.provider, model.model))
         .collect();
     assert_eq!(

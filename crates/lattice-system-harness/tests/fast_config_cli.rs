@@ -312,7 +312,7 @@ catalog = "arbitrary-entry"
             let reply = support::ipc(
                 &world,
                 budget.cap_timeout(spec.step_timeout()),
-                json!({"operation":"models", "target":target}),
+                json!({"operation":"models", "query":{"target":target}}),
             );
             evidence
                 .record_json("exact model metadata", &reply)
@@ -344,7 +344,7 @@ catalog = "arbitrary-entry"
         let subscription = support::ipc(
             &world,
             budget.cap_timeout(spec.step_timeout()),
-            json!({"operation":"models", "target":"chatgpt/current"}),
+            json!({"operation":"models", "query":{"target":"chatgpt/current"}}),
         );
         evidence
             .record_json("chatgpt capabilities from openai metadata", &subscription)
@@ -426,7 +426,7 @@ catalog = "arbitrary-entry"
                 let listed = support::ipc(
                     &world,
                     budget.cap_timeout(spec.step_timeout()),
-                    json!({"operation":"models","target":target}),
+                    json!({"operation":"models","query":{"target":target}}),
                 );
                 evidence
                     .record_json(&format!("builtin capabilities {provider}-{model}"), &listed)
@@ -479,9 +479,8 @@ catalog = "arbitrary-entry"
             json!(["high"])
         );
         for query in [
-            json!({"operation":"models", "provider":"local", "target":"local/current"}),
-            json!({"operation":"models", "target":"missing/model"}),
-            json!({"operation":"models", "target":"invalid"}),
+            json!({"operation":"models", "query":{"list":{"provider":"missing","ready_only":false}}}),
+            json!({"operation":"models", "query":{"target":"missing/model"}}),
         ] {
             let reply = support::ipc(&world, budget.cap_timeout(spec.step_timeout()), query);
             evidence
@@ -533,7 +532,7 @@ catalog = "arbitrary-entry"
         let exact = support::ipc(
             &world,
             budget.cap_timeout(spec.step_timeout()),
-            json!({"operation":"models", "target":"empty/listed"}),
+            json!({"operation":"models", "query":{"target":"empty/listed"}}),
         );
         evidence
             .record_json("invalid handwritten effort exact query", &exact)
@@ -857,31 +856,57 @@ fn models_report_unreadable_credentials() {
                 std::fs::write(directory.join("auth.json"), "invalid auth").unwrap();
             }
             let unavailable = cli(&world, &spec, &["--json", "models"]);
-            evidence.record_command("models global credential warning", &unavailable);
+            evidence.record_command("models unreadable credential availability", &unavailable);
             assert!(unavailable.is_clean_exit(0), "{label}: models exited");
             let unavailable: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
             let warnings = unavailable["warnings"].as_array().unwrap();
-            let global: Vec<_> = warnings
+            assert!(
+                !warnings.iter().any(|warning| warning["provider"].is_null()),
+                "{label}: unexpected global warning {warnings:?}"
+            );
+            let models = unavailable["models"].as_array().unwrap();
+            let local = models
                 .iter()
-                .filter(|warning| warning["provider"].is_null())
-                .collect();
-            assert_eq!(global.len(), 1, "{label}: global warning count");
-            let reason = global[0]["message"].as_str().unwrap();
+                .find(|model| model["provider"] == "local" && model["model"] == "current")
+                .expect("declared bearer model listed");
+            assert_eq!(local["availability"]["status"], "invalid", "{local}");
+            let reason = local["availability"]["reason"].as_str().unwrap();
             let expected = if unavailable_directory {
                 "permissions are too broad"
             } else {
                 "auth.json"
             };
-            assert!(reason.contains(expected), "{label}: warning was {reason}");
+            assert!(reason.contains(expected), "{label}: reason was {reason}");
+            let empty = models
+                .iter()
+                .find(|model| model["provider"] == "empty" && model["model"] == "listed")
+                .expect("auth=none model listed");
+            assert_eq!(empty["availability"], json!({"status":"ready"}), "{empty}");
             let text = cli(&world, &spec, &["models"]);
-            evidence.record_command("models global credential warning text", &text);
+            evidence.record_command("models unreadable credential text", &text);
             assert!(text.is_clean_exit(0), "{label}: text models exited");
-            assert_eq!(
-                String::from_utf8_lossy(&text.stderr)
-                    .matches("provider credentials are not ready")
-                    .count(),
-                1,
-                "{label}: text warning count"
+            let stderr = String::from_utf8_lossy(&text.stderr);
+            assert!(
+                !stderr.contains("provider credentials are not ready"),
+                "{label}: removed global warning still printed: {stderr}"
+            );
+            assert!(
+                stderr
+                    .lines()
+                    .any(|line| line.starts_with("local/current: ") && line.contains(expected)),
+                "{label}: stderr was {stderr}"
+            );
+            let ready_only = cli(&world, &spec, &["--json", "models", "--auth"]);
+            evidence.record_command("models unreadable credential ready-only", &ready_only);
+            assert!(ready_only.is_clean_exit(0), "{label}: --auth exited");
+            let ready_only: Value = serde_json::from_slice(&ready_only.stdout).unwrap();
+            assert!(
+                !ready_only["models"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|model| model["provider"] == "local"),
+                "{label}: invalid bearer provider leaked into --auth: {ready_only}"
             );
         }
         std::fs::set_permissions(
@@ -903,13 +928,13 @@ fn models_name_available_providers_when_the_requested_one_is_absent() {
         lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
             .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let missing = cli(&world, &spec, &["--json", "models", "--provider", "EMPTY"]);
+        let missing = cli(&world, &spec, &["--json", "models", "--provider", "absent"]);
         evidence.record_command("models unknown provider", &missing);
         assert!(missing.is_clean_exit(2), "unknown provider was accepted");
         let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
         let message = missing["message"].as_str().unwrap();
         for value in [
-            "EMPTY",
+            "absent",
             "available providers:",
             "anthropic",
             "openai",

@@ -62,30 +62,23 @@ async fn model_query_fetches_only_a_missing_signed_in_account_catalog_and_preser
                 })
             },
         );
-    for (provider, target) in [(None, Some("chatgpt/outside")), (Some("openai"), None)] {
-        backend
-            .dispatch(Request::Models {
-                provider: provider.map(str::to_owned),
-                target: target.map(str::to_owned),
-            })
-            .await
-            .unwrap();
+    for query in [
+        ModelCandidateQuery::Target(ModelRef::parse("chatgpt/outside").unwrap()),
+        ModelCandidateQuery::List {
+            provider: Some(ProviderId::parse("openai").unwrap()),
+            ready_only: false,
+        },
+    ] {
+        backend.dispatch(Request::Models { query }).await.unwrap();
     }
-    assert!(
-        backend
-            .dispatch(Request::Models {
-                provider: Some("chatgpt".into()),
-                target: Some("chatgpt/outside".into())
-            })
-            .await
-            .is_err()
-    );
     assert_eq!(calls.load(Ordering::SeqCst), 0);
     for _ in 0..2 {
         let Response::Models(result) = backend
             .dispatch(Request::Models {
-                provider: Some("chatgpt".into()),
-                target: None,
+                query: ModelCandidateQuery::List {
+                    provider: Some(ProviderId::parse("chatgpt").unwrap()),
+                    ready_only: false,
+                },
             })
             .await
             .unwrap()
@@ -103,8 +96,10 @@ async fn model_query_fetches_only_a_missing_signed_in_account_catalog_and_preser
     fail.store(true, Ordering::SeqCst);
     let Response::Models(result) = backend
         .dispatch(Request::Models {
-            provider: None,
-            target: None,
+            query: ModelCandidateQuery::List {
+                provider: None,
+                ready_only: false,
+            },
         })
         .await
         .unwrap()
@@ -128,8 +123,10 @@ async fn model_query_fetches_only_a_missing_signed_in_account_catalog_and_preser
     std::fs::remove_file(auth_path).unwrap();
     backend
         .dispatch(Request::Models {
-            provider: Some("chatgpt".into()),
-            target: None,
+            query: ModelCandidateQuery::List {
+                provider: Some(ProviderId::parse("chatgpt").unwrap()),
+                ready_only: false,
+            },
         })
         .await
         .unwrap();

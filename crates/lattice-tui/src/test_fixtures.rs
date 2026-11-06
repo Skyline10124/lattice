@@ -30,8 +30,8 @@ pub(super) fn model_candidate(
     efforts: &[lattice_api::Effort],
 ) -> lattice_api::ModelCandidate {
     lattice_api::ModelCandidate {
-        provider: provider.into(),
-        model: model.into(),
+        provider: lattice_api::ProviderId::parse(provider).unwrap(),
+        model: lattice_api::ModelId::parse(model).unwrap(),
         name: None,
         context: None,
         output: None,

@@ -50,7 +50,7 @@ enum Commands {
         auth: bool,
         /// Only list models from this configured provider.
         #[arg(long)]
-        provider: Option<String>,
+        provider: Option<lattice_api::ProviderId>,
         #[command(subcommand)]
         action: Option<models::ModelsAction>,
     },

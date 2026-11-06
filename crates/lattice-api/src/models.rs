@@ -5,8 +5,8 @@ pub use lattice_conversation::{
     ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId, ProviderIdError,
 };
 pub use lattice_llm::{
-    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidates, ModelPrice,
-    ModelWarning,
+    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery, ModelCandidates,
+    ModelPrice, ModelWarning,
 };
 
 /// 通过公开 API 初始化日志。

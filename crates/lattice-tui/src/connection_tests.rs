@@ -1430,8 +1430,7 @@ fn accepted_selection_consumes_only_matching_field_generations() {
         for reselect in 0..4 {
             let mut app = test_app(true);
             app.selection
-                .choose_model(model_candidate("p", "same", &[Low, Off]))
-                .unwrap();
+                .choose_model(model_candidate("p", "same", &[Low, Off]));
             app.selection.choose_effort(Low);
             app.input.set_text("first");
             let prompt = app.submit().unwrap();
@@ -1447,14 +1446,17 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             app.dock.release();
             if reselect & 1 != 0 {
                 app.selection
-                    .choose_model(model_candidate("p", "same", &[Low, Off]))
-                    .unwrap();
+                    .choose_model(model_candidate("p", "same", &[Low, Off]));
             }
             if reselect & 2 != 0 {
                 app.selection.choose_effort(Low);
             }
             app.apply_builtin("/effort");
             let old_query = app.model_query.take().unwrap();
+            assert_eq!(
+                old_query.query,
+                lattice_api::ModelCandidateQuery::Target(same.clone())
+            );
             app.apply_models(
                 old_query.clone(),
                 Ok(lattice_api::ModelCandidates {
@@ -1463,7 +1465,7 @@ fn accepted_selection_consumes_only_matching_field_generations() {
                 }),
             );
             app.apply_view(LocalUpdate::Head(current()));
-            assert_eq!(app.next_target().as_deref(), Some("p/same"));
+            assert_eq!(app.next_target().as_ref(), Some(&same));
             confirm(&mut app, first.turn_id, proof, 1);
             let query = app.dock.query().unwrap();
             let mut terminal =
@@ -1492,8 +1494,10 @@ fn accepted_selection_consumes_only_matching_field_generations() {
             );
             if reselect & 1 == 0 {
                 assert_eq!(
-                    query.target.as_deref(),
-                    Some("other/current"),
+                    query.query,
+                    lattice_api::ModelCandidateQuery::Target(
+                        lattice_api::ModelRef::parse("other/current").unwrap()
+                    ),
                     "proof {proof}, reselect {reselect}"
                 );
                 assert_ne!(query.id, old_query.id);
@@ -1541,8 +1545,7 @@ fn accepted_selection_consumes_only_matching_field_generations() {
     }
     let mut app = test_app(true);
     app.selection
-        .choose_model(model_candidate("p", "same", &[Low, Off]))
-        .unwrap();
+        .choose_model(model_candidate("p", "same", &[Low, Off]));
     app.selection.choose_effort(Low);
     let first = next(&mut app, &options);
     app.apply_submission(receipt(
@@ -1557,8 +1560,7 @@ fn accepted_selection_consumes_only_matching_field_generations() {
     );
     confirm(&mut app, second.turn_id, 0, 3);
     app.selection
-        .choose_model(model_candidate("p", "same", &[Low, Off]))
-        .unwrap();
+        .choose_model(model_candidate("p", "same", &[Low, Off]));
     app.selection.choose_effort(Off);
     confirm(&mut app, first.turn_id, 0, 1);
     let third = next(&mut app, &options);
@@ -1571,10 +1573,17 @@ fn accepted_selection_consumes_only_matching_field_generations() {
 
 #[test]
 fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
-    use lattice_api::{Effort::Low, ModelCandidates};
+    use lattice_api::{Effort::Low, ModelCandidateQuery, ModelCandidates, ModelRef};
     let mut app = test_app(false);
     app.apply_builtin("/model");
     let closed = app.model_query.take().unwrap();
+    assert_eq!(
+        closed.query,
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true
+        }
+    );
     app.apply_action(KeyAction::Clear);
     app.apply_models(
         closed.clone(),
@@ -1586,6 +1595,13 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     assert!(app.dock.shows_input(), "迟到成功不能重开面板");
     app.apply_builtin("/model");
     let current = app.model_query.take().unwrap();
+    assert_eq!(
+        current.query,
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true
+        }
+    );
     app.apply_models(
         current,
         Ok(ModelCandidates {
@@ -1607,13 +1623,16 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     assert!(app.dock.message_id().is_none(), "迟到失败不能发 Warn");
     app.apply_action(KeyAction::Submit);
     assert_eq!(
-        app.next_target().as_deref(),
-        Some("p/fresh"),
+        app.next_target(),
+        Some(ModelRef::parse("p/fresh").unwrap()),
         "旧响应不能取代新候选"
     );
     app.apply_builtin("/effort");
     let old_effort = app.model_query.take().unwrap();
-    assert_eq!(old_effort.target.as_deref(), Some("p/fresh"));
+    assert_eq!(
+        old_effort.query,
+        ModelCandidateQuery::Target(ModelRef::parse("p/fresh").unwrap())
+    );
     app.apply_action(KeyAction::Clear);
     // 已有会话当前模型不在普通列表也可以精确查询。
     app.selection = Default::default();
@@ -1622,13 +1641,19 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     app.apply_view(LocalUpdate::Head(current));
     app.apply_builtin("/effort");
     let current = app.model_query.take().unwrap();
-    assert_eq!(current.target.as_deref(), Some("openai/deprecated"));
+    assert_eq!(
+        current.query,
+        ModelCandidateQuery::Target(ModelRef::parse("openai/deprecated").unwrap())
+    );
     let mut changed = head(0, None, false);
     changed.provider = "other".into();
     changed.model = "unknown/model".into();
     app.apply_view(LocalUpdate::Head(changed));
     let changed = app.model_query.take().unwrap();
-    assert_eq!(changed.target.as_deref(), Some("other/unknown/model"));
+    assert_eq!(
+        changed.query,
+        ModelCandidateQuery::Target(ModelRef::parse("other/unknown/model").unwrap())
+    );
     app.apply_models(
         current,
         Err(local_error(
