@@ -1,31 +1,45 @@
 # lattice-system-harness 工作指引
 
-## 职责
+驱动已构建的 `lattice` 二进制执行全系统黑盒验收场景并提供本地 `tui_mock` 调试环境，被开发验收、`xtask ci`、`xtask rollout` 与 `xtask tui-mock` 使用。
 
-测试已构建 `lattice` 二进制的独立外部 harness，不是产品 crate 的 integration-test target。只共享通用驱动，场景 fixture 和断言留在本场景，Direct 场景共用的 plumbing 位于私有 `tests/support/mod.rs`。
+## 模块
 
-## 上位文档
+| 模块 | 负责 |
+| --- | --- |
+| `src/lib.rs` | 重导出场景世界、进程驱动、fake 服务、预算与断言辅助接口 |
+| `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离、环境变量白名单、后台归属登记、有序 `stop` 与进程组回收 |
+| `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 路径解析、独立进程组命令执行、超时终止、`CommandOutcome` 采集与快速 CLI 辅助 |
+| `src/scenario.rs` | 场景分层与单命令、整场景时长预算计算 |
+| `src/fake_llm.rs`、`src/provider.rs`、`src/tls.rs` | 五协议 TLS + HTTP/2 `FakeLlmServer`、`ResponseGate`、工具 schema 校验、临时 CA 签发及经 `providers.toml` 与 `lattice auth set` 的正式配置接入 |
+| `src/fixture_http.rs` | `fetch__web` 场景使用的本地 HTTP/TLS 测试服务 |
+| `src/session_send.rs` | `lattice --json session send` JSONL 解析（保留未知有效记录为 `Unknown` 并单独记录畸形行）与 `0`/`1`/`2` 退出码核验 |
+| `src/pty_tui.rs` | 基于 `portable-pty` 的真实 TUI 终端冒烟驱动 |
+| `src/artifacts.rs`、`src/assert.rs` | 失败产物目录独占锁占用、秘密字面脱敏、工作区快照对比与 `FailureReport` 生成 |
+| `src/tui_mock.rs`、`src/bin/tui_mock.rs` | 启动本地确定性 fake provider 并拉起真实 TUI 的人工调试入口 |
 
-修改前读取[测试工程](../../docs/development/testing.md)及[宿主平台](../../docs/architecture/platform.md)。构建、命令和产物定位见[验证指南](../../docs/development/validation-guide.md)，产品断言同时读取对应领域合同。
+## 先读
 
-## 局部约束
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [测试工程](../../docs/development/testing.md)、[宿主平台](../../docs/architecture/platform.md)、[工程规范](../../docs/development/engineering.md) |
+| 被测二进制准备与运行命令 | [验证指南](../../docs/development/validation-guide.md) |
+| 具体场景断言（会话、模型、TUI、工具） | 对应领域的架构合同（如[会话与 Turn](../../docs/architecture/session/README.md)、[模型接入](../../docs/architecture/llm/README.md)、[Dock 与输入区](../../docs/architecture/tui/dock.md#选择面板)、[LANCET 工具执行](../../docs/architecture/lancet.md)） |
 
-- manifest 不依赖 lattice/lancet 产品 crate，不用 workspace/path 形式引入产品实现；通用测试和系统库允许。由 `cargo xtask harness-boundary` 按产品名称及 workspace 归属核验，不是禁止所有依赖。
-- 仅通过 `LATTICE_BIN` 获取产品。读取 session/audit 走公开 CLI，请求回执与视图边界可用公开 Local IPC；工作区历史的既有通用 Git 对象检查例外按测试合同执行，不扩大私有读取面。
-- 环境隔离、端口、env_clear/allowlist、ResponseGate、预算、FailureReport、claim 和脱敏遵循测试合同，不增加非 Linux 空实现或故障跳过。
-- `ScenarioWorld` 在首次可能自启前登记后台归属，驱动分别管理前端与后台进程组，证据收尾负责报告清理。具体顺序与失败语义按[进程生命周期](../../docs/development/testing.md#超时与进程生命周期)执行。
-- fake LLM 经正式的配置入口接入：场景 HOME 下的 `providers.toml` 把 provider 指向 fake LLM，key 经 `lattice auth set` 录入，无隐藏参数或测试 provider。`fast_env_boundary` 核对工作区 `.env` 与环境变量不提供 key 或 endpoint，删除变量用 `unset_env`，不能以设空串代替不存在而产生假绿。
-- `SessionSendDriver` 驱动 `lattice --json session send`，同时返回原始命令证据与解析 JSONL；未知但有效记录保留为 `Unknown`，非空畸形行另存，不导入产品类型即可核验 0/1/2 退出契约。
-- 场景专用断言不可为共享而丢失；独立 release operator fixture/断言由 rollout 对锁定 release 二进制运行，不能把 debug `direct_operator` 重跑当作 release 验收。
+## 约束
 
-## 场景与验证入口
+- `Cargo.toml` 只引入通用测试、网络、TLS 与终端库，保持零 `lattice-*` 与 `lancet-*` 产品 crate 依赖，由 `cargo xtask harness-boundary` 守卫黑盒边界。
+- 场景只通过 `LATTICE_BIN`（推荐传入绝对路径）调用已构建产品，经公开 CLI、JSONL 与公开 Local IPC 核验行为；仅工作区历史场景按[测试工程](../../docs/development/testing.md)使用通用 Git 对象检查。
+- 目标平台固定为 Linux，环境隔离、环境变量白名单、`ScenarioWorld` 后台提前登记与前后台进程组清理、`ResponseGate`、预算、失败产物占用与脱敏均按[测试工程](../../docs/development/testing.md)执行；运行环境异常（含 PTY 环境错误）直接计为测试失败。
+- `FakeLlmServer` 经场景私有 `HOME` 下的 `providers.toml` 与 `lattice auth set` 接入正式配置入口；验证变量未设置（如 `fast_env_boundary`）时调用 `unset_env` 移除变量，确保真正测试缺失态而非空字符串。
+- `src/` 只承载跨场景通用驱动，Direct 共用辅助放在 `tests/support/mod.rs`，场景专用 fixture 与语义断言保留在各自 `tests/*.rs` 中：`direct_operator` 与 `release_operator` 均走 Component 路径并各自保留 `fetch`、`todo`、组合调用及 `newest-20` 断言，其中 `release_operator` 专对锁定的 release 二进制运行。
+- 本 crate 之外：未公开的 redb 表编码、值版本、纯关闭规划与内部状态机分支由 `lattice-session`、`lattice-llm`、`lattice-api` 等对应产品 crate 的单元或集成测试负责。
 
-- 快速场景覆盖 help、环境变量与 CLI。Direct 场景覆盖真实 Turn 与重新打开、观察、变更、工具、失败、取消与 deadline、操作员、秘密、会话隔离和工作区历史。
-- `direct_background` 与相关 PTY 场景保护前后端分离、回执丢失后按 TurnId 找回、Busy 与并发、视图推送与历史查询、取消与 stop；断言的边界见[后台与重连场景](../../docs/development/testing.md#后台与重连场景)。
-- `direct_operator` 与 `release_operator` 各自保留 fetch、todo 与组合调用的场景，以及 `newest-20` 断言。两者都使用 Component，不再用 native、Component、mixed 区分执行路径。
-- `direct_crash_barriers` 是显式 feature 场景，验证会话库提交后的 SIGSTOP 与 SIGKILL 窗口、各阶段的结论、持久取消、库级故障与观察调度。普通套件通过不代表运行过它。
-- `direct_tree_session` 保护按 NodeId 退回分叉、profile 副本与 agent 规则、原 Turn 的 Step 详情，以及文件与历史不回退，并验证旧库被拒绝。未公开的表编码、值版本与事务关系由库层测试验证，harness 不直接打开 redb。
-- 配置来源与 profile 副本的场景要求见[测试合同](../../docs/development/testing.md#配置来源与-profile-副本)。
-- PTY smoke 验证同一个 Direct-Local Turn 的接线，以及[模型与档位选择](../../docs/architecture/tui/dock.md#选择面板)、过滤与取消、请求 JSON 和公开会话事实；环境故障不能当作跳过。
-- 先按测试合同准备当前的被测二进制，再运行需要的 fast、direct 或 PTY 目标；运行 `release-operator`、`crash-barriers` 时要明确说明。`LATTICE_BIN` 按测试进程的工作目录解析，推荐用绝对路径，但这不是额外的代码约束。
-- 只在影响范围需要时运行全量 harness，它不是每次局部修改的默认命令。
+## 验证
+
+| 改动 | 运行 |
+| --- | --- |
+| 修改 `src/` 通用驱动或解析器 | `cargo test -p lattice-system-harness --lib` 与 `cargo xtask harness-boundary` |
+| 修改 CLI 帮助、环境变量或参数场景 | 先构建 `lattice`，再运行对应的 `cargo test -p lattice-system-harness --test fast_<场景>` |
+| 修改后台重连、会话树、工具或 provider 场景 | 先构建当前 `lattice`，再按影响范围运行对应的 `cargo test -p lattice-system-harness --test direct_<场景>` |
+| 修改 TUI 冒烟驱动或 `pty_tui_smoke` | 先构建当前 `lattice`，再运行 `cargo test -p lattice-system-harness --test pty_tui_smoke` |
+| 修改崩溃窗口或 release 操作员验收 | 显式构建对应特征或 release 二进制，分别运行 `--features crash-barriers --test direct_crash_barriers` 或 `--features release-operator --test release_operator`，并在报告中注明 |
