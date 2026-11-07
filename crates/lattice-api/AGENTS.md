@@ -6,12 +6,12 @@
 
 - `local/client.rs`：LocalClient 的连接与分帧，转交视图与查询；`stop` 收到回执后限时等待 socket 撤下、`owner.lock` 可取得后返回。
 - `local/auth.rs` 与 `local/auth/login.rs`：后台凭据目录、敏感录入材料与凭据错误映射，以及同连接登录句柄、专用交换和取消责任。认证规则与文件操作归 LLM 的共享生命周期对象。
-- `local/metadata.rs`：协调 models.dev 与账号模型目录的自动、手动、登录后和缺目录刷新，按来源共享在途操作，并由同一个任务调度；新鲜度、退避、开关与部分失败规则见[元数据合同](../../docs/architecture/llm.md#元数据的来源与合并)。停止时取消发布并排空目录文件工作，Turn 与认证的停止顺序仍由 server 负责。
-- `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)。
-- `local/server.rs`：serve 持实例资源和连接，并在启动时拉起元数据刷新任务。Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。`stop` 先取消刷新任务并停止登录，已接管 Turn 收尾后再关闭认证生命周期、排空连接。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session.md#取消与退出)。
+- `local/metadata.rs`：协调 models.dev 与账号模型目录的自动、手动、登录后和缺目录刷新，按来源共享在途操作，并由同一个任务调度；新鲜度、退避、开关与部分失败规则见[元数据合同](../../docs/architecture/llm/models.md#元数据的来源与合并)。停止时取消发布并排空目录文件工作，Turn 与认证的停止顺序仍由 server 负责。
+- `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作)。
+- `local/server.rs`：serve 持实例资源和连接，并在启动时拉起元数据刷新任务。Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。`stop` 先取消刷新任务并停止登录，已接管 Turn 收尾后再关闭认证生命周期、排空连接。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)。
 - `models.rs`：重导出公开模型候选与查询类型（`ModelCandidateQuery`、`Availability`、`ConfigurationRequirement`），并转发日志初始化。
 - `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。
-- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：委托 `lattice-profile::load_agent_profile` 完成发现、权限检查与字段解析（API 层不再重复检查 profile 名称、超时或重试字段），再解析外部策略文件并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session.md#配置拒绝的原因)。
+- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：委托 `lattice-profile::load_agent_profile` 完成发现、权限检查与字段解析（API 层不再重复检查 profile 名称、超时或重试字段），再解析外部策略文件并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)。
 - `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；准入经 `GatewayTurn::prepare` 一次完成可用性核对与 `EffortPolicy` 档位选择，并为不支持的档位标明来源（`--effort`、`agent.toml` 的 `[agent].effort` 或会话副本）；`start_turn` 用于后台执行接线，`run_turn`/`stream_turn` 仅供测试复用核心。
 - `turn/cep.rs`：profile→policy、Tool 事件映射及生产依赖接线；首次共享 Component 组成经 spawn_blocking，组装仍归 lancet-api。
 - coordinator/saga 模块：阻塞存储适配、可注入 IdSource、调用登记、顺序执行、槽位终态、Step/Turn 关闭及会话退回。
@@ -19,16 +19,16 @@
 
 ## 上位文档
 
-修改前读取[会话](../../docs/architecture/session.md)、[模型接入](../../docs/architecture/llm.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)、[LANCET](../../docs/architecture/lancet.md)及 [Cell](../../docs/architecture/cell.md)合同。
+修改前读取[会话](../../docs/architecture/session/README.md)、[模型接入](../../docs/architecture/llm/README.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)、[LANCET](../../docs/architecture/lancet.md)及 [Cell](../../docs/architecture/cell.md)合同。
 
 ## 局部约束
 
 - TurnCoordinator 是唯一持久 Turn 协调者，使用窄领域接口持有全 Turn SessionExecutionLock；无第二 dispatch/schema/Component 组装路径或跨库事务。会话库写事务与工作区历史仓库锁不同时持有，也不同时持有两把仓库写锁。CLI 渲染与 provider wire 分别留在 CLI/LLM。
-- 接受与找回遵循[请求身份与找回](../../docs/architecture/session.md#请求身份与找回)：`submit` 只接受新请求，找回经按 TurnId 查询。观察经会话视图交付，按观察者推送条目的最新值；背压不得阻塞 live task drain 或持久提交，条目和错误保持结构化。面向用户的等级与说明由 Step 条目中的重试提示与 `TurnSummary` 的 notice 给出，见[模型请求与执行预算](../../docs/architecture/session.md#模型请求与执行预算)。
+- 接受与找回遵循[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)：`submit` 只接受新请求，找回经按 TurnId 查询。观察经会话视图交付，按观察者推送条目的最新值；背压不得阻塞 live task drain 或持久提交，条目和错误保持结构化。面向用户的等级与说明由 Step 条目中的重试提示与 `TurnSummary` 的 notice 给出，见[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)。
 - profile capability 转换将 enabled 作为第一阶段、capabilities 作减法；没有已加载 profile 时 fail closed。`cep_policy_from_profile` 只携带执行策略，不隐式授予准入能力。
-- 阻塞 Git/store 调用用 spawn_blocking，写事务与仓库锁不跨 await。调用开始前先提交 Started，失败后不继续分发；commit 出错按[事务与一致性](../../docs/architecture/session.md#事务与一致性)停止全库写入和新 provider/Tool 启动，排空在途工作后关闭重开，不推定已回滚。
+- 阻塞 Git/store 调用用 spawn_blocking，写事务与仓库锁不跨 await。调用开始前先提交 Started，失败后不继续分发；commit 出错按[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)停止全库写入和新 provider/Tool 启动，排空在途工作后关闭重开，不推定已回滚。
 - 槽位结果由到达的阶段确定：停在 `Registered` 为 NotExecuted，停在 `Started` 为效果不确定，不猜 NotExecuted 或重分发；分发前取消、Deadline 等停止原因随 Step 关闭写入一次。
-- 执行者消失的 Turn 不被继续或补写；关闭 Step 不请求模型、不重执行 Tool、不读取工作区历史，也不取得工作区操作锁。`rewind` 移到已有 NodeId 本身，保留原分叉，不恢复文件，也不改变 profile 副本；agent 的选择与副本的写入按[会话的 profile 副本](../../docs/architecture/session.md#会话的-profile-副本)执行。
+- 执行者消失的 Turn 不被继续或补写；关闭 Step 不请求模型、不重执行 Tool、不读取工作区历史，也不取得工作区操作锁。`rewind` 移到已有 NodeId 本身，保留原分叉，不恢复文件，也不改变 profile 副本；agent 的选择与副本的写入按[会话的 profile 副本](../../docs/architecture/session/settings.md#会话的-profile-副本)执行。
 - Session ID 解析精确优先，再按已存 Session ID 前缀匹配；歧义最多列 5 个候选并要求更多字符，拒绝空/全空白。规范 SessionId 仍是32位十六进制，缩写只属输入/显示。
 
 ## 验证入口

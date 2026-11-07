@@ -11,7 +11,7 @@ status: active
 
 本合同规定 Tool 的 Cell 模型、能力准入、Host 操作授权、结果计量和证据语义。`lancet-protocol` 维护数据契约，`lancet-runtime` 执行准入、授权与记录，`lancet-authority` 提供领域策略，`lattice-session` 把证据持久保存在调用槽位中并提供操作员读取。
 
-[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态写入](lancet.md#调用身份与执行流程)；[会话合同](session.md#step-执行与结果保存)维护调用槽位与 Step 关闭；[工作区合同](workspace.md#文件变更)维护文件安装效果。
+[LANCET 合同](lancet.md#构建与封闭组成)维护工具构建与组成，并负责[执行及终态写入](lancet.md#调用身份与执行流程)；[会话合同](session/steps.md#step-执行与结果保存)维护调用槽位与 Step 关闭；[工作区合同](workspace.md#文件变更)维护文件安装效果。
 
 ## 模型与声明
 
@@ -103,7 +103,7 @@ guest 返回一个结果 CellRef 和结构化结果。Host 解析后，要求结
 canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.rs) 的单一实现生成：显式排序对象键，不依赖 `serde_json::Map` 内部结构或 `preserve_order` 是否启用；不输出空白，数字沿用 serde_json 格式，数组顺序保持不变。
 有界领域操作返回数据时按对应 Host 定义记录交付量；无返回值的操作可不带该度量。操作返回量与最终结果表示是不同测量对象，不能直接相加视为唯一预算消耗。
 
-计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。此处结果值的字节计量与会话层[调用槽位的内容保存上限](session.md#调用槽位)分别约束各自对象，不互作替代。
+计量提供事实，预算执行由对应 Host 与 Turn 预算负责。`free` 标签本身不证明上下文已释放，guest 自报用量也不能取代 Host 度量。此处结果值的字节计量与会话层[调用槽位的内容保存上限](session/steps.md#调用槽位)分别约束各自对象，不互作替代。
 
 ## 证据模型与失败语义
 
@@ -131,7 +131,7 @@ canonical JSON 由 [`canonical.rs`](../../crates/lancet-protocol/src/canonical.r
 | 结果校验失败、trap、超限或取消 | 已记录的操作效果与拒绝继续保留，结果效果依实际校验结果产生 |
 | 没有可靠的完整执行证据 | 由调用协调依据持久事实处理，不从结果材料反推或补造执行证据 |
 
-`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据在调用槽位中的一次写入边界；[会话合同](session.md#执行者消失后的-turn)维护执行者消失、Turn 未能关闭时的结局。
+`CellEvidenceTriple` 将三类版本化记录交给协调层，构成内部 receipt 的证据部分，不是 provider 结果字段。[LANCET](lancet.md#结果证据与失败处理)维护终态与完整证据在调用槽位中的一次写入边界；[会话合同](session/recovery.md#执行者消失后的-turn)维护执行者消失、Turn 未能关闭时的结局。
 调用事件、内存证据快照和操作员投影不构成持久化确认。
 
 ### 内容与版本边界

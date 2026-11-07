@@ -12,7 +12,7 @@ status: active
 
 本合同规定 LANCET 的工具组成、Tool Host 边界、调用执行及证据与持久事实的衔接。维护归属为 `lancet-runtime`、`lancet-authority`、`lancet-protocol` 和 `lancet-api` 各自负责的部分。
 
-产品调用由 `lattice-api::TurnCoordinator` 发起和协调。[会话合同](session.md#step-执行与结果保存)维护调用槽位、Step 与 Turn 的持久记录，[存储合同](storage.md)维护会话库与通用持久化机制，[工作区合同](workspace.md)维护文件操作。
+产品调用由 `lattice-api::TurnCoordinator` 发起和协调。[会话合同](session/steps.md#step-执行与结果保存)维护调用槽位、Step 与 Turn 的持久记录，[存储合同](storage.md)维护会话库与通用持久化机制，[工作区合同](workspace.md)维护文件操作。
 
 ## 工具模型与职责
 
@@ -112,7 +112,7 @@ Cell 模型、能力匹配、scope/trust 解析及拒绝证据由该合同集中
 ### 网络获取
 
 `fetch__web` 仅通过 `network-fetch` Host 发出 GET 请求，供 Tool 在获准目标上取得受限响应。每次请求及重定向由 Host 核验允许主机、协议和地址策略，解析 DNS，固定连接地址，再完成 TLS 验证与读取。
-Tool Host 接收[冻结配置](session.md#执行配置冻结)中的实际 TLS 根证书内容，即后台启动时载入的根，以 Turn 专属信任配置验证 HTTPS 连接；本 Turn 的 provider 连接使用同一份根内容。没有可用的根证书时，Host 在通过网络策略与单元授权后、解析与连接前拒绝 https 请求（证据原因 `tls_roots_unavailable`）；不在允许名单或未授权的目标仍记为策略拒绝（`network_policy` 或 `cell_denied`），http 请求照常，不回退系统根。材料的来源、冻结时点与持久化边界由会话合同维护。Host 在每一跳继续执行本节的目标授权、地址固定和证据记录。
+Tool Host 接收[冻结配置](session/acceptance.md#执行配置冻结)中的实际 TLS 根证书内容，即后台启动时载入的根，以 Turn 专属信任配置验证 HTTPS 连接；本 Turn 的 provider 连接使用同一份根内容。没有可用的根证书时，Host 在通过网络策略与单元授权后、解析与连接前拒绝 https 请求（证据原因 `tls_roots_unavailable`）；不在允许名单或未授权的目标仍记为策略拒绝（`network_policy` 或 `cell_denied`），http 请求照常，不回退系统根。材料的来源、冻结时点与持久化边界由会话合同维护。Host 在每一跳继续执行本节的目标授权、地址固定和证据记录。
 公网访问采用 HTTPS；显式 localhost 策略作为受控例外处理，其余私有、保留和特殊地址拒绝。跨源重定向移除调用方请求头，响应头、响应体、重定向次数和 deadline 均受限制，取消与 Turn 观察预算参与执行。
 调用须同时通过 `ex` 能力边界和非空 `allowed_hosts` 目标策略；空允许列表拒绝全部网络，`allow_public_https` 只是公网 HTTPS 开关。localhost 还须显式启用并列入允许主机。每次调用最多一次网络 import，Host 内部处理重定向，不由 guest 发起第二条独立网络操作。最多跟随 5 次重定向，初始请求计数为 0；DNS、连接、TLS、各跳与 body 共用一次调用 deadline 和取消身份，不逐跳重置。
 
@@ -131,9 +131,9 @@ guest 只接收最小成功投影与无 payload 的粗错误标签，结构化�
 
 一个 `InvocationId` 贯穿调用登记、Host 上下文、事件、取消、工作区变更关联、结果保存和证据。provider Tool Call ID 仅用于对应 provider 的协议材料，不参与 LANCET 授权或持久身份判断。
 
-模型回复含工具调用时，协调层在一个会话库事务中把回复写入 Step 节点，为每个调用建立[调用槽位](session.md#调用槽位)并分配 InvocationId。槽位记录 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。InvocationId 在同一事务插入全局索引，键冲突时放弃该事务、重新生成后重试。
+模型回复含工具调用时，协调层在一个会话库事务中把回复写入 Step 节点，为每个调用建立[调用槽位](session/steps.md#调用槽位)并分配 InvocationId。槽位记录 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。InvocationId 在同一事务插入全局索引，键冲突时放弃该事务、重新生成后重试。
 
-槽位的执行路径为 `Registered → Started → Terminal`。到达 `Terminal` 时同时保存执行 outcome、结果载荷和完整 Cell 证据；停在 `Registered` 的槽位结果为不带原因的 `NotExecuted`，停止原因记在 Step 上，见[调用槽位](session.md#调用槽位)。下图展开一个已登记调用的分发与运行时返回路径：
+槽位的执行路径为 `Registered → Started → Terminal`。到达 `Terminal` 时同时保存执行 outcome、结果载荷和完整 Cell 证据；停在 `Registered` 的槽位结果为不带原因的 `NotExecuted`，停止原因记在 Step 上，见[调用槽位](session/steps.md#调用槽位)。下图展开一个已登记调用的分发与运行时返回路径：
 
 ```mermaid
 flowchart TD
@@ -160,13 +160,13 @@ flowchart TD
 | Cell 准入拒绝 | 不把控制权交给 Component，返回类型化拒绝与准入证据 |
 | Host 操作前拒绝 | 不调用对应设施，记录拒绝；与调用整体终态分别处理 |
 | trap、资源耗尽、超时或取消 | 返回有界、脱敏的类型化错误，保留已经观察到的效果 |
-| 执行已返回，槽位终态写入失败 | 协调层停止后续分发，按会话合同的[事务失败](session.md#事务与一致性)处理；Turn 停在已写入的进度，该槽位停在 `Started`，结果为 Indeterminate |
+| 执行已返回，槽位终态写入失败 | 协调层停止后续分发，按会话合同的[事务失败](session/concurrency.md#事务与一致性)处理；Turn 停在已写入的进度，该槽位停在 `Started`，结果为 Indeterminate |
 
-执行 outcome 为 `Succeeded`、`Failed`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。从 LANCET 看，`NotExecuted` 表示调用从未交给 LANCET；其余三种都在越过 Started 后写入：`Succeeded` 与 `Failed` 是 LANCET 的确定返回，`Indeterminate` 对应返回 `CallCancelled`、`OutcomeIndeterminate` 或没有取得返回。准入或宿主操作的拒绝是 `Failed` 的错误族，不表示调用未执行。各结局的判定依据、载荷与效果保证见[调用槽位](session.md#调用槽位)。
-调用进度随视图中 Step 条目的槽位阶段显示，执行结果以槽位终态为准，不从显示推断调用失败。视图与重连由[会话观察协议](session.md#观察与重连)维护。
+执行 outcome 为 `Succeeded`、`Failed`、`NotExecuted` 或 `Indeterminate`，载荷形状按 outcome 确定。从 LANCET 看，`NotExecuted` 表示调用从未交给 LANCET；其余三种都在越过 Started 后写入：`Succeeded` 与 `Failed` 是 LANCET 的确定返回，`Indeterminate` 对应返回 `CallCancelled`、`OutcomeIndeterminate` 或没有取得返回。准入或宿主操作的拒绝是 `Failed` 的错误族，不表示调用未执行。各结局的判定依据、载荷与效果保证见[调用槽位](session/steps.md#调用槽位)。
+调用进度随视图中 Step 条目的槽位阶段显示，执行结果以槽位终态为准，不从显示推断调用失败。视图与重连由[会话观察协议](session/recovery.md#观察与重连)维护。
 LANCET 返回后，结果、载荷和完整 Cell 证据随 `Terminal` 在一个会话库事务中写入槽位；停在 `Registered` 或 `Started` 的槽位没有 Cell 证据，证据为不可用。这一范围不扩展为文件与会话库的跨库事务。
 
-`CepError` 的 retriability 描述错误属性，不授权重新执行已越过 Started 边界的调用。执行者消失的 Turn 停在已写入的进度，结局见[执行者消失后的 Turn](session.md#执行者消失后的-turn)，LANCET 不重新执行 Tool。
+`CepError` 的 retriability 描述错误属性，不授权重新执行已越过 Started 边界的调用。执行者消失的 Turn 停在已写入的进度，结局见[执行者消失后的 Turn](session/recovery.md#执行者消失后的-turn)，LANCET 不重新执行 Tool。
 
 ## 证据与操作员读取
 

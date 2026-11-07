@@ -164,7 +164,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 - 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时 rewind 到该用户消息之前。
 - 崩溃遗留的进行中 Turn 仍按 closure-only 规则由后台在该 Session 下一次写操作前自动关闭，不请求 provider、不执行 Tool：ActiveStep 处于 `Requesting` 时追加 `Stopped { ProcessExit }`；处于执行时按第 7 节写入各槽位终态并写 Step 节点；随后以 `Stop` 关闭 Step 与 Turn。自动关闭所需事实全部在同一库中，由一个事务完成。
-- 执行中关闭的 `cause` 与 live 执行、读取校验使用同一规则：槽位自身决定的停止优先（`Indeterminate(Cancelled)` 得到 Cancelled，`Indeterminate(Reported)` 得到 `InvocationIndeterminate`），否则取关闭 Step 的外部停止（live 在两次分发之间发现的 Cancelled 或 Deadline，或自动关闭的 ProcessExit）；完整规则见[会话合同](../architecture/session.md#执行中-step-的停止原因)。live 执行决定停止分发时，补写的终态与 Step、Turn 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；崩溃落在某个槽位 Started 之前或之后，Step 原因都是 ProcessExit，崩溃时机不改变结局。
+- 执行中关闭的 `cause` 与 live 执行、读取校验使用同一规则：槽位自身决定的停止优先（`Indeterminate(Cancelled)` 得到 Cancelled，`Indeterminate(Reported)` 得到 `InvocationIndeterminate`），否则取关闭 Step 的外部停止（live 在两次分发之间发现的 Cancelled 或 Deadline，或自动关闭的 ProcessExit）；完整规则见[会话合同](../architecture/session/steps.md#执行中-step-的停止原因)。live 执行决定停止分发时，补写的终态与 Step、Turn 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；崩溃落在某个槽位 Started 之前或之后，Step 原因都是 ProcessExit，崩溃时机不改变结局。
 
 ### 9. 对外结局呈现
 

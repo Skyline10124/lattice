@@ -164,13 +164,13 @@ provider 配置不写入会话，也不按 Turn 冻结：请求网关每次请�
 - 统一档位：`off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`，`max` 在 `xhigh` 之上。
 - 模型可用的档位由元数据给出（models.dev 的 `reasoning_options`），协议适配器把档位映射为该协议的参数。
 - 选了模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位。
-- profile 的 `[agent].effort` 设默认档位，会话中可以切换（第 13 节）。不设档位时不发送档位参数，由 provider 使用默认推理强度；推理文字与 include 是否请求只看模型元数据，见[模型接入合同](../architecture/llm.md#推理档位)。生效的档位随 Turn 冻结并记在 UserMessage 节点上。
+- profile 的 `[agent].effort` 设默认档位，会话中可以切换（第 13 节）。不设档位时不发送档位参数，由 provider 使用默认推理强度；推理文字与 include 是否请求只看模型元数据，见[模型接入合同](../architecture/llm/reasoning.md#推理档位)。生效的档位随 Turn 冻结并记在 UserMessage 节点上。
 
 ### 8. 用量细分、费用与缓存
 
 - 每次尝试的用量细分为输入、缓存读、缓存写、输出与其中的推理。各协议的报告口径不同（例如 OpenAI 的输入含缓存命中，Anthropic 不含），由协议适配器换算为统一口径，换算规则写入合同。
 - provider 没有报告的细分项为未知，不记为 0，与现有“缺失的用量为未知”一致。
-- 每次请求结束时，请求网关按当时的模型价格比对用量，费用分为确切、估算、未知三种状态，随用量一起保存在这次尝试上，具体规则见[费用估算](../architecture/llm.md#费用估算)。存下的是当时的费用结果，之后价格变化不回头修改。费用只按模型价格计算，不因 provider 或认证方式区别，SIWC 同样显示。
+- 每次请求结束时，请求网关按当时的模型价格比对用量，费用分为确切、估算、未知三种状态，随用量一起保存在这次尝试上，具体规则见[费用估算](../architecture/llm/usage.md#费用估算)。存下的是当时的费用结果，之后价格变化不回头修改。费用只按模型价格计算，不因 provider 或认证方式区别，SIWC 同样显示。
 - 用量在两处查看：TUI 的 statusline 显示本轮的 token、缓存命中与费用估算；`lattice session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。
 - 缓存的开启与检测一起做：适配器按协议开启缓存（Anthropic 的 `cache_control`，OpenAI 的 `prompt_cache_key` 等），显示每轮的缓存命中。缓存键不含用户内容。
 

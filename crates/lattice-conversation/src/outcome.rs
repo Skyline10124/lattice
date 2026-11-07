@@ -7,7 +7,7 @@
 //! must close its ToolCall through the provider result block with exactly one
 //! of these outcomes; it is never re-labeled after the fact. The durable
 //! invocation slot in `lattice-session` stores the same vocabulary plus the
-//! outcome-shaped payload (see `docs/architecture/session.md#调用槽位`).
+//! outcome-shaped payload (see `docs/architecture/session/steps.md#调用槽位`).
 //!
 //! Two dimensions, as for model attempts: the outcome is the end shape, and
 //! `IndeterminateCause` or the returned `CepError` carries the reason. Only

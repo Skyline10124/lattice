@@ -43,14 +43,14 @@ cargo xtask lancet-boundary
 
 ### 配置与启动环境
 
-后台在新会话首次提交或显式选择 agent 时按名称读取 profile，先查会话绑定项目的 `.lattice/agents/<名字>/agent.toml`，再查后台启动环境中的 `$HOME/.lattice/agents/<名字>/agent.toml`，并加载系统提示、解析和冻结有效策略。全局 agents 目录、profile 目录与文件须属于当前用户且不可被同组或其他用户写入，各自路径的最后一段不能是符号链接（上级目录不限），见[会话合同的配置来源](../architecture/session.md#配置来源与后台启动)。CLI/TUI 提交选择，配置由后台读取；agents 目录没有覆盖变量。有效字段与提示引用随接受事务保存到会话的 profile 副本，后续未显式选择 agent 时不再读取 profile、外部提示或策略源文件。源文件的修改和策略收紧只影响新会话或显式选择 agent 的提交，同名选择也会重建副本。
+后台在新会话首次提交或显式选择 agent 时按名称读取 profile，先查会话绑定项目的 `.lattice/agents/<名字>/agent.toml`，再查后台启动环境中的 `$HOME/.lattice/agents/<名字>/agent.toml`，并加载系统提示、解析和冻结有效策略。全局 agents 目录、profile 目录与文件须属于当前用户且不可被同组或其他用户写入，各自路径的最后一段不能是符号链接（上级目录不限），见[会话合同的配置来源](../architecture/session/acceptance.md#配置来源与后台启动)。CLI/TUI 提交选择，配置由后台读取；agents 目录没有覆盖变量。有效字段与提示引用随接受事务保存到会话的 profile 副本，后续未显式选择 agent 时不再读取 profile、外部提示或策略源文件。源文件的修改和策略收紧只影响新会话或显式选择 agent 的提交，同名选择也会重建副本。
 agent 名必须是单个普通路径段。profile、外部提示与外部策略只读取普通文件；`agent.toml` 与外部策略原始文件各最多 16 MiB，解析后的系统提示最多 2 MiB，均按字节计量。
 
 后台从用户级 `~/.lattice/providers.toml` 读取 provider 配置，从 `~/.lattice/auth.json` 读取凭据；key 用 `lattice auth set` 录入，用法见[根 README](../../README.md#2-配置模型凭据)。环境变量与工作区 `.env` 不提供 key、endpoint 或模型，项目中的 `providers.toml` 不被读取。`lattice models` 经后台列出模型候选、限制、价格与凭据状态。
 
 后台在 `~/.lattice/cache/models.json` 新于 24 小时时不重复拉取；缓存缺失或更旧时在启动时拉取，成功后每 24 小时再拉取。拉取失败从 1 分钟起倍增重试，上限 1 小时。用户级 `providers.toml` 的 `[metadata] auto_refresh = false` 可关闭自动刷新，后台每次触发时读取当前设置，无需重启；配置无效时本次自动刷新算作失败，记录原因并按上述退避重试，修正配置后在下一次重试时生效。手动更新使用 `lattice models refresh`，不受开关影响。
 
-后台启动与 Git 隔离规则见[会话合同](../architecture/session.md#配置来源与后台启动)。
+后台启动与 Git 隔离规则见[会话合同](../architecture/session/acceptance.md#配置来源与后台启动)。
 
 ## 语义编辑
 
@@ -87,7 +87,7 @@ lattice --json lancet doctor
 
 ## 开发状态诊断与重建边界
 
-先通过只读查询确认实际状态。没有 Owner 的遗留 Turn 停在已写入的进度，结局见[执行者消失后的 Turn](../architecture/session.md#执行者消失后的-turn)；后台不重新联系 provider 或分发 Tool，下一次新提交或 `rewind` 直接进行。不要把删除目录重建作为普通恢复手段，旧 #139-B 的清理步骤不授权处理当前状态。
+先通过只读查询确认实际状态。没有 Owner 的遗留 Turn 停在已写入的进度，结局见[执行者消失后的 Turn](../architecture/session/recovery.md#执行者消失后的-turn)；后台不重新联系 provider 或分发 Tool，下一次新提交或 `rewind` 直接进行。不要把删除目录重建作为普通恢复手段，旧 #139-B 的清理步骤不授权处理当前状态。
 
 确需开发状态重建时，先由人类明确选择绝对 STATE_ROOT、Local Workspace、ProjectStoreKey 和数据归属，逐项列出受影响对象。全局 `lattice.redb` 保存所有项目的会话，不能为处理单个项目随意删除；项目 `workspace-history.git` 单独核验。发现旧 `sessions.git` 或任意项目 `invocations.git` 时，后台拒绝打开并列出路径，由人决定删除或存档，不迁移、不兼容读取。所需原证据先保全，任何删除、搬移、重新创建都须有对应授权，不用广泛 glob 操作其他项目。路径以[存储布局](../architecture/storage.md#私有状态根)为准，不从旧日志猜测。
 
