@@ -31,10 +31,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 2
-      # A PR that changes only Markdown skips every Rust step below; the job
-      # still runs and passes, so `check` reports on every PR. A failed diff
-      # fails the job instead of skipping checks. main push skips this step,
-      # and the empty output keeps every step enabled.
+      # 只改 Markdown 的 PR 运行文档链接检查，跳过之后的 Rust 步骤；job 照常给出结论，
+      # 所以每个 PR 都有 `check` 结果。diff 失败时 job 失败。push 到 main 时不运行这一步，
+      # 输出为空，所有步骤都运行。
       - name: Detect docs-only PR
         id: changes
         if: github.event_name == 'pull_request'
@@ -45,12 +44,12 @@ jobs:
           else
             echo code=false >> "$GITHUB_OUTPUT"
           fi
+      # 文档链接检查由 xtask 执行，所以工具链与缓存对每个 PR 都准备。
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        if: steps.changes.outputs.code != 'false'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        if: steps.changes.outputs.code != 'false'
+      - run: cargo xtask docs-check
       - run: cargo fmt --all --check
         if: steps.changes.outputs.code != 'false'
       - run: cargo clippy --workspace --all-targets -- -D warnings

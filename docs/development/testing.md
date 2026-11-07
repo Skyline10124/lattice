@@ -263,8 +263,9 @@ CI 编排通过 Cargo、公开 xtask 入口或已构建二进制调用验证，�
 
 | 入口 | 职责 |
 | --- | --- |
-| `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：用明确的 debug 二进制跑默认测试，再用带屏障的二进制跑崩溃屏障目标；只改 Markdown 的 PR 跳过这些步骤 |
+| `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再用明确的 debug 二进制跑默认测试，最后用带屏障的二进制跑崩溃屏障目标；只改 Markdown 的 PR 只运行文档链接检查 |
 | `.github/workflows/full-gate.yml` | 手动或定时的完整验证、release rollout 与 Component 可复现性证据 |
+| `cargo xtask docs-check` | 检查 Git 跟踪的 Markdown 文件中相对链接的目标文件与标题锚点 |
 | `cargo xtask ci` | 本地验证编排，控制编译并发和每 crate 测试超时 |
 | `cargo xtask rollout --channel alpha` | 对锁定 release 构建记录产物身份、验证步骤与发布证据 |
 

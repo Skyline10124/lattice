@@ -1,5 +1,6 @@
 mod boundary_report;
 mod ci;
+mod docs_check;
 mod harness_boundary;
 mod lancet_boundary;
 #[cfg(feature = "model-metadata")]
@@ -25,6 +26,8 @@ struct Cli {
 enum Commands {
     /// Local CI replica (fmt, clippy, build, harness boundary, test).
     Ci(ci::CiArgs),
+    /// 检查 Markdown 相对链接的目标文件与锚点。
+    DocsCheck,
     /// Verify lattice-system-harness has no product-crate dependencies.
     HarnessBoundary,
     /// LANCET architecture boundary gate.
@@ -47,6 +50,7 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Ci(args) => ci::run(args),
+        Commands::DocsCheck => docs_check::run(),
         Commands::HarnessBoundary => harness_boundary::run(),
         Commands::LancetBoundary => lancet_boundary::run(),
         #[cfg(feature = "model-metadata")]
