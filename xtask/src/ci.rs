@@ -11,7 +11,8 @@
 //!
 //! 测试步骤按依赖顺序，对每个 workspace 成员单独运行 `cargo test -p <crate>`，每次都有
 //! 超时上限。某个 crate 失控时（例如网络测试在 DNS 黑洞环境里挂起），只耗尽它自己的时间
-//! 预算并快速失败，整个门禁随之结束。
+//! 预算并快速失败，整个门禁随之结束。原始记录见
+//! `git show ead22771^:docs/archive/records/FIX.md` 中的 L-26-01。
 
 use std::env;
 use std::os::unix::process::CommandExt;
