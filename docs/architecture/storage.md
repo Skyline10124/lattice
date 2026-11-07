@@ -297,7 +297,7 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 
 | 检查对象 | 入口 |
 | --- | --- |
-| 会话库打开、创建、版本与旧库拒绝 | `cargo test -p lattice-session`；隔离测试先列出全部失败方式 |
+| 会话库打开、创建、版本与旧库拒绝 | `cargo test -p lattice-session` |
 | 会话库的崩溃与重开 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../development/testing.md)选择 |
 | 寻址、Git 仓库身份、严格打开、首次创建、锁及屏障 | `cargo test -p lattice-store` |
 | 内核静态检查 | `cargo clippy -p lattice-store --all-targets -- -D warnings` |

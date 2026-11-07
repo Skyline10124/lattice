@@ -1,20 +1,18 @@
 # 文档索引
 
-本页按主题提供文档入口，不定义独立规则。文档分类、效力与迁移方式由治理合同规定。
+本页按主题列出文档入口。文档的位置与写法见[文档写作](governance/writing.md)。
 
 ## 项目入口
 
 - [项目介绍与快速开始](../README.md)：安装、配置与运行。
-- [Agent 工作指引](../AGENTS.md)：治理文档读取要求、通用工作边界与工程约束。
+- [Agent 工作指引](../AGENTS.md)：阅读顺序、推进任务的方式与交付要求。
 
 ## 治理
 
-- [项目宪章](governance/charter.md)：权威来源、授权关系与 Agent 地位。
-- [文档生命周期](governance/document-lifecycle.md)：文档分类、语言与命名、批准、修订和迁移。
-- [架构合同写作](governance/architecture-contracts.md)：领域模型、结构与接口、数据流、行为语义及审查要求。
-- [Agent 身份与权限](governance/agent-permissions.md)：独立身份、任务授权、凭据与操作边界。
-- [Git 操作与协作记录](governance/git-operations.md)：默认只读、写操作授权，以及 commit 和评论格式。
-- [PR 格式与行文规范](governance/pull-requests.md)：PR 标题、结构化授权、变更边界、验证记录与行文要求。
+- [项目宪章](governance/charter.md)：角色、规则怎样生效，以及 Agent 的工作原则。
+- [Agent 身份与权限](governance/agent-permissions.md)：bot 身份，Agent 与维护者各自执行的操作，安全边界与委派。
+- [Git 与 GitHub](governance/git-operations.md)：操作流程，以及提交、PR 与评论的格式模板。
+- [文档写作](governance/writing.md)：文档位置、语言与状态、写法，以及架构合同与 ADR 的模板。
 
 ## 架构
 
@@ -29,6 +27,7 @@
 
 ## 开发与验证
 
+- [工程规范](development/engineering.md)：设计中的归属、代码可读性、测试判定、TDD 与验证范围。
 - [工具开发与操作](development/tool-development.md)：manifest/生成链、profile、语义编辑、audit、lancet status 与 lancet doctor。
 - [测试工程](development/testing.md)：测试分层、后台与重连场景步骤、被测产物、隔离和清理、执行资源与失败证据。
 - [验证操作指南](development/validation-guide.md)：安装、构建、后台命令与重连用法、局部验证、显式 feature、本地 CI、rollout 和证据查看。
@@ -52,4 +51,4 @@
 - [ADR 0010](adr/0010-protocol-adapters-and-configured-providers.md)：模型接入按协议适配，provider 改为配置，厂商差异用 features 表达；模型写作 `<provider>/<model>`，元数据取自 models.dev，新增推理强度、用量细分与缓存、Responses、Interactions、Sign in with ChatGPT，配置与凭据由后台读取、key 保存在 `auth.json`，会话持有 profile 副本，以及 TUI 的 `/model` 与 `/effort`。
 - [InvocationStore 历史诊断指南](development/invocation-store-diagnostics.md)：仅解释旧 Git ledger 的测量工具、参数与保留证据，不用于 redb 资格化或当前产品验收。
 
-ADR 的用途与规则承接方式见[文档生命周期](governance/document-lifecycle.md#分类与归属)。
+ADR 与合同的分工见[文档写作](governance/writing.md#文档放在哪里)。
