@@ -20,7 +20,7 @@ cargo xtask tool-build --verify
 cargo xtask lancet-boundary
 ```
 
-生成与构建入口分别是 [`tool_codegen.rs`](../../xtask/src/tool_codegen.rs) 和 [`tool_build.rs`](../../xtask/src/tool_build.rs)。这些命令会写生成物或构建产物；执行前确认本次授权和现有修改。工具链安装、宿主与 guest 的不同构建目标见[验证操作指南](validation-guide.md#安装与构建产物)。
+生成与构建入口分别是 [`tool_codegen.rs`](../../xtask/src/tool_codegen.rs) 和 [`tool_build.rs`](../../xtask/src/tool_build.rs)。这些命令会写生成物或构建产物；执行前确认本次授权和现有修改。工具链安装、宿主与 guest 的不同构建目标见[验证操作指南](scenarios/manual/build.md)。
 
 `tool-build --verify` 的警告与失败处理遵循[测试工程合同](testing.md#ci-与发布证据)。跨机一致记录不会自动使摘要漂移成为硬门。
 

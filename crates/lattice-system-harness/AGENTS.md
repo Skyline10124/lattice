@@ -22,7 +22,8 @@
 | 修改的内容 | 读取 |
 | --- | --- |
 | 任何改动 | [测试工程](../../docs/development/testing.md)、[宿主平台](../../docs/architecture/platform.md)、[工程规范](../../docs/development/engineering.md) |
-| 被测二进制准备与运行命令 | [验证指南](../../docs/development/validation-guide.md) |
+| 被测二进制准备与运行命令 | [验证指南](../../docs/development/validation-guide.md)、[运行测试](../../docs/development/scenarios/manual/run-tests.md) |
+| 新增或修改产品场景 | [场景卡片](../../docs/development/scenarios/README.md)：每个产品场景对应一张自动场景卡片 |
 | 具体场景断言（会话、模型、TUI、工具） | 对应领域的架构合同（如[会话与 Turn](../../docs/architecture/session/README.md)、[模型接入](../../docs/architecture/llm/README.md)、[Dock 与输入区](../../docs/architecture/tui/dock.md#选择面板)、[LANCET 工具执行](../../docs/architecture/lancet.md)） |
 
 ## 约束

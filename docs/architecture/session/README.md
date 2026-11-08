@@ -121,8 +121,8 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | 回复累积、流中断与资源计量 | `cargo test -p lattice-llm` |
 | 单次尝试结果的映射 | `cargo test -p lattice-agent --features test-utils` |
 | 会话库表编码、值版本、旧库拒绝、阶段给出的结论与读取校验 | `cargo test -p lattice-session` |
-| 提交、多步 Turn、取消、退回分叉、进程退出后的结局与观察 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../../development/testing.md#后台与重连场景)选择 |
-| 配置读取与 profile 副本 | 局部测试覆盖模型与档位的取值顺序及副本的写入条件；E2E 场景见[测试工程合同](../../development/testing.md#配置来源与-profile-副本) |
+| 提交、多步 Turn、取消、退回分叉、进程退出后的结局与观察 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../../development/scenarios/README.md#自动场景)选择 |
+| 配置读取与 profile 副本 | 局部测试覆盖模型与档位的取值顺序及副本的写入条件；E2E 场景见[测试工程合同](../../development/scenarios/harness/config-and-profile-copy.md) |
 
 E2E 崩溃场景在每个提交点 SIGKILL 后重开，先不做任何写入，核验：每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[预留、progress 与结论](#预留progress-与结论)的表；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致。随后核验 `send` 与 `rewind` 直接成功，旧 Turn 的节点保持原样；有 Owner 执行的 Turn 存在时 `send` 与 `rewind` 返回 Busy。
 

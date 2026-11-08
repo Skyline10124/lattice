@@ -140,12 +140,12 @@ app 发起新的提交时换用新的 LocalTurn。旧句柄通过自己的 `deta
 
 Ctrl+D、`/quit` 和普通退出只断开前端。第二次 Ctrl+C 退出保留第一次的取消意图；应用先复原终端，再将同一句柄交给 `detach`，由 connection 格式化其最后已知事实。键位成立条件见[键盘](interaction.md#键盘)，共同回执预算及未知后的处理见[客户端意图与退出交接](../session/recovery.md#客户端意图与退出交接)。
 
-会话头说明当前位置那一轮有没有 Owner。这一轮尚未结束而有 Owner 时，按正在运行的轮次显示，不另写提示。最后一步未关闭而没有 Owner 时，执行者已经消失，这一轮停在已写入的进度：新视图开始或会话头变为这一状态时，TUI 以一条 Warn 提示用户，用户可以直接发送新消息或退回。CLI 的 `session send` 与 `session rewind` 同样直接进行，用法见[操作指南](../../development/validation-guide.md#执行者消失后继续)。已写入的节点、调用结果和文件效果保留，旧任务的模型或工具不会重放。只有内存中的取消意图时，结局为 Failed（进程退出）；已写入的取消原因给出 Cancelled，精确规则见[执行者消失后的 Turn](../session/recovery.md#执行者消失后的-turn)。
+会话头说明当前位置那一轮有没有 Owner。这一轮尚未结束而有 Owner 时，按正在运行的轮次显示，不另写提示。最后一步未关闭而没有 Owner 时，执行者已经消失，这一轮停在已写入的进度：新视图开始或会话头变为这一状态时，TUI 以一条 Warn 提示用户，用户可以直接发送新消息或退回。CLI 的 `session send` 与 `session rewind` 同样直接进行，用法见[操作指南](../../development/scenarios/manual/cancel-and-continue.md#执行者消失后继续)。已写入的节点、调用结果和文件效果保留，旧任务的模型或工具不会重放。只有内存中的取消意图时，结局为 Failed（进程退出）；已写入的取消原因给出 Cancelled，精确规则见[执行者消失后的 Turn](../session/recovery.md#执行者消失后的-turn)。
 
 #### 观察与控制边界
 
 - 视图推送使用穷举匹配，不以兜底分支吞掉新增种类；生成中的文字用于进度显示，不能代替接受回执或对话条目。
-- `watch` 与查询保持只读，不关闭旧 Turn，也不重新接受 prompt。接受回执仍未知时按 TurnId 查询找回，见[原请求重试配方](../../development/validation-guide.md#提交与找回)；以新的 TurnId 发送同一输入是另一次请求，不是找回。
+- `watch` 与查询保持只读，不关闭旧 Turn，也不重新接受 prompt。接受回执仍未知时按 TurnId 查询找回，见[原请求重试配方](../../development/scenarios/manual/submit-and-recover.md)；以新的 TurnId 发送同一输入是另一次请求，不是找回。
 - 前端不拥有后台执行生命周期，慢读和重绘不得阻塞后台必要收尾；取消不回滚已发生效果。已接管取消的处理义务不因前端退出而消失。
 
 ## 文件索引
