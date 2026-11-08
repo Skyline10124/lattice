@@ -51,7 +51,7 @@ status: active
 会话与调用状态通过公开 CLI 读取；本地请求回执及视图边界可通过公开 Local IPC 验证，不导入产品类型或直接调用进程内实现。既有工作区历史场景为验证私有 Git 历史，使用通用 Git 库检查对象与引用；这不授权 harness 导入产品实现或扩大为任意私有状态读取接口。
 未通过公开接口暴露的内部对象关系、引用事务与 fsync 故障由对应库测试保护。
 
-fake LLM 经正式的配置入口接入：场景在自己的 HOME 下写 `~/.lattice/providers.toml`，把所测 provider 的 `base_url` 指向 fake LLM，或新增一个使用所测协议的 provider；key 经 `lattice auth set` 从标准输入录入。fake LLM 按请求路由生成[模型接入合同](../architecture/llm.md#端点与认证)中五种协议的流式响应。`chatgpt` 的 endpoint 不能由配置改写，harness 不覆盖 SIWC，它的验证见[模型接入合同](../architecture/llm.md#验证与承接)。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
+fake LLM 经正式的配置入口接入：场景在自己的 HOME 下写 `~/.lattice/providers.toml`，把所测 provider 的 `base_url` 指向 fake LLM，或新增一个使用所测协议的 provider；key 经 `lattice auth set` 从标准输入录入。fake LLM 按请求路由生成[模型接入合同](../architecture/llm/protocols.md#端点与认证)中五种协议的流式响应。`chatgpt` 的 endpoint 不能由配置改写，harness 不覆盖 SIWC，它的验证见[模型接入合同](../architecture/llm/README.md#验证与承接)。场景不增加隐藏产品参数、测试专用 provider 或绕过真实调用流程的产品分支。
 
 场景 HOME 中的 `providers.toml` 默认写入 `[metadata] auto_refresh = false`，后台不自动从 models.dev 拉取元数据；场景使用内置快照或场景写入的元数据缓存。拉取与写缓存由 `lattice-llm` 局部测试对本地服务验证；触发时机、共享与开关由 `lattice-api` 局部测试验证。
 
@@ -89,7 +89,7 @@ flowchart LR
 
 ### Fake provider 的确定性边界
 
-fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`，证书由 harness 生成的临时 CA 签发，场景默认经 `SSL_CERT_FILE`/`SSL_CERT_DIR` 只信任该 CA；后台从启动环境继承这两个变量，见[配置来源与后台启动](../architecture/session.md#配置来源与后台启动)。明文 HTTP/1.1 只保留给本地 provider 场景，只支持完整的流式响应与 HTTP 错误响应。传输层故障在 HTTP/2 上构造：流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后 `GOAWAY(NO_ERROR)`、最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
+fake provider 与官方 provider 一样使用 TLS + HTTP/2：ALPN 只提供 `h2`，证书由 harness 生成的临时 CA 签发，场景默认经 `SSL_CERT_FILE`/`SSL_CERT_DIR` 只信任该 CA；后台从启动环境继承这两个变量，见[配置来源与后台启动](../architecture/session/acceptance.md#配置来源与后台启动)。明文 HTTP/1.1 只保留给本地 provider 场景，只支持完整的流式响应与 HTTP 错误响应。传输层故障在 HTTP/2 上构造：流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后 `GOAWAY(NO_ERROR)`、最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
 
 fake provider 唯一的客户端是被测产品，因此只做取出路由、凭据与 body 所需的最少解析，不防御畸形或恶意 HTTP。它对场景只承担三项保证：
 
@@ -105,7 +105,7 @@ fake provider 唯一的客户端是被测产品，因此只做取出路由、凭
 
 Direct-Local 场景同时限制单命令和整个场景耗时。每次启动命令使用 `min(step_timeout, remaining_total)`，累计步骤不能绕过场景总预算。
 当前默认边界由 `ScenarioSpec` 及场景配置维护：普通 Direct-Local 为每命令 30 秒、场景 180 秒，PTY smoke 为每命令 120 秒、场景 300 秒。修改边界须说明适用场景与原因，不以放宽超时掩盖停滞。
-这些是测试驱动的等待上限。产品内部的 [Turn deadline](../architecture/session.md#模型请求与执行预算)与必要写入由会话合同维护；驱动超时不能据此推定产品尚未发生效果或已经完成持久关闭。
+这些是测试驱动的等待上限。产品内部的 [Turn deadline](../architecture/session/acceptance.md#模型请求与执行预算)与必要写入由会话合同维护；驱动超时不能据此推定产品尚未发生效果或已经完成持久关闭。
 
 前端子进程在 Linux 独立进程组中运行。超时和受控中断保留已收集的 stdout/stderr，回收直接子进程并清理该进程组；清理失败、存活进程和输出不完整均进入诊断。产品后台使用另一独立进程组，由场景单独持有清理责任。
 
@@ -121,9 +121,9 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 
 ### 后台与重连场景
 
-这些场景检验同一条提交链上的不同边界：前端提交一次，后台读取配置、接管执行并把每一步写入会话库，前端经视图与查询独立读取与观察。正常协作见[从提交到结果可见](../architecture/session.md#从提交到结果可见)；测试不负责另立提交协议。观察按会话视图进行：会话头、最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](../architecture/session.md#观察与重连)。
+这些场景检验同一条提交链上的不同边界：前端提交一次，后台读取配置、接管执行并把每一步写入会话库，前端经视图与查询独立读取与观察。正常协作见[从提交到结果可见](../architecture/session/flow.md#从提交到结果可见)；测试不负责另立提交协议。观察按会话视图进行：会话头、最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](../architecture/session/recovery.md#观察与重连)。
 
-提交、双向取消回执交接与结局分类由 API 的具体交互句柄 [LocalTurn](../architecture/session.md#组件与接口) 局部测试保护。CLI IPC 回归核验真实信号、记录与退出选择；TUI run_loop 回归核验按键、按 NodeId 替换条目、尝试边界及按 InvocationId 配对的绘制。局部测试控制真实接口的回执、读取和调度窗口；前端实际入口仍需下面的外部场景核验。
+提交、双向取消回执交接与结局分类由 API 的具体交互句柄 [LocalTurn](../architecture/session/README.md#组件与接口) 局部测试保护。CLI IPC 回归核验真实信号、记录与退出选择；TUI run_loop 回归核验按键、按 NodeId 替换条目、尝试边界及按 InvocationId 配对的绘制。局部测试控制真实接口的回执、读取和调度窗口；前端实际入口仍需下面的外部场景核验。
 
 以下按目标、准备、操作、观察、断言、清理组织场景要求。共同准备遵循[被测二进制](#被测二进制)和[场景隔离](#场景隔离)，共同清理遵循[超时与进程生命周期](#超时与进程生命周期)。每个场景记录自己的 gate、进程对象及实际命中窗口；入口已有测试不代表以下全部要求已经覆盖或通过。涉及会话库状态的场景记录状态摘要、树形 `log`、`audit` 输出与所用参数；这些记录在失败时写入[失败 bundle](#失败证据)，通过时不保留。
 
@@ -142,7 +142,7 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 2. 准备：从第一条 `submit` 记录保存 TurnId 与 SessionId，设置公开 IPC 的可控制未读回执窗口。
 3. 操作：在该窗口断开提交连接，按 TurnId 查询；再以同一身份重新提交一次。分别覆盖向已有 Session 提交、不带 `--session` 的首次提交，以及后台持续运行和后台重启后的找回；另覆盖原请求仍在准入时的查询。
 4. 观察：保留未读回执窗口证据、查询结果、重新提交的回执、`session turn` 详情、`list` 输出以及 provider 请求计数。
-5. 断言：已接受的请求能按 TurnId 查到；原请求仍在准入时查询返回在途，准入结束后返回已接受或 NotFound。以同一身份重新提交返回 Conflict，不增加模型循环或工具执行。不带 `--session` 的首次提交之后只存在一个 Session 与一个 Turn。执行者消失的 Turn 停在已写入的进度，后续写操作直接进行。仅在 provider 收到请求后杀前端不足以证明回执丢失。[请求身份与找回](../architecture/session.md#请求身份与找回)表中的其余各行由局部测试覆盖。
+5. 断言：已接受的请求能按 TurnId 查到；原请求仍在准入时查询返回在途，准入结束后返回已接受或 NotFound。以同一身份重新提交返回 Conflict，不增加模型循环或工具执行。不带 `--session` 的首次提交之后只存在一个 Session 与一个 Turn。执行者消失的 Turn 停在已写入的进度，后续写操作直接进行。仅在 provider 收到请求后杀前端不足以证明回执丢失。[请求身份与找回](../architecture/session/recovery.md#请求身份与找回)表中的其余各行由局部测试覆盖。
 6. 清理：先让在途提交及回执驱动退场，再分别核验前后台清理和证据完整性。
 
 #### 同会话排他与跨会话并发
@@ -187,7 +187,7 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 2. 准备：保存原身份，分别控制后台实际接管提交后的准备及执行窗口；明确区分可证明未建立任务的配置拒绝与未知发布。
 3. 操作：单次取消获 true 后立即退出前端，放行后台直至独立收尾；另覆盖明确拒绝且监督退场后同一 TurnId 的重新提交，以及用 `session cancel <SESSION_ID>` 从另一个终端取消正在执行的一轮。
 4. 观察：记录接管/未接管/未知回执、前端退出、后续的 `session turn` 详情和已发生效果；保留请求及诊断的真实归属。
-5. 断言：依[取消规则](../architecture/session.md#取消与退出)核验实际操作的接管资格、同载体独立收尾及拒绝后的重新提交；`session cancel` 取消的是该会话当时正在执行的一轮，没有时报告无可取消。取消不抹去先前终态或文件效果，true 不等于持久 Cancelled。局部测试分别保护两种回执次序的一次补发、true 不补发、五秒未知交接后提交连接仍在时只等回执、断开后才按 TurnId 查询，以及迟到传输诊断，后台错误单独对照。
+5. 断言：依[取消规则](../architecture/session/recovery.md#取消与退出)核验实际操作的接管资格、同载体独立收尾及拒绝后的重新提交；`session cancel` 取消的是该会话当时正在执行的一轮，没有时报告无可取消。取消不抹去先前终态或文件效果，true 不等于持久 Cancelled。局部测试分别保护两种回执次序的一次补发、true 不补发、五秒未知交接后提交连接仍在时只等回执、断开后才按 TurnId 查询，以及迟到传输诊断，后台错误单独对照。
 6. 清理：让后台完成必要收尾；确认未知时保留身份与诊断，按共同清理规则处理，不能为清理改写原失败。
 
 #### 停止后台与排空
@@ -204,8 +204,8 @@ Direct-Local 使用场景自有的产品后台，可以通过正式入口自动�
 1. 目标：验证后台在任一会话库提交点退出后，重开不经任何写入即可读到这一轮的结局；随后的 `send` 或 `rewind` 直接进行，旧 Turn 的节点保持原样。
 2. 准备：使用显式崩溃 feature 和匹配的产品二进制，在每个会话库提交点设置屏障：接受、开始请求、尝试停止（可重试与不可重试）、登记调用、调用开始、调用返回（含取消结果）与关闭 Step；核验后台身份与命中记录。脚本为带多个调用的多步 Turn。
 3. 操作：命中屏障后以 SIGKILL 中断后台，保留前端独立退出证据；新客户端先查询，再发送新消息或执行 `rewind`。
-4. 观察：对照[执行者消失后的 Turn](../architecture/session.md#执行者消失后的-turn)记录停点、旧 Turn 的 `session turn --json`（其中各 Step、尝试与槽位的 `progress` 及其结论）、旧 Turn 的结局、新请求的接受与结果、provider/Tool 调用次数和文件效果。
-5. 断言：查询保持只读；重开后不经任何写入即可读到结局，不重新请求旧任务的模型或分发工具；新消息一次被接受并执行，provider 请求只因新任务增加。每个提交点重开后，每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[阶段与结论的对照表](../architecture/session.md#预留progress-与结论)；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致；停在 `Started` 的槽位结果为 Indeterminate。仅内存取消得到 Failed（进程退出），已写入的取消原因得到 Cancelled。发送新消息或退回之后，旧 Turn 的节点不变。场景记录每个提交点的状态摘要、树形 `log`、`session turn --json` 与 `audit` 输出。
+4. 观察：对照[执行者消失后的 Turn](../architecture/session/recovery.md#执行者消失后的-turn)记录停点、旧 Turn 的 `session turn --json`（其中各 Step、尝试与槽位的 `progress` 及其结论）、旧 Turn 的结局、新请求的接受与结果、provider/Tool 调用次数和文件效果。
+5. 断言：查询保持只读；重开后不经任何写入即可读到结局，不重新请求旧任务的模型或分发工具；新消息一次被接受并执行，provider 请求只因新任务增加。每个提交点重开后，每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[阶段与结论的对照表](../architecture/session/README.md#预留progress-与结论)；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致；停在 `Started` 的槽位结果为 Indeterminate。仅内存取消得到 Failed（进程退出），已写入的取消原因得到 Cancelled。发送新消息或退回之后，旧 Turn 的节点不变。场景记录每个提交点的状态摘要、树形 `log`、`session turn --json` 与 `audit` 输出。
 6. 清理：同时检查崩溃前后自有进程组及 stdout/stderr EOF；必要状态和原始失败进入证据后，才按共同规则清理。
 
 #### 配置来源与 profile 副本

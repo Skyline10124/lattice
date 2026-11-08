@@ -20,24 +20,24 @@
 
 ## 上位文档
 
-修改前读取[模型接入合同](../../docs/architecture/llm.md)、[会话的对话与模型请求合同](../../docs/architecture/session.md)、[测试工程](../../docs/development/testing.md)；Tool 网络路径由 [LANCET 合同](../../docs/architecture/lancet.md)另行维护，不能覆盖本层 provider 策略。
+修改前读取[模型接入合同](../../docs/architecture/llm/README.md)、[会话的对话与模型请求合同](../../docs/architecture/session/README.md)、[测试工程](../../docs/development/testing.md)；Tool 网络路径由 [LANCET 合同](../../docs/architecture/lancet.md)另行维护，不能覆盖本层 provider 策略。
 
 ## 局部约束
 
 - 调用方只给出 provider `id`、模型 `id`、推理档位与请求内容，不接触 endpoint、key 与 features；网关不向外暴露连接材料，每次请求按当前配置与凭据解析。
 - 协议差异留在适配器与 client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。适配器按协议划分，厂商差异只用该协议的 features 表达，不按 URL 或 provider `id` 判断厂商；新增 feature 先修订模型接入合同。
 - 所有请求 builder 经共同投影入口 `request_messages_with_replay`；`protocol/projection` 的 `wire_to_native` 只用于完整 wire 夹具的解码，逐块交给共同回复累积器，usage 经 `wire_usage`。解析器只翻译部件增量，不保留完整内容缓冲；正式流、stub 与测试客户端共用 `reply_stream`，显示增量与完整消息出自同一次累积。累积器独占流式 `AttemptAssembly`，超限停止消费且不返回部分消息；完整 wire 夹具路径映射为 `ProjectionError::OutputLimitExceeded`。不新建 ToolCall/ToolResult codec。
-- provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放材料按[回放来源](../../docs/architecture/llm.md#回放来源)的两级规则投影。
+- provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放材料按[回放来源](../../docs/architecture/llm/protocols.md#回放来源)的两级规则投影。
 - `validate_base_url` 的 DNS 检查仅尽力而为，连接前解析并固定地址才是主要 SSRF 防线：每个 Turn 第一次请求时在 blocking 线程上解析、校验并固定地址，构建的 client 在本 Turn 内复用；响应没有完整结束（发送失败、流没交付 `Done` 就结束或出错、错误正文读到一半中断）时丢弃，下次尝试重新解析。不跨 Turn 复用，认证头不放进 client 默认头；SIWC 的 access token 每次请求前取得。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
 - 一次尝试对应一个被 provider 接收的请求。HTTP 库只重发 provider 明确没处理的请求：reqwest 那层换成自有策略（判断同默认，每次重发记 WARN），hyper-util 对未发出请求的重发无法关闭，以新建连接的 DEBUG 日志间接可见。不得让 HTTP 库重发已被处理的请求；其他重试一律由协调层按冻结策略执行并逐次记录。
 - 除认证头与协议要求的头外，请求头只加 `User-Agent`（LATTICE 自己的标识，不冒充其他客户端）、`Accept` 与取 SessionId 的 `x-client-request-id`；新增发给 provider 的头先修订会话合同。
 - HTTP 默认 `redirect::Policy::none()`；重新允许重定向必须逐跳重新执行地址与 pinning 检查，避免向未经验证的主机转送 body 和密钥。不能依赖首跳校验保护后续跳。
 - DNS rebinding 防御结合连接地址固定和 `net-guard` 分类/后缀规则。扩大启发式或后缀范围须有测试，并如实报告未覆盖风险。
 - 工具名原样作为 wire 名发给每个 provider，不做编解码，命名规则见 [LANCET 合同](../../docs/architecture/lancet.md)。
-- 日志写 stderr，ANSI 取决于交互 stderr 与 `NO_COLOR`，不污染 JSONL stdout。输出上限只在协议要求时发送，取值见[模型接入合同](../../docs/architecture/llm.md#适配器的职责)，不在别处硬编码；JSON 解析不以哨兵错误值承担正常控制流。
+- 日志写 stderr，ANSI 取决于交互 stderr 与 `NO_COLOR`，不污染 JSONL stdout。输出上限只在协议要求时发送，取值见[模型接入合同](../../docs/architecture/llm/protocols.md#适配器的职责)，不在别处硬编码；JSON 解析不以哨兵错误值承担正常控制流。
 
 ## 验证入口
 
 - 运行 `cargo test -p lattice-llm`；消息投影的测试对照 `tests/fixtures/projection/` 中的正式 wire fixtures。
-- 新增或修改协议适配器、feature 时，测试要覆盖流、Tool call、用量、错误映射，以及该 feature 每个取值的请求体；再运行 agent 与 API 的流式测试。其余检查对象见[模型接入合同](../../docs/architecture/llm.md#验证与承接)。
+- 新增或修改协议适配器、feature 时，测试要覆盖流、Tool call、用量、错误映射，以及该 feature 每个取值的请求体；再运行 agent 与 API 的流式测试。其余检查对象见[模型接入合同](../../docs/architecture/llm/README.md#验证与承接)。
 - 改了 URL 或 DNS 处理时，测试要覆盖私网地址、localhost、DNS rebinding、重定向与地址固定。

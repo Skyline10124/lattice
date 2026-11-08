@@ -13,7 +13,7 @@
 
 ## 上位文档
 
-修改前读取[会话合同](../../docs/architecture/session.md)、[存储合同](../../docs/architecture/storage.md)、[调用与证据](../../docs/architecture/lancet.md)及[测试工程](../../docs/development/testing.md)。涉及文件关联时读取[工作区历史](../../docs/architecture/workspace.md)。旧 Git 会话、独立调用账本与跨库协调的取代范围见 [ADR 0006](../../docs/adr/0006-tree-session-and-global-redb-store.md)。
+修改前读取[会话合同](../../docs/architecture/session/README.md)、[存储合同](../../docs/architecture/storage.md)、[调用与证据](../../docs/architecture/lancet.md)及[测试工程](../../docs/development/testing.md)。涉及文件关联时读取[工作区历史](../../docs/architecture/workspace.md)。旧 Git 会话、独立调用账本与跨库协调的取代范围见 [ADR 0006](../../docs/adr/0006-tree-session-and-global-redb-store.md)。
 
 ## 局部约束
 

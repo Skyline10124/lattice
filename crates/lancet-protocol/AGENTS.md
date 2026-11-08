@@ -8,7 +8,7 @@
 
 ## 上位文档
 
-修改前读取 [Cell 数据与证据合同](../../docs/architecture/cell.md)、[LANCET 调用流程](../../docs/architecture/lancet.md)、[会话数据合同](../../docs/architecture/session.md)。
+修改前读取 [Cell 数据与证据合同](../../docs/architecture/cell.md)、[LANCET 调用流程](../../docs/architecture/lancet.md)、[会话数据合同](../../docs/architecture/session/README.md)。
 
 ## 局部约束
 

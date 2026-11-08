@@ -45,7 +45,7 @@ cargo xtask tool-build --verify
 
 profile 由后台在新会话首次提交或显式选择 agent 时读取：项目内的 `.lattice/agents` 优先，其次是后台启动时 HOME 下的 `.lattice/agents`；全局目录与 profile 须属于当前用户且不可被同组或其他用户写入，0755 目录与 0644 文件可用。固定 `XDG_STATE_HOME` 而更换前端 HOME 时仍连接同一后台，使用同一全局 agents 目录；更换后台的 HOME 需要停止后重新启动。有效 profile 与提示引用随接受事务保存，普通继承不再读取源文件。TUI 启动不检查 profile，配置拒绝在提交时显示并保留输入；启动时指定的 agent 在下一次接受后消费，后续提交继承副本。
 
-Session、TUI、`auth` 与 `models` 会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。后台在启动时按自己的环境确定配置目录与全局 agents 目录的位置，并载入 TLS 根证书。目录位置与 TLS 根随后保持不变。目录里的 `providers.toml` 与凭据在每次请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。价格的生效时机见[费用估算](../architecture/llm.md#费用估算)。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。纯查询可建立连接所需运行资源，领域数据保持只读。
+Session、TUI、`auth` 与 `models` 会按需自启后台；`daemon status`、`daemon stop` 只联系已有后台，不自启。后台在启动时按自己的环境确定配置目录与全局 agents 目录的位置，并载入 TLS 根证书。目录位置与 TLS 根随后保持不变。目录里的 `providers.toml` 与凭据在每次请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。价格的生效时机见[费用估算](../architecture/llm/usage.md#费用估算)。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。纯查询可建立连接所需运行资源，领域数据保持只读。
 
 ### 提交与找回
 
@@ -82,7 +82,7 @@ lattice --json run "继续。" --session "$SESSION_ID"
 lattice --json run "重新读取 reader 配置。" --session "$SESSION_ID" --agent reader
 ```
 
-档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略表示继承，`--effort off` 明确关闭推理，要求该模型支持。不选档位时产品不发档位参数，由 provider 用默认推理强度。`gpt-6-luna` 这类模型在自定义的 Chat Completions provider 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。前端只检查名字与模型引用写法，后台确认 provider、凭据及档位是否可用。模型引用在第一个 `/` 处分开，后续 `/` 属于模型名。换模型而未指定档位时，当前档位不支持就尝试 profile 默认档位，默认也不支持则不发档位参数；显式选择不支持的档位直接拒绝。完整规则见[会话的 profile 副本](../architecture/session.md#会话的-profile-副本)。
+档位名只有 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`；省略表示继承，`--effort off` 明确关闭推理，要求该模型支持。不选档位时产品不发档位参数，由 provider 用默认推理强度。`gpt-6-luna` 这类模型在自定义的 Chat Completions provider 上带工具时，这个默认值会被拒绝（HTTP 400），要显式选 `--effort off`，或在 profile 里写 `effort = "off"`。前端只检查名字与模型引用写法，后台确认 provider、凭据及档位是否可用。模型引用在第一个 `/` 处分开，后续 `/` 属于模型名。换模型而未指定档位时，当前档位不支持就尝试 profile 默认档位，默认也不支持则不发档位参数；显式选择不支持的档位直接拒绝。完整规则见[会话的 profile 副本](../architecture/session/settings.md#会话的-profile-副本)。
 
 例如，若目标模型的候选档位不含 `max`，以下请求退出 2，既有副本和会话树保持原样，provider 不会收到请求：
 
@@ -106,7 +106,7 @@ TURN_ID="替换为第一条 submit 记录中的 TurnId"
 lattice --json session turn "$TURN_ID"
 ```
 
-查到即已接受，按下一节继续观察；报告在途说明后台仍在准入这个请求，稍后再查；NotFound 说明这次请求没有被接受，可以重新发送这条消息，CLI 会生成新的身份。`submit` 只接受新请求，不用同一条命令找回。详见[请求身份与找回](../architecture/session.md#请求身份与找回)。
+查到即已接受，按下一节继续观察；报告在途说明后台仍在准入这个请求，稍后再查；NotFound 说明这次请求没有被接受，可以重新发送这条消息，CLI 会生成新的身份。`submit` 只接受新请求，不用同一条命令找回。详见[请求身份与找回](../architecture/session/recovery.md#请求身份与找回)。
 
 ### 查询与继续观察
 
@@ -123,11 +123,11 @@ lattice --json session turn "$TURN_ID" --follow
 
 `--follow` 与 TUI 按会话视图观察：先得到会话头与最近几轮的对话条目，之后接收变化的条目与生成中的文字；观察者变慢时只少收中间版本，不需要重新同步。`--follow` 的 JSONL 只含所跟的那一轮：`head` 是会话头，`entry` 是对话条目，按 `node` 覆盖，`text` 是生成中的文字；结局在这一轮最后一个 Step 条目的 `TurnSummary` 中。它们不是 Git OID、journal 或另一份执行账本。后台重启后未保存的半截流式文字无法找回。
 
-TUI 中用 `/reconnect` 重新观察。临时正文保留到对应 Step 节点的正文实际装入后才替换；结局先到、正文挂起或失败时继续保留已知结局。呈现见 [TUI 连接、结局与重载](../architecture/tui.md#连接结局与重载)。
+TUI 中用 `/reconnect` 重新观察。临时正文保留到对应 Step 节点的正文实际装入后才替换；结局先到、正文挂起或失败时继续保留已知结局。呈现见 [TUI 连接、结局与重载](../architecture/tui/README.md#连接结局与重载)。
 
 ### 查询当前路径的用量
 
-TUI 的 [statusline](../architecture/tui.md#statusline) 显示本轮用量、缓存命中率和费用估算，并单独显示上下文用量。
+TUI 的 [statusline](../architecture/tui/layout.md#statusline) 显示本轮用量、缓存命中率和费用估算，并单独显示上下文用量。
 
 已知 SessionId 时，一次读取当前路径各轮的用量和费用估算，以及当前路径与全会话的合计：
 
@@ -137,7 +137,7 @@ lattice --json session usage "$SESSION_ID"
 lattice session usage "$SESSION_ID" --json
 ```
 
-SessionId 可用唯一前缀。JSON 是一个含 `session_id`、`position`、`turns`、`path_total` 和 `session_total` 的对象；每轮带 TurnId、路径轮次、provider/model 与汇总。文本末尾两行分别给出当前路径与全会话合计。文本与 JSON 的未知、部分及空路径语义见[当前路径的用量查询](../architecture/session.md#当前路径的用量查询)，金额格式见[费用估算](../architecture/llm.md#费用估算)。先 `rewind` 再查询即可核对当前路径变化，全会话合计仍包含原分支；`session turn` 仍给出原 Turn 的全部 Step。
+SessionId 可用唯一前缀。JSON 是一个含 `session_id`、`position`、`turns`、`path_total` 和 `session_total` 的对象；每轮带 TurnId、路径轮次、provider/model 与汇总。文本末尾两行分别给出当前路径与全会话合计。文本与 JSON 的未知、部分及空路径语义见[当前路径的用量查询](../architecture/session/operations.md#当前路径的用量查询)，金额格式见[费用估算](../architecture/llm/usage.md#费用估算)。先 `rewind` 再查询即可核对当前路径变化，全会话合计仍包含原分支；`session turn` 仍给出原 Turn 的全部 Step。
 
 ### 会话退回与分叉
 
@@ -170,11 +170,11 @@ lattice session send "改写后的第一条消息。" --session "$SESSION_ID" --
 lattice --json session cancel "$SESSION_ID"
 ```
 
-CLI 先从会话头查出正在执行的那一轮，再按它的 TurnId 取消，`cancel` 记录写明这个 TurnId；没有正在执行的一轮时报告无可取消。`owned: true` 表示后台在判定点已接管本次取消，之后独立处理和收尾；`owned: false` 表示该判定点未接管，不表示没有后台工作。按原 TurnId 查询结果，接管回复本身不是持久 Cancelled；未知回执保留原身份，必要时再次明确取消。接管区间、明确拒绝后的新准入与持久事实边界见[会话取消规则](../architecture/session.md#取消与退出)。
+CLI 先从会话头查出正在执行的那一轮，再按它的 TurnId 取消，`cancel` 记录写明这个 TurnId；没有正在执行的一轮时报告无可取消。`owned: true` 表示后台在判定点已接管本次取消，之后独立处理和收尾；`owned: false` 表示该判定点未接管，不表示没有后台工作。按原 TurnId 查询结果，接管回复本身不是持久 Cancelled；未知回执保留原身份，必要时再次明确取消。接管区间、明确拒绝后的新准入与持久事实边界见[会话取消规则](../architecture/session/recovery.md#取消与退出)。
 
-CLI 提交/观察期间第一次 Ctrl+C 按本轮的 TurnId 请求取消并继续观察，再次 Ctrl+C 结束等待或观察。首次取消若仍在等提交回执，本次提交的句柄 [LocalTurn](../architecture/session.md#组件与接口) 在五秒后报告提交结果不明，继续接收迟到的回执；提交连接断开后才按 TurnId 查询，查到即继续观察，这一轮没有 Owner 时 CLI 可以退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断。
+CLI 提交/观察期间第一次 Ctrl+C 按本轮的 TurnId 请求取消并继续观察，再次 Ctrl+C 结束等待或观察。首次取消若仍在等提交回执，本次提交的句柄 [LocalTurn](../architecture/session/README.md#组件与接口) 在五秒后报告提交结果不明，继续接收迟到的回执；提交连接断开后才按 TurnId 查询，查到即继续观察，这一轮没有 Owner 时 CLI 可以退出。此次未知交接后，迟到的本地提交传输错误只保留未知诊断。
 
-TUI 的 Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui.md#键盘)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session.md#输入与传输限制)。
+TUI 的 Ctrl+C 取消、Ctrl+D 或 `/quit` 退出按[键位条件](../architecture/tui/interaction.md#键盘)执行，两端共用 LocalTurn 的[回执等待预算](../architecture/session/concurrency.md#输入与传输限制)。
 
 #### 执行者消失后继续
 
@@ -186,7 +186,7 @@ lattice --json session send "继续检查项目的测试入口。" --session "$S
 
 `rewind` 同样直接进行。同一 Session 正在由 Owner 执行时，新提交和退回返回 Busy。
 
-旧 Turn 不会被继续执行，也不会被补写。它的结局按[执行者消失后的 Turn](../architecture/session.md#执行者消失后的-turn)从已写入的内容得出，随时可以按旧 TurnId 查询；新请求的接受回执与结果属于新 Turn。只在内存中的取消意图不会写入，这样的 Turn 结局为 Failed（进程退出）。
+旧 Turn 不会被继续执行，也不会被补写。它的结局按[执行者消失后的 Turn](../architecture/session/recovery.md#执行者消失后的-turn)从已写入的内容得出，随时可以按旧 TurnId 查询；新请求的接受回执与结果属于新 Turn。只在内存中的取消意图不会写入，这样的 Turn 结局为 Failed（进程退出）。
 
 #### 查询或停止已有后台
 
@@ -205,11 +205,11 @@ stop 先关闭新准入，再等待已接管工作及必要收尾；收到回执
 
 客户端与后台应来自相符构建，当前 Local IPC 标识为 `LTLOCAL=`。新旧版本的 IPC 互不兼容，新二进制不能停止旧后台；升级前先用旧二进制执行 `lattice daemon stop`，或手动结束旧后台进程。后台读到不同的 IPC 标识会先回写自己的标识再断开：客户端据此报 `incompatible_backend`，后台较旧时提示用旧二进制执行 `lattice daemon stop`，后台较新时提示改用新二进制。更早的后台不回写就断开，客户端发出请求后一个字节都没收到时报传输错误，并附同样的停机提示；当前后台过载或崩溃也可能这样断开，所以这只是提示。两种情况退出码都是 `1`。身份或协议不兼容时保留错误，交由用户处理；不自动终止已有后台或迁移状态。当前会话库格式为 7，严格拒绝格式 6；旧格式 `lattice.redb` 与旧 `sessions.git` / `invocations.git` 在打开会话库时被拒绝并列出路径，不提供迁移或兼容读取；处理状态须另获授权，见[开发状态诊断与重建边界](tool-development.md#开发状态诊断与重建边界)。
 
-外部脚本需适配 `session turn --json`、流式 JSONL 条目，以及人类输出中的 `usage` 摘要：尝试的 `usage` 由三个必填计数 `prompt_tokens`、`completion_tokens`、`total_tokens` 改为五个可选计数 `input`、`cache_read`、`cache_write`、`output`、`reasoning`，尝试上新增 `usage_kind`，可选费用字段由 `estimated_cost_usd` 改为 `cost`（`{usd, exact}` 或 null）。Turn 用量汇总新增 `attempts`、`partial_attempts`，五项计数各自提供 `known`、`complete`、`overflowed`，其中 `complete` 只表示该项没有未报告的尝试且未溢出，与单价无关；费用汇总为 `cost: {known: {usd, exact} | null, unknown_attempts, overflowed}`，其中 `unknown_attempts` 仅统计费用未知的尝试；整体 `kind` 由各次尝试保存的 `usage_kind` 与汇总溢出决定。计数与费用的含义见[用量、缓存与费用](../architecture/llm.md#用量缓存与费用)，汇总字段与完整性语义见[会话合同](../architecture/session.md#关闭-step-与-turn)。
+外部脚本需适配 `session turn --json`、流式 JSONL 条目，以及人类输出中的 `usage` 摘要：尝试的 `usage` 由三个必填计数 `prompt_tokens`、`completion_tokens`、`total_tokens` 改为五个可选计数 `input`、`cache_read`、`cache_write`、`output`、`reasoning`，尝试上新增 `usage_kind`，可选费用字段由 `estimated_cost_usd` 改为 `cost`（`{usd, exact}` 或 null）。Turn 用量汇总新增 `attempts`、`partial_attempts`，五项计数各自提供 `known`、`complete`、`overflowed`，其中 `complete` 只表示该项没有未报告的尝试且未溢出，与单价无关；费用汇总为 `cost: {known: {usd, exact} | null, unknown_attempts, overflowed}`，其中 `unknown_attempts` 仅统计费用未知的尝试；整体 `kind` 由各次尝试保存的 `usage_kind` 与汇总溢出决定。计数与费用的含义见[用量、缓存与费用](../architecture/llm/usage.md#用量缓存与费用)，汇总字段与完整性语义见[会话合同](../architecture/session/steps.md#关闭-step-与-turn)。
 
 `session usage --json` 的合计字段由 `total` 改为 `path_total`，新增 `session_total`，后者包含 rewind 后留存的所有分支；逐轮明细仍只列当前路径。
 
-新尝试按[费用估算](../architecture/llm.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选使用类型化查询（`List { provider, ready_only }` 或 `Target`），每个候选带有序 `supported_efforts` 数组（无可选档位为 `[]`）与 `availability`（`ready`、`unconfigured` 附所缺 `requirement`、`invalid` 附 `reason`）；文本 models 表的 `EFFORTS` 列在空档位时显示 `-`、配置无效时显示 `config-error`，`AUTH` 列显示 `ready`、`unconfigured` 或 `invalid`，配置无效的原因在 stderr 逐个写出，`lattice models` 不因个别模型或 provider 配置无效而失败。当前 Local IPC 标识为 `LTLOCAL=`，会话库格式仍为 7；从 `LTLOCAL<` 等旧标识或格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
+新尝试按[费用估算](../architecture/llm/usage.md#费用估算)保存确切或估算金额，未知费用仍为 null；已有记录中的未知费用不回填，旧尝试不补 `usage_kind`。公开 IPC 的提交提供可选 `model` 和 `effort`，CLI 对应 `--model` 与 `--effort`；会话头提供 `model`、`provider`、`effort` 与 `profile_default_effort`，UserMessage 保存本轮生效档位。模型候选使用类型化查询（`List { provider, ready_only }` 或 `Target`），每个候选带有序 `supported_efforts` 数组（无可选档位为 `[]`）与 `availability`（`ready`、`unconfigured` 附所缺 `requirement`、`invalid` 附 `reason`）；文本 models 表的 `EFFORTS` 列在空档位时显示 `-`、配置无效时显示 `config-error`，`AUTH` 列显示 `ready`、`unconfigured` 或 `invalid`，配置无效的原因在 stderr 逐个写出，`lattice models` 不因个别模型或 provider 配置无效而失败。当前 Local IPC 标识为 `LTLOCAL=`，会话库格式仍为 7；从 `LTLOCAL<` 等旧标识或格式 6 升级前先用旧二进制正常停止后台，再由用户决定存档或删除旧库，不提供自动迁移。
 
 ### 退出码与失败后的动作
 

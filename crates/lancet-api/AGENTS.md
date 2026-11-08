@@ -11,7 +11,7 @@
 
 ## 上位文档
 
-修改前读取 [LANCET 合同](../../docs/architecture/lancet.md)、[会话调用槽位](../../docs/architecture/session.md#调用槽位)、[Cell 证据](../../docs/architecture/cell.md)、[工作区历史](../../docs/architecture/workspace.md)及[测试工程](../../docs/development/testing.md)。
+修改前读取 [LANCET 合同](../../docs/architecture/lancet.md)、[会话调用槽位](../../docs/architecture/session/steps.md#调用槽位)、[Cell 证据](../../docs/architecture/cell.md)、[工作区历史](../../docs/architecture/workspace.md)及[测试工程](../../docs/development/testing.md)。
 
 ## 局部约束
 

@@ -8,7 +8,7 @@
 
 ## 上位文档
 
-修改前读取 [Cell 准入](../../docs/architecture/cell.md)、[会话配置与预算](../../docs/architecture/session.md)、[工作区策略](../../docs/architecture/workspace.md)及[测试工程](../../docs/development/testing.md)。
+修改前读取 [Cell 准入](../../docs/architecture/cell.md)、[会话配置与预算](../../docs/architecture/session/acceptance.md)、[工作区策略](../../docs/architecture/workspace.md)及[测试工程](../../docs/development/testing.md)。
 
 ## 局部约束
 
