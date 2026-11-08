@@ -40,7 +40,8 @@ status: proposed
 2026-11-08，#377 的讨论中确定：
 
 - 一轮执行期间不能修改设置。
-- `send` 被拒绝时，已经创建的会话与已经修改的设置保留；没有发过消息的会话照常出现在 `list` 中。
+- `send` 被拒绝时，已经创建的会话与已经修改的设置保留。
+- 一轮都没有接受过的会话（草稿）照常出现在 `list` 中；24 小时没有改动、也没有观察者时，由后台删除。用过的会话保留，需要时以后再做归档。
 - 实施顺序：ADR 0009（从 LATTICE 剥离 LANCET）在前，本 ADR 其次，ADR 0011（#333）随后按本 ADR 修订。
 
 ## 决策
@@ -144,7 +145,45 @@ submit {
 - 设置版本是会话设置内容的摘要：内容相同，版本相同。设置改了又改回原值时，按原版本提交的消息照常接受，因为它使用的正是用户看到的设置。
 - configure 成功后，后台向该会话的所有观察者推送新的会话头。
 
-### 6. 前端
+### 6. 会话的状态
+
+```mermaid
+stateDiagram-v2
+    [*] --> 草稿: configure(New)
+    草稿 --> 草稿: configure(Existing)
+    草稿 --> 执行中: 第一轮被接受
+    草稿 --> [*]: 清理
+    执行中 --> 空闲: 这一轮关闭，或执行者消失
+    空闲 --> 执行中: 提交被接受
+    空闲 --> 空闲: configure(Existing)、rewind
+```
+
+| 状态 | 含义 |
+| --- | --- |
+| 草稿 | 会话树上只有根节点，一轮都没有被接受过 |
+| 执行中 | 有一轮由 Owner 执行；这期间 configure、`rewind` 与其他提交返回 Busy |
+| 空闲 | 至少接受过一轮，当前没有 Owner；最后一轮可能停在执行者消失时的进度，见[执行者消失后的 Turn](../architecture/session/recovery.md#执行者消失后的-turn) |
+
+草稿由后台清理，规则只在这一处执行：
+
+```text
+每次 configure(New) 回复之后:
+    for 会话 in 会话库:
+        if 会话树上只有根节点
+           and Session 记录的更新时间早于 24 小时前
+           and 没有观察者
+           and 能非阻塞地占用 Owner 槽并取得 SessionExecutionLock:
+            在一个事务中再次确认只有根节点,
+            删除 Session 记录、根节点与会话设置
+```
+
+- 草稿没有 TurnId、调用记录，也不引用任何一轮的配置，删除它不影响按 TurnId 找回与其他保证。按内容摘要存放的数据照旧不回收。
+- configure 刷新 Session 记录的更新时间，24 小时从最后一次修改设置算起；`send` 被拒绝后，用户在这段时间内可以带 `--session` 重试。
+- 开着的 TUI 一直观察它的会话，它的草稿留在会话库中。
+- `rewind 0` 之后的会话树上仍有各轮的节点，属于空闲状态。
+- 用过的会话停留在空闲与执行中两个状态；需要结束它们时，另行决定归档。
+
+### 7. 前端
 
 | 前端 | 开始 | 修改设置 | 提交 |
 | --- | --- | --- | --- |
@@ -175,20 +214,21 @@ sequenceDiagram
     B->>S: 接受事务：从会话设置冻结配置，写 UserMessage
 ```
 
-### 7. 存储
+### 8. 存储
 
 - 会话库的 profile 副本表改为会话设置表，键为 SessionId。
 - 会话可以只有根节点。打开与读写时的校验要求会话设置自身有效、它引用的系统提示存在；会话设置与最后一轮的配置各自成立。
+- 草稿可以整体删除，规则见[第 6 节](#6-会话的状态)；会话树的其余部分照旧只追加。
 - 系统提示随会话设置保存，与每一轮的配置条目分开。现在的配置条目是一轮的系统提示加工具目录（`crates/lattice-session/src/store/config.rs:225-230`），创建会话时还没有这一轮。保存方式在实施时确定：内联在会话设置中并用投影读取，或按内容摘要单独存放。
 - 会话库格式版本从 7 升到 8。旧库按[身份、版本与打开](../architecture/storage.md#身份版本与打开)拒绝打开。
 
-### 8. 实施顺序
+### 9. 实施顺序
 
 1. ADR 0009：从 LATTICE 剥离 LANCET。工作区历史库、Component 工具目录与 profile 中的 LANCET 策略随之移出，configure 只处理 agent、系统提示、模型与档位等字段。
 2. 本 ADR。会话库的两次格式变化时间相近时合并为一次。若本 ADR 先于 ADR 0009 实施，`configure(New)` 还要创建项目的工作区历史库（`crates/lattice-api/src/turn/execute.rs:387-397`）。
 3. ADR 0011（#333）按本 ADR 修订 IM 的会话创建、台账与工具检查。
 
-### 9. 沿用的规则
+### 10. 沿用的规则
 
 - 会话树、节点、TurnId 索引，以及按 TurnId 找回提交。
 - `rewind` 只移动当前位置。
@@ -201,6 +241,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 会话设置 | 会话库的会话设置表 | 后台的 `configure`，含档位规则 | 准入、会话头与视图、TUI、CLI、IM |
 | 会话的创建 | 会话库的 Session 记录 | `configure(New)` | 提交与各项查询 |
+| 草稿的清理 | 会话库 | 后台在 `configure(New)` 回复之后执行的清理 | `list`、`head` 与视图 |
 | 一轮实际使用的配置 | UserMessage 节点与配置表 | 接受事务 | `log`、视图、用量 |
 | 档位能力 | 模型元数据与 provider features | lattice-llm 的档位能力查询 | `configure`、`/effort` 面板 |
 | 排队消息 | TUI 进程内存 | TUI | 无 |
@@ -211,12 +252,14 @@ sequenceDiagram
 | --- | --- |
 | 后台提供只读的 profile 查询，前端在查询结果与会话头之间切换显示基准 | 前端的状态与逻辑更多，维护者否决 |
 | 前端只显示会话头与已选的值，不做预测 | 首次提交之前仍看不到配置，配置错误仍到提交时才报 |
-| 后台在内存中保存草稿会话，首次接受时写入会话库 | 会话状态分在内存与会话库两处，后台重启即丢失 |
+| 后台在内存中暂存新会话，第一轮被接受时再写入会话库 | 会话状态分在内存与会话库两处，后台重启即丢失 |
 | 后台按连接保存选择 | 状态同样分在两处，提交的语义还取决于连接 |
 | 前端读取 profile | 配置是后台的全局状态，见 ADR 0010 |
 | 提交附带设置修改，在接受事务中原子写入 | 修改设置会有两条路径；`send` 被拒绝时保留已改的设置，维护者已接受 |
 | 执行中允许修改设置：按会话加一道设置门，使 configure 与准入串行 | 维护者确定执行中不能修改设置 |
-| 没有发过消息的会话在退出时删除，或在 `list` 中隐藏 | 已写入的节点只追加（[范围与禁止事项](../architecture/session/concurrency.md#范围与禁止事项)）；隐藏会让 `list` 与 `log`、`head` 的结果不一致 |
+| TUI 退出时丢弃自己的草稿 | 要新增一条命令，也覆盖不了崩溃留下的草稿；后台清理覆盖所有情况，规则只在一处执行 |
+| 在 `list` 中隐藏草稿 | `list` 会与 `log`、`head` 的结果不一致 |
+| 删除用过的会话 | 按 TurnId 查询会把已执行的一轮查成未被接受，要先改找回语义（例如保留 TurnId 墓碑），并为配置表加回收；用过的会话占用空间很小 |
 
 ## 影响
 
@@ -224,8 +267,8 @@ sequenceDiagram
 
 | crate | 变化 |
 | --- | --- |
-| lattice-session | 会话设置表取代 profile 副本表；允许只有根节点的会话；校验改为会话设置自身有效；新增创建会话与修改设置的事务；格式版本 8 |
-| lattice-api | 新增 `configure`，按 `rewind` 的方式占 Owner 槽与执行锁；准入只读会话设置；会话头字段与推送；`expected_settings` 的核对与独立冲突原因；IPC 魔数升级 |
+| lattice-session | 会话设置表取代 profile 副本表；允许只有根节点的会话；校验改为会话设置自身有效；新增创建会话、修改设置与删除草稿的事务；格式版本 8 |
+| lattice-api | 新增 `configure`，按 `rewind` 的方式占 Owner 槽与执行锁；`configure(New)` 回复之后清理草稿；准入只读会话设置；会话头字段与推送；`expected_settings` 的核对与独立冲突原因；IPC 魔数升级 |
 | lattice-llm | 新增不需要凭据、返回 `Result` 的档位能力查询；档位规则由 `configure` 调用 |
 | lattice-tui | 删除随提交生效的选择状态（`selection.rs`、待生效的 agent）、`preview_effort`、新会话的 `New`/`Existing` 切换与“会话已存在”找回、首次接受后才观察的特例；启动时调用 `configure`；`/model`、`/effort` 改为 `configure` |
 | lattice-cli | `session send` 先 `configure` 再提交；`--json` 新增 `configure` 记录 |
@@ -241,7 +284,7 @@ sequenceDiagram
 
 - 选择立即生效并持久保存，各前端共享同一份设置。
 - `send` 被拒绝时，已经创建的会话与已经修改的设置保留。
-- 没有发过消息的会话照常出现在 `list` 中。
+- 草稿照常出现在 `list` 中，24 小时没有改动、也没有观察者时由后台删除。
 - 带 `--agent` 打开已有会话，即修改它的设置。
 - 一轮执行期间不能修改设置。
 - 过去各轮的有效策略中 UserMessage 未记录的部分，例如重试退避，不再能从会话设置读出。依据 [ADR 0007 第 6 节](0007-session-tree-as-single-authority.md#6-接受时确定的事实记在-usermessage-节点上)：冻结配置不保存策略快照，因为它们没有读者。
@@ -254,20 +297,21 @@ sequenceDiagram
 | `architecture/session/operations.md` | 操作表新增 `configure`，改写 `submit` 与 `head`；CLI `send` 与 `--json` 记录 |
 | `architecture/session/recovery.md` | 请求身份表只保留已有会话的提交；`configure` 的找回 |
 | `architecture/session/acceptance.md` | 接受事务不再写设置；冻结配置的来源改为会话设置；配置拒绝按时点分为 `configure` 与提交两处 |
-| `architecture/session/concurrency.md` | 操作锁表加入 `configure` |
+| `architecture/session/concurrency.md` | 操作锁表加入 `configure` 与草稿清理；“已写入的节点”一行写明草稿可以整体删除 |
 | `architecture/session/README.md` | Session 记录与会话设置、记录表中的 profile 副本行、当前 agent |
 | `architecture/tui/README.md` | 启动、提交与运行 |
 | `architecture/tui/dock.md` | 选择面板的作用范围与换模型时的档位；删除已知缺口 |
 | `architecture/tui/layout.md` | statusline 的 session、agent、模型与档位的来源 |
 | `architecture/tui/interaction.md` | 排队与设置变化 |
-| `architecture/storage.md` | 会话库的首次创建路径与格式版本 |
-| `reference/glossary.md` | “profile 副本”改为“会话设置”；会话视图词条 |
+| `architecture/storage.md` | 会话库的首次创建路径与格式版本；“保留、索引与演化”写明草稿的清理 |
+| `reference/glossary.md` | “profile 副本”改为“会话设置”；新增“草稿”；会话视图词条 |
 
 ### 与其他 ADR 的关系
 
 | ADR | 关系 |
 | --- | --- |
 | [ADR 0006 第 4 节](0006-tree-session-and-global-redb-store.md#4-会话操作) | 部分取代：会话改由 `configure(New)` 创建。ADR 0006 否决 `session new` 时，会话还没有独立于轮次的配置；ADR 0010 引入 profile 副本后，配置需要在第一轮之前存在、可以校验和显示 |
+| [ADR 0007 第 6 节](0007-session-tree-as-single-authority.md#6-接受时确定的事实记在-usermessage-节点上) | 部分取代：会话库原来没有删除会话的操作，本 ADR 允许后台删除草稿；配置表照旧不回收 |
 | [ADR 0008 第 6 节](0008-backend-api-commands-view-queries.md#6-请求身份由客户端生成后台校验) | 部分取代：提交不再写明 `New`/`Existing`；SessionId 仍由客户端生成，新建在 `configure` 中显式写明 |
 | [ADR 0008 第 7 节](0008-backend-api-commands-view-queries.md#7-submit-只接受新请求找回改为查询)、[第 9 节](0008-backend-api-commands-view-queries.md#9-cli) | 补充：`configure` 幂等，结果不明时以同一参数重发；CLI 在身份记录之后先输出 `configure` 记录 |
 | [ADR 0010 第 13 节](0010-protocol-adapters-and-configured-providers.md#13-会话持有-profile-副本)、[第 14 节](0010-protocol-adapters-and-configured-providers.md#14-tui-的-model-与-effort) | 部分取代：profile 副本改为会话设置，选择经 `configure` 立即生效。ADR 0010 否决“选择后立即写回副本”的两条理由：新增后台命令，正是本 ADR 让后台成为设置唯一权威的方式；副本与最后一轮不同，是会话设置表示下一轮配置的应有结果，最后一轮实际使用的配置记在它的 UserMessage 节点上 |
