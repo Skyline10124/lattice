@@ -1,21 +1,18 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local CI replica.
+//! 本地 CI 的复刻。
 //!
-//! Compile parallelism is capped via `CARGO_BUILD_JOBS` (default 4). The dev
-//! machine has 24 cores and runs a heavy desktop whose Electron apps massively
-//! over-reserve virtual address space; cargo's default of one rustc per core
-//! plus codegen allocation spikes has triggered global OOM during the compile
-//! phase (see docs/archive/records/FINDINGS.md "OOM: dev-machine compile-phase oversubscription").
-//! The cap bounds the compile footprint on oversubscribed hosts without
-//! slowing down resource-rich CI, where `CARGO_BUILD_JOBS` can be raised.
+//! 编译并发由 `CARGO_BUILD_JOBS` 限制，默认 4。一台 24 核开发机上常驻的 Electron
+//! 应用预留了极大的虚拟地址空间，cargo 默认每核一个 rustc，加上 codegen 的瞬时分配，
+//! 曾在编译阶段触发全局 OOM。限制并发后，编译占用在资源紧张的主机上有上限；资源充足的
+//! CI 可以调高 `CARGO_BUILD_JOBS`。原始记录见
+//! `git show ead22771^:docs/archive/records/FINDINGS.md` 中的 ENV-OOM-01。
 //!
-//! The test step runs one `cargo test -p <crate>` per workspace member in
-//! dependency order, each under a hard timeout. A single runaway (e.g. a
-//! network test hanging in a DNS-blackhole environment — see docs/archive/records/FINDINGS.md
-//! L-26-01) is bounded to its crate's budget and fails fast instead of
-//! hanging the whole gate indefinitely.
+//! 测试步骤按依赖顺序，对每个 workspace 成员单独运行 `cargo test -p <crate>`，每次都有
+//! 超时上限。某个 crate 失控时（例如网络测试在 DNS 黑洞环境里挂起），只耗尽它自己的时间
+//! 预算并快速失败，整个门禁随之结束。原始记录见
+//! `git show ead22771^:docs/archive/records/FIX.md` 中的 L-26-01。
 
 use std::env;
 use std::os::unix::process::CommandExt;
@@ -27,7 +24,7 @@ use anyhow::Context as _;
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Args;
 
-use crate::{harness_boundary, lancet_boundary, repo_root, tool_build, tool_codegen};
+use crate::{docs_check, harness_boundary, lancet_boundary, repo_root, tool_build, tool_codegen};
 
 #[derive(Args, Debug)]
 pub struct CiArgs {}
@@ -47,6 +44,8 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     let build_jobs = env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| DEFAULT_BUILD_JOBS.to_owned());
 
     step("toolchain precheck", check_toolchain)?;
+
+    step("docs-check", docs_check::run)?;
 
     step("fmt", || {
         run_cargo(&root, &["fmt", "--all", "--check"], &build_jobs)
