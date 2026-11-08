@@ -1,23 +1,46 @@
 # lattice-conversation 工作指引
 
-## 职责
+定义 provider 中立的纯数据对话类型、模型选择值、工具调用绑定 typestate 与字节计量规则，被 `lattice-session`、`lattice-profile`、`lattice-llm`、`lattice-agent` 与 `lattice-api` 使用。
 
-维护共享推理档位 `Effort`、模型选择值（`ProviderId`、`ModelId`、`ModelRef`）及 provider-neutral 纯数据对话：有序 `NativeMessage<ToolCallState>`/`MessagePart`、`UnboundToolCall`/`BoundToolCall` typestate、闭合的 `ToolResultOutcome` 与结构化结果载荷、参数与内容摘要、attempt usage/中断/拒绝、attempt 费用结果（`CostEstimate`，只放结果数据，计价逻辑归 `lattice-llm`）、provider origin 与 part-local replay state，以及 `ConversationItem`。
+## 模块
 
-## 上位文档
+| 模块 | 负责 |
+| --- | --- |
+| `src/lib.rs` | 重导出对话类型、协议上限常量及 `lancet-protocol` 的调用身份与规范 JSON |
+| `src/effort.rs` | 推理档位 `Effort` 解析与排序 |
+| `src/model_selection.rs` | `ProviderId`、`ModelId`、`ModelRef` 构造与字符、长度校验 |
+| `src/message.rs` | 有序 `NativeMessage<ToolCallState>`、`MessagePart`、回放来源 `ReplayOrigin` 与 64 KiB `OpaqueProviderState` |
+| `src/tool_call.rs` | `UnboundToolCall` / `BoundToolCall` typestate、规范 JSON 参数对象、域分离 SHA-256 摘要与 `validate_tool_call_batch` |
+| `src/limits.rs` | 流式增量计量 `AttemptAssembly`、完整回复边界核验 `validate_assistant_bounds` 与字节上限常量 |
+| `src/outcome.rs` | 闭合的调用结局 `ToolResultOutcome` 与 `IndeterminateCause` |
+| `src/result.rs` | 结构化工具结果 `StoredToolResult`、`ResultPayload` 与 64 KiB 正文保存边界 |
+| `src/attempt.rs` | 模型尝试中断与批次拒绝记录（`AttemptInterruption`、`AttemptRejection`） |
+| `src/usage.rs` | 尝试级 `TokenUsage`、`UsageCompleteness`、费用结果数据 `CostEstimate` 与汇总 `UsageSummary` |
+| `src/history.rs` | provider 中立对话历史项 `ConversationItem` |
 
-修改前读取[会话对话模型](../../docs/architecture/session/conversation.md)、[LANCET 调用身份](../../docs/architecture/lancet.md)及[测试工程](../../docs/development/testing.md)。
+## 先读
 
-## 局部约束
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [对话数据与模型投影](../../docs/architecture/session/conversation.md)、[工程规范](../../docs/development/engineering.md) |
+| 工具调用批次、绑定与结果边界 | [LANCET 工具执行](../../docs/architecture/lancet.md#登记与持久边界)、[Step 执行与结果保存](../../docs/architecture/session/steps.md#调用槽位) |
+| 回复字节计量与上限常量 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md#模型请求与执行预算) |
+| 用量、完整性与费用数据结构 | [用量、缓存与费用](../../docs/architecture/llm/usage.md#用量换算)、[关闭 Step 与 Turn](../../docs/architecture/session/steps.md#关闭-step-与-turn) |
 
-- 仅依赖 `lancet-protocol` 和中立数据依赖；不引入 gix、文件系统、store、锁、runtime、HTTP 客户端或 ID 生成器。InvocationId/TurnId 生成归 API 协调层。
-- 使用绑定 typestate，不以 `Option<InvocationId>` 代替。Tool 参数必须是一个 JSON object，不把空串规范化为 `{}`；一个无效调用拒绝整批。
-- 完整 provider 批次须通过 `validate_tool_call_batch`，公开上限 `MAX_TOOL_CALLS_PER_BATCH = 32`，超限拒绝整次 attempt，不截断；会话库登记时再次核验批次与绑定。
-- 参数摘要为 SHA-256(domain separator + u64_be 字节长度 + canonical bytes)。BoundToolCall 反序列化时从参数重算摘要，不一致报 `ArgumentsDigestMismatch`。
-- replay state 按 part 原样保留，上限 64 KiB；即使 part 其他内容为空也不删。`Option<TokenUsage>` 缺失表示整次尝试没有用量（partial），不当作零；单项缺失表示未报告。尝试的完整性由请求网关提供的 `usage_kind` 表达，汇总按[会话合同](../../docs/architecture/session/steps.md#关闭-step-与-turn)派生。
-- `AttemptAssembly` 提供按调用 index 的参数计量及共享总量算法；流式组装由 `lattice-llm` 的共同累积器独占。`validate_assistant_bounds` 用同一组常量与算法核对完整消息，供会话库在持久边界独立检查，参数按规范形式计量。
+## 约束
 
-## 验证入口
+- `Cargo.toml` 仅依赖 `lancet-protocol` 与纯数据序列化、摘要库，保持确定性的内存数据结构与校验逻辑。
+- 工具调用以 `UnboundToolCall` 与 `BoundToolCall` typestate 区分待登记与已绑定状态；参数在构造时解析为单个 JSON 对象，完整批次经 `validate_tool_call_batch` 核验（单批上限 `MAX_TOOL_CALLS_PER_BATCH = 32`，任一无效或超限则整批拒绝），保证进入会话库的调用槽位均对应完整有效回复，见[有序消息与 ToolCall](../../docs/architecture/session/conversation.md#有序消息与-toolcall)。
+- 参数摘要按 `SHA-256(domain_separator + u64_be(len) + canonical_bytes)` 计算，`BoundToolCall` 反序列化时从参数重算摘要并在失配时返回 `ArgumentsDigestMismatch`；`src/tool_call.rs` 的 golden 摘要值锁定持久与 wire 兼容性，变更该算法前须由维护者确认迁移方案。
+- `OpaqueProviderState` 按片段原样保留不透明回放材料（上限 64 KiB，包含正文为空的片段），见[回放与跨 provider 投影](../../docs/architecture/session/conversation.md#回放与跨-provider-投影)。
+- `Option<TokenUsage>` 为 `None` 表示整次尝试缺失用量，字段级 `None` 表示该项未报告；完整性由 `UsageCompleteness` 表达，路径与全会话汇总按[关闭 Step 与 Turn](../../docs/architecture/session/steps.md#关闭-step-与-turn)派生。
+- `AttemptAssembly` 与 `validate_assistant_bounds` 共用同一套字节上限常量和计量规则，使流式阶段与会话库持久边界的检查口径一致，见[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)。
+- 本 crate 之外：流式回复组装、provider 协议投影与费用计价逻辑由 `lattice-llm` 负责；`TurnId` 与 `InvocationId` 生成由 `lattice-api` 负责；持久落盘与锁由 `lattice-session` 和 `lattice-store` 负责。
 
-- 运行 `cargo test -p lattice-conversation`。
-- 改了参数摘要或构造方式时，核对 `src/tool_call.rs` 中的 golden fixture。golden 值变化意味着 wire 格式不兼容，不能为了让测试通过直接改期望值。
+## 验证
+
+| 改动 | 运行 |
+| --- | --- |
+| 任何改动 | `cargo test -p lattice-conversation` |
+| 修改参数规范化或摘要构造 | 运行 `cargo test -p lattice-conversation`，保持 `src/tool_call.rs` 的 golden 摘要用例原值通过 |
+| 修改公开对话类型、上限常量或用量结构 | `cargo test -p lattice-session`、`cargo test -p lattice-llm`、`cargo test -p lattice-api` |

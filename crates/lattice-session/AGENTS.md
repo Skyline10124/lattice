@@ -1,32 +1,46 @@
 # lattice-session 工作指引
 
-## 职责与模块
+维护全局会话库 `lattice.redb`、会话树同步领域事务、由持久进度推导的结论、历史与操作员只读查询及共享领域字段类型，被 `lattice-profile`、`lancet-api`、`lattice-api` 与 `lattice-cli` 使用。
 
-维护全局会话库 `lattice.redb` 与会话树的领域字段类型：Session、会话树（Step 节点内含尝试与调用槽位）、配置表、TurnId 索引、InvocationId 索引和调用变更日志。提供同步的领域事务、由阶段给出结论、对话条目与按轮的历史查询、操作员只读投影；对话、模型选择值与 usage 类型归 `lattice-conversation`。
+## 模块
 
-- `model/mod.rs`：会话树模型与有效 profile 共享的领域字段类型（`AgentName`、`TurnTimeout`、`RetryPolicy`）；保持纯数据与构造校验，独立于存储机制、redb 表与编解码。
-- `store/mod.rs`、`types.rs`：SessionStore、锁凭据、领域类型、错误与公开接口。
-- `store/codec.rs`、`open.rs`、`validate.rs`：表与值版本、创建/严格打开、形状及跨记录一致性校验。
-- `store/write.rs`、`close.rs`：事务写入与纯关闭规划；`read.rs`：树、对话条目的读取投影与轮次序号、按轮分页和操作员投影。
-- `store/config.rs`、`hex_digest.rs`：冻结事实与摘要编码；`local.rs`：按 Session/Turn 等范围加载事务记录。
-- `store/tests.rs`：记录层回归。
+| 模块 | 负责 |
+| --- | --- |
+| `src/lib.rs` | 重导出领域字段类型、`SessionStore` 读写接口及 `test-utils` 测试辅助 |
+| `src/model/mod.rs` | 独立于存储机制的纯数据领域类型（`AgentName`、`TurnTimeout`、`RetryPolicy`）与构造校验 |
+| `src/store/mod.rs`、`src/store/types.rs` | `SessionStore`、`SessionRead`、`SessionExecutionLock`、公开请求/响应类型与错误 |
+| `src/store/codec.rs`、`src/store/open.rs`、`src/store/validate.rs` | redb 表与值版本编解码、首次创建与严格打开、旧库拒绝及全库跨记录一致性校验 |
+| `src/store/write.rs`、`src/store/close.rs` | 单步 `Durability::Immediate` 领域写事务，以及从持久 `progress` 推导尝试、槽位与 Step 结论的纯函数 |
+| `src/store/read.rs`、`src/store/local.rs` | 会话树、当前路径对话条目、轮次序号、按轮分页、用量与操作员只读投影，以及按会话或 Turn 范围加载记录 |
+| `src/store/profile_copy.rs`、`src/store/config.rs`、`src/store/hex_digest.rs` | 会话 profile 副本、系统提示与工具目录的内容摘要配置表及十六进制摘要编码 |
+| `src/store/tests.rs` | 会话库编码、校验、事务推进与读取投影单元测试 |
 
-## 上位文档
+## 先读
 
-修改前读取[会话合同](../../docs/architecture/session/README.md)、[存储合同](../../docs/architecture/storage.md)、[调用与证据](../../docs/architecture/lancet.md)及[测试工程](../../docs/development/testing.md)。涉及文件关联时读取[工作区历史](../../docs/architecture/workspace.md)。旧 Git 会话、独立调用账本与跨库协调的取代范围见 [ADR 0006](../../docs/adr/0006-tree-session-and-global-redb-store.md)。
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [会话与 Turn](../../docs/architecture/session/README.md)、[私有存储与持久化](../../docs/architecture/storage.md#会话库)、[工程规范](../../docs/development/engineering.md) |
+| Step 预留、调用槽位与关闭结论 | [Step 执行与结果保存](../../docs/architecture/session/steps.md)、[重开、取消与未完成状态](../../docs/architecture/session/recovery.md#执行者消失后的-turn) |
+| 事务、锁与故障重开 | [会话存储与并发](../../docs/architecture/session/concurrency.md) |
+| profile 副本与用量查询 | [会话的 profile 副本](../../docs/architecture/session/settings.md)、[当前路径的用量查询](../../docs/architecture/session/operations.md#当前路径的用量查询) |
+| 调用证据、工作区关联与操作员投影 | [LANCET 工具执行](../../docs/architecture/lancet.md#操作员接口)、[Cell 权限与证据](../../docs/architecture/cell.md#内容与版本边界)、[本地工作区与变更历史](../../docs/architecture/workspace.md#私有存储与数据关系) |
+| 存储演化背景与验证分层 | [ADR 0006](../../docs/adr/0006-tree-session-and-global-redb-store.md)、[测试工程](../../docs/development/testing.md) |
 
-## 局部约束
+## 约束
 
-- 会话库格式与事务由本 crate 拥有，不暴露原始表或写事务。redb 版本、文件后端、独占打开与 Immediate 提交遵循存储合同；不引入双写、旧库迁移或兼容读取。
-- Session 永久绑定组成层传入的 ProjectStoreKey，不从进程 cwd 推导。不负责 provider、profile 发现、CLI 或 Tool 执行，不依赖 runtime/API/agent/profile；操作员读取保持 runtime-free。
-- open 不初始化、不修复，损坏无关 Session 也不能忽略。类型、值版本、规范 JSON、绑定摘要与证据版本都须校验，派生索引和变更日志随权威记录在同一事务更新。
-- 树只追加节点，只有末端未关闭的 Step 可改写，每次推进一个事务。Step 在开始前预留，最后一个 Step 关闭即 Turn 关闭。结论由 `progress` 给出，不从缺少结果推定未执行。
-- 执行者消失的 Turn 不被补写；读取只读，不修改未关闭的 Step。退回只移动当前位置，不写入节点，文件及工作区历史保持原样。
-- 锁范围、失败后停写与关闭重开遵循会话和存储合同。写事务内不等待外部操作；同步接口由异步调用方放入阻塞执行边界。
-- 操作员 DTO 不含参数、结果正文、schema 或冻结秘密。测试设施仅在 `cfg(test)` 或显式测试 feature 下可用，下游通过 dev-dependencies 启用，生产不得绕过领域事务。
+- `SessionStore` 封装全部 redb 表与 `Durability::Immediate` 写事务，对外只提供窄领域接口；测试辅助限定在 `#[cfg(test)]` 或 `test-utils` feature 下供下游 `dev-dependencies` 启用，确保生产路径全部经领域事务读写，见[会话库](../../docs/architecture/storage.md#会话库)。
+- `Session` 在创建时永久绑定调用方传入的 `ProjectStoreKey`，见[会话库与项目绑定](../../docs/architecture/session/concurrency.md#会话库与项目绑定)。
+- `open` 执行全库严格核验：旧格式库与任何损坏的会话、类型、值版本、规范 JSON、绑定摘要或证据版本均整库拒绝；派生索引与调用变更日志随节点权威记录在同一写事务更新，见[身份、版本与打开](../../docs/architecture/storage.md#身份版本与打开)与[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)。
+- 会话树只追加节点，每次推进以单个写事务改写末端未关闭的 Step，结论只由节点已保存的 `progress` 推导；查询保持纯只读，退回只移动会话当前节点指针，见[预留、progress 与结论](../../docs/architecture/session/README.md#预留progress-与结论)与[表、读取范围与 rewind](../../docs/architecture/session/README.md#表读取范围与-rewind)。
+- 写事务内只做内存编码与提交，同步接口由异步调用方放入 blocking 线程执行；锁范围与提交失败后的停写重开见[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)与[锁与并发语义](../../docs/architecture/storage.md#锁与并发语义)。
+- 操作员查询只依赖存储记录，DTO 只投影调用身份、结局、时间戳与摘要元数据（排除参数、结果正文、schema 与冻结秘密），保持无运行时依赖，见[操作员接口](../../docs/architecture/lancet.md#操作员接口)。
+- 本 crate 之外：对话消息、模型选择值与用量数据结构由 `lattice-conversation` 负责；profile 发现与解析由 `lattice-profile` 负责；provider 请求、Turn 协调、Tool 执行与 CLI 分别由 `lattice-llm`、`lattice-api`、`lancet-runtime` 和 `lattice-cli` 负责。
 
-## 验证入口
+## 验证
 
-- 运行 `cargo test -p lattice-session`。哪些行为需要测试，按[工程规范](../../docs/development/engineering.md#测试)判定。
-- 改了记录格式、会话树、事务或读取时，再检查 API 与 CLI。真实提交、退回分叉、旧库拒绝与崩溃后的关闭，用当前构建的二进制运行外部 harness 验证，不能用纯 planner 测试代替提交窗口。
-- `cargo xtask lancet-boundary` 检查 session 不依赖 runtime，以及生产代码不启用测试 feature。
+| 改动 | 运行 |
+| --- | --- |
+| 任何改动 | `cargo test -p lattice-session` |
+| 修改依赖或 `test-utils` 特性边界 | `cargo xtask lancet-boundary` |
+| 修改记录编码、会话树、事务或读取投影 | `cargo test -p lattice-api`、`cargo test -p lattice-cli`，并用当前构建的 `lattice` 二进制运行 `cargo test -p lattice-system-harness --test direct_tree_session` |
+| 修改提交阶段或崩溃后结论推导 | 构建开启崩溃屏障的二进制并运行 `cargo test -p lattice-system-harness --features crash-barriers --test direct_crash_barriers` 验证真实提交窗口 |

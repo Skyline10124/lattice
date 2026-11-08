@@ -1,38 +1,52 @@
 # lattice-api 工作指引
 
-## 职责
+提供 `SessionApi`、`LocalClient`、本地后台服务与 `TurnCoordinator`，跨领域协调会话库、请求网关、profile 与工具运行时，被 `lattice-cli` 与 `lattice-tui` 调用。
 
-提供 SessionApi、LocalClient、本地后台及公开的视图、查询与结果；读取并冻结 profile、维护会话的 profile 副本、经 `lattice-llm` 的请求网关发出模型请求、承接凭据与模型命令，并驱动 TurnCoordinator 经会话库事务推进执行。Component 组成在 lancet-api，执行在 runtime；本 crate 拥有跨领域协调而非下层机制。
+## 模块
 
-- `local/client.rs`：LocalClient 的连接与分帧，转交视图与查询；`stop` 收到回执后限时等待 socket 撤下、`owner.lock` 可取得后返回。
-- `local/auth.rs` 与 `local/auth/login.rs`：后台凭据目录、敏感录入材料与凭据错误映射，以及同连接登录句柄、专用交换和取消责任。认证规则与文件操作归 LLM 的共享生命周期对象。
-- `local/metadata.rs`：协调 models.dev 与账号模型目录的自动、手动、登录后和缺目录刷新，按来源共享在途操作，并由同一个任务调度；新鲜度、退避、开关与部分失败规则见[元数据合同](../../docs/architecture/llm/models.md#元数据的来源与合并)。停止时取消发布并排空目录文件工作，Turn 与认证的停止顺序仍由 server 负责。
-- `local/operation.rs`：LocalTurn 是本客户端一次提交的具体句柄，管理提交、在途取消与退出交接；前端生成身份、交出 agent、模型与推理档位的选择并消费视图，配置由后台读取，持久 Turn 仍由后台执行。接口分层见[公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作)。
-- `local/server.rs`：serve 持实例资源和连接，并在启动时拉起元数据刷新任务。Backend 管准入、存储句柄、视图及本进程完成诊断，Owner 监督独立操作。`stop` 先取消刷新任务并停止登录，已接管 Turn 收尾后再关闭认证生命周期、排空连接。接管、同一取消载体与独立收尾遵循[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)。
-- `models.rs`：重导出公开模型候选与查询类型（`ModelCandidateQuery`、`Availability`、`ConfigurationRequirement`），并转发日志初始化。
-- `session.rs`：公开会话操作、固定读取、ID 解析和结构化错误映射。
-- `config_rejection.rs`、`redact.rs`：配置拒绝的说明只经一个入口构造，文字在其中脱敏并规范化为单行；`profile.rs`：委托 `lattice-profile::load_agent_profile` 完成发现、权限检查与字段解析（API 层不再重复检查 profile 名称、超时或重试字段），再解析外部策略文件并冻结有效策略。规则见[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)。
-- `turn/live.rs`、`turn/execute.rs`：同一 live 核心及独立接受/完成结果；准入经 `GatewayTurn::prepare` 一次完成可用性核对与 `EffortPolicy` 档位选择，并为不支持的档位标明来源（`--effort`、`agent.toml` 的 `[agent].effort` 或会话副本）；`start_turn` 用于后台执行接线，`run_turn`/`stream_turn` 仅供测试复用核心。
-- `turn/cep.rs`：profile→policy、Tool 事件映射及生产依赖接线；首次共享 Component 组成经 spawn_blocking，组装仍归 lancet-api。
-- coordinator/saga 模块：阻塞存储适配、可注入 IdSource、调用登记、顺序执行、槽位终态、Step/Turn 关闭及会话退回。
-- `stores.rs`：共享会话库句柄与库级停写、排空和重开；`turn/observer.rs`：当前尝试已生成的正文与 reasoning（段列表，视图从中推送生成中的文字），以及每个观察者待推送的条目与已发文字的位置。
+| 模块 | 负责 |
+| --- | --- |
+| `src/lib.rs`、`src/root.rs`、`src/models.rs` | 公开接口重导出、规范本地工作区根路径解析 `resolve_local_workspace_root`、模型候选类型重导出与日志初始化转发 |
+| `src/session.rs` | `SessionApi` 会话列表、树形日志、退回、历史、用量、详情读取与 `SessionId` 精确/前缀解析 |
+| `src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 委托 `lattice-profile` 加载配置后解析外部策略文件，经单一构造入口生成脱敏单行 `ConfigRejection` |
+| `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写、在途工作排空与关闭重开 |
+| `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地控制面入口、IPC 消息定义、16 MiB 单帧分帧/拼回及 Unix socket 权限与对端 UID 核验 |
+| `src/local/client.rs`、`src/local/operation.rs` | `LocalClient` 连接、自动启动后台、视图与查询转发、`stop` 收到回执后等待 socket 撤下与 `owner.lock` 释放；`LocalTurn` 提交、取消回执与 `detach` 退出交接 |
+| `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 准入与视图推送、`Owner` 独立监督及有序 `stop` 收尾 |
+| `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令转发、敏感材料传输、错误映射与同连接 SIWC 登录句柄 |
+| `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
+| `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（经 `GatewayTurn::prepare` 核对可用性与带来源标注的 `EffortPolicy`）、生产后台接线 `start_turn` 及 `test-utils` 复用的 `run_turn` |
+| `src/turn/coordinator.rs`、`src/turn/saga.rs` | 全 Turn `SessionExecutionLock` 持有、`spawn_blocking` 存储适配、模型重试、顺序调用分发及 Step/Turn 关闭 |
+| `src/turn/cep.rs` | profile 到 LANCET 准入与执行策略转换、首次共享 Component 的 `spawn_blocking` 组装及工具事件映射 |
+| `src/turn/observer.rs` | 当前尝试的生成中文字段列表，以及各观察者待推节点与文字游标 |
+| `src/turn/crash_barrier.rs` | `test-crash-barriers` feature 控制的提交后停点与观察调度插桩 |
 
-## 上位文档
+## 先读
 
-修改前读取[会话](../../docs/architecture/session/README.md)、[模型接入](../../docs/architecture/llm/README.md)、[工作区](../../docs/architecture/workspace.md)、[存储](../../docs/architecture/storage.md)、[LANCET](../../docs/architecture/lancet.md)及 [Cell](../../docs/architecture/cell.md)合同。
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [会话与 Turn](../../docs/architecture/session/README.md)、[实现模块与公开操作](../../docs/architecture/session/operations.md)、[工程规范](../../docs/development/engineering.md) |
+| 提交准入、配置冻结、脱敏与重试预算 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md)、[会话的 profile 副本](../../docs/architecture/session/settings.md) |
+| Step 事务、调用槽位、锁与故障停写 | [Step 执行与结果保存](../../docs/architecture/session/steps.md)、[会话存储与并发](../../docs/architecture/session/concurrency.md)、[私有存储与持久化](../../docs/architecture/storage.md#锁与并发语义) |
+| 找回、视图观察、取消与后台 `stop` | [重开、取消与未完成状态](../../docs/architecture/session/recovery.md) |
+| 模型候选、元数据调度与凭据交换 | [模型接入](../../docs/architecture/llm/README.md)、[模型引用与元数据](../../docs/architecture/llm/models.md#元数据的来源与合并)、[凭据与 Sign in with ChatGPT](../../docs/architecture/llm/credentials.md) |
+| 工具准入、Component 接线与工作区关联 | [Cell 权限与证据](../../docs/architecture/cell.md#调用准入)、[LANCET 工具执行](../../docs/architecture/lancet.md)、[本地工作区与变更历史](../../docs/architecture/workspace.md)、[测试工程](../../docs/development/testing.md) |
 
-## 局部约束
+## 约束
 
-- TurnCoordinator 是唯一持久 Turn 协调者，使用窄领域接口持有全 Turn SessionExecutionLock；无第二 dispatch/schema/Component 组装路径或跨库事务。会话库写事务与工作区历史仓库锁不同时持有，也不同时持有两把仓库写锁。CLI 渲染与 provider wire 分别留在 CLI/LLM。
-- 接受与找回遵循[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)：`submit` 只接受新请求，找回经按 TurnId 查询。观察经会话视图交付，按观察者推送条目的最新值；背压不得阻塞 live task drain 或持久提交，条目和错误保持结构化。面向用户的等级与说明由 Step 条目中的重试提示与 `TurnSummary` 的 notice 给出，见[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)。
-- profile capability 转换将 enabled 作为第一阶段、capabilities 作减法；没有已加载 profile 时 fail closed。`cep_policy_from_profile` 只携带执行策略，不隐式授予准入能力。
-- 阻塞 Git/store 调用用 spawn_blocking，写事务与仓库锁不跨 await。调用开始前先提交 Started，失败后不继续分发；commit 出错按[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)停止全库写入和新 provider/Tool 启动，排空在途工作后关闭重开，不推定已回滚。
-- 槽位结果由到达的阶段确定：停在 `Registered` 为 NotExecuted，停在 `Started` 为效果不确定，不猜 NotExecuted 或重分发；分发前取消、Deadline 等停止原因随 Step 关闭写入一次。
-- 执行者消失的 Turn 不被继续或补写；关闭 Step 不请求模型、不重执行 Tool、不读取工作区历史，也不取得工作区操作锁。`rewind` 移到已有 NodeId 本身，保留原分叉，不恢复文件，也不改变 profile 副本；agent 的选择与副本的写入按[会话的 profile 副本](../../docs/architecture/session/settings.md#会话的-profile-副本)执行。
-- Session ID 解析精确优先，再按已存 Session ID 前缀匹配；歧义最多列 5 个候选并要求更多字符，拒绝空/全空白。规范 SessionId 仍是32位十六进制，缩写只属输入/显示。
+- `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的分发、schema 与 Component 组装路径；阻塞式会话库、Git 与首次共享 Component 组装均放入 `spawn_blocking`，按[锁与并发语义](../../docs/architecture/storage.md#锁与并发语义)保持会话库写事务与工作区历史仓库锁在同步闭包内独立获取、互不重叠。
+- `submit` 只接受新请求，找回统一走按 `TurnId` 查询；`observer.rs` 为每个观察者维护最新待推条目与文字游标并以非阻塞通知解耦观察背压、实时排空与持久提交；Step 重试提示与 `TurnSummary` notice 按[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)生成，接受与观察交接见[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)与[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。
+- `local/server.rs` 的 `stop` 先取消元数据刷新任务并调用 `stop_logins`，待已接管 Turn 收尾后再关闭认证生命周期并排空连接，交接顺序见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
+- `cep.rs` 以 `[tools].enabled` 为第一阶段、叠加 `[lancet.capabilities]` 减法构造准入策略，缺失已加载 profile 时默认拒绝，`cep_policy_from_profile` 只转换执行策略，见[调用准入](../../docs/architecture/cell.md#调用准入)。
+- 调用分发前先提交 `Started`，槽位终态与 Step 停止原因严格由已保存的阶段单次推导；写事务提交失败时经 `stores.rs` 立即停写全库、排空在途工作后关闭重开，见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)与[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)。
+- 执行者消失后的 Turn 保留原持久状态，`rewind` 只将当前节点指针移到目标 `NodeId` 并保留原分叉、工作区文件与会话 profile 副本，见[执行者消失后的 Turn](../../docs/architecture/session/recovery.md#执行者消失后的-turn)与[会话的 profile 副本](../../docs/architecture/session/settings.md#会话的-profile-副本)。
+- `session.rs` 解析 `SessionId` 时先精确匹配再按已存前缀匹配，歧义时最多列出 5 个候选并拒绝空白输入，内部与持久层始终使用 32 位十六进制规范 `SessionId`。
+- 本 crate 之外：profile 字段与目录权限校验由 `lattice-profile` 负责；会话库表与事务原语由 `lattice-session` 负责；provider wire 协议与认证生命周期由 `lattice-llm` 负责；Component 组装与执行分别由 `lancet-api` 和 `lancet-runtime` 负责；终端与命令行呈现由 `lattice-tui` 和 `lattice-cli` 负责。
 
-## 验证入口
+## 验证
 
-- 运行 `cargo test -p lattice-api`。测试要覆盖提交、取消、读取与控制的交接、观察切点、库级故障和执行者消失后的结局；与工作区文件的关联由 `workspace_history_acceptance` 保护。
-- 按改动的影响，再检查 runtime、agent、session 与 CLI 的测试。
-- 被测产物与外部场景的选择遵循[测试工程](../../docs/development/testing.md)。
+| 改动 | 运行 |
+| --- | --- |
+| 任何改动 | `cargo test -p lattice-api`（含提交、取消交接、视图切点、库级故障、执行者消失及 `tests/workspace_history_acceptance.rs`） |
+| 修改 Turn 协调、流消费或工具接线 | `cargo test -p lattice-agent`、`cargo test -p lattice-session`、`cargo test -p lancet-runtime` |
+| 修改 `LocalClient`、IPC 或公开 DTO | `cargo test -p lattice-cli`、`cargo test -p lattice-tui`，并按[测试工程](../../docs/development/testing.md)运行受影响的 `lattice-system-harness` 场景 |

@@ -29,8 +29,9 @@
 
 - [工程规范](development/engineering.md)：设计中的归属、代码可读性、测试判定、TDD 与验证范围。
 - [工具开发与操作](development/tool-development.md)：manifest/生成链、profile、语义编辑、audit、lancet status 与 lancet doctor。
-- [测试工程](development/testing.md)：测试分层、后台与重连场景步骤、被测产物、隔离和清理、执行资源与失败证据。
-- [验证操作指南](development/validation-guide.md)：安装、构建、后台命令与重连用法、局部验证、显式 feature、本地 CI、rollout 和证据查看。
+- [测试工程](development/testing.md)：测试的原则：测试层、harness 的原则、场景的共同规则、失败证据与发布门禁。
+- [验证操作指南](development/validation-guide.md)：动手验证的原则：产物、环境与后台、结果判读、证据与门禁。
+- [场景卡片](development/scenarios/README.md)：每个自动场景与手动操作一张卡片，写明目标、前提与断言或命令与结果。
 
 ## 参考资料
 

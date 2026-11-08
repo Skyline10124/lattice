@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Localhost fake LLM for harness scenarios.
+//! 供 harness 场景使用的本地 fake LLM。
 //!
 //! 场景经 [`ScenarioWorld::wire_provider`](crate::ScenarioWorld::wire_provider)
 //! 把模型与凭据接到 fake server。请求路由选择已实现协议的响应格式。
@@ -9,18 +9,28 @@
 //! 传输与官方 provider 一致：TLS + HTTP/2，ALPN 只提供 `h2`，证书来自
 //! [`TlsIdentity`]，场景经 `SSL_CERT_FILE` 信任它（见 `ScenarioWorld`）。
 //! [`FakeLlmServer::start_plain_http1`] 另起明文 HTTP/1.1，只服务本地 provider
-//! （Ollama 一类）场景，只支持完整响应。
+//! （Ollama 一类）场景，只支持完整响应，空闲连接五秒后关闭。传输层故障在 HTTP/2 上构造：
+//! 流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后的 `GOAWAY(NO_ERROR)`、
+//! 最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
 //!
-//! The server does two things (RFC #41, Codeberg #19, decision four):
+//! 依据 #41 的第四项决定，服务端做两件事：
 //!
-//! 1. Captures each model request (model, messages, tool names, identifying
-//!    headers, connection) so scenarios can assert on what the product sent.
-//! 2. Answers with the script chosen by the scenario: plain text, tool calls,
-//!    HTTP errors, or a transport failure (stream cut, reset, GOAWAY, refused
-//!    stream).
+//! 1. 捕获每个模型请求（模型、消息、工具名、识别头与连接），供场景断言产品发出了什么。
+//! 2. 按场景选定的脚本回复：正文、工具调用、HTTP 错误或传输故障。SSE 正文与真实流一致：
+//!    每个分片一条 `data: {chunk}\n\n`，OpenAI 协议以 `data: [DONE]\n\n` 结束。
 //!
-//! SSE bodies mirror the real streams: one `data: {chunk}\n\n` per chunk,
-//! terminated by `data: [DONE]\n\n` in the OpenAI protocol.
+//! 唯一的客户端是被测产品，所以服务端只做取出路由、凭据与 body 所需的最少解析。它对场景保证：
+//!
+//! 1. 计数准确：只有发往五种协议模型端点的请求进入捕获；其他请求得到错误响应，记为 fixture
+//!    failure。工具定义按 `tool_schema_rejection` 的规则核对，违反时返回 400，记为 fixture
+//!    failure，该请求不进入捕获。非 JSON 的 body 保留为诊断。对端放弃流或连接、客户端在 TLS
+//!    握手中拒绝证书属于对端行为，握手被拒的次数由 [`FakeLlmServer::rejected_handshakes`] 给出。
+//! 2. 回复确定：捕获、Sequence 的选择与推进、到达通知在同一临界区内发生；gate 只控制交付时机。
+//!    请求数超过 Sequence 长度时重复最后一项；空 Sequence 产生 `IllegalResponse`。
+//! 3. 失败有界：request、stall、release 与 shutdown 都是有界握手。shutdown 发出停止信号，同时
+//!    中止停在握手或读请求中的连接任务，并取消 gate，等在途任务结束后再 join 服务线程；超时返回
+//!    错误并保留线程，再次调用或 Drop 时继续有界等待。保留第一个 fixture failure，shutdown 在
+//!    有界清理后返回它。
 
 use std::collections::BTreeMap;
 use std::future::Future;

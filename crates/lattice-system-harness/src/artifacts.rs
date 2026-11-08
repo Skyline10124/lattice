@@ -1,6 +1,22 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+//! 场景的失败证据：终端上的失败报告与持久化的 bundle。
+//!
+//! - 失败报告依次保留：排序去重的秘密泄露位置、原始断言、命令诊断、按发生顺序的证据错误。
+//!   命令诊断先于 bundle I/O 形成；场景失败时附每条命令 stdout 与 stderr 的开头（先脱敏再截断，
+//!   每个流最多 2,048 字节，注明截掉的字节数）与完整脱敏副本的路径。
+//! - bundle 根目录取 `LATTICE_HARNESS_FAILURE_DIR`，未设置时为本 crate 下的
+//!   `target/harness-failures/`。场景名称由 `validate_artifact_name` 核对：单个普通路径分量，
+//!   保留名 `.claims` 除外。
+//! - 写者在清理旧产物之前取得 `<base>/.claims/<scenario>.lock` 的非阻塞独占锁，持有到持久化与
+//!   扫描结束；同名的并发写者立即失败，锁文件保留。[`ScenarioEvidence`] 从构造起持有占用权，
+//!   嵌套记录器使用不同的场景名称。
+//! - 输出错误与持久副本先做字面脱敏。递归字节扫描先记录泄露位置再修改副本；遍历、读取、重写、
+//!   符号链接与特殊文件的错误分别保留，扫描继续检查其他可达条目。工作区快照把符号链接本身记为叶子。
+//! - 证据目录里的命令文件不含证据路径；`world.txt` 以绝对路径记录场景临时目录。
+//! - 只有失败的场景写 bundle。
+
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{File, OpenOptions};

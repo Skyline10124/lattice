@@ -105,7 +105,11 @@ impl ProcessGroupCleanup {
     }
 }
 
-/// Captured command bytes with completeness, direct-child observation, intervention, and cleanup.
+/// 一条命令的完整结果：输出字节及其完整性、直接子进程的终止方式、harness 的干预与进程组清理。
+///
+/// [`CommandOutcome::clean_exit_code`] 只在干净退出时给出退出码：两条输出流都读到 EOF，没有
+/// 干预与强制清理，清理成功且没有存活进程。信号、缺失的终止状态或单纯的 exit 0 都不算干净退出。
+/// [`CommandOutcome::summary`] 与 `Debug` 只输出元数据；产品是否 panic 不从信号推断。
 #[derive(Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub stdout: Vec<u8>,
@@ -579,6 +583,7 @@ fn record_process_group_signal_result<F>(
 {
     match result {
         Ok(()) => {}
+        // 清理信号遇到 ESRCH 时立即复核进程组：组已为空才算无害。请求发出的 SIGINT 走另一条路径。
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
             let signal_error = CleanupError::new(operation, error);
             match recheck() {

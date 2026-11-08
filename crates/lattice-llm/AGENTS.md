@@ -1,43 +1,48 @@
 # lattice-llm 工作指引
 
-## 职责
+维护对外唯一的模型请求网关、五种协议适配器、provider 注册表、模型元数据、凭据与 Sign in with ChatGPT 及 stderr 日志初始化，被 `lattice-agent`、`lattice-api` 与 `xtask` 调用。
 
-维护请求网关，它是对外唯一的模型请求入口，内部包含协议适配器（请求构造、流式事件解析、用量换算）、provider 注册表、模型元数据、凭据库与 Sign in with ChatGPT、工具 wire 类型、SSE、DNS pinning 与传输层重试判断；另维护日志设置。持久消息与 usage 直接使用 `lattice-conversation` 类型，不负责 Session 图、profile 发现、Agent 循环、重试策略或 LANCET 执行。
+## 模块
 
-目录按职责划分，协议与 provider 分开：
+| 模块 | 负责 |
+| --- | --- |
+| `src/lib.rs` | 重导出请求网关、协议、模型候选、认证、流事件与日志接口 |
+| `src/gateway.rs`、`src/gateway/` | `RequestGateway`（筛选并缓存可用 TLS 根）、`GatewayTurn::prepare` 准入与档位选择、`GatewayTurn::resolve` 按次解析及 `cost.rs` 费用估算 |
+| `src/availability.rs` | 统一的 provider 与模型 `Availability`（`Ready` / `Unconfigured` / `Invalid`）判定与补救提示 |
+| `src/protocol/` | 五种协议适配器（`chat_completions.rs`、`responses.rs`、`anthropic_messages.rs`、`generate_content.rs`、`interactions.rs`）、`features.rs`、`usage.rs`、`common.rs` 及唯一生产消息投影 `projection/` |
+| `src/provider/` | 内置 provider 表（`builtins.rs`）、`providers.toml` 严格解析与合并（`config.rs`，含显式声明 `declared` 事实）及按 `ProviderId` 查找 |
+| `src/metadata/`、`src/models.rs`、`src/reasoning.rs` | 内置快照、`models.dev` 与 ChatGPT 账号目录单次拉取与缓存合并、`ModelCandidateQuery` 候选查询及可用推理档位推导与映射 |
+| `src/auth/` | `auth.json` 读写、脱敏已知凭据值提取，以及 `siwc/` 下的 Sign in with ChatGPT 登录、单飞刷新、登出与分阶段收尾（`stop_logins` / `shutdown`） |
+| `src/tls.rs`、`src/client.rs`、`src/transport.rs`、`src/sse.rs`、`src/types.rs` | 平台根 DER 原始加载、单 Turn 地址固定与 HTTP 客户端复用、请求头与未处理请求重发策略、错误诊断与 Retry-After 解析、SSE 解析及请求/事件类型 |
+| `src/reply.rs`、`src/reply_stream.rs` | 同步回复累积器（有序片段、实时增量、字节限额）与惰性流包装器（取消、deadline、唯一终态交付） |
+| `src/logging.rs`、`src/stub.rs`、`src/testing.rs` | stderr 日志与 `NO_COLOR` 控制、`StubLlm` 及 `test-utils` 流测试辅助 |
 
-- `gateway.rs` 与 `gateway/`：`GatewayTurn::prepare` 在一次配置与凭据读取中完成准入可用性核对与 `EffortPolicy`（`Strict` / `Fallback`）档位选择；`GatewayTurn::resolve` 在每次请求尝试时读取当前注册表与凭据，返回封装协议与认证的 `ResolvedRequest`，发送沿用该结果。`tls.rs` 原样载入平台根 DER，不筛选，可能为空；网关在 `RequestGateway::new` 中按 `select_roots` 筛选，并判定有没有可用的根（`has_usable_tls_roots`，`prepare` 与 `resolve` 共用同一判定）；后台把网关筛选后的同一份 DER 交给 Tool Host。
-- `availability.rs`：统一的 provider 与模型可用性判定（`Availability`：`Ready`、`Unconfigured` 附 `ConfigurationRequirement`、`Invalid` 附 `reason`）及缺项补救提示，`prepare`、`resolve`、`models` 与 `auth status` 共用这一处判定。
-- `protocol/`：协议适配器，每个协议一个模块（`chat_completions`、`responses`、`anthropic_messages`、`generate_content`、`interactions`），负责该协议的请求体、流式事件、用量换算与 features；各适配器共用的消息投影 `protocol/projection/` 是唯一的生产消息 codec。这里不出现任何厂商名。
-- `provider/`：provider 注册表，包括内置表、`providers.toml` 的解析与合并（含是否在 `providers.toml` 显式声明的 `declared` 事实）、按 `ProviderId` 查找。这里不含协议代码。
-- `metadata/`：内置快照、缓存与手写元数据的合并与刷新，以及账号目录的解析、缓存和单次拉取。定时与并发触发协调归 API；账号 GET 经共享认证对象取 token，发布时核对凭据生命周期。
-- `src/models.rs`：按 `ModelCandidateQuery`（`List { provider, ready_only }` 或 `Target(ModelRef)`）查询候选、限制、价格、`availability`、可选档位与缺失元数据警告。
-- `auth/`：凭据库，含 `auth.json` 格式、文件读写、API key 管理、凭据事实读取与比较更新；`auth/siwc/` 封装 Sign in with ChatGPT，内部按生命周期、完整登录与 OpenAI 端点操作分文件；网关共享的认证生命周期对象管理登录、取可用 token、登出和移除，`auth status` 组合凭据事实与 `availability` 输出状态。`stop_logins` 只停止登录，最终 `shutdown` 排空认证工作，顺序见会话合同。
-- `transport.rs`：请求标识、错误诊断、可重试判断与 Retry-After；`client.rs`：HTTP 行为、Turn 内 client 复用与连接安全；`sse.rs`：流解析；`types.rs`：请求信封、工具定义与流事件。
-- `reply.rs`：同步回复累积器，统一有序部件、实时文字投影、限额与完整消息；`reply_stream.rs`：惰性流消费、取消与 deadline、唯一终态交付。
-- `stub.rs`：测试客户端；`logging.rs`：日志初始化。
-- 共享 URL/DNS/地址检查归 `net-guard`，client 将中立错误映射为 `LlmError`。凭据只经凭据库读写，脱敏所用的已知值也取自凭据库；新增凭据种类时一并纳入脱敏。
+## 先读
 
-## 上位文档
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [模型接入](../../docs/architecture/llm/README.md)、[工程规范](../../docs/development/engineering.md) |
+| 协议适配器、消息投影与 features | [协议适配器与 features](../../docs/architecture/llm/protocols.md)、[对话数据与模型投影](../../docs/architecture/session/conversation.md) |
+| provider 注册表、URL 与 HTTP 传输 | [provider 配置](../../docs/architecture/llm/providers.md)、[会话存储与并发](../../docs/architecture/session/concurrency.md#输入与传输限制)、[Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md#模型请求与执行预算) |
+| 模型元数据、可用性、推理档位与计费 | [模型引用与元数据](../../docs/architecture/llm/models.md)、[推理档位](../../docs/architecture/llm/reasoning.md)、[用量、缓存与费用](../../docs/architecture/llm/usage.md) |
+| `auth.json` 与 Sign in with ChatGPT | [凭据与 Sign in with ChatGPT](../../docs/architecture/llm/credentials.md)、[重开、取消与未完成状态](../../docs/architecture/session/recovery.md#停止后台) |
+| 工具 wire 名称与验证分层 | [LANCET 工具执行](../../docs/architecture/lancet.md#生成与校验)、[测试工程](../../docs/development/testing.md) |
 
-修改前读取[模型接入合同](../../docs/architecture/llm/README.md)、[会话的对话与模型请求合同](../../docs/architecture/session/README.md)、[测试工程](../../docs/development/testing.md)；Tool 网络路径由 [LANCET 合同](../../docs/architecture/lancet.md)另行维护，不能覆盖本层 provider 策略。
+## 约束
 
-## 局部约束
+- `RequestGateway` 对调用方封装 endpoint、凭据与协议 `features`，调用方只传入 `ProviderId`、`ModelId`、推理档位与类型化请求内容；网关在 `new` 时筛选平台 TLS 根并由后台将同一份 DER 传给 Tool Host，每次请求经 `GatewayTurn::resolve` 读取当前配置与凭据，见[组成与归属](../../docs/architecture/llm/README.md#组成与归属)与[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)。
+- 适配器严格按 wire 协议划分，厂商差异全部通过该协议的 `features` 表达（模块内保持无厂商名硬编码，新增 feature 先修订[协议适配器与 features](../../docs/architecture/llm/protocols.md#features)）；输出 token 上限仅在协议要求必填时按[适配器的职责](../../docs/architecture/llm/protocols.md#适配器的职责)发送，工具名按原样作为 wire 名称发送，见[生成与校验](../../docs/architecture/lancet.md#生成与校验)。
+- 所有请求构造统一经过 `request_messages_with_replay`，回放材料与可选不透明 provider call ID 按[回放来源](../../docs/architecture/llm/protocols.md#回放来源)透传或裁剪；流解析器只翻译部件增量并交给独占 `AttemptAssembly` 的 `reply.rs` 与 `reply_stream.rs`（正式流、`stub` 与测试客户端共用），使实时增量与完整回复同源并在超限时立即停止消费；`wire_to_native` 专用于完整 wire 夹具逐块喂入同一累积器（超限映射为 `ProjectionError::OutputLimitExceeded`），用量统一经 `wire_usage` 换算，JSON 解析以显式条件分支处理正常控制流。
+- 凭据统一经 `auth/` 读写，脱敏所需的已知凭据值从同一凭据库提取，新增凭据类型同步纳入提取列表，见 [`auth.json`](../../docs/architecture/llm/credentials.md#authjson)。
+- `client.rs` 在每个 Turn 首次请求时于 blocking 线程调用 `net-guard` 解析、校验并固定地址（`localhost`、`127.0.0.1`、`::1` 适用一致的 loopback 例外），在本 Turn 内复用已完整读毕的客户端，响应未完整结束时丢弃客户端以便下次重新解析；认证头与按需获取的 SIWC access token 按次附加，公共请求头固定为自有 `User-Agent`、`Accept` 与 `x-client-request-id`（修订请求头先更新[输入与传输限制](../../docs/architecture/session/concurrency.md#输入与传输限制)）。
+- HTTP 客户端固定使用 `redirect::Policy::none()` 关闭自动重定向（若未来开启重定向，须对每一跳重新执行地址解析、校验与固定）；`reqwest` 配置自有重试策略，只重发服务端明确未处理的请求并在每次重发时记 `WARN` 日志，`hyper-util` 对尚未发出请求的重连通过新建连接 `DEBUG` 日志留痕，其余已被接收的请求结果直接交由协调层按冻结预算处理，见[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)。
+- `logging.rs` 将日志输出到 stderr，依据交互终端状态与 `NO_COLOR` 控制 ANSI 颜色，保持 stdout 专供结构化输出。
+- 本 crate 之外：底层 URL/IP/DNS 分类原语由 `net-guard` 负责；持久对话类型由 `lattice-conversation` 负责；元数据刷新定时与并发调度、模型循环与重试预算由 `lattice-api` 负责；会话树、profile 发现与 Tool 网络执行分别由 `lattice-session`、`lattice-profile` 和 `lancet-runtime` 负责。
 
-- 调用方只给出 provider `id`、模型 `id`、推理档位与请求内容，不接触 endpoint、key 与 features；网关不向外暴露连接材料，每次请求按当前配置与凭据解析。
-- 协议差异留在适配器与 client 层，高层只消费类型化 `LlmEvent`、`LlmError` 和模型元数据。适配器按协议划分，厂商差异只用该协议的 features 表达，不按 URL 或 provider `id` 判断厂商；新增 feature 先修订模型接入合同。
-- 所有请求 builder 经共同投影入口 `request_messages_with_replay`；`protocol/projection` 的 `wire_to_native` 只用于完整 wire 夹具的解码，逐块交给共同回复累积器，usage 经 `wire_usage`。解析器只翻译部件增量，不保留完整内容缓冲；正式流、stub 与测试客户端共用 `reply_stream`，显示增量与完整消息出自同一次累积。累积器独占流式 `AttemptAssembly`，超限停止消费且不返回部分消息；完整 wire 夹具路径映射为 `ProjectionError::OutputLimitExceeded`。不新建 ToolCall/ToolResult codec。
-- provider call ID 是可选不透明 wire 元数据，不是领域 Invocation 身份，不合成 `tc_*` 身份。回放材料按[回放来源](../../docs/architecture/llm/protocols.md#回放来源)的两级规则投影。
-- `validate_base_url` 的 DNS 检查仅尽力而为，连接前解析并固定地址才是主要 SSRF 防线：每个 Turn 第一次请求时在 blocking 线程上解析、校验并固定地址，构建的 client 在本 Turn 内复用；响应没有完整结束（发送失败、流没交付 `Done` 就结束或出错、错误正文读到一半中断）时丢弃，下次尝试重新解析。不跨 Turn 复用，认证头不放进 client 默认头；SIWC 的 access token 每次请求前取得。localhost、127.0.0.1、::1 使用一致的 loopback 例外，其他私有/保留 IP literal 拒绝。
-- 一次尝试对应一个被 provider 接收的请求。HTTP 库只重发 provider 明确没处理的请求：reqwest 那层换成自有策略（判断同默认，每次重发记 WARN），hyper-util 对未发出请求的重发无法关闭，以新建连接的 DEBUG 日志间接可见。不得让 HTTP 库重发已被处理的请求；其他重试一律由协调层按冻结策略执行并逐次记录。
-- 除认证头与协议要求的头外，请求头只加 `User-Agent`（LATTICE 自己的标识，不冒充其他客户端）、`Accept` 与取 SessionId 的 `x-client-request-id`；新增发给 provider 的头先修订会话合同。
-- HTTP 默认 `redirect::Policy::none()`；重新允许重定向必须逐跳重新执行地址与 pinning 检查，避免向未经验证的主机转送 body 和密钥。不能依赖首跳校验保护后续跳。
-- DNS rebinding 防御结合连接地址固定和 `net-guard` 分类/后缀规则。扩大启发式或后缀范围须有测试，并如实报告未覆盖风险。
-- 工具名原样作为 wire 名发给每个 provider，不做编解码，命名规则见 [LANCET 合同](../../docs/architecture/lancet.md)。
-- 日志写 stderr，ANSI 取决于交互 stderr 与 `NO_COLOR`，不污染 JSONL stdout。输出上限只在协议要求时发送，取值见[模型接入合同](../../docs/architecture/llm/protocols.md#适配器的职责)，不在别处硬编码；JSON 解析不以哨兵错误值承担正常控制流。
+## 验证
 
-## 验证入口
-
-- 运行 `cargo test -p lattice-llm`；消息投影的测试对照 `tests/fixtures/projection/` 中的正式 wire fixtures。
-- 新增或修改协议适配器、feature 时，测试要覆盖流、Tool call、用量、错误映射，以及该 feature 每个取值的请求体；再运行 agent 与 API 的流式测试。其余检查对象见[模型接入合同](../../docs/architecture/llm/README.md#验证与承接)。
-- 改了 URL 或 DNS 处理时，测试要覆盖私网地址、localhost、DNS rebinding、重定向与地址固定。
+| 改动 | 运行 |
+| --- | --- |
+| 任何改动 | `cargo test -p lattice-llm`（含对照 `tests/fixtures/projection/` 正式 wire 夹具的消息投影测试） |
+| 新增或修改协议适配器、`features` | 在 `cargo test -p lattice-llm` 中覆盖流解析、ToolCall、用量、错误映射及该 feature 各取值的请求体，再运行 `cargo test -p lattice-agent` 与 `cargo test -p lattice-api` |
+| 修改 URL、DNS、重定向或地址固定 | 在 `cargo test -p lattice-llm` 中覆盖私网与保留地址、`localhost`、DNS rebinding 域名、重定向拒绝与连接地址固定 |
