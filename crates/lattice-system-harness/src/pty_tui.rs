@@ -1,18 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `PtyTuiDriver`: drive the prototype TUI through a PTY for smoke scenarios.
+//! `PtyTuiDriver`：经 PTY 驱动 TUI，用于冒烟场景。
 //!
-//! RFC #41 (Codeberg #19) decision three: PTY is only for one or two smoke
-//! scenarios that prove the TUI entrypoint still wires into the same
-//! `stream_turn` chain. It does **not** assert on colors, prompt shape, or
-//! layout — those are prototype presentation details that must not become
-//! long-term contract. Ready recognition (alternate-screen enter) and ANSI
-//! cleanup live **inside this driver** only; scenario-level assertions never
-//! touch display details.
+//! 依据 #41 的第三项决定，PTY 只用于一两个冒烟场景，证明 TUI 入口仍接到与 CLI 相同的
+//! 后台提交与执行链路。颜色、提示符形状与布局属于展示细节，场景断言只核对行为；就绪
+//! 识别（进入备用屏幕）与 ANSI 清理都在本驱动内部完成。
 //!
-//! Linux-only. The driver is built on `portable-pty`, a general test library
-//! that satisfies the harness boundary (no product crate deps).
+//! 只支持 Linux。驱动基于通用测试库 `portable-pty`，符合 harness 的依赖边界。
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};

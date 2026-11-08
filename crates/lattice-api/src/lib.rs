@@ -4,7 +4,7 @@
 //! LATTICE 公开应用接口。
 //!
 //! [`SessionApi`] 提供会话操作，[`local::LocalClient`] 提供本地提交与观察，
-//! [`start_turn`] 提供后台执行接线；run_turn/stream_turn 仅供测试复用执行核心。
+//! [`start_turn`] 提供后台执行接线；`run_turn` 只在测试或 `test-utils` 下复用执行核心。
 //!
 //! # Boundary
 //!
