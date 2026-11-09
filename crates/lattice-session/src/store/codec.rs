@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{InvocationId, SessionId, TurnId};
+use lattice_conversation::{InvocationId, SessionId, TurnId};
 use redb::{ReadableTable, TableDefinition};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
@@ -39,7 +39,7 @@ pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Resul
 
 pub(super) fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_value(value)
-        .map(|v| lancet_protocol::canonical_json(&v).into_bytes())
+        .map(|v| lattice_conversation::canonical_json(&v).into_bytes())
         .map_err(|_| invalid("record", "serialization failed"))
 }
 pub(super) fn encode<T: Serialize + DeserializeOwned>(value: &T) -> Result<Vec<u8>> {

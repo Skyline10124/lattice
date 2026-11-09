@@ -6,7 +6,7 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 重导出对话类型、协议上限常量及 `lancet-protocol` 的调用身份与规范 JSON |
+| `src/lib.rs` | 重导出对话类型、协议上限常量，以及 `lancet-protocol` 的调用身份、地址、`canonical_json` 与 `arguments_digest`，`lattice-*` 经此导入这些项 |
 | `src/effort.rs` | 推理档位 `Effort` 解析与排序 |
 | `src/model_selection.rs` | `ProviderId`、`ModelId`、`ModelRef` 构造与字符、长度校验 |
 | `src/message.rs` | 有序 `NativeMessage<ToolCallState>`、`MessagePart`、回放来源 `ReplayOrigin` 与 64 KiB `OpaqueProviderState` |

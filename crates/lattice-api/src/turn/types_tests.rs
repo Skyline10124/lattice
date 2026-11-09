@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::types::{TurnEvent, TurnRef};
-use lancet_protocol::{SessionId, TurnId};
+use lattice_conversation::{SessionId, TurnId};
 use lattice_session::store::*;
 
 #[test]

@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 当前代会话库的短期门面；不自行打开、创建或替换数据库。
-use lancet_protocol::SessionId;
+use lattice_conversation::SessionId;
 use lattice_session::store::{SessionRead, SessionRecord, SessionStore, SessionUsage, StoreError};
 use std::sync::Arc;
 

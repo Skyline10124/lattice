@@ -20,7 +20,7 @@ pub fn prepare_terminal(
     validate::evidence(binding, &evidence)?;
     let payload = match result {
         Ok(value) => {
-            let bytes = lancet_protocol::canonical_json(&value);
+            let bytes = lattice_conversation::canonical_json(&value);
             let digest = lattice_conversation::tool_content_digest(&bytes);
             let byte_length = bytes.len() as u64;
             ResultPayload::Succeeded(if bytes.len() > MAX_TOOL_CONTENT_BYTES {

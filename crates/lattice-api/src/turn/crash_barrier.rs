@@ -3,7 +3,8 @@
 
 //! 显式故障产物的提交后停点；marker 仅记录身份和事务序号，不复制正文。
 use super::coordinator::{CoordinatorIoError, CoordinatorStoreIo};
-use lancet_protocol::{InvocationBinding, InvocationId, SessionId, TurnId};
+use lancet_protocol::InvocationBinding;
+use lattice_conversation::{InvocationId, SessionId, TurnId};
 use lattice_session::store::ChangeSeq;
 use serde::Serialize;
 use std::{io::Write, path::PathBuf};

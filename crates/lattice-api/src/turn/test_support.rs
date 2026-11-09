@@ -93,7 +93,8 @@ impl TestFixture {
         let execution = super::execute::start_execution(super::execute::ExecutionInput {
             session: self.api.clone(),
             layout: self.layout.clone(),
-            turn_id: lancet_protocol::TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap(),
+            turn_id: lattice_conversation::TurnId::parse(&uuid::Uuid::new_v4().to_string())
+                .unwrap(),
             workspace: self.root.clone(),
             request,
             prepared_model: None,

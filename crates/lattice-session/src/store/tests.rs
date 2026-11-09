@@ -3,14 +3,11 @@
 
 use super::codec::*;
 use super::*;
-use lancet_protocol::{
-    CellEvidenceTriple, CepError, CepErrorCode, CepErrorData, InvocationId, ModelAttemptKey,
-    Retriability, SessionId, TurnId,
-};
+use lancet_protocol::{CellEvidenceTriple, CepError, CepErrorCode, CepErrorData, Retriability};
 use lattice_conversation::{
-    CostEstimate, MessagePart, MessageRole, MessageSemantic, ModelId, NativeMessage,
-    OpaqueProviderState, Protocol, ProviderId, TokenUsage, ToolResultOutcome, UnboundToolCall,
-    UsageCompleteness,
+    CostEstimate, InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey,
+    ModelId, NativeMessage, OpaqueProviderState, Protocol, ProviderId, SessionId, TokenUsage,
+    ToolResultOutcome, TurnId, UnboundToolCall, UsageCompleteness,
 };
 use lattice_store::{ProjectStoreKey, StateLayout};
 use redb::ReadableTable;
@@ -4380,7 +4377,7 @@ fn rejected_error_round_trip_and_privacy() {
     let mut bad = wire.clone();
     bad["result"]["payload"]["payload"]["unknown"] = json!(true);
     let mut bytes = VERSION.to_be_bytes().to_vec();
-    bytes.extend(lancet_protocol::canonical_json(&bad).as_bytes());
+    bytes.extend(lattice_conversation::canonical_json(&bad).as_bytes());
     assert!(codec::decode::<InvocationTerminal>("steps", "test", &bytes).is_err());
     let mut old = wire;
     old["result"]["payload"]["payload"]

@@ -798,8 +798,10 @@ async fn diagnostic_and_owner_only_heads_repeat_the_current_entry() {
         .insert(input.turn_id, diagnostic.clone());
     // CEP 通知只唤醒推送，不标记任何节点；不能借节点变化掩盖缺失的补推。
     sink.emit(crate::TurnEvent::CepCallStarted {
-        invocation_id: lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
-            .unwrap(),
+        invocation_id: lattice_conversation::InvocationId::parse(
+            "00000000-0000-4000-8000-000000000001",
+        )
+        .unwrap(),
         method: "test".into(),
         semantic_stage: "test".into(),
         guard_stage: "test".into(),

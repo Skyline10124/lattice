@@ -2,9 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::TurnId;
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, UnboundToolCall,
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, TurnId, UnboundToolCall,
 };
 use lattice_session::{ProjectStoreKey, StateLayout};
 use serde_json::json;

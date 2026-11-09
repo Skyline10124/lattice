@@ -7,12 +7,17 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_session::store::*;
 use std::sync::Arc;
 
-fn id() -> lancet_protocol::TurnId {
-    lancet_protocol::TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap()
+fn id() -> lattice_conversation::TurnId {
+    lattice_conversation::TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap()
 }
-fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::TurnId) {
+fn seed(
+    fixture: &TestFixture,
+) -> (
+    lattice_conversation::SessionId,
+    lattice_conversation::TurnId,
+) {
     let sid =
-        lancet_protocol::SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).unwrap();
+        lattice_conversation::SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).unwrap();
     let turn = id();
     fixture
         .store
@@ -317,7 +322,7 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
     let fixture = setup_fixture(llm.clone(), &[]);
     let mut invalid = fixture.request.clone();
     invalid.session_id =
-        Some(lancet_protocol::SessionId::parse("00000000000000000000000000000001").unwrap());
+        Some(lattice_conversation::SessionId::parse("00000000000000000000000000000001").unwrap());
     let (execution, _) = fixture.start(invalid);
     assert!(
         matches!(execution.acceptance.await.unwrap(), Err(ApiError::Store(error)) if matches!(error.as_ref(), StoreError::NotFound { .. }))

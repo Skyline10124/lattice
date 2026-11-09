@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
-use lancet_protocol::SessionId;
+use lattice_conversation::SessionId;
 use lattice_profile::LoadedAgentProfile;
 use lattice_session::store::{TurnDetail, TurnSummary, UsageSummary};
 
@@ -71,25 +71,25 @@ pub enum TurnEvent {
         user_node: lattice_session::store::NodeId,
     },
     ModelStarted {
-        key: lancet_protocol::ModelAttemptKey,
+        key: lattice_conversation::ModelAttemptKey,
         origin: lattice_session::store::AttemptOrigin,
         model: String,
     },
     TokenDelta {
-        key: lancet_protocol::ModelAttemptKey,
+        key: lattice_conversation::ModelAttemptKey,
         content: String,
     },
     ReasoningDelta {
-        key: lancet_protocol::ModelAttemptKey,
+        key: lattice_conversation::ModelAttemptKey,
         content: String,
     },
     LlmRetry {
-        key: lancet_protocol::ModelAttemptKey,
+        key: lattice_conversation::ModelAttemptKey,
         delay_ms: u64,
         notice: lattice_session::store::Notice,
     },
     ModelFinished {
-        key: lancet_protocol::ModelAttemptKey,
+        key: lattice_conversation::ModelAttemptKey,
         finish_reason: Option<String>,
         usage: Option<lattice_conversation::TokenUsage>,
         usage_kind: lattice_conversation::UsageCompleteness,
@@ -100,24 +100,24 @@ pub enum TurnEvent {
         calls: Vec<lancet_protocol::InvocationBinding>,
     },
     ToolCallStarted {
-        id: lancet_protocol::InvocationId,
+        id: lattice_conversation::InvocationId,
         name: String,
     },
     ToolCallFinished {
-        id: lancet_protocol::InvocationId,
+        id: lattice_conversation::InvocationId,
         name: String,
         outcome: lattice_conversation::ToolResultOutcome,
         material: lattice_session::store::MaterialSummary,
         error_summary: Option<String>,
     },
     CepCallStarted {
-        invocation_id: lancet_protocol::InvocationId,
+        invocation_id: lattice_conversation::InvocationId,
         method: String,
         semantic_stage: String,
         guard_stage: String,
     },
     CepCallFinished {
-        invocation_id: lancet_protocol::InvocationId,
+        invocation_id: lattice_conversation::InvocationId,
         method: String,
         ok: bool,
         semantic_stage: String,
@@ -146,13 +146,13 @@ pub enum TurnEvent {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TurnRef {
-    pub session_id: lancet_protocol::SessionId,
-    pub turn_id: lancet_protocol::TurnId,
+    pub session_id: lattice_conversation::SessionId,
+    pub turn_id: lattice_conversation::TurnId,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttemptSegments {
-    pub key: lancet_protocol::ModelAttemptKey,
+    pub key: lattice_conversation::ModelAttemptKey,
     pub segments: Vec<TextSegment>,
 }
 
@@ -169,7 +169,7 @@ pub enum TurnAcceptance {
         turn: TurnDetail,
     },
     ConfirmationUnknown {
-        turn_id: lancet_protocol::TurnId,
+        turn_id: lattice_conversation::TurnId,
         session_id: SessionId,
     },
 }

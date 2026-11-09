@@ -8,12 +8,11 @@ use super::{
     observer::ObserverSink,
     types::{TurnEvent, TurnRef},
 };
-use lancet_protocol::{ModelAttemptKey, TurnId};
 use lattice_agent::{
     ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
     ModelStopCause,
 };
-use lattice_conversation::ConversationItem;
+use lattice_conversation::{ConversationItem, ModelAttemptKey, TurnId};
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -648,7 +647,7 @@ fn map_stop(cause: ModelStopCause) -> StopCause {
 
 fn history(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<Vec<ConversationItem>> {
     let mut current = read.session(session_id)?.current;
     let mut items = Vec::new();
