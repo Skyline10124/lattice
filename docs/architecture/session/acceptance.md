@@ -31,7 +31,7 @@ status: active
 
 配置的来源：
 
-- **profile。** 会话的 profile 副本；新会话或提交指定了 agent 时，由 `lattice-profile::load_agent_profile` 发现并加载该 agent 的 profile（先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，核对全局目录与文件权限、解析字段与系统提示），再在协调层解析外部策略文件。
+- **profile。** 会话的 profile 副本；新会话或提交指定了 agent 时，由 `lattice-profile::load_agent_profile` 发现并加载该 agent 的 profile（先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，核对全局目录与文件权限，仅接受 `schema_version = 1`、`[agent]`、`[prompt]` 与可选 `[llm]`，解析字段与系统提示；出现已移除的 `[lancet]` 或 `[tools]` 时直接拒绝，见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#6-profile-删除-lancet-与-tools)）。
 - **provider、模型、元数据与凭据。** 提交的选择或副本中的 `ModelRef`；接受时由 `GatewayTurn::prepare` 在一次准备中读取当前配置，核对 provider 与模型处于 `ready`（满足声明、凭据与端点校验，见[可用性判定](../llm/models.md#可用性判定)），并按本次档位策略选定推理档位（见[会话的 profile 副本](settings.md#会话的-profile-副本)）。输出上限、推理预算与凭据本身不在接受时冻结，由请求网关每次请求时按当前状态取得，见[元数据的来源与合并](../llm/models.md#元数据的来源与合并)与[凭据](../llm/credentials.md#凭据)。
 - **TLS 根证书。** 后台启动时载入，见[配置来源与后台启动](#配置来源与后台启动)。
 
@@ -75,7 +75,7 @@ provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn �
 
 ### 配置拒绝的原因
 
-新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找、权限校验、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、provider 与模型未满足的可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效）、模型引用与带来源归属的推理档位错误（`--effort`、`agent.toml` 的 `[agent].effort` 或会话 profile 副本），以及没有可用的根证书时所选 provider 的端点是 https。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
+新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找、权限校验、已移除或禁止的顶层节（如 `[lancet]`、`[tools]`）、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、provider 与模型未满足的可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效）、模型引用与带来源归属的推理档位错误（`--effort`、`agent.toml` 的 `[agent].effort` 或会话 profile 副本），以及没有可用的根证书时所选 provider 的端点是 https。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
 
 说明由 [`ConfigRejection`](../../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
@@ -92,7 +92,7 @@ provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn �
 
 TOML 解析错误给出路径、行号与解析器的错误描述，不附源码行。说明是单行文字：控制字符换成空格，空白折叠，最多 1024 个字符，超出时以 `…` 截断。
 
-以下拒绝保持固定文本：外部策略文件的解析与校验、提交输入超限或无法解析、持久配置校验，以及后台其余的 `ApiError::BadRequest(String)`。
+以下拒绝保持固定文本：提交输入超限或无法解析、持久配置校验，以及后台其余的 `ApiError::BadRequest(String)`。
 
 ## 模型请求与执行预算
 

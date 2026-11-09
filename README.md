@@ -37,11 +37,11 @@ lattice --help
 
 ## 快速开始
 
-以下示例创建一个只允许读取项目文件的 Agent，使用模型引用 `anthropic/claude-sonnet-4-6`。
+以下示例创建一个纯对话 Agent，使用模型引用 `anthropic/claude-sonnet-4-6`。
 
 ### 1. 准备配置
 
-进入希望读取的项目根目录，创建配置目录：
+进入项目根目录，创建配置目录：
 
 ```sh
 mkdir -p .lattice/agents/reader
@@ -59,15 +59,12 @@ name = "reader"
 model = "anthropic/claude-sonnet-4-6"
 
 [prompt]
-system = "请用中文回答。先读取相关文件，再根据实际内容说明项目结构与实现。"
-
-[tools]
-enabled = ["observe__workspace"]
+system = "请用中文回答，表达简洁准确。"
 ```
 
 配置目录名称与 `[agent].name` 保持一致。
 后台在新会话首次提交或显式选择 agent 时读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。全局目录与其中的 profile 须属于当前用户、不可被同组或其他用户写入（默认的 0755/0644 即可），路径最后一段不能是符号链接，否则提交时按配置错误拒绝。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。接受事务会保存 profile 的有效副本和提示引用；后续未显式选择 agent 时使用副本，即使源文件修改或删除也不受影响。退回历史节点或根节点不会改变副本；显式选择同名 agent 可重新加载源配置。
-这里仅启用工作区读取工具，不授予创建、编辑文件或抓取网页的工具权限。
+当前版本不向模型提供工具，所有会话以纯对话运行；`agent.toml` 含 `[lancet]` 或 `[tools]` 时会被拒绝加载，需要删除。
 
 ### 2. 配置模型凭据
 
@@ -87,8 +84,7 @@ provider 来自内置表与用户级 `~/.lattice/providers.toml`；环境变量�
 auto_refresh = false
 ```
 
-> 密钥不要写入提交到仓库的文件。只读工具配置不代表离线运行，
-> 对话仍需要调用模型服务。
+> 密钥不要写入提交到仓库的文件。对话需要调用模型服务。
 
 ### 3. 启动终端界面
 

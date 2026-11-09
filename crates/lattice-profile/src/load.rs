@@ -17,7 +17,6 @@ use crate::discovery::{DiscoveryPaths, discover_profile_path};
 use crate::error::ProfileError;
 use crate::schema::{
     AgentProfile, AgentSection, LlmSection, RawAgentProfile, RawPromptSection, RawRetryPolicy,
-    TYPED_LANCET_SUB_TABLES,
 };
 
 const MAX_SYSTEM_PROMPT_BYTES: usize = 2 * 1024 * 1024;
@@ -36,12 +35,13 @@ pub struct LoadedAgentProfile {
     pub system_prompt: String,
 }
 
-/// Forbidden top-level sections that must be rejected before deserialization.
+/// 严格反序列化前拒绝的顶层配置节。
 ///
-/// `workspace` is the retired Upper microVM section (#62, Codeberg #40):
-/// legacy profiles that still declare it fail here with a named, actionable
-/// error rather than a bare `deny_unknown_fields` rejection.
+/// `lancet` 与 `tools` 随旧 LANCET 移除（ADR 0009 决策 6）；`workspace` 为早期
+/// Upper microVM 退役节。预扫描在此给出明确诊断，而非落入泛化的 `deny_unknown_fields`。
 const FORBIDDEN_SECTIONS: &[&str] = &[
+    "lancet",
+    "tools",
     "capabilities",
     "handoff",
     "orchestrator",
@@ -122,12 +122,10 @@ pub fn load_agent_profile(
             effort: raw.agent.effort,
             description: raw.agent.description,
         },
-        tools: raw.tools,
         llm: LlmSection {
             timeout_secs,
             retry,
         },
-        lancet: raw.lancet,
     };
 
     Ok(LoadedAgentProfile {
@@ -358,92 +356,20 @@ fn check_forbidden_sections(path: &Path, content: &str) -> Result<(), ProfileErr
     for (key, _) in table {
         let lower = key.to_lowercase();
         if FORBIDDEN_SECTIONS.contains(&lower.as_str()) {
+            let reason = match lower.as_str() {
+                "lancet" | "tools" => {
+                    format!("`[{lower}]` has been removed; delete this section from agent.toml")
+                }
+                _ => format!("`[{key}]` is not part of the v1 agent profile schema"),
+            };
             return Err(ProfileError::ForbiddenSection {
                 path: path.to_path_buf(),
                 section: key.clone(),
-                reason: format!("`[{key}]` is not part of the v1 agent profile schema"),
+                reason,
             });
         }
     }
 
-    check_retired_keys(path, table)?;
-
-    Ok(())
-}
-
-/// Retired `[lancet.<section>].<key>` entries: section, key, replacement text.
-const RETIRED_LANCET_KEYS: &[(&str, &str, &str)] = &[(
-    "observation",
-    "allowed_roots",
-    "observation scope is `[lancet.project_root].root`; \
-     read visibility is `[lancet.workspace]`",
-)];
-
-/// Reject retired `[lancet.*]` keys with an error that names the replacement.
-///
-/// `deny_unknown_fields` alone would reject these, but only as a bare "unknown
-/// field". These keys were once accepted and validated, so an operator's profile
-/// may still carry them; a named error is what tells them the setting never took
-/// effect and what to use instead (#121).
-fn check_retired_keys(
-    path: &Path,
-    table: &toml::map::Map<String, toml::Value>,
-) -> Result<(), ProfileError> {
-    let Some(lancet) = table.get("lancet").and_then(toml::Value::as_table) else {
-        return Ok(());
-    };
-    check_lancet_sub_table_spelling(path, lancet)?;
-    for (section, key, replacement) in RETIRED_LANCET_KEYS {
-        let present = lancet
-            .get(*section)
-            .and_then(toml::Value::as_table)
-            .is_some_and(|sub| sub.contains_key(*key));
-        if present {
-            return Err(ProfileError::ForbiddenField {
-                path: path.to_path_buf(),
-                section: format!("lancet.{section}"),
-                field: (*key).to_string(),
-                reason: format!(
-                    "retired: it was validated but never reached any read decision, so it left \
-                     the observation surface wider than it implied. Use {replacement}"
-                ),
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Reject a case variant of a typed `[lancet.*]` sub-table.
-///
-/// Anything genuinely unknown under `[lancet]` lands in
-/// `LancetSection::extensions` by design, so a future sub-table does not break
-/// older builds. A case variant of a typed name is not a future sub-table
-/// though: without this check `[lancet.Observation]` deserializes into
-/// `extensions` and every key inside it — including the retired ones above and
-/// the limits that are still live — is dropped without a word (#121).
-fn check_lancet_sub_table_spelling(
-    path: &Path,
-    lancet: &toml::map::Map<String, toml::Value>,
-) -> Result<(), ProfileError> {
-    for key in lancet.keys() {
-        if TYPED_LANCET_SUB_TABLES.contains(&key.as_str()) {
-            continue;
-        }
-        let lower = key.to_lowercase();
-        if let Some(expected) = TYPED_LANCET_SUB_TABLES
-            .iter()
-            .find(|typed| **typed == lower.as_str())
-        {
-            return Err(ProfileError::ForbiddenSection {
-                path: path.to_path_buf(),
-                section: format!("lancet.{key}"),
-                reason: format!(
-                    "sub-table names are case-sensitive; `[lancet.{key}]` would be ignored \
-                     entirely. Write `[lancet.{expected}]`"
-                ),
-            });
-        }
-    }
     Ok(())
 }
 
@@ -796,71 +722,81 @@ system_path = "subdir"
         assert!(err.to_string().contains("not a regular file"), "got: {err}");
     }
 
-    /// #121: a profile still carrying the retired `allowed_roots` key must fail
-    /// with an error that names the key and the supported replacement, not a
-    /// bare serde "unknown field" — and never load as if the narrowing applied.
+    /// ADR 0009 决策 6：`[lancet]` 与 `[tools]`（含只写子表、点号键、内联表与大小写变体）
+    /// 在加载预扫描中统一以 `ForbiddenSection` 拒绝，并指明该节已移除、需从 `agent.toml` 删除。
     #[test]
-    fn reject_retired_observation_allowed_roots_with_named_error() {
-        let fixture = ProjectProfileFixture::new(
-            "t",
-            r#"
-schema_version = 1
+    fn removed_lancet_and_tools_sections_are_rejected_with_removal_diagnostic() {
+        let lancet_reason = "`[lancet]` has been removed; delete this section from agent.toml";
+        let tools_reason = "`[tools]` has been removed; delete this section from agent.toml";
 
-[agent]
-name = "t"
-model = "anthropic/claude-sonnet-4-6"
+        let cases = [
+            ("top_level_lancet", "[lancet]", "lancet", lancet_reason),
+            (
+                "top_level_tools",
+                "[tools]\nenabled = [\"observe__workspace\"]",
+                "tools",
+                tools_reason,
+            ),
+            (
+                "sub_table_only_lancet_workspace",
+                "[lancet.workspace]\ndenied_write_patterns = [\".git/**\"]",
+                "lancet",
+                lancet_reason,
+            ),
+            (
+                "dotted_lancet_key",
+                "lancet.workspace.denied_write_patterns = [\".git/**\"]",
+                "lancet",
+                lancet_reason,
+            ),
+            (
+                "inline_lancet_table",
+                "lancet = { workspace = { denied_write_patterns = [] } }",
+                "lancet",
+                lancet_reason,
+            ),
+            (
+                "dotted_tools_key",
+                "tools.enabled = [\"observe__workspace\"]",
+                "tools",
+                tools_reason,
+            ),
+            (
+                "inline_tools_table",
+                "tools = { enabled = [\"observe__workspace\"] }",
+                "tools",
+                tools_reason,
+            ),
+            (
+                "case_variant_tools",
+                "[Tools]\nenabled = [\"observe__workspace\"]",
+                "Tools",
+                tools_reason,
+            ),
+            ("case_variant_lancet", "[Lancet]", "Lancet", lancet_reason),
+        ];
 
-[prompt]
-system = "hi"
-
-[lancet.observation]
-allowed_roots = ["src"]
-"#,
-        );
-
-        let err = fixture.load().unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("allowed_roots"), "got: {msg}");
-        assert!(msg.contains("lancet.observation"), "got: {msg}");
-        assert!(msg.contains("project_root"), "got: {msg}");
-    }
-
-    /// #121: a case variant of a typed `[lancet.*]` sub-table must fail. It
-    /// otherwise falls into `extensions` and every key inside it is dropped in
-    /// silence — including retired keys the pre-scan is supposed to catch and
-    /// limits that are still live.
-    #[test]
-    fn reject_case_variant_of_typed_lancet_sub_table() {
-        for (spelling, expected) in [
-            ("Observation", "observation"),
-            ("NETWORK", "network"),
-            ("Project_Root", "project_root"),
-        ] {
-            let fixture = ProjectProfileFixture::new(
-                "t",
-                &format!(
-                    r#"
-schema_version = 1
-
-[agent]
-name = "t"
-model = "anthropic/claude-sonnet-4-6"
-
-[prompt]
-system = "hi"
-
-[lancet.{spelling}]
-allowed_roots = ["src"]
-"#
-                ),
+        for (case_name, extra_toml, expected_section, expected_reason) in cases {
+            let content = format!(
+                "schema_version = 1\n{extra_toml}\n\n[agent]\nname = \"t\"\nmodel = \"anthropic/claude-sonnet-4-6\"\n\n[prompt]\nsystem = \"hi\"\n"
             );
-
-            let err = fixture.load().unwrap_err();
-            let msg = err.to_string();
-            assert!(msg.contains(spelling), "got: {msg}");
+            let fixture = ProjectProfileFixture::new("t", &content);
+            let err = fixture.load().expect_err(case_name);
+            let display = err.to_string();
+            let ProfileError::ForbiddenSection {
+                path,
+                section,
+                reason,
+            } = err
+            else {
+                panic!("{case_name}: 期望 ForbiddenSection，实际得到 {err:?}");
+            };
+            assert_eq!(path, fixture.toml_path, "{case_name}");
+            assert_eq!(section, expected_section, "{case_name}");
+            assert_eq!(reason, expected_reason, "{case_name}");
             assert!(
-                msg.contains(expected),
-                "the error must name the correct spelling: {msg}"
+                display.contains("Allowed sections: schema_version, [agent], [prompt], [llm]"),
+                "{case_name}: 允许节列表不应再含 [tools]，实际: {display}"
             );
         }
     }

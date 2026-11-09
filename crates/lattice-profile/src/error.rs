@@ -27,19 +27,11 @@ pub enum ProfileError {
     UnsupportedSchemaVersion { path: PathBuf, found: u64 },
 
     #[error(
-        "forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [tools], [llm]"
+        "forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [llm]"
     )]
     ForbiddenSection {
         path: PathBuf,
         section: String,
-        reason: String,
-    },
-
-    #[error("forbidden field `{field}` in [{section}] at {path}: {reason}")]
-    ForbiddenField {
-        path: PathBuf,
-        section: String,
-        field: String,
         reason: String,
     },
 

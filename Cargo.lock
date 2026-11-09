@@ -2894,7 +2894,6 @@ dependencies = [
 name = "lattice-profile"
 version = "0.1.0"
 dependencies = [
- "lancet-protocol",
  "lattice-conversation",
  "lattice-session",
  "rustix",

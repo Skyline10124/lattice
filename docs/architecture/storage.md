@@ -77,7 +77,7 @@ ProjectStoreKey = lower_hex(SHA256(
 ))
 ```
 
-键使用 64 个小写十六进制字符，不要求路径为 UTF-8。profile 的 `[lancet.project_root].root` 是策略范围，不参与寻址。
+键使用 64 个小写十六进制字符，不要求路径为 UTF-8。
 
 同一规范路径使用同一命名空间，项目移动到其他路径后得到不同键，无关项目复用原路径会看到既有命名空间。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目。Session 永久绑定一个键，路径迁移后创建新 Session，不自动 relink。会话库是全局的，项目键只作为 Session 的绑定字段和工作区历史库的目录地址。
 
