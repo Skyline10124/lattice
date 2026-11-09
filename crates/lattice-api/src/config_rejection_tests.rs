@@ -97,9 +97,15 @@ fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
                 "{prefix}[prompt]\nsystem='hi'\n[lancet.observation]\nallowed_roots=['{SENTINEL}']"
             ),
             vec![
-                "forbidden field `allowed_roots` in [lancet.observation]",
-                "retired:",
-                "[lancet.project_root].root",
+                "forbidden top-level section [lancet]",
+                "`[lancet]` has been removed; delete this section from agent.toml",
+            ],
+        ),
+        (
+            format!("{prefix}[prompt]\nsystem='hi'\n[tools]\nenabled=['{SENTINEL}']"),
+            vec![
+                "forbidden top-level section [tools]",
+                "`[tools]` has been removed; delete this section from agent.toml",
             ],
         ),
     ];
@@ -199,15 +205,6 @@ fn profile_payloads_are_redacted_and_legacy_bad_requests_stay_fixed() {
                 reason: SENTINEL.into(),
             },
             "forbidden",
-        ),
-        (
-            ProfileError::ForbiddenField {
-                path: path.clone(),
-                section: SENTINEL.into(),
-                field: SENTINEL.into(),
-                reason: SENTINEL.into(),
-            },
-            "forbidden field",
         ),
         (
             ProfileError::Protection {

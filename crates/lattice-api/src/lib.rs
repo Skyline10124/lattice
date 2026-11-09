@@ -23,7 +23,6 @@ mod session;
 mod stores;
 pub mod turn;
 
-pub use lancet_api::CompositionError;
 pub use lattice_conversation::Effort;
 pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
 pub use lattice_session::{
@@ -41,6 +40,7 @@ pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]
 pub use turn::run_turn;
 pub use turn::{
-    RunTurnRequest, RunTurnResult, STREAM_IDLE_TIMEOUT_SECS, TurnAcceptance, TurnCompletion,
-    TurnEvent, TurnExecution, TurnRef, start_turn,
+    NoTools, RunTurnRequest, RunTurnResult, STREAM_IDLE_TIMEOUT_SECS, ToolExecutor, ToolOutcome,
+    ToolSpec, TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution, TurnRef, TurnTools,
+    start_turn,
 };

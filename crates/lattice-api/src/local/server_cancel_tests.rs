@@ -118,7 +118,12 @@ async fn backend_with_roots(
     let layout = crate::StateLayout::in_state_root(dir.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
-    let backend = Backend::with_tls_roots(layout.clone(), Some(dir.path().into()), roots);
+    let backend = Backend::with_tls_roots(
+        layout.clone(),
+        Some(dir.path().into()),
+        roots,
+        Arc::new(crate::NoTools),
+    );
     let server = backend.clone();
     let task = tokio::spawn(async move {
         let mut connections = JoinSet::new();
@@ -271,29 +276,27 @@ async fn without_tls_roots_status_answers_http_is_accepted_and_https_is_rejected
 }
 
 #[tokio::test]
-async fn missing_or_invalid_external_policy_is_rejected_before_acceptance() {
+async fn removed_lancet_or_tools_section_is_rejected_before_acceptance() {
     let (dir, backend, client, task) = backend().await;
     let provider = Provider::start().await;
     config(dir.path(), &provider.endpoint);
     let profile = dir.path().join(".lattice/agents/local-test/agent.toml");
     let source = std::fs::read_to_string(&profile).unwrap();
-    std::fs::write(
-        &profile,
-        format!("{source}\n[lancet.policy]\npath='policy.toml'\n"),
-    )
-    .unwrap();
-    for contents in [
-        None,
-        Some("[network]\nallow_localhost=@\n"),
-        Some("[workspace]\ndenied_write_patterns=['../outside']\n"),
+    for (extra, section) in [
+        ("[lancet.policy]\npath='policy.toml'\n", "[lancet]"),
+        ("[tools]\nenabled=['observe__workspace']\n", "[tools]"),
     ] {
-        if let Some(contents) = contents {
-            std::fs::write(dir.path().join("policy.toml"), contents).unwrap();
-        }
+        std::fs::write(&profile, format!("{source}\n{extra}")).unwrap();
         let input = request(dir.path());
         let error = bounded(client.submit(input.clone())).await.unwrap_err();
         assert_eq!(error.kind, LocalErrorKind::BadRequest);
-        assert_eq!(error.message, "request or frozen configuration is invalid");
+        assert!(
+            error
+                .message
+                .contains(&format!("forbidden top-level section {section}")),
+            "unexpected error message: {}",
+            error.message
+        );
         idle(&backend).await;
         assert_eq!(
             client.turn(input.turn_id).await.unwrap_err().kind,
@@ -627,14 +630,6 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
         crate::LocalWorkspaceRoot::from_path(backend.layout.lattice_root().parent().unwrap())
             .unwrap()
             .store_key();
-    let project_root = backend
-        .layout
-        .lattice_root()
-        .parent()
-        .unwrap()
-        .to_str()
-        .unwrap()
-        .to_owned();
     api.blocking(move |api| {
         let guard = api.store.try_lock_session(sid)?;
         api.store.accept_turn(&guard, {
@@ -644,7 +639,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 model: ModelId::parse("test").unwrap(),
                 provider: ProviderId::parse("local").unwrap(),
                 system_prompt: None,
-                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
                 limits: TurnExecutionLimits {
                     timeout_secs: crate::TurnTimeout::default(),
                     max_model_steps: 32,
@@ -652,11 +647,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 },
             };
             AcceptTurn {
-                profile_copy: {
-                    let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
-                    copy.profile.policy.project_root = project_root;
-                    copy
-                },
+                profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
                 expected_profile_digest: api
                     .store
                     .begin_read()?
@@ -796,16 +787,8 @@ async fn diagnostic_and_owner_only_heads_repeat_the_current_entry() {
     lock(&backend.admission)
         .diagnostics
         .insert(input.turn_id, diagnostic.clone());
-    // CEP 通知只唤醒推送，不标记任何节点；不能借节点变化掩盖缺失的补推。
-    sink.emit(crate::TurnEvent::CepCallStarted {
-        invocation_id: lattice_conversation::InvocationId::parse(
-            "00000000-0000-4000-8000-000000000001",
-        )
-        .unwrap(),
-        method: "test".into(),
-        semantic_stage: "test".into(),
-        guard_stage: "test".into(),
-    });
+    // 仅唤醒推送而不标记任何节点，不能借节点变化掩盖缺失的补推。
+    sink.notify_without_marking();
     let (waiting, resume_next) = arm(&backend.gates.watch_wait);
     resume.send(()).unwrap();
     assert!(
@@ -1730,13 +1713,6 @@ async fn existing_orphan_and_root_inherit_copy_without_mutating_old_nodes() {
     let sid = super::super::new_session_id();
     let old = seed_round(&backend, sid, true).await;
     let before = client.turn(old).await.unwrap();
-    let root = crate::LocalWorkspaceRoot::from_path(dir.path()).unwrap();
-    let backing =
-        lancet_api::WorkspaceHistoryBacking::for_key(backend.layout.clone(), root.store_key());
-    tokio::task::spawn_blocking(move || lancet_api::WorkspaceHistory::create(backing))
-        .await
-        .unwrap()
-        .unwrap();
     let provider = Provider::start().await;
     let configure_source = || {
         config(dir.path(), &provider.endpoint);
@@ -1970,7 +1946,11 @@ async fn serve_gated(slot: GateSlot) -> GatedServe {
     let (armed, gate) = oneshot::channel();
     let (backend_layout, home) = (layout.clone(), dir.path().to_path_buf());
     let serving = tokio::spawn(serve_with_backend(layout.clone(), move || {
-        let mut backend = Backend::new(backend_layout, Some(home));
+        let mut backend = Backend::with_tools(
+            backend_layout,
+            Some(home),
+            crate::turn::tools::default_tool_executor(),
+        );
         Arc::get_mut(&mut backend)
             .expect("unshared test backend")
             .metadata = super::super::metadata::MetadataRefresh::without_network();

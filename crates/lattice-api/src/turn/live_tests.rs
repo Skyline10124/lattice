@@ -28,7 +28,7 @@ fn seed(
                 model: crate::ModelId::parse("old-model").unwrap(),
                 provider: crate::ProviderId::parse("openai-compatible").unwrap(),
                 system_prompt: None,
-                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
                 limits: TurnExecutionLimits {
                     timeout_secs: crate::TurnTimeout::default(),
                     max_model_steps: 32,
@@ -36,12 +36,7 @@ fn seed(
                 },
             };
             AcceptTurn {
-                profile_copy: {
-                    let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
-                    copy.profile.policy.project_root =
-                        fixture.root.canonical_path().to_str().unwrap().into();
-                    copy
-                },
+                profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
                 expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: turn,
@@ -53,11 +48,6 @@ fn seed(
             }
         })
         .unwrap();
-    lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
-        fixture.layout.clone(),
-        fixture.root.store_key(),
-    ))
-    .unwrap();
     (sid, turn)
 }
 
@@ -197,7 +187,7 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
 }
 
 #[tokio::test]
-async fn existing_session_requires_its_workspace_history_before_accepting_new_turn() {
+async fn session_turns_do_not_create_or_require_workspace_history() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -205,24 +195,25 @@ async fn existing_session_requires_its_workspace_history_before_accepting_new_tu
             .build(),
     );
     let fixture = setup_fixture(llm.clone(), &[]);
+    let history_dir = fixture
+        .layout
+        .project_store(&fixture.root.store_key(), "workspace-history.git");
     let (first, _) = fixture.run(fixture.request.clone()).await;
-    std::fs::remove_dir_all(fixture.layout.project_store(
-        &fixture.root.store_key(),
-        lancet_runtime::history::HISTORY_REPO_DIR,
-    ))
-    .unwrap();
+    assert!(
+        !history_dir.exists(),
+        "新建会话不应创建 workspace-history.git"
+    );
     let mut request = fixture.request.clone();
     request.session_id = Some(first.session_id);
-    let (execution, _) = fixture.start(request);
-    assert!(execution.acceptance.await.unwrap().is_err());
-    assert!(execution.completion.await.unwrap().is_err());
-    assert_eq!(llm.call_count(), 1);
-    let read = fixture.store.begin_read().unwrap();
-    assert_eq!(
-        read.turn_detail(first.session_id, first.turn_id).unwrap(),
-        first
+    request.agent = None;
+    request.loaded_profile = None;
+    let (second, _) = fixture.run(request).await;
+    assert_eq!(second.summary.outcome, PublicTurnOutcome::Completed);
+    assert!(
+        !history_dir.exists(),
+        "续写会话不应创建或依赖 workspace-history.git"
     );
-    assert_eq!(read.log(first.session_id).unwrap().nodes.len(), 3);
+    assert_eq!(llm.call_count(), 2);
 }
 
 #[tokio::test]
@@ -461,9 +452,9 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
     *observer.before_accept.lock().unwrap() = Some((entered, resume));
     let execution = super::execute::start_execution(super::execute::ExecutionInput {
         session: fixture.api.clone(),
-        layout: fixture.layout.clone(),
         turn_id,
         workspace: fixture.root.clone(),
+        tools: Arc::new(crate::NoTools),
         request: fixture.request.clone(),
         prepared_model: None,
         prepared_profile: None,

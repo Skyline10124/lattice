@@ -3,11 +3,8 @@
 
 //! The single Local Workspace root resolver (ADR 0005 §3, GitHub #143).
 //!
-//! CLI and TUI obtain the current Local Workspace root from this resolver —
-//! neither has a separate binding heuristic, and there is no lazy first-Turn
-//! binding path. The full runtime root is used: profile
-//! `[lancet.project_root].root` is a policy subdirectory/scope and does not
-//! participate in store addressing.
+//! CLI 与 TUI 统一通过本解析器获取当前本地工作区根目录，不存在第二套绑定启发式或惰性首轮绑定路径；
+//! 会话归属键直接由规范化工作区根目录派生。
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};

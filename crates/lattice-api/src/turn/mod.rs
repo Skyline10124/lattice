@@ -7,7 +7,6 @@
 //! run_turn 仅在测试或 test-utils 下复用该执行路径；
 //! Owner 同步保存当前尝试的观察段，持久执行与关闭由 TurnCoordinator 独占负责。
 
-pub(crate) mod cep;
 pub(crate) mod coordinator;
 #[cfg(feature = "test-crash-barriers")]
 pub(crate) mod crash_barrier;
@@ -15,6 +14,7 @@ pub(crate) mod execute;
 mod live;
 pub(crate) mod observer;
 mod saga;
+pub mod tools;
 mod types;
 
 #[cfg(test)]
@@ -36,6 +36,8 @@ mod live_tests;
 pub use execute::run_turn;
 pub(crate) use execute::start_execution;
 pub use execute::{STREAM_IDLE_TIMEOUT_SECS, start_turn};
+pub(crate) use tools::default_tool_executor;
+pub use tools::{NoTools, ToolExecutor, ToolOutcome, ToolSpec, TurnTools};
 pub use types::{
     AttemptSegments, RunTurnRequest, RunTurnResult, TextSegment, TurnAcceptance, TurnCompletion,
     TurnEvent, TurnExecution, TurnRef,

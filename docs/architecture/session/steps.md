@@ -66,25 +66,25 @@ stateDiagram-v2
 同一回复的调用按片段顺序逐个执行，每次只处理最低序号的未返回槽位：
 
 1. 把该槽位推进到 `Started` 并提交。从这时起，它停下时的结论是 `Indeterminate(NoResult)`。这是“可能已执行”的保守边界：它不证明执行器已开始或外部效果已发生，但越过它之后不能仅凭没有结果推定未执行。
-2. 把调用交给执行器执行，取得返回结果。
-3. 执行器因调用期到达本轮 deadline 返回 `Deadline` 时，协调层不补写槽位终态，直接以 `Stop { Deadline }` 关闭 Step（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）；其余返回经 `ToolReply` 推进该槽位到 `Terminal` 并提交，写入结局与载荷。
+2. 把已提交的 `StartedInvocation`、工具名、参数、取消标志与本轮 deadline 交给 `TurnTools::execute` 执行，取得 [`ToolOutcome`](../../../crates/lattice-api/src/lib.rs)。
+3. 执行器因调用期到达本轮 deadline 返回 `ToolOutcome::Deadline` 时，协调层不调用 `finish_invocation` 补写槽位终态，直接以 `Stop { Deadline }` 关闭 Step（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）；其余四种返回由协调层映射为 [`ToolReply`](../../../crates/lattice-session/src/store/types.rs)，推进该槽位到 `Terminal` 并提交，写入结局与载荷。
 
 每个槽位任何时刻都有 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷：`Terminal` 的槽位保存它们，其他阶段由阶段确定。结局与[模型尝试](acceptance.md#模型请求与执行预算)一样分两维：结局是结束形状，说明执行器给出了什么；原因放在载荷的 `ToolError` 或 `IndeterminateCause` 里。判定只看两件事：槽位到达了哪个阶段，以及执行器返回了什么。
 
 | 结局 | 槽位的阶段 | 判定依据 | 载荷 | 外部效果 |
 | --- | --- | --- | --- | --- |
-| Succeeded | `Terminal` | 执行器返回 `ToolReply::Succeeded(value)` | 完整 JSON value（超限时保存摘要与长度） | 可能已发生 |
-| Failed | `Terminal` | 执行器返回 `ToolReply::Failed(ToolError)` | 结构化 `ToolError { code, message }`，错误码与消息原样保存 | 可能已发生 |
+| Succeeded | `Terminal` | 执行器返回 `ToolOutcome::Succeeded(value)` | 完整 JSON value（超限时保存摘要与长度） | 可能已发生 |
+| Failed | `Terminal` | 执行器返回 `ToolOutcome::Failed(ToolError)` | 结构化 `ToolError { code, message }`，错误码与消息原样保存 | 可能已发生 |
 | NotExecuted | `Registered` | 调用尚未交给执行器；Step 在它开始之前停止时，它一直停在这里 | 无 | 保证没有 |
 | Indeterminate | `Started`，或 `Terminal` | 越过 `Started` 后没有取得确定结果 | `IndeterminateCause`，见下文 | 未知 |
 
-终态映射由 [`prepare_terminal`](../../../crates/lattice-session/src/store/close.rs) 按 [`ToolReply`](../../../crates/lattice-session/src/store/types.rs) 执行：`ToolReply::Succeeded` 映射为 Succeeded（按 65,536 字节边界分成 `Json` 或 `OutputTooLarge`），`ToolReply::Failed(ToolError)` 映射为 `Failed(ToolError)`，`ToolReply::Cancelled` 映射为 `Indeterminate(Cancelled)`，`ToolReply::Indeterminate` 映射为 `Indeterminate(Reported)`（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）。
+协调层把非 `Deadline` 的 `ToolOutcome` 映射为 `ToolReply`，再由 [`prepare_terminal`](../../../crates/lattice-session/src/store/close.rs) 构造槽位终态：`ToolOutcome::Succeeded` → `ToolReply::Succeeded` → Succeeded（按 65,536 字节边界分成 `Json` 或 `OutputTooLarge`），`ToolOutcome::Failed(ToolError)` → `ToolReply::Failed(ToolError)` → `Failed(ToolError)`，`ToolOutcome::Cancelled` → `ToolReply::Cancelled` → `Indeterminate(Cancelled)`，`ToolOutcome::Indeterminate` → `ToolReply::Indeterminate` → `Indeterminate(Reported)`（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）。
 
 Indeterminate 的原因 `IndeterminateCause` 有三种：
 
 - `NoResult`：槽位停在 `Started`，还没有取得结果。它是这个阶段的结论；Step 停止、调用期到达本轮 deadline 或进程退出时仍在这个阶段的槽位，结果就是它。`Started` 已提交、交给执行器之前发现取消或 Deadline 也属于这种情况：越过 `Started` 后不能再证明未执行。
-- `Cancelled`：执行器返回取消（`ToolReply::Cancelled`），即交出后被取消。
-- `Reported`：执行器报告结果不确定（`ToolReply::Indeterminate`）。
+- `Cancelled`：执行器返回取消（`ToolOutcome::Cancelled`，经 `ToolReply::Cancelled` 写入），即交出后被取消。
+- `Reported`：执行器报告结果不确定（`ToolOutcome::Indeterminate`，经 `ToolReply::Indeterminate` 写入）。
 
 NotExecuted 不带原因。停止原因沿 Turn → Step → 槽位的嵌套只从下往上传：为什么停只在 Step 的 `end.cause` 中记录一次，不抄到每个未执行的槽位，推导规则见[执行中 Step 的停止原因](#执行中-step-的停止原因)。
 
@@ -127,16 +127,16 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
   - `Closed`：这一轮已经结束，`outcome` 是最终结局。
   - 未关闭，后台持有这一轮的 Owner：仍在执行，`outcome` 只说明此刻停下会得到什么，前端按进行中显示。
   - 未关闭，没有 Owner：执行者已消失，这一轮停在这一步，`outcome` 就是它的结局，见[执行者消失后的 Turn](recovery.md#执行者消失后的-turn)。
-- Step 节点保留各次尝试与 `end` 的原因，随视图、历史查询和 `session turn` 提供，供诊断与操作员查询使用；前端的对话显示只依据 `TurnSummary` 与后端给出的 notice 给出文字和等级，不从 `end` 或尝试的原因推导。
+- Step 节点保留各次尝试与 `end` 的原因，随视图、历史查询和 `session turn` 提供，供诊断与查询使用；前端的对话显示只依据 `TurnSummary` 与后端给出的 notice 给出文字和等级，不从 `end` 或尝试的原因推导。
 - Turn 的 usage 汇总由各次尝试的 usage 得出。Turn 的结束时间是最后一个 Step 关闭时的推进时间；未关闭时，最后一个 Step 的推进时间说明它最后一次有进展是什么时候。
 - 尝试的 `usage` 保存五项可选计数，`usage_kind` 保存请求结束时按[用量与价格表的比对](../llm/usage.md#用量与价格表的比对)得出的完整性判定，`cost` 独立保存可选的 `CostEstimate { usd, exact }`。开始请求时 `usage_kind` 为 `partial`，用量与费用未知；停止、登记调用或完成回复时原样接收请求网关的结果，与实际进度同事务保存。没有收到终态的 `Sent` 尝试与执行者消失后的尝试保留 `partial`、未知费用；读取不补写旧尝试，也不重新判定或估价。
 - 汇总携带 `attempts` 与 `partial_attempts`，后者统计 `usage_kind=partial` 的尝试。五项计数各有 `known`（已报告计数的小计）、`complete` 与 `overflowed`，小计为可选整数；`complete` 表示没有未报告的尝试且未溢出，只看计数本身，与该项有没有单价无关；费用汇总有 `known`、`unknown_attempts` 与 `overflowed`，`cost.known` 为可选 `{usd, exact}`，`cost.unknown_attempts` 统计费用未知的尝试数。有尝试而某项全未知时其小计为 null，明确的零保留为 0；没有尝试时是空和 0，费用为 `{usd:0, exact:true}`，由 `attempts=0` 区别于未知请求。`Sent` 也计入尝试，Reserved 没有尝试。
 - 整体 `kind` 仅在 `partial_attempts=0` 且所有指标均未溢出时为 `complete`，否则为 `partial`；某项计数或费用未报告本身不决定 `kind`。整数小计溢出饱和到 `u64::MAX`，金额小计溢出饱和到有限的 `f64::MAX`，同时设置该项溢出标记；原始尝试不变。
 - 费用合计规则见[费用估算](../llm/usage.md#费用估算)。
 
-关闭 Step 只写会话库，不读取工作区历史，也不取得工作区操作锁。Turn 与文件变更的关联由工作区历史中每条变更记录的 `TurnId` 与 `InvocationId` 承载，见[私有存储与数据关系](../workspace.md#私有存储与数据关系)。
+关闭 Step 只写会话库；会话的建立、推进与关闭均不创建或读写工作区历史库，也不取得工作区操作锁。
 
-会话库事务提供本库的原子提交；工作区历史与会话库各自提交，所以读取可能见到跨库中间状态，例如文件已记入工作区历史而 Turn 尚未关闭。已发生的文件效果由工作区合同处理。
+会话库事务提供本库的原子提交；已发生的工作区外部效果不在会话库事务内回滚。
 
 ### 执行中 Step 的停止原因
 

@@ -51,10 +51,12 @@ struct Admission {
     unconfirmed_operations: usize,
 }
 struct Backend {
+    #[cfg(test)]
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
     gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
     metadata: Arc<super::metadata::MetadataRefresh>,
+    tools: Arc<dyn crate::ToolExecutor>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -140,14 +142,19 @@ impl Backend {
         }
     }
 
-    fn new(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Arc<Self> {
-        Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der())
+    fn with_tools(
+        layout: crate::StateLayout,
+        home: Option<std::path::PathBuf>,
+        tools: Arc<dyn crate::ToolExecutor>,
+    ) -> Arc<Self> {
+        Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der(), tools)
     }
 
     fn with_tls_roots(
         layout: crate::StateLayout,
         home: Option<std::path::PathBuf>,
         roots: Vec<Vec<u8>>,
+        tools: Arc<dyn crate::ToolExecutor>,
     ) -> Arc<Self> {
         let directory = super::auth::directory(home.as_deref())
             .map_err(|error| crate::ConfigRejection::new(&error.message, None));
@@ -158,12 +165,15 @@ impl Backend {
                 .map(Arc::new)
                 .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
         });
+        let stores = crate::stores::StoreManager::new(layout.clone());
         Arc::new(Self {
+            #[cfg(test)]
+            layout,
             home,
             metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
             gateway,
-            stores: crate::stores::StoreManager::new(layout.clone()),
-            layout,
+            tools,
+            stores,
             epoch: uuid::Uuid::new_v4().to_string(),
             admission: Mutex::default(),
             changed: watch::channel(0).0,
@@ -502,7 +512,7 @@ impl Backend {
             blocking(move || {
                 let loaded =
                     crate::profile::load_for_turn(&selected, &project, &configuration_dir)?;
-                let configuration = crate::profile::TurnProfile::from_loaded(&loaded, &project)?;
+                let configuration = crate::profile::TurnProfile::from_loaded(&loaded);
                 Ok((configuration, Some(loaded.path)))
             })
             .await?
@@ -539,9 +549,9 @@ impl Backend {
         }
         let execution = crate::turn::start_execution(crate::turn::execute::ExecutionInput {
             session: api,
-            layout: self.layout.clone(),
             turn_id: request.turn_id,
             workspace,
+            tools: self.tools.clone(),
             shutdown,
             observer: owner.observer.clone(),
             new_session: request.session.is_new().then_some(sid),
@@ -553,10 +563,9 @@ impl Backend {
                 effort: request.effort,
                 loaded_profile: None,
                 cancel_flag: Some(owner.execution_cancel.clone()),
+                tools: Some(self.tools.clone()),
                 #[cfg(any(test, feature = "test-utils"))]
                 test_llm: None,
-                #[cfg(any(test, feature = "test-utils"))]
-                test_project_root: None,
             },
             prepared_model: Some(prepared_model),
             prepared_profile: Some(prepared_profile),
@@ -855,56 +864,6 @@ impl Backend {
             }
             Request::Submit { .. } => Err(internal()),
             request @ Request::Rewind { .. } => self.wait_reply(self.claim(request, None)?).await,
-            Request::AuditQuery {
-                workspace,
-                selection,
-                after,
-                limit,
-            } => {
-                let filter = audit_filter(workspace, selection).await?;
-                Ok(Response::Audit(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::query_audit(r, &filter, after, limit as usize))
-                        .await?,
-                ))
-            }
-            Request::AuditTail {
-                workspace,
-                selection,
-                after,
-                limit,
-            } => {
-                let filter = audit_filter(workspace, selection).await?;
-                Ok(Response::AuditTail(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::tail_audit(r, &filter, after, limit as usize))
-                        .await?,
-                ))
-            }
-            Request::AuditReplay {
-                workspace,
-                session_id,
-                turn_id,
-            } => {
-                let project = canonical_workspace(workspace).await?.store_key();
-                Ok(Response::AuditReplay(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::replay_audit(r, &project, session_id, turn_id))
-                        .await?,
-                ))
-            }
-            Request::OperatorStatus { workspace } => {
-                let project = canonical_workspace(workspace).await?.store_key();
-                Ok(Response::OperatorStatus(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::collect_status(r, &project))
-                        .await?,
-                ))
-            }
             Request::Watch { .. } => Err(internal()),
         }
     }
@@ -1092,18 +1051,6 @@ async fn canonical_workspace(path: std::path::PathBuf) -> Result<crate::LocalWor
     })
     .await
 }
-async fn audit_filter(
-    workspace: std::path::PathBuf,
-    selection: AuditSelection,
-) -> Result<lattice_session::store::AuditFilter> {
-    Ok(lattice_session::store::AuditFilter {
-        project_store_key: canonical_workspace(workspace).await?.store_key(),
-        session_id: selection.session_id,
-        turn_id: selection.turn_id,
-        method: selection.method,
-        outcome: selection.outcome,
-    })
-}
 async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()> {
     ipc::check_peer(&stream)?;
     let request = tokio::time::timeout(
@@ -1172,8 +1119,20 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
+    serve_with_tools(layout, home, crate::turn::default_tool_executor()).await
+}
+
+/// 显式注入 [`crate::ToolExecutor`] 的本地后台入口。
+pub async fn serve_with_tools(
+    layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
+    tools: Arc<dyn crate::ToolExecutor>,
+) -> Result<()> {
     let backend_layout = layout.clone();
-    serve_with_backend(layout, move || Backend::new(backend_layout, home)).await
+    serve_with_backend(layout, move || {
+        Backend::with_tools(backend_layout, home, tools)
+    })
+    .await
 }
 
 /// 测试后台以空动作替代自动与手动元数据刷新，其余操作沿用正式入口。
@@ -1182,9 +1141,19 @@ pub async fn serve_for_test(
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
 ) -> Result<()> {
+    serve_for_test_with_tools(layout, home, crate::turn::default_tool_executor()).await
+}
+
+/// 显式注入 [`crate::ToolExecutor`] 的测试后台入口。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test_with_tools(
+    layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
+    tools: Arc<dyn crate::ToolExecutor>,
+) -> Result<()> {
     let backend_layout = layout.clone();
     serve_with_backend(layout, move || {
-        let mut backend = Backend::new(backend_layout, home);
+        let mut backend = Backend::with_tools(backend_layout, home, tools);
         Arc::get_mut(&mut backend)
             .expect("unshared test backend")
             .metadata = super::metadata::MetadataRefresh::without_network();

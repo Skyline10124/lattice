@@ -2783,14 +2783,8 @@ name = "lattice-api"
 version = "0.1.0"
 dependencies = [
  "async-trait",
- "blake3",
  "chrono",
  "futures",
- "gix",
- "lancet-api",
- "lancet-authority",
- "lancet-protocol",
- "lancet-runtime",
  "lattice-agent",
  "lattice-api",
  "lattice-conversation",

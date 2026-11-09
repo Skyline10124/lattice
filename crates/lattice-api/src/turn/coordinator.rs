@@ -5,7 +5,6 @@
 
 use std::{future::Future, sync::Arc};
 
-use lancet_protocol::InvocationBinding;
 use lattice_conversation::{InvocationId, ModelAttemptKey, SessionId};
 use lattice_session::store::*;
 
@@ -267,7 +266,7 @@ impl TurnCoordinator {
             .write(move |store, lock| store.rewind(lock, target, chrono::Utc::now()))
             .await?;
         #[cfg(feature = "test-crash-barriers")]
-        super::crash_barrier::rewind_hit(&self.io, &session).await?;
+        super::crash_barrier::rewind_hit(&session).await?;
         Ok(session)
     }
 }

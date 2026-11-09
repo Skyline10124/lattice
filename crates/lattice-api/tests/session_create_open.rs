@@ -51,12 +51,12 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         agent: Some(alpha),
         loaded_profile: Some(loaded_profile),
         cancel_flag: None,
+        tools: None,
         test_llm: Some((
             llm.clone(),
             lattice_session::store::AttemptProtocol::ChatCompletions,
             vec![],
         )),
-        test_project_root: None,
     };
     let root = lattice_api::LocalWorkspaceRoot::from_path(project.path()).unwrap();
     let id = new_turn_id();

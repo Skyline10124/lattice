@@ -34,6 +34,60 @@ pub(super) fn happy_events() -> Vec<ScriptEvent> {
         },
     ]
 }
+struct StaticTestTools {
+    specs: Vec<crate::ToolSpec>,
+}
+
+impl StaticTestTools {
+    fn from_names(names: &[&str]) -> Arc<dyn crate::ToolExecutor> {
+        if names.is_empty() {
+            return Arc::new(crate::NoTools);
+        }
+        Arc::new(Self {
+            specs: names
+                .iter()
+                .map(|name| crate::ToolSpec {
+                    name: (*name).to_owned(),
+                    description: format!("测试工具 {name}"),
+                    input_schema: serde_json::json!({ "type": "object" }),
+                    tool_identity: format!("test:{name}@1"),
+                })
+                .collect(),
+        })
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::ToolExecutor for StaticTestTools {
+    async fn open_turn(
+        &self,
+        _session_id: lattice_conversation::SessionId,
+        _workspace: &crate::LocalWorkspaceRoot,
+    ) -> crate::session::Result<Box<dyn crate::TurnTools>> {
+        Ok(Box::new(Self {
+            specs: self.specs.clone(),
+        }))
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::TurnTools for StaticTestTools {
+    fn specs(&self) -> &[crate::ToolSpec] {
+        &self.specs
+    }
+
+    async fn execute(
+        &self,
+        _started: lattice_session::store::StartedInvocation,
+        name: &str,
+        _arguments: serde_json::Value,
+        _cancel: Arc<std::sync::atomic::AtomicBool>,
+        _deadline: tokio::time::Instant,
+    ) -> crate::ToolOutcome {
+        crate::ToolOutcome::Succeeded(serde_json::json!({ "tool": name, "ok": true }))
+    }
+}
+
 pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> TestFixture {
     let project = tempfile::tempdir().unwrap();
     let state = tempfile::tempdir().unwrap();
@@ -45,7 +99,11 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     };
     let path = paths.project_agents_dir().join("test/agent.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    std::fs::write(&path, format!("schema_version=1\n[agent]\nname='test'\nmodel='local/sonnet'\n[prompt]\nsystem='System from profile.'\n[tools]\nenabled={enabled_tools:?}\n")).unwrap();
+    std::fs::write(
+        &path,
+        "schema_version=1\n[agent]\nname='test'\nmodel='local/sonnet'\n[prompt]\nsystem='System from profile.'\n",
+    )
+    .unwrap();
     let layout = crate::StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
@@ -60,12 +118,12 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         agent: Some(agent),
         loaded_profile: Some(loaded_profile),
         cancel_flag: None,
+        tools: Some(StaticTestTools::from_names(enabled_tools)),
         test_llm: Some((
             llm,
             lattice_session::store::AttemptProtocol::ChatCompletions,
             vec![],
         )),
-        test_project_root: Some(root.canonical_path().to_str().unwrap().into()),
     };
     TestFixture {
         api: crate::SessionApi::from_store(store.clone()),
@@ -90,12 +148,16 @@ pub(super) fn setup_with_events(events: Vec<ScriptEvent>, tools: &[&str]) -> Tes
 impl TestFixture {
     pub fn start(&self, request: RunTurnRequest) -> (TurnExecution, Arc<ObserverSink>) {
         let observer = Arc::new(ObserverSink::default());
+        let tools = request
+            .tools
+            .clone()
+            .unwrap_or_else(super::default_tool_executor);
         let execution = super::execute::start_execution(super::execute::ExecutionInput {
             session: self.api.clone(),
-            layout: self.layout.clone(),
             turn_id: lattice_conversation::TurnId::parse(&uuid::Uuid::new_v4().to_string())
                 .unwrap(),
             workspace: self.root.clone(),
+            tools,
             request,
             prepared_model: None,
             prepared_profile: None,
