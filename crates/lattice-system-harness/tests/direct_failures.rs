@@ -857,3 +857,201 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
         "direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry",
     );
 }
+
+#[cfg(feature = "fake-tools")]
+#[test]
+fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
+    use lattice_system_harness::{SlotOutcome, SlotState};
+
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-failure-tool-deadline",
+        "tool-deadline",
+        "[llm]\ntimeout_secs = 2\n",
+    );
+    world.set_env("LATTICE_TEST_TOOLS", "hold_call,write_marker");
+
+    let ready_path = world.root().join("hold.ready");
+    let marker_path = world.root().join("hold.marker");
+    let skipped_path = world.project_dir().join("skipped.marker");
+    let hold_args = serde_json::to_string(&json!({
+        "action": "block",
+        "ready_path": ready_path,
+        "marker_path": marker_path,
+        "marker_line": "hold-entered\n",
+    }))
+    .unwrap();
+    let write_args = serde_json::to_string(&json!({
+        "action": "append_marker",
+        "path": skipped_path,
+        "line": "must-not-run\n",
+    }))
+    .unwrap();
+
+    let server = wire_fake_llm(
+        &world,
+        "tool-deadline",
+        sequence(vec![
+            SseScript::ToolCalls {
+                calls: vec![
+                    ("call-hold".into(), "hold_call".into(), hold_args),
+                    ("call-write".into(), "write_marker".into(), write_args),
+                ],
+            },
+            SseScript::plain("healthy after tool deadline"),
+        ]),
+    );
+
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "tool-deadline");
+
+    let outcome = send.send("block inside tool until turn deadline").unwrap();
+    let requests_after_deadline = server.captured_requests();
+    let first_tid = outcome.accepted_turn_id().unwrap();
+    let detail = send
+        .run_command(&["--json", "session", "turn", first_tid])
+        .unwrap();
+
+    let followup = send.send("follow up after deadline").unwrap();
+    let followup_detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            followup.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let detail_after = send
+        .run_command(&["--json", "session", "turn", first_tid])
+        .unwrap();
+
+    let captures = server.captured_requests();
+    let result = (|| {
+        failed(&outcome, "deadline")?;
+        require(
+            requests_after_deadline.len() == 1,
+            format!(
+                "调用期 deadline 后仅应有 1 次模型请求，实际为 {}",
+                requests_after_deadline.len()
+            ),
+        )?;
+        require(
+            ready_path.exists() && marker_path.exists(),
+            "hold_call 必须已进入执行并写出 ready/marker 文件",
+        )?;
+        let ready_lines: Vec<_> = std::fs::read_to_string(&ready_path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let marker_lines: Vec<_> = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        require(
+            ready_lines.len() == 1
+                && ready_lines[0].starts_with("hold_call:")
+                && marker_lines == vec!["hold-entered"],
+            format!("hold_call 只应进入一次：ready={ready_lines:?}, marker={marker_lines:?}"),
+        )?;
+        require(
+            !skipped_path.exists(),
+            "后续槽位 write_marker 不得执行或创建目标文件",
+        )?;
+
+        let live_slots = outcome.slots();
+        require(
+            live_slots.len() == 2
+                && live_slots[0].method == "hold_call"
+                && live_slots[0].state == SlotState::Started
+                && live_slots[0].outcome == SlotOutcome::Indeterminate
+                && live_slots[1].method == "write_marker"
+                && live_slots[1].state == SlotState::Registered
+                && live_slots[1].outcome == SlotOutcome::NotExecuted,
+            format!("实时槽位阶段与结局不匹配：{live_slots:?}"),
+        )?;
+
+        require(
+            detail.is_clean_exit(0)
+                && followup_detail.is_clean_exit(0)
+                && detail_after.is_clean_exit(0),
+            "session turn 查询应返回 0",
+        )?;
+        let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let expected_end = json!({"end": "stop", "cause": {"cause": "deadline"}});
+        require(
+            persisted["summary"]["outcome"] == "failed"
+                && persisted["summary"]["notice"]
+                    == json!({"level": "error", "text": "turn deadline exceeded"})
+                && persisted["steps"].as_array().unwrap().len() == 1
+                && persisted["steps"][0]["end"] == expected_end,
+            format!("持久 Turn 结局、提示或 Step.end 不匹配：{persisted}"),
+        )?;
+        let slots = persisted["steps"][0]["slots"].as_array().unwrap();
+        require(slots.len() == 2, format!("预期 2 个槽位：{slots:?}"))?;
+        require(
+            slots[0]["binding"]["method"] == "hold_call"
+                && slots[0]["binding"]["tool_identity"] == "fake:hold_call@1"
+                && slots[0]["progress"] == json!({"state": "started"})
+                && slots[0]["outcome"] == "indeterminate"
+                && slots[0]["reason"] == json!({"kind": "indeterminate", "value": "no_result"})
+                && slots[0]["material"] == json!({"kind": "no_content"}),
+            format!(
+                "槽位 0 应停在 started 且读出 indeterminate(no_result)：{}",
+                slots[0]
+            ),
+        )?;
+        require(
+            slots[1]["binding"]["method"] == "write_marker"
+                && slots[1]["binding"]["tool_identity"] == "fake:write_marker@1"
+                && slots[1]["progress"] == json!({"state": "registered"})
+                && slots[1]["outcome"] == "not_executed"
+                && slots[1]["reason"].is_null()
+                && slots[1]["material"] == json!({"kind": "no_content"}),
+            format!("槽位 1 应停在 registered 且读出 not_executed：{}", slots[1]),
+        )?;
+        require(
+            same_turn(&final_turn(&outcome), &persisted),
+            "实时条目与持久 session turn 详情应一致",
+        )?;
+
+        assert_clean_send(&followup)?;
+        assert_accepted_and_closed(&followup)?;
+        require(
+            followup.command.is_clean_exit(0)
+                && followup.has_completed()
+                && followup.reply_text() == "healthy after tool deadline"
+                && followup.accepted_session_id() == outcome.accepted_session_id(),
+            format!("同一会话后续纯文本轮应正常完成：{}", followup.summary()),
+        )?;
+        require(
+            captures.len() == 2,
+            format!(
+                "后续纯文本轮完成后总模型请求数应为 2，实际为 {}",
+                captures.len()
+            ),
+        )?;
+        require(
+            !skipped_path.exists()
+                && std::fs::read_to_string(&marker_path).unwrap() == "hold-entered\n"
+                && serde_json::from_slice::<Value>(&detail_after.stdout).unwrap() == persisted,
+            "后续轮不得重放旧调用或改写已关闭的 deadline Turn",
+        )
+    })();
+
+    finish_failure(
+        evidence,
+        &send,
+        &[
+            ("tool deadline turn", &outcome.command),
+            ("turn detail", &detail),
+            ("followup turn", &followup.command),
+            ("followup detail", &followup_detail),
+            ("turn detail after followup", &detail_after),
+        ],
+        captures,
+        result,
+        "tool_call_deadline_leaves_slot_started_and_stops_turn",
+    );
+}

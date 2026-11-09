@@ -18,6 +18,7 @@ status: active
 | CLI IPC：真实信号、记录与退出选择 | CLI 的局部回归测试 |
 | TUI run_loop：按键、按 NodeId 替换条目、尝试边界，以及按 InvocationId 配对的绘制 | TUI 的局部回归测试 |
 | 会话库表编码、值版本解析与旧库检测等产品内部交接 | 相应 crate 的单元与集成测试 |
+| provider 故障、工具错误投影与 Turn deadline（模型流与调用期超时） | harness 的 `direct_failures`（见[超时与进程生命周期](../testing.md#超时与进程生命周期)） |
 | 前端的实际入口 | 下表的自动场景 |
 
 | 卡片 | 证明什么 |

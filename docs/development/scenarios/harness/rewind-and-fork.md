@@ -7,8 +7,8 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | `rewind` 到树上任意节点后提交，会从该节点分叉，原分支保留；发给模型的上下文是根到该节点的路径 |
-| 前提 | 涉及工具写文件的用例开启 `fake-tools` feature（配 `test-fake-tools` 二进制与 `LATTICE_TEST_TOOLS`）：一个多步且写过文件的 Turn，一个在工具执行后被取消的 Turn；两个 Turn 使用不同的 agent，后一个 Turn 的 agent 因此在 profile 副本中 |
-| 相关测试 | `direct_tree_session`：`multi_step_two_agent_tree_rewind_preserves_files_and_old_turn`；`direct_crash_barriers`：`rewind_commit_survives_sigkill_and_keeps_both_branches`；`direct_background`：`long_session_pages_by_turn_and_rewind_replaces_the_path` |
+| 前提 | 涉及假工具步骤或写文件的用例开启 `fake-tools` feature（配 `test-fake-tools` 二进制与 `LATTICE_TEST_TOOLS`）：一个多步且写过文件的 Turn，一个在工具执行后被取消的 Turn；两个 Turn 使用不同的 agent，后一个 Turn 的 agent 因此在 profile 副本中 |
+| 相关测试 | `direct_tree_session`：`multi_step_two_agent_tree_rewind_preserves_files_and_old_turn`；`direct_crash_barriers`：`rewind_commit_survives_sigkill_and_keeps_both_branches`；`direct_background`：`long_session_pages_by_turn_and_rewind_replaces_the_path`；`pty_tui_smoke`：`pty_statusline_usage_survives_reopening_and_follows_rewind` |
 
 ## 操作
 

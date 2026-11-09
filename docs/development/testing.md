@@ -102,6 +102,7 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 - 数值由 `ScenarioSpec` 与场景配置维护；修改时写明适用场景与原因，场景停滞时先定位原因。
 - 每次启动命令的上限为 `min(step_timeout, remaining_total)`；命令预算从 spawn 开始计时，provider request、stall、release 与最终 wait 共用剩余预算。
 - 这些是驱动的等待上限。产品内部的 [Turn deadline](../architecture/session/acceptance.md#模型请求与执行预算) 由会话合同维护；驱动超时之后，产品是否已发生效果、是否已持久关闭，从产品状态读取。
+- `direct_failures` 以短 `[llm] timeout_secs` 覆盖产品内部的 Turn deadline：模型流停滞与部分用量后的超时关闭（`direct_failure_profile_deadline_while_stalled_commits_error`、`direct_failure_deadline_after_reported_usage_preserves_cost`），以及 `fake-tools` 下假工具 `block` 在调用期内到达本轮 deadline（`tool_call_deadline_leaves_slot_started_and_stops_turn`：执行器返回 `Deadline`，协调层不补写槽位终态，Step 以 `Stop { Deadline }` 关闭，已进入执行的槽位留在 `Started` 并读出 `Indeterminate(NoResult)`，同一步后续槽位留在 `Registered` 且不执行，Turn 以 `failed` 与提示 `turn deadline exceeded` 结束，随后同一会话的新一轮纯文本提交照常完成）；两次分发之间的 deadline 收尾与崩溃恢复由 `direct_crash_barriers` 的 `dispatch_deadline_tail_is_atomic_and_survives_crash` 覆盖。
 - 前端子进程与产品后台各在独立的 Linux 进程组中运行；超时与受控中断保留已收集的输出，回收子进程并清理进程组。命令结果的判定见 [`CommandOutcome`](../../crates/lattice-system-harness/src/driver.rs)。
 - PTY raw 模式用回车 `\r` 提交；读取输出时按 deadline 等待，阻塞的 read 同样受超时约束。
 - Direct-Local 使用场景自有的后台，经正式入口自动启动或显式启动，与开发者正在运行的后台、虚拟机或容器镜像无关；隔离与清理要求覆盖所有可能自动启动后台的 fast、Direct 与 PTY 场景。已选场景的环境故障按失败报告。

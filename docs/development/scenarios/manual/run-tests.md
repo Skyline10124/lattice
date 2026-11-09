@@ -36,7 +36,7 @@ cargo test --workspace --release
 cargo build -p lattice-cli --bin lattice --features test-fake-tools
 LATTICE_BIN="$(pwd)/target/debug/lattice" \
   cargo test -p lattice-system-harness --features fake-tools \
-  --test direct_tree_session
+  --test direct_tree_session --test direct_failures --test pty_tui_smoke
 
 cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers
 LATTICE_BIN="$(pwd)/target/debug/lattice" \

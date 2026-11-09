@@ -7,13 +7,16 @@
 
 use std::time::Duration;
 
+#[cfg(feature = "fake-tools")]
+use lattice_system_harness::ScenarioSpec;
 use lattice_system_harness::processes_in_pgid;
 use lattice_system_harness::{
-    LatticeDriver, ProviderFixture, PtyTuiDriver, ScenarioLayer, ScenarioSpec, ScenarioWorld,
+    LatticeDriver, ProviderFixture, PtyTuiDriver, ScenarioLayer, ScenarioWorld,
 };
 
-/// TUI smoke 的项目 profile，启用 `session__todo_write`；调用顺序由 `two_step_script` 决定。
+/// TUI smoke 的项目 profile；工具目录由 `LATTICE_TEST_TOOLS` 注入，调用顺序由 `two_step_script` 决定。
 /// 手写 TOML，不用 serde，因为 harness 边界禁止依赖 `lattice-profile`。
+#[cfg(feature = "fake-tools")]
 fn agent_toml() -> String {
     let model = ProviderFixture::chat_completions("tui-smoke")
         .model_ref()
@@ -27,22 +30,20 @@ model = "{model}"
 
 [prompt]
 system = "You are a concise test agent. Reply briefly."
-
-[tools]
-enabled = ["session__todo_write"]
 "#
     )
 }
 
-/// 一个 Turn 两个 Step：先调用工具，再输出三行最终回答。
+/// 一个 Turn 两个 Step：先调用假工具 `record_note`，再输出三行最终回答。
+#[cfg(feature = "fake-tools")]
 fn two_step_script() -> lattice_system_harness::SseScript {
     use lattice_system_harness::SseScript;
     SseScript::Sequence {
         scripts: vec![
             SseScript::ToolCall {
                 call_id: "smoke-call-1".into(),
-                tool_name: "session__todo_write".into(),
-                arguments_json: r#"{"todos":[{"content":"smoke","status":"in_progress"}]}"#.into(),
+                tool_name: "record_note".into(),
+                arguments_json: r#"{"action":"read","value":{"note":"smoke"}}"#.into(),
             },
             SseScript::PlainText {
                 chunks: (1..=3)
@@ -59,6 +60,7 @@ fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     let driver = driver();
@@ -70,6 +72,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         total_timeout_secs: Some(300),
     };
     let world = ScenarioWorld::new(&spec.name).expect("world");
+    world.set_env("LATTICE_TEST_TOOLS", "record_note");
     let budget = world.budget(&spec);
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
@@ -125,12 +128,16 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             budget.cap_timeout(Duration::from_secs(10)),
             |frame| frame.contains("mock line 03"),
         );
-        // 启动横幅固定在对话记录最上方，最终回答仍在屏幕上。
+        // 假工具返回 `{"note":"smoke"}`（canonical JSON 16 字节），工具块在启动横幅与最终回答之间折叠显示。
         let banner = frame.find("显示命令");
+        let tool_block = frame.find("▸ ✓ record_note · 16 B");
         let answer = frame.find("mock line 03");
         assert!(
-            answer.is_some() && banner.is_none_or(|n| Some(n) < answer),
-            "final answer must stay on screen below the startup banner: {frame}"
+            tool_block.is_some()
+                && answer.is_some()
+                && banner.is_none_or(|n| Some(n) < tool_block)
+                && tool_block < answer,
+            "tool block and final answer must stay in order below the startup banner: {frame}"
         );
         // 两个 Step 同属一个 Turn：助手标题线只出现一次。状态行也显示 agent 与模型名，不计入。
         assert_eq!(
@@ -150,6 +157,11 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             caps.iter()
                 .any(|c| c.model == "tui-smoke" && c.message_roles.iter().any(|r| r == "user")),
             "fake LLM did not receive the expected request; captures: {caps:?}"
+        );
+        assert_eq!(
+            support::tool_result_value(&caps[1]),
+            Some(serde_json::json!({"note": "smoke"})),
+            "假工具结果应投影进第二步模型请求：{caps:?}"
         );
 
         // 首次接受消费启动 agent；删去源 profile 后第二次提交仍继承副本。
@@ -204,11 +216,36 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         evidence.record_command("--json session list", &out);
         assert!(out.is_clean_exit(0));
         let list: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let sid = list[0]["session_id"].as_str().unwrap();
+        let log_out = session
+            .run_command(&["--json", "session", "log", sid])
+            .unwrap();
+        evidence.record_command("--json session log (first turn check)", &log_out);
+        assert!(log_out.is_clean_exit(0));
+        let log: serde_json::Value = serde_json::from_slice(&log_out.stdout).unwrap();
+        let first_tid = log["nodes"][1]["turn_start"]["turn_id"].as_str().unwrap();
+        let turn_out = session
+            .run_command(&["--json", "session", "turn", first_tid])
+            .unwrap();
+        evidence.record_command("--json session turn (first turn)", &turn_out);
+        assert!(turn_out.is_clean_exit(0));
+        let first_detail: serde_json::Value = serde_json::from_slice(&turn_out.stdout).unwrap();
+        assert_eq!(first_detail["summary"]["outcome"], "completed");
+        assert_eq!(first_detail["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(first_detail["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(
+            first_detail["steps"][0]["slots"][0]["binding"]["method"],
+            "record_note"
+        );
+        assert_eq!(
+            first_detail["steps"][0]["slots"][0]["binding"]["tool_identity"],
+            "fake:record_note@1"
+        );
         record_pty_session(
             &session,
             &mut evidence,
-            list[0]["session_id"].as_str().unwrap(),
-            serde_json::json!({"prompt":"ping","script":"todo_write tool step + three-line text step","exit":"/quit"}),
+            sid,
+            serde_json::json!({"prompt":"ping","script":"record_note fake tool step + three-line text step","exit":"/quit"}),
         );
     }));
     evidence.record_captures(server.captured_requests());
@@ -219,6 +256,7 @@ mod support;
 
 use support::record_session as record_pty_session;
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
     use lattice_system_harness::{NativeUsage, SessionSendDriver, SseScript};
@@ -283,6 +321,7 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         "m",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
+    world.set_env("LATTICE_TEST_TOOLS", "record_usage");
     spec.layer = ScenarioLayer::PtySmoke;
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
@@ -306,8 +345,8 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
             with_usage(
                 support::tool_call(
                     "usage-tool",
-                    "session__todo_write",
-                    r#"{"todos":[{"content":"usage","status":"completed"}]}"#,
+                    "record_usage",
+                    r#"{"action":"read","value":{"step":"usage"}}"#,
                 ),
                 usage(200, 20, 0),
             ),
@@ -334,6 +373,9 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
             text.contains("saved usage answer") && text.contains("完成")
         })
         .unwrap();
+        wait_pty_frame(&mut tui, step(), |frame| {
+            frame.contains("▸ ✓ record_usage · 16 B") && frame.contains("saved usage answer")
+        });
         let initial = wait_for_usage(&mut tui, Some([600.0, 60.0, 50.0, 0.09, 330.0]), step());
         let list = query(&session, &mut evidence, &["--json", "session", "list"]);
         assert_eq!(list.as_array().unwrap().len(), 1);
@@ -360,6 +402,11 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         let tid = persisted["turns"][0]["turn_id"].as_str().unwrap();
         let detail = query(&session, &mut evidence, &["--json", "session", "turn", tid]);
         assert_eq!(detail["steps"].as_array().unwrap().len(), 2);
+        assert_eq!(detail["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(
+            detail["steps"][0]["slots"][0]["binding"]["method"],
+            "record_usage"
+        );
         let middle = detail["steps"][0]["node"].as_u64().unwrap().to_string();
         // 释放重试的 Warn，再正常退出；后台也停止，重开只能读取已保存计量。
         tui.send_keys(b" ").unwrap();
@@ -725,28 +772,36 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
             "completed"
         );
         assert_eq!(server.captured_requests().len(), 2);
-        for args in [
-            vec!["session", "log", session.session_id().unwrap()],
-            vec![
+        let log_text = session
+            .run_command(&["session", "log", session.session_id().unwrap()])
+            .unwrap();
+        evidence.record_command("session log", &log_text);
+        assert!(log_text.is_clean_exit(0), "{}", log_text.summary());
+        let turn_out = session
+            .run_command(&[
                 "--json",
                 "session",
                 "turn",
                 sent.accepted_turn_id().unwrap(),
-            ],
-            vec![
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                session.session_id().unwrap(),
-                "--turn",
-                sent.accepted_turn_id().unwrap(),
-            ],
-        ] {
-            let out = session.run_command(&args).unwrap();
-            evidence.record_command(args.join(" "), &out);
-            assert!(out.is_clean_exit(0), "{}", out.summary());
-        }
+            ])
+            .unwrap();
+        evidence.record_command("--json session turn", &turn_out);
+        assert!(turn_out.is_clean_exit(0), "{}", turn_out.summary());
+        let detail: serde_json::Value = serde_json::from_slice(&turn_out.stdout).unwrap();
+        assert_eq!(detail["session_id"], session.session_id().unwrap());
+        assert_eq!(detail["turn_id"], sent.accepted_turn_id().unwrap());
+        assert_eq!(detail["summary"]["outcome"], "completed");
+        assert_eq!(detail["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            detail["steps"][0]["end"],
+            serde_json::json!({"end": "finish"})
+        );
+        assert_eq!(detail["steps"][0]["attempts"].as_array().unwrap().len(), 1);
+        assert!(detail["steps"][0]["slots"].as_array().unwrap().is_empty());
+        assert!(
+            support::same_turn(&support::live_turn(&sent.parsed), &detail),
+            "实时条目与 session turn --json 持久详情一致：{detail}"
+        );
         evidence
             .record_json(
                 "observation-windows",
@@ -874,6 +929,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
 }
 
 /// 每次读取本次 resize 产生的完整帧，不从累计输出推断当前面板。
+#[cfg(feature = "fake-tools")]
 #[track_caller]
 fn wait_pty_frame(
     tui: &mut PtyTuiDriver,
@@ -900,6 +956,7 @@ fn wait_pty_frame(
     }
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
     use lattice_system_harness::{FakeLlmServer, ProviderTarget, SessionSendDriver, SseScript};
@@ -916,17 +973,15 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
     }
     let driver = driver();
     let (world, mut spec) = support::direct_world("pty-model-effort", "model-panel", "");
+    world.set_env("LATTICE_TEST_TOOLS", "read_panel_note");
     spec.layer = ScenarioLayer::PtySmoke;
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
     let step = || budget.cap_timeout(spec.step_timeout());
-    let profile = "schema_version=1\n[agent]\nname='model-panel'\nmodel='local/base'\neffort='low'\n[prompt]\nsystem='Read fixture.txt using observe__workspace.'\n[tools]\nenabled=['observe__workspace']\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n";
+    let profile = "schema_version=1\n[agent]\nname='model-panel'\nmodel='local/base'\neffort='low'\n[prompt]\nsystem='Read panel note using read_panel_note.'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n";
     world
         .write_project_file(".lattice/agents/model-panel/agent.toml", profile)
-        .unwrap();
-    world
-        .write_project_file("fixture.txt", "panel-file-marker")
         .unwrap();
     let (server, gate) = FakeLlmServer::start_gated(support::sequence(vec![
         SseScript::HttpError {
@@ -935,8 +990,8 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         },
         support::tool_call(
             "panel-read",
-            "observe__workspace",
-            r#"{"request":{"mode":"read_file","path":"fixture.txt"}}"#,
+            "read_panel_note",
+            r#"{"action":"read","value":{"marker":"panel-file-marker"}}"#,
         ),
         SseScript::plain("panel tool complete"),
         SseScript::plain("panel inherited complete"),
@@ -1042,15 +1097,18 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         });
         gate.release_next(step()).unwrap();
         gate.wait_until_stalled(3, step()).unwrap();
-        assert!(
-            support::last_tool_content(&server.captured_requests()[2])
-                .unwrap()
-                .contains("panel-file-marker")
+        assert_eq!(
+            support::tool_result_value(&server.captured_requests()[2]),
+            Some(json!({"marker": "panel-file-marker"}))
         );
         gate.release_next(step()).unwrap();
-        wait_pty_frame(&mut tui, step(), |text| {
+        let panel_done = wait_pty_frame(&mut tui, step(), |text| {
             text.contains("panel tool complete") && text.contains("idle")
         });
+        assert!(
+            panel_done.contains("▸ ✓ read_panel_note · 30 B"),
+            "假工具结果应在 TUI 中按实际字节长度显示：{panel_done}"
+        );
         let detail = query(
             &session,
             &mut evidence,
@@ -1059,6 +1117,14 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         assert_eq!(detail["summary"]["outcome"], "completed");
         assert_eq!(detail["steps"][0]["attempts"].as_array().unwrap().len(), 2);
         assert_eq!(detail["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(
+            detail["steps"][0]["slots"][0]["binding"]["method"],
+            "read_panel_note"
+        );
+        assert_eq!(
+            detail["steps"][0]["slots"][0]["binding"]["tool_identity"],
+            "fake:read_panel_note@1"
+        );
         tui.send_line("inherit the accepted selection").unwrap();
         gate.wait_until_stalled(4, step()).unwrap();
         gate.release_next(step()).unwrap();
@@ -1168,7 +1234,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
                 capture
                     .tool_names
                     .iter()
-                    .any(|tool| tool == "observe__workspace")
+                    .any(|tool| tool == "read_panel_note")
             );
             assert!(capture.raw.get("enable_thinking").is_none());
         }
@@ -1189,7 +1255,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             &session,
             &mut evidence,
             sid,
-            json!({"script":"503, file tool, final, inherited, reopened", "provider_requests":5}),
+            json!({"script":"503, read_panel_note fake tool, final, inherited, reopened", "provider_requests":5}),
         );
     }));
     evidence.record_pty(tui.output());
