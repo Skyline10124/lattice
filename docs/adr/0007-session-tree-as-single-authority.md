@@ -9,7 +9,7 @@ status: accepted
 - 修订：部分取代 ADR 0006，范围见[与 ADR 0006 的关系](#与-adr-0006-的关系)
 - 依赖：ADR 0006 未被取代的部分
 - 实施跟踪：GitHub #289（已完成，实现见 #290）
-- 部分被取代：ADR 0008（第 8 节中重试提示与未关闭 Step 的交付方式；范围见 ADR 0008 的[与 ADR 0006、ADR 0007 的关系](0008-backend-api-commands-view-queries.md#与-adr-0006adr-0007-的关系)）
+- 部分被取代：ADR 0008（第 8 节中重试提示与未关闭 Step 的交付方式；范围见 ADR 0008 的[与 ADR 0006、ADR 0007 的关系](0008-backend-api-commands-view-queries.md#与-adr-0006adr-0007-的关系)）；ADR 0009（第 4 节槽位结论表移除 `evidence` 字段；范围见 ADR 0009 的[与其他 ADR 的关系](0009-remove-legacy-lancet-tool-executor.md#与其他-adr-的关系)）
 
 ## 背景
 

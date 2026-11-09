@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # ADR 0009：从 LATTICE 剥离旧 LANCET，工具执行收窄为 `ToolExecutor`
@@ -28,7 +28,7 @@ LATTICE 与旧 LANCET 同处一个仓库，依赖双向交叉（按 `main` 的 `
 
 ### 维护者已确定的事项
 
-2026-11-06 至 11-09 确定：
+2026-11-06 至 11-09 确定并批准（`#388`）：
 
 - 剥离前已在 `4842b13a` 打归档标签 `archive/legacy-lancet` 保存旧栈完整快照。
 - 旧 LANCET 整体移出本仓库；新 LANCET 在独立仓库中从零重写为独立进程 `lancet-node`，对外提供 `act`，其设计记为新仓库的 ADR 0001。
