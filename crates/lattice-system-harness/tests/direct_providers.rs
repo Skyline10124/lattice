@@ -4,15 +4,19 @@
 //! 已实现协议的工具往返、缓存请求与尝试计量。
 //!
 //! 场景经统一入口配置 endpoint、模型与凭据，fake provider 按请求协议回复流。
-//! 每轮先调用 `observe__workspace`，再把工具结果按该协议投影，最后回复文本。
+//! 工具用例通过 `LATTICE_TEST_TOOLS` 注册确定性假工具，校验工具定义投影、调用与结果往返。
 
 mod support;
 
+#[cfg(feature = "fake-tools")]
+use lattice_system_harness::{AssertError, CapturedRequest, ScenarioEvidence};
 use lattice_system_harness::{
-    AssertError, CapturedRequest, FakeLlmServer, ProviderFixture, ProviderProtocol, ProviderTarget,
-    ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SessionSendDriver,
+    FakeLlmServer, ProviderFixture, ProviderProtocol, ProviderTarget, ScenarioSpec, ScenarioWorld,
+    SendExecution, SessionSendDriver,
 };
-use support::{assert_clean_send, driver, finish_scenario, require, sequence, tool_call, tool_ok};
+use support::{assert_clean_send, driver, sequence};
+#[cfg(feature = "fake-tools")]
+use support::{finish_scenario, require, tool_call, tool_ok};
 
 fn responses_fixture() -> ProviderFixture<'static> {
     ProviderFixture {
@@ -86,6 +90,7 @@ fn interactions_native(
     }
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
@@ -97,15 +102,13 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         assistant_role: "assistant",
     };
     let (world, spec) = provider_world(&provider);
-    world
-        .write_project_file("second.txt", "second-interactions-sentinel")
-        .unwrap();
+    world.set_env("LATTICE_TEST_TOOLS", "read_note,read_second");
     let steps = vec![
         json!({"type":"model_output","content":[{"type":"text","text":"Inspecting files."}]}),
         json!({"type":"thought","signature":"fixture-thought-signature","summary":[{"type":"text","text":"Check both."},{"type":"text","text":"Read results."}]}),
         json!({"type":"thought","signature":"fixture-signature-only"}),
-        json!({"type":"function_call","id":"call_a","name":"observe__workspace","arguments":{"request":{"mode":"read_file","path":"notes.txt"}}}),
-        json!({"type":"function_call","id":"call_b","name":"observe__workspace","arguments":{"request":{"mode":"read_file","path":"second.txt"}}}),
+        json!({"type":"function_call","id":"call_a","name":"read_note","arguments":{"action":"read","value":{"note":"sentinel-interactions"}}}),
+        json!({"type":"function_call","id":"call_b","name":"read_second","arguments":{"action":"read","value":{"note":"second-interactions-sentinel"}}}),
     ];
     let final_step =
         json!({"type":"model_output","content":[{"type":"text","text":"Both files inspected."}]});
@@ -163,15 +166,34 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         assert_eq!(captures.len(), 2);
         let input = captures[1].raw["input"].as_array().unwrap();
         assert_eq!(&input[1..6], &steps);
-        for (index, id, sentinel) in [
-            (6, "call_a", "sentinel-interactions"),
-            (7, "call_b", "second-interactions-sentinel"),
+        for (index, id, tool_name, sentinel) in [
+            (6, "call_a", "read_note", "sentinel-interactions"),
+            (7, "call_b", "read_second", "second-interactions-sentinel"),
         ] {
-            assert_eq!(input[index]["type"], "function_result");
-            assert_eq!(input[index]["call_id"], id);
-            assert_eq!(input[index]["name"], "observe__workspace");
-            assert!(input[index]["result"].as_str().unwrap().contains(sentinel));
+            assert_eq!(
+                input[index],
+                json!({
+                    "type": "function_result",
+                    "call_id": id,
+                    "name": tool_name,
+                    "result": format!("{{\"note\":\"{sentinel}\"}}"),
+                })
+            );
         }
+        let expected_tools = json!([
+            {
+                "type": "function",
+                "name": "read_note",
+                "description": "测试假工具 read_note",
+                "parameters": {"type": "object", "additionalProperties": true},
+            },
+            {
+                "type": "function",
+                "name": "read_second",
+                "description": "测试假工具 read_second",
+                "parameters": {"type": "object", "additionalProperties": true},
+            },
+        ]);
         for capture in &captures {
             assert_eq!(capture.provider, "interactions");
             assert_eq!(
@@ -184,11 +206,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
                 capture.raw["generation_config"],
                 json!({"thinking_summaries":"auto"})
             );
-            assert_eq!(capture.raw["tools"][0]["name"], "observe__workspace");
-            assert_eq!(
-                capture.raw["tools"][0]["parameters"],
-                captures[0].raw["tools"][0]["parameters"]
-            );
+            assert_eq!(capture.raw["tools"], expected_tools);
             for key in [
                 "max_output_tokens",
                 "previous_interaction_id",
@@ -250,18 +268,15 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     let fixture = interactions_fixture();
-    world.write_project_file(".lattice/agents/interactions/agent.toml",&format!("schema_version=1\n[agent]\nname='interactions'\nmodel='{}'\n[prompt]\nsystem='test'\n[tools]\nenabled=['observe__workspace']\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
-    world
-        .write_project_file("notes.txt", "not executed")
-        .unwrap();
+    world.write_project_file(".lattice/agents/interactions/agent.toml",&format!("schema_version=1\n[agent]\nname='interactions'\nmodel='{}'\n[prompt]\nsystem='test'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
     world.init_git_project().unwrap();
     let values = vec![
         json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"interactions-model"}}),
         json!({"event_type":"step.start","index":0,"step":{"type":"model_output"}}),
         json!({"event_type":"step.delta","index":0,"delta":{"type":"text","text":"partial"},"metadata":{"total_usage":{"total_input_tokens":8,"total_tool_use_tokens":2}}}),
         json!({"event_type":"step.stop","index":0}),
-        json!({"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call","name":"observe__workspace","arguments":{}}}),
-        json!({"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}}),
+        json!({"event_type":"step.start","index":1,"step":{"type":"function_call","id":"call","name":"read_note","arguments":{}}}),
+        json!({"event_type":"step.delta","index":1,"delta":{"type":"arguments_delta","arguments":"{\"action\":\"read\"}"}}),
         json!({"event_type":"step.stop","index":1}),
         json!({"event_type":"interaction.status_update","status":"requires_action"}),
         json!({"event_type":"interaction.completed","interaction":{"status":"failed","errors":[{"code":"invalid_request","message":"fixture-failed"}],"usage":{"total_output_tokens":2,"total_thought_tokens":3}}}),
@@ -496,6 +511,7 @@ fn responses_native(output: Vec<serde_json::Value>) -> lattice_system_harness::S
     }
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart() {
     use lattice_system_harness::FAKE_API_KEY;
@@ -507,14 +523,12 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         assistant_role: "assistant",
     };
     let (world, spec) = provider_world(&provider);
-    world
-        .write_project_file("second.txt", "second-sentinel")
-        .unwrap();
+    world.set_env("LATTICE_TEST_TOOLS", "read_note,read_second");
     let output = vec![
         json!({"type":"message","id":"msg_comment","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Inspecting two files.","annotations":[],"logprobs":[]}]}),
         json!({"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"Check both inputs."}],"encrypted_content":"fixture-final-cipher"}),
-        json!({"type":"function_call","id":"item_a","call_id":"call_a","name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}),
-        json!({"type":"function_call","id":"item_b","call_id":"call_b","name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"second.txt\"}}"}),
+        json!({"type":"function_call","id":"item_a","call_id":"call_a","name":"read_note","arguments":"{\"action\":\"read\",\"value\":{\"note\":\"sentinel-responses\"}}"}),
+        json!({"type":"function_call","id":"item_b","call_id":"call_b","name":"read_second","arguments":"{\"action\":\"read\",\"value\":{\"note\":\"second-sentinel\"}}"}),
     ];
     let final_item = json!({"type":"message","id":"msg_final","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Both files inspected.","annotations":[],"logprobs":[]}]});
     let server = FakeLlmServer::start(sequence(vec![
@@ -569,28 +583,45 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         assert_eq!(captures.len(), 2);
         let inputs = captures[1].raw["input"].as_array().unwrap();
         assert_eq!(&inputs[1..5], &output);
-        assert_eq!(inputs[5]["type"], "function_call_output");
-        assert_eq!(inputs[5]["call_id"], "call_a");
-        assert!(
-            inputs[5]["output"]
-                .as_str()
-                .unwrap()
-                .contains("sentinel-responses")
+        assert_eq!(
+            inputs[5],
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_a",
+                "output": "{\"note\":\"sentinel-responses\"}",
+            })
         );
-        assert_eq!(inputs[6]["call_id"], "call_b");
-        assert!(
-            inputs[6]["output"]
-                .as_str()
-                .unwrap()
-                .contains("second-sentinel")
+        assert_eq!(
+            inputs[6],
+            json!({
+                "type": "function_call_output",
+                "call_id": "call_b",
+                "output": "{\"note\":\"second-sentinel\"}",
+            })
         );
+        let expected_tools = json!([
+            {
+                "type": "function",
+                "name": "read_note",
+                "description": "测试假工具 read_note",
+                "parameters": {"type": "object", "additionalProperties": true},
+                "strict": false,
+            },
+            {
+                "type": "function",
+                "name": "read_second",
+                "description": "测试假工具 read_second",
+                "parameters": {"type": "object", "additionalProperties": true},
+                "strict": false,
+            },
+        ]);
         for capture in &captures {
             assert_eq!(capture.provider, "responses");
             assert_eq!(capture.raw["instructions"], "You are a concise test agent.");
             assert_eq!(capture.raw["store"], false);
             assert_eq!(capture.raw["stream"], true);
             assert_eq!(capture.raw["prompt_cache_key"], sid);
-            assert_eq!(capture.raw["tools"][0]["strict"], false);
+            assert_eq!(capture.raw["tools"], expected_tools);
             assert_eq!(
                 capture.raw["include"],
                 json!(["reasoning.encrypted_content"])
@@ -662,18 +693,15 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     let fixture = responses_fixture();
-    world.write_project_file(".lattice/agents/responses/agent.toml",&format!("schema_version=1\n[agent]\nname='responses'\nmodel='{}'\n[prompt]\nsystem='test'\n[tools]\nenabled=['observe__workspace']\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
-    world
-        .write_project_file("notes.txt", "not executed")
-        .unwrap();
+    world.write_project_file(".lattice/agents/responses/agent.toml",&format!("schema_version=1\n[agent]\nname='responses'\nmodel='{}'\n[prompt]\nsystem='test'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
     world.init_git_project().unwrap();
     let events = vec![
         json!({"type":"response.created","response":{"status":"in_progress","output":[],"usage":{"input_tokens":8}}}),
         json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","role":"assistant","id":"msg","content":[]}}),
         json!({"type":"response.content_part.added","output_index":0,"item_id":"msg","content_index":0,"part":{"type":"output_text","text":""}}),
         json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg","content_index":0,"delta":"partial"}),
-        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"item","call_id":"call","name":"observe__workspace","arguments":""}}),
-        json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"item","delta":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}),
+        json!({"type":"response.output_item.added","output_index":1,"item":{"type":"function_call","id":"item","call_id":"call","name":"read_note","arguments":""}}),
+        json!({"type":"response.function_call_arguments.delta","output_index":1,"item_id":"item","delta":"{\"action\":\"read\"}"}),
         json!({"type":"response.failed","response":{"status":"failed","error":{"code":"insufficient_quota","message":"no credit"},"usage":{"output_tokens":3}}}),
     ];
     let native = |events: Vec<Value>| SseScript::NativeEvents {
@@ -698,13 +726,13 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},"output":[{"type":"message","role":"assistant","id":"saved","status":"incomplete","content":[{"type":"output_text","text":"saved incomplete"}]}],"usage":{"input_tokens":9,"output_tokens":4}}}),
             ]),
             native(vec![
-                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"observe__workspace","arguments":""}}),
-                json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"truncated","delta":"{\"request\":"}),
-                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"observe__workspace","status":"incomplete","arguments":"{\"request\":"}}),
+                json!({"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"read_note","arguments":""}}),
+                json!({"type":"response.function_call_arguments.delta","output_index":0,"item_id":"truncated","delta":"{\"action\":"}),
+                json!({"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","id":"truncated","call_id":"truncated-call","name":"read_note","status":"incomplete","arguments":"{\"action\":"}}),
                 json!({"type":"response.incomplete","response":{"status":"incomplete","incomplete_details":{"reason":"max_output_tokens"}}}),
             ]),
             native(vec![
-                json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"missing-call-id","name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}]}}),
+                json!({"type":"response.completed","response":{"status":"completed","output":[{"type":"function_call","id":"missing-call-id","name":"read_note","arguments":"{\"action\":\"read\"}"}]}}),
             ]),
         ]),
         spec.total_timeout().unwrap(),
@@ -869,13 +897,15 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
     support::finish_recorded(evidence, result);
 }
 
+#[cfg(feature = "fake-tools")]
 struct Provider {
     name: &'static str,
     fixture: ProviderFixture<'static>,
-    /// Role the provider uses for the assistant turn on the wire.
+    /// 该协议在 wire 上表示助手轮次的 role。
     assistant_role: &'static str,
 }
 
+#[cfg(feature = "fake-tools")]
 const PROVIDERS: [Provider; 3] = [
     Provider {
         name: "openai",
@@ -906,6 +936,7 @@ const PROVIDERS: [Provider; 3] = [
     },
 ];
 
+#[cfg(feature = "fake-tools")]
 fn provider_world(provider: &Provider) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(format!("direct-provider-{}", provider.name));
     let world = ScenarioWorld::new(&spec.name).expect("world");
@@ -913,8 +944,7 @@ fn provider_world(provider: &Provider) -> (ScenarioWorld, ScenarioSpec) {
     let toml = format!(
         "schema_version = 1\n\n\
          [agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = [\"observe__workspace\"]\n",
+         [prompt]\nsystem = \"You are a concise test agent.\"\n",
         name = provider.name,
     );
     world
@@ -923,19 +953,16 @@ fn provider_world(provider: &Provider) -> (ScenarioWorld, ScenarioSpec) {
             &toml,
         )
         .expect("write agent.toml");
-    world
-        .write_project_file("notes.txt", &format!("sentinel-{}\n", provider.name))
-        .expect("write notes");
     world.init_git_project().expect("init git");
     (world, spec)
 }
 
-/// The Tool result the product sent back in the second request, in the
-/// provider's own shape, as text for content assertions.
+/// 提取第二次请求里按各协议格式投影的工具结果载荷。
+#[cfg(feature = "fake-tools")]
 fn projected_tool_result(
     provider: &Provider,
     capture: &CapturedRequest,
-) -> Result<String, AssertError> {
+) -> Result<serde_json::Value, AssertError> {
     let (list, last) = match provider.name {
         "openai" | "anthropic" => ("messages", capture.raw["messages"].as_array()),
         _ => ("contents", capture.raw["contents"].as_array()),
@@ -952,7 +979,7 @@ fn projected_tool_result(
             } else {
                 "user"
             },
-        format!("tool result turn is not a user turn: {last}"),
+        format!("工具结果轮次的 role 不匹配: {last}"),
     )?;
     let block = match provider.name {
         "openai" => last["content"].clone(),
@@ -960,7 +987,7 @@ fn projected_tool_result(
             let block = &last["content"][0];
             require(
                 block["type"] == "tool_result" && block["tool_use_id"] == "call-1",
-                format!("Anthropic tool_result must answer tool_use call-1: {block}"),
+                format!("Anthropic tool_result 必须回指 tool_use call-1: {block}"),
             )?;
             block["content"].clone()
         }
@@ -968,14 +995,15 @@ fn projected_tool_result(
             let response = &last["parts"][0]["functionResponse"];
             require(
                 response["name"] == capture.tool_names[0].as_str(),
-                format!("Gemini functionResponse must name the called Tool: {response}"),
+                format!("Gemini functionResponse 必须写明被调工具名: {response}"),
             )?;
             response["response"].clone()
         }
     };
-    Ok(block.to_string())
+    Ok(block)
 }
 
+#[cfg(feature = "fake-tools")]
 fn with_usage(
     provider: &Provider,
     script: lattice_system_harness::SseScript,
@@ -1000,6 +1028,7 @@ fn with_usage(
     }
 }
 
+#[cfg(feature = "fake-tools")]
 fn cache_controls(wire: &serde_json::Value) -> Vec<(String, serde_json::Value)> {
     fn collect(wire: &serde_json::Value, path: &str, found: &mut Vec<(String, serde_json::Value)>) {
         match wire {
@@ -1027,19 +1056,23 @@ fn cache_controls(wire: &serde_json::Value) -> Vec<(String, serde_json::Value)> 
     found
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
     let driver = driver();
     for provider in &PROVIDERS {
         let (world, spec) = provider_world(provider);
+        world.set_env("LATTICE_TEST_TOOLS", "read_note");
+        let sentinel = format!("sentinel-{}", provider.name);
+        let call_args = serde_json::json!({
+            "action": "read",
+            "value": {"note": sentinel},
+        })
+        .to_string();
         let key = format!("{}-fixture-key", provider.name);
         let server = FakeLlmServer::start(sequence(
             vec![
-                tool_call(
-                    "call-1",
-                    "observe__workspace",
-                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-                ),
+                tool_call("call-1", "read_note", &call_args),
                 lattice_system_harness::SseScript::PlainText {
                     chunks: vec!["answer-".into(), provider.name.into()],
                     finish_reason: "stop".into(),
@@ -1094,7 +1127,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 "--json",
                 "session",
                 "send",
-                "read notes.txt",
+                "read note",
                 "--agent",
                 provider.name,
                 "--model",
@@ -1117,32 +1150,29 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
 
         let result: Result<(), AssertError> = (|| {
             assert_clean_send(&outcome)?;
-            require(
-                tool_ok(&outcome.parsed, "observe__workspace"),
-                "observe__workspace ok",
-            )?;
-            require(outcome.has_completed(), "turn completed")?;
+            require(tool_ok(&outcome.parsed, "read_note"), "read_note 执行成功")?;
+            require(outcome.has_completed(), "turn 已完成")?;
             let stdout = String::from_utf8_lossy(&outcome.command.stdout);
             require(
                 stdout.contains(&format!("answer-{}", provider.name)),
-                "final text streamed in order",
+                "最终文本按序流式输出",
             )?;
             require(
                 captures.len() == 2,
-                format!("expected 2 model requests, got {}", captures.len()),
+                format!("预期 2 次模型请求，实际为 {}", captures.len()),
             )?;
             require(
                 detail.is_clean_exit(0) && stopped.is_clean_exit(0) && reopened.is_clean_exit(0),
-                "query, stop and reopen succeed",
+                "查询、停止与重开均成功",
             )?;
             let saved: serde_json::Value = serde_json::from_slice(&detail.stdout).unwrap();
             require(
                 saved == serde_json::from_slice::<serde_json::Value>(&reopened.stdout).unwrap(),
-                "reopened metering is unchanged",
+                "重开后用量计量保持不变",
             )?;
             require(
                 server.captured_requests().len() == 2,
-                "queries do not issue model requests",
+                "只读查询不触发模型请求",
             )?;
             for step in saved["steps"].as_array().unwrap() {
                 let attempt = &step["attempts"][0];
@@ -1159,7 +1189,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                         && attempt["cost"]["usd"]
                             .as_f64()
                             .is_some_and(|fee| (fee - expected_fee).abs() < 1e-15),
-                    format!("native usage normalized and saved: {attempt}"),
+                    format!("原生用量已归一化并持久化: {attempt}"),
                 )?;
             }
             require(
@@ -1169,8 +1199,31 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                     && saved["usage"]["output"]["known"] == 40
                     && saved["usage"]["cost"]["known"]["exact"] == true
                     && saved["usage"]["cost"]["unknown_attempts"] == 0,
-                "two complete attempts aggregate with exact fees",
+                "两次完整尝试聚合出精确费用",
             )?;
+            let schema = serde_json::json!({"type": "object", "additionalProperties": true});
+            let expected_tools = match provider.name {
+                "openai" => serde_json::json!([{
+                    "type": "function",
+                    "function": {
+                        "name": "read_note",
+                        "description": "测试假工具 read_note",
+                        "parameters": schema,
+                    },
+                }]),
+                "anthropic" => serde_json::json!([{
+                    "name": "read_note",
+                    "description": "测试假工具 read_note",
+                    "input_schema": schema,
+                }]),
+                _ => serde_json::json!([{
+                    "functionDeclarations": [{
+                        "name": "read_note",
+                        "description": "测试假工具 read_note",
+                        "parametersJsonSchema": schema,
+                    }],
+                }]),
+            };
             for (index, capture) in captures.iter().enumerate() {
                 let paths = match provider.name {
                     "anthropic" => vec!["/cache_control", "/system/0/cache_control"],
@@ -1191,26 +1244,26 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 let actual = cache_controls(&capture.raw);
                 require(
                     actual == expected,
-                    format!("complete cache breakpoint set: expected {expected:?}, got {actual:?}"),
+                    format!("缓存断点集合不匹配: 预期 {expected:?}, 实际 {actual:?}"),
                 )?;
                 if provider.name == "anthropic" {
                     require(
                         capture.raw["max_tokens"] == 8192,
-                        "Messages output limit comes from cached metadata",
+                        "Messages 输出上限应来自缓存元数据",
                     )?;
                 }
                 require(
                     capture.provider == provider.name,
-                    format!(
-                        "request reached the {} route: {}",
-                        provider.name, capture.provider
-                    ),
+                    format!("请求未命中 {} 路由: {}", provider.name, capture.provider),
                 )?;
                 require(
                     capture.model == provider.fixture.model,
-                    format!("frozen model {}: {}", provider.fixture.model, capture.model),
+                    format!("冻结模型应为 {}: {}", provider.fixture.model, capture.model),
                 )?;
-                require(!capture.tool_names.is_empty(), "tool declarations sent")?;
+                require(
+                    capture.tool_names == ["read_note"] && capture.raw["tools"] == expected_tools,
+                    format!("假工具定义投影不匹配: {}", capture.raw["tools"]),
+                )?;
                 let disabled = match provider.name {
                     "openai" => capture.raw["reasoning_effort"] == serde_json::json!("none"),
                     "anthropic" => {
@@ -1225,7 +1278,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 };
                 require(
                     disabled,
-                    format!("CLI off must reach every {} request", provider.name),
+                    format!("CLI off 必须传到每次 {} 请求", provider.name),
                 )?;
             }
             require(
@@ -1235,12 +1288,22 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                     } else {
                         vec!["user", provider.assistant_role, "user"]
                     },
-                format!("second request history: {:?}", captures[1].message_roles),
+                format!("第二次请求角色序列异常: {:?}", captures[1].message_roles),
             )?;
             let projected = projected_tool_result(provider, &captures[1])?;
+            let expected_projected = match provider.name {
+                "openai" => serde_json::json!([{
+                    "type": "text",
+                    "text": format!("{{\"note\":\"{sentinel}\"}}"),
+                    "cache_control": {"type": "ephemeral"},
+                }]),
+                "anthropic" => serde_json::json!(format!("{{\"note\":\"{sentinel}\"}}")),
+                "gemini" => serde_json::json!({"note": sentinel}),
+                _ => unreachable!(),
+            };
             require(
-                projected.contains(&format!("sentinel-{}", provider.name)),
-                format!("Tool result must carry the file content: {projected}"),
+                projected == expected_projected,
+                format!("工具结果投影不匹配: 预期 {expected_projected}, 实际 {projected}"),
             )?;
             Ok(())
         })();
@@ -1272,7 +1335,11 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
         let spec = ScenarioSpec::direct_local(name);
         let world = ScenarioWorld::new(&spec.name).unwrap();
         world.budget(&spec);
-        let fixture = PROVIDERS[2].fixture;
+        let fixture = ProviderFixture {
+            protocol: ProviderProtocol::GenerateContent,
+            target: ProviderTarget::Custom("google-generate"),
+            model: "gemini-2.5-flash",
+        };
         world
             .write_agent_profile("blocked", &fixture.model_ref().unwrap())
             .unwrap();
@@ -1370,6 +1437,7 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
     }
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
@@ -1392,23 +1460,21 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
         let spec = ScenarioSpec::direct_local(format!("builtin-{id}"));
         let world = ScenarioWorld::new(&spec.name).unwrap();
         world.budget(&spec);
+        world.set_env("LATTICE_TEST_TOOLS", "read_note");
         let fixture = ProviderFixture {
             protocol,
             target: ProviderTarget::Builtin(id),
             model: "fixture-model",
         };
         world.write_project_file(".lattice/agents/builtin/agent.toml", &format!(
-            "schema_version=1\n[agent]\nname='builtin'\nmodel='{}'\n[prompt]\nsystem='builtin system'\n[tools]\nenabled=['observe__workspace']\n",fixture.model_ref().unwrap()
+            "schema_version=1\n[agent]\nname='builtin'\nmodel='{}'\n[prompt]\nsystem='builtin system'\n",fixture.model_ref().unwrap()
         )).unwrap();
-        world
-            .write_project_file("notes.txt", "builtin sentinel")
-            .unwrap();
         world.init_git_project().unwrap();
         let server = FakeLlmServer::start(sequence(vec![
             tool_call(
                 "builtin-call",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+                "read_note",
+                r#"{"action":"read","value":{"note":"builtin sentinel"}}"#,
             ),
             SseScript::plain("builtin works"),
             SseScript::plain("builtin reopened"),
@@ -1436,7 +1502,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
             evidence.record_command("builtin tool Turn", &sent.command);
             assert!(sent.command.is_clean_exit(0) && sent.has_completed());
             assert_eq!(sent.slots().len(), 1);
-            assert!(tool_ok(&sent.parsed, "observe__workspace"));
+            assert!(tool_ok(&sent.parsed, "read_note"));
             let turn = support::live_turn(&sent.parsed);
             assert_eq!(turn["steps"].as_array().unwrap().len(), 2);
             for step in turn["steps"].as_array().unwrap() {
@@ -1462,11 +1528,15 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
                 assert_eq!(capture.provider, wire);
                 assert_eq!(capture.raw["stream"], true);
                 assert_eq!(capture.raw["store"], false);
-                assert!(
-                    capture
-                        .tool_names
-                        .iter()
-                        .any(|name| name == "observe__workspace")
+                assert_eq!(capture.tool_names, ["read_note"]);
+                assert_eq!(capture.raw["tools"][0]["name"], "read_note");
+                assert_eq!(
+                    capture.raw["tools"][0]["description"],
+                    "测试假工具 read_note"
+                );
+                assert_eq!(
+                    capture.raw["tools"][0]["parameters"],
+                    json!({"type": "object", "additionalProperties": true})
                 );
                 assert_eq!(
                     capture.raw[if id == "google" {
@@ -1496,6 +1566,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
             }
             let input = captures[1].raw["input"].as_array().unwrap();
             assert!(input.iter().any(|item| item["type"] == "function_call"
+                && item["name"] == "read_note"
                 && item[if id == "google" { "id" } else { "call_id" }] == "builtin-call"));
             assert!(input.iter().any(|item| item["type"]
                 == if id == "google" {
@@ -1737,6 +1808,7 @@ fn builtin_text_history_projects_across_protocols() {
     support::finish_recorded(evidence, result);
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasoning() {
     use lattice_system_harness::{FAKE_API_KEY, SseScript};
@@ -1744,17 +1816,15 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
     let spec = ScenarioSpec::direct_local("provider-replay-switch");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
-    world
-        .write_project_file("notes.txt", "replay sentinel\n")
-        .unwrap();
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     world.write_project_file(".lattice/agents/replay/agent.toml",
-        "schema_version=1\n[agent]\nname='replay'\nmodel='openai-chat/first'\n[prompt]\nsystem='Read the requested file.'\n[tools]\nenabled=['observe__workspace']\n").unwrap();
+        "schema_version=1\n[agent]\nname='replay'\nmodel='openai-chat/first'\n[prompt]\nsystem='Read the requested file.'\n").unwrap();
     world.init_git_project().unwrap();
     let server = FakeLlmServer::start(sequence(vec![
         SseScript::Chunks { chunks: vec![
             json!({"choices":[{"delta":{"reasoning_content":"source-a-reasoning"}}]}),
             json!({"choices":[{"delta":{"content":"read first"}}]}),
-            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"replay-call","type":"function","function":{"name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"notes.txt\"}}"}}]}}]}),
+            json!({"choices":[{"delta":{"tool_calls":[{"index":0,"id":"replay-call","type":"function","function":{"name":"read_note","arguments":"{\"action\":\"read\",\"value\":{\"note\":\"replay sentinel\"}}"}}]}}]}),
             json!({"choices":[{"delta":{},"finish_reason":"tool_calls"}]}),
         ]},
         SseScript::plain("first done"),
@@ -1905,7 +1975,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         assert!(!captures[2].raw.to_string().contains("source-a-reasoning"));
         let cross_wire = captures[3].raw.to_string();
         assert!(cross_wire.contains("replay sentinel"));
-        assert!(cross_wire.contains("observe__workspace"));
+        assert!(cross_wire.contains("read_note"));
         for material in [
             "source-a-reasoning",
             "source-b-reasoning",

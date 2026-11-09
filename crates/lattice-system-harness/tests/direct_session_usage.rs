@@ -3,6 +3,8 @@
 
 //! 公开用量输出分别累计当前路径与全会话，读取与后台重开保持已存事实。
 
+#![cfg(feature = "fake-tools")]
+
 mod support;
 
 use lattice_system_harness::{
@@ -175,11 +177,9 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         "priced",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let driver = support::driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "priced");
-    world
-        .write_project_file("notes.txt", "usage tool result\n")
-        .unwrap();
     world
         .write_agent_profile("unpriced", "local/unpriced")
         .unwrap();
@@ -199,8 +199,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             with_usage(
                 support::tool_call(
                     "read",
-                    "observe__workspace",
-                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+                    "read_note",
+                    r#"{"action":"read","value":{"note":"usage tool result"}}"#,
                 ),
                 json!({"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200},"completion_tokens_details":{"reasoning_tokens":0}}),
             ),

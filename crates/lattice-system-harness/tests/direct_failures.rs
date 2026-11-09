@@ -133,6 +133,7 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         test,
     );
 }
+#[cfg(feature = "fake-tools")]
 #[test]
 fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     use serde_json::json;
@@ -142,9 +143,7 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
         "failure",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
-    world
-        .write_project_file("notes.txt", "persisted tool result\n")
-        .unwrap();
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let usage = json!({"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":100},"completion_tokens_details":{"reasoning_tokens":20}});
     let priced = |script| SseScript::WithUsage {
         script: Box::new(script),
@@ -162,8 +161,8 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
             },
             priced(tool_call(
                 "call",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+                "read_note",
+                r#"{"action":"read","value":{"note":"persisted tool result"}}"#,
             )),
             priced(SseScript::plain("complete")),
         ]),
@@ -614,6 +613,7 @@ fn stopped_after_reported_usage(deadline: bool) {
         test,
     );
 }
+#[cfg(feature = "fake-tools")]
 #[test]
 fn direct_failure_mutation_survives_provider_failure() {
     let driver = driver();
@@ -622,15 +622,23 @@ fn direct_failure_mutation_survives_provider_failure() {
         "mutation",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
+    world.set_env("LATTICE_TEST_TOOLS", "write_marker");
+    let survivor_path = world
+        .project_dir()
+        .join("survivor.txt")
+        .display()
+        .to_string();
+    let create_args = serde_json::to_string(&json!({
+        "action": "append_marker",
+        "path": survivor_path,
+        "line": "bytes\n",
+    }))
+    .unwrap();
     let server = wire_fake_llm(
         &world,
         "mutation",
         sequence(vec![
-            tool_call(
-                "c1",
-                "mutate__create",
-                r#"{"path":"survivor.txt","content":"bytes\n","create_parents":false}"#,
-            ),
+            tool_call("c1", "write_marker", &create_args),
             SseScript::HttpError {
                 status: 500,
                 body: r#"{"error":{"message":"down"}}"#.into(),
@@ -646,15 +654,15 @@ fn direct_failure_mutation_survives_provider_failure() {
         require(
             turn["steps"][0]["end"]["end"] == "continue"
                 && turn["steps"][0]["slots"][0]["outcome"] == "succeeded",
-            "mutation committed before failed next request",
+            "第一步工具结果已持久提交，随后第二步请求失败",
         )?;
         require(
             std::fs::read_to_string(world.project_dir().join("survivor.txt")).unwrap() == "bytes\n",
-            "installed bytes survive provider failure",
+            "已写出的标记文件在后续 provider 失败后保持不变",
         )?;
         require(
             server.captured_requests().len() == 2,
-            "tool round then failed request only",
+            "只发出工具轮与失败轮两次请求",
         )
     })();
     finish_failure(
@@ -664,6 +672,114 @@ fn direct_failure_mutation_survives_provider_failure() {
         server.captured_requests(),
         result,
         "direct_failure_mutation_survives_provider_failure",
+    );
+}
+#[cfg(feature = "fake-tools")]
+#[test]
+fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
+    use lattice_system_harness::{SlotOutcome, SlotState};
+    let driver = driver();
+    let (world, spec) = direct_world("direct-failure-tool-error", "tool-fail", "");
+    world.set_env("LATTICE_TEST_TOOLS", "check_gate");
+    let server = wire_fake_llm(
+        &world,
+        "tool-fail",
+        sequence(vec![
+            tool_call(
+                "call-fail",
+                "check_gate",
+                r#"{"action":"fail","code":"gate_denied","message":"simulated tool failure"}"#,
+            ),
+            SseScript::plain("recovered after tool error"),
+        ]),
+    );
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "tool-fail");
+    let outcome = send.send("run failing tool then recover").unwrap();
+    let detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let captures = server.captured_requests();
+    let result = (|| {
+        assert_clean_send(&outcome)?;
+        assert_accepted_and_closed(&outcome)?;
+        require(
+            outcome.command.is_clean_exit(0)
+                && outcome.has_completed()
+                && outcome.reply_text() == "recovered after tool error",
+            format!(
+                "工具返回 Failed(ToolError) 后仍推进下一步并正常完成：{}",
+                outcome.reply_text()
+            ),
+        )?;
+        require(
+            captures.len() == 2,
+            format!("预期两次模型请求，实际为 {}", captures.len()),
+        )?;
+        let slots = outcome.slots();
+        require(
+            slots.len() == 1
+                && slots[0].method == "check_gate"
+                && slots[0].state == SlotState::Terminal
+                && slots[0].outcome == SlotOutcome::Failed
+                && slots[0].error_code.as_deref() == Some("gate_denied"),
+            format!("公开槽位记录应为 Failed 且携带机器码 gate_denied：{slots:?}"),
+        )?;
+        let expected_wire =
+            r#"{"error":{"code":"gate_denied","message":"simulated tool failure"}}"#;
+        require(
+            captures[1].raw["messages"][3]
+                == json!({
+                    "role": "tool",
+                    "tool_call_id": "call-fail",
+                    "content": expected_wire,
+                }),
+            format!(
+                "第二步请求中的工具错误投影不匹配：{}",
+                captures[1].raw["messages"][3]
+            ),
+        )?;
+        require(detail.is_clean_exit(0), "session turn 查询应返回 0")?;
+        let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let slot = &persisted["steps"][0]["slots"][0];
+        let expected_reason = json!({"kind": "failed", "value": {"code": "gate_denied"}});
+        let expected_material = json!({"kind": "no_content"});
+        require(
+            persisted["summary"]["outcome"] == "completed"
+                && persisted["steps"].as_array().unwrap().len() == 2
+                && persisted["steps"][0]["end"] == json!({"end": "continue"})
+                && persisted["steps"][1]["end"] == json!({"end": "finish"})
+                && slot["outcome"] == "failed"
+                && slot["progress"]
+                    == json!({
+                        "state": "terminal",
+                        "outcome": "failed",
+                        "reason": expected_reason,
+                        "material": expected_material,
+                    })
+                && slot["reason"] == expected_reason
+                && slot["material"] == expected_material
+                && slot["binding"]["method"] == "check_gate"
+                && slot["binding"]["tool_identity"] == "fake:check_gate@1"
+                && same_turn(&final_turn(&outcome), &persisted),
+            format!("持久 Turn 详情与槽位失败结论不一致：{persisted}"),
+        )
+    })();
+    finish_failure(
+        evidence,
+        &send,
+        &[
+            ("tool error turn", &outcome.command),
+            ("turn detail", &detail),
+        ],
+        captures,
+        result,
+        "direct_failure_tool_error_projects_to_model_and_continues_next_step",
     );
 }
 #[test]
