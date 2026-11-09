@@ -14,7 +14,7 @@ crash-barriers = []
 [[test]]
 name = "direct_crash_barriers"
 path = "tests/direct_crash_barriers.rs"
-required-features = ["crash-barriers"]
+required-features = ["crash-barriers", "fake-tools"]
 
 [dependencies]
 # 通用哈希库（非产品 crate）：工作区快照对比与场景产物摘要核对使用。

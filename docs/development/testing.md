@@ -125,7 +125,7 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 | --- | --- | --- |
 | 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景，配无测试 feature 的 `lattice` 二进制 | 普通 CI；本地按需 |
 | 假工具场景 | 标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景：需要 harness 的 `fake-tools` feature、带 `test-fake-tools` 的被测二进制，以及后台启动前设置的 `LATTICE_TEST_TOOLS` | 按影响范围或 CI 显式构建该二进制运行 |
-| 崩溃屏障 | `direct_crash_barriers`：需要 harness 的 `crash-barriers` feature 与带 `test-crash-barriers`（含工具调用时加 `test-fake-tools`）的被测二进制 | 普通 CI 在默认测试之后构建该二进制并运行 |
+| 崩溃屏障 | `direct_crash_barriers`：需要 harness 的 `fake-tools,crash-barriers` feature 与带 `test-fake-tools,test-crash-barriers` 的被测二进制 | 普通 CI 在默认测试之后构建该二进制并运行 |
 
 报告列明测试目标、feature、构建模式与实际结果；普通套件的结论只覆盖普通套件。
 

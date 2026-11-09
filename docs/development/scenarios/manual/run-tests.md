@@ -38,9 +38,9 @@ LATTICE_BIN="$(pwd)/target/debug/lattice" \
   cargo test -p lattice-system-harness --features fake-tools \
   --test direct_tree_session
 
-cargo build -p lattice-cli --bin lattice --features test-crash-barriers
+cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers
 LATTICE_BIN="$(pwd)/target/debug/lattice" \
-  cargo test -p lattice-system-harness --features crash-barriers \
+  cargo test -p lattice-system-harness --features fake-tools,crash-barriers \
   --test direct_crash_barriers
 ```
 
