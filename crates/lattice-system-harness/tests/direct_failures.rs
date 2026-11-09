@@ -59,7 +59,6 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
     let (world, spec) = direct_world(
         name,
         "failure",
-        "[]",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let server = wire_fake_llm(&world, "failure", script);
@@ -141,7 +140,6 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     let (world, spec) = direct_world(
         "failure-usage-retry",
         "failure",
-        "[\"observe__workspace\"]",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     world
@@ -394,7 +392,6 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
     let (world, spec) = direct_world(
         "direct-failure-deadline-stall",
         "deadline",
-        "[]",
         "[llm]\ntimeout_secs = 1\n",
     );
     // 整份响应的 gate 在发送响应头之前等待，保护打开阶段的 deadline 轮询。
@@ -457,7 +454,6 @@ fn stopped_after_reported_usage(deadline: bool) {
     let (world, spec) = direct_world(
         prefix,
         agent,
-        "[]",
         if deadline {
             "[llm]\ntimeout_secs = 5\n"
         } else {
@@ -624,7 +620,6 @@ fn direct_failure_mutation_survives_provider_failure() {
     let (world, spec) = direct_world(
         "direct-failure-mutation-survives",
         "mutation",
-        "[\"mutate__create\"]",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let server = wire_fake_llm(
@@ -674,7 +669,7 @@ fn direct_failure_mutation_survives_provider_failure() {
 #[test]
 fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-failure-stale-parent", "busy", "[]", "");
+    let (world, spec) = direct_world("direct-failure-stale-parent", "busy", "");
     let baseline_server = wire_fake_llm(&world, "busy", SseScript::plain("baseline done"));
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "busy");

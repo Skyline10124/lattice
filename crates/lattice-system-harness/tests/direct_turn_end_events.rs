@@ -45,12 +45,7 @@ fn reopened_entries_match(
 #[test]
 fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-turn-end-events-completed",
-        "end-events",
-        "[\"observe__workspace\"]",
-        "",
-    );
+    let (world, spec) = direct_world("direct-turn-end-events-completed", "end-events", "");
     let server = wire_fake_llm(
         &world,
         "end-events",
@@ -134,7 +129,6 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
     let (world, spec) = direct_world(
         "direct-turn-end-events-exhausted-retries",
         "end-errors",
-        "[]",
         "[llm.retry]\nmax_retries = 2\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let server = wire_fake_llm(

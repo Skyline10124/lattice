@@ -1,56 +1,34 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local turn scenarios (issue #62, Codeberg #40): the production turn
-//! path runs against the canonical Local Workspace — no KVM, no MSB daemon,
-//! no OCI image registry, no guest Git installation, no `[workspace]` profile
-//! section. These scenarios run in the ordinary lane (not `#[ignore]`):
-//! after #62 a broken turn path is a product failure, never a skip.
+//! Direct-Local 基础轮次场景：产品轮次直接运行在规范化项目工作区上，无 `[workspace]`、`[lancet]`
+//! 或 `[tools]` 配置段。
 //!
-//! Skeleton coverage (full Direct-Local scenario matrix belongs to #46,
-//! Codeberg #24):
-//!
-//! - **plain-text turn** — a complete text-only turn commits and exits 0;
-//!   `session log --json` cross-validates the commit (supersedes the retired
-//!   KVM-lane plain-turn scenario with the same semantic core).
-//! - **session reopen** — a second `session send` on the same session
-//!   succeeds after an external (non-LATTICE) edit + commit changed the
-//!   Local state, and carries the first turn's transcript context.
-//! - **policy denial** — a `mutate__create` call on a
-//!   `[lancet.workspace].denied_write_patterns` path is denied, surfaces as
-//!   a failed tool event in the public stream, leaves no file on disk, and
-//!   the turn still completes on the model's recovery reply.
+//! - **纯文本轮次** — 完整的纯文本轮次持久提交并退出 0，`session log --json` 与实时输出互证；
+//! - **外部变更后重开会话** — 两次 `session send` 之间发生外部文件编辑与 Git 提交，重开会话保留
+//!   外部文件与 Git HEAD，且第二次模型请求携带完整上文对话。
 
 mod support;
 
 use lattice_system_harness::{
     AssertError, CapturedRequest, ProviderFixture, ScenarioSpec, ScenarioWorld, SendExitCode,
-    SendOutcome, SessionSendDriver, SlotOutcome, SseScript, derive_send_exit_code,
+    SendOutcome, SessionSendDriver, SseScript, derive_send_exit_code,
 };
 use serde_json::{Value, json};
 use support::{
     assert_accepted_and_closed, assert_clean_send, driver, evidence, finish_scenario, require,
-    tool_failure, wire_fake_llm,
+    wire_fake_llm,
 };
 
-/// A Direct-Local project world with a fake-LLM-backed agent profile.
-///
-/// `tools` is the `[tools].enabled` list; `extra_profile` is appended verbatim
-/// (e.g. a `[lancet.workspace]` policy table). The profile is hand-written
-/// TOML — the harness boundary forbids `lattice-profile`.
-fn turn_world(
-    prefix: &str,
-    agent: &str,
-    tools: &str,
-    extra_profile: &str,
-) -> (ScenarioWorld, ScenarioSpec) {
+/// 构造带手写 `agent.toml` 的 Direct-Local 场景世界（harness 黑盒边界禁止依赖 `lattice-profile`）。
+fn turn_world(prefix: &str, agent: &str) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(prefix);
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let model = ProviderFixture::chat_completions(agent)
         .model_ref()
         .unwrap();
     let toml = format!(
-        "schema_version = 1\n\n[agent]\nname = \"{agent}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"You are a concise test agent. Reply briefly.\"\n\n[tools]\nenabled = {tools}\n{extra_profile}"
+        "schema_version = 1\n\n[agent]\nname = \"{agent}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"You are a concise test agent. Reply briefly.\"\n"
     );
     world
         .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
@@ -125,7 +103,7 @@ fn request_messages(capture: &CapturedRequest) -> Vec<(&str, &str)> {
 #[test]
 fn direct_local_plain_text_turn_commits_and_exit_zero() {
     let driver = driver();
-    let (world, spec) = turn_world("direct-local-plain-turn", "dl-plain", "[]", "");
+    let (world, spec) = turn_world("direct-local-plain-turn", "dl-plain");
     let server = wire_fake_llm(&world, "dl-plain", SseScript::plain("ok"));
     let scenario_evidence = evidence(&world, &spec);
 
@@ -177,7 +155,7 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
 #[test]
 fn direct_local_session_reopen_after_external_change() {
     let driver = driver();
-    let (world, spec) = turn_world("direct-local-reopen", "dl-reopen", "[]", "");
+    let (world, spec) = turn_world("direct-local-reopen", "dl-reopen");
     let server = wire_fake_llm(
         &world,
         "dl-reopen",
@@ -286,96 +264,6 @@ fn direct_local_session_reopen_after_external_change() {
             ("second session send", &second.command),
             ("session log", &log_output),
         ],
-        captures,
-        result,
-    );
-}
-
-/// Policy denial over the Direct-Local runtime: `mutate__create` targeting a
-/// `[lancet.workspace].denied_write_patterns` path is rejected by the
-/// guarded Local Workspace, surfaces as a failed tool event in the public
-/// stream, and leaves nothing on disk; the model's recovery reply completes
-/// the turn. Skeleton — the full denial matrix (read denial, effect denial,
-/// system exclusions) is #46.
-#[test]
-fn direct_local_mutate_create_denied_by_write_policy() {
-    let driver = driver();
-    let (world, spec) = turn_world(
-        "direct-local-policy-denial",
-        "dl-deny",
-        "[\"mutate__create\"]",
-        "\n[lancet.workspace]\ndenied_write_patterns = [\"blocked/**\"]\n",
-    );
-    let server = wire_fake_llm(
-        &world,
-        "dl-deny",
-        SseScript::Sequence {
-            scripts: vec![
-                SseScript::ToolCall {
-                    call_id: "call_1".into(),
-                    tool_name: "mutate__create".into(),
-                    arguments_json:
-                        r#"{"path":"blocked/denied.txt","content":"must not land","create_parents":true}"#
-                            .into(),
-                },
-                SseScript::plain("the write was denied; leaving the tree unchanged"),
-            ],
-        },
-    );
-    let scenario_evidence = evidence(&world, &spec);
-    let send = SessionSendDriver::new(&driver, &world, &spec, "dl-deny");
-    let outcome = send.send("create blocked/denied.txt").expect("turn drives");
-    let captures = server.captured_requests();
-
-    let result: Result<(), AssertError> = (|| {
-        assert_clean_send(&outcome)?;
-        let denied = outcome
-            .slots()
-            .iter()
-            .any(|slot| slot.method == "mutate__create" && slot.outcome == SlotOutcome::Failed);
-        require(
-            denied,
-            format!(
-                "Step entries lacked a failed mutate__create slot: {:?}",
-                outcome.slots()
-            ),
-        )?;
-        require(
-            !world.project_dir().join("blocked/denied.txt").exists(),
-            "denied mutate__create left a file on disk",
-        )?;
-        require(
-            outcome.has_completed(),
-            format!(
-                "turn did not recover after denial: {:?}",
-                outcome.type_sequence()
-            ),
-        )?;
-        require(
-            captures.len() == 2,
-            format!("expected Tool round + recovery round, got: {captures:?}"),
-        )?;
-        let failure = tool_failure(&outcome.parsed, "mutate__create");
-        require(
-            failure.is_some_and(|(slot, error)| {
-                error["code"] == "capability_violation"
-                    && error["data"]["kind"] == "capability"
-                    && error["data"]["capability"] == "mutate:write:workspace"
-                    && error["data"]["violations"] == json!(["denied"])
-                    && slot["progress"]["evidence"]["value"]["admission"]["denied_capabilities"]
-                        == json!([])
-                    && slot["progress"]["evidence"]["value"]["admission"]["approved_capabilities"]
-                        .as_array()
-                        .is_some_and(|caps| caps.iter().any(|cap| cap == "workspace.mutation"))
-            }),
-            format!("write-policy refusal with admitted workspace.mutation required: {failure:?}"),
-        )?;
-        Ok(())
-    })();
-
-    finish_scenario(
-        scenario_evidence,
-        &[("denied mutate__create turn", &outcome.command)],
         captures,
         result,
     );

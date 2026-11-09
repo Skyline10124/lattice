@@ -83,12 +83,7 @@ fn assert_identity(captures: &[CapturedRequest], session: &str) -> Result<(), As
 #[test]
 fn retry_after_is_honoured_and_requests_identify_lattice() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-retry-after",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
+    let (world, spec) = direct_world("direct-transport-retry-after", "transport", RETRY_FAST);
     world
         .write_project_file("notes.txt", "transport-sentinel\n")
         .unwrap();
@@ -168,7 +163,6 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
         let (world, spec) = direct_world(
             &format!("direct-transport-long-retry-{case}"),
             "transport",
-            r#"["observe__workspace"]"#,
             &format!("{limits}{RETRY_FAST}"),
         );
         world.write_project_file("notes.txt", "quota\n").unwrap();
@@ -338,12 +332,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
 #[test]
 fn unauthorized_request_fails_without_retry_notice() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-unauthorized",
-        "transport",
-        "[]",
-        RETRY_FAST,
-    );
+    let (world, spec) = direct_world("direct-transport-unauthorized", "transport", RETRY_FAST);
     let server = wire_fake_llm(
         &world,
         "transport",
@@ -393,12 +382,7 @@ fn unauthorized_request_fails_without_retry_notice() {
 #[test]
 fn stream_cut_before_completion_is_retried() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-cut",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
+    let (world, spec) = direct_world("direct-transport-cut", "transport", RETRY_FAST);
     world.write_project_file("notes.txt", "cut\n").unwrap();
     // 第二个 Step 先遇到正常结束却没有结束事件的流，再遇到读到一半被
     // `RST_STREAM(INTERNAL_ERROR)` 重置的流，第三次成功。
@@ -472,12 +456,7 @@ fn stream_cut_before_completion_is_retried() {
 #[test]
 fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-reuse",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
+    let (world, spec) = direct_world("direct-transport-reuse", "transport", RETRY_FAST);
     world.write_project_file("a.txt", "alpha\n").unwrap();
     world.write_project_file("b.txt", "beta\n").unwrap();
     let server = wire_fake_llm(
@@ -550,7 +529,6 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
         let (world, spec) = direct_world(
             &format!("direct-transport-unprocessed-{case}"),
             "transport",
-            r#"["observe__workspace"]"#,
             "[llm.retry]\nmax_retries = 0\n",
         );
         world.write_project_file("notes.txt", "nack\n").unwrap();
@@ -625,12 +603,7 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
 #[test]
 fn plaintext_local_provider_over_http1() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-local-http1",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
+    let (world, spec) = direct_world("direct-transport-local-http1", "transport", RETRY_FAST);
     world.write_project_file("a.txt", "alpha\n").unwrap();
     world.write_project_file("b.txt", "beta\n").unwrap();
     let server = FakeLlmServer::start_plain_http1(sequence(vec![

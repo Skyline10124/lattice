@@ -11,7 +11,7 @@ use support::*;
 #[test]
 fn direct_turn_completed_reopen_contract() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-turn-contract", "dl-contract", "[]", "");
+    let (world, spec) = direct_world("direct-turn-contract", "dl-contract", "");
     let server = wire_fake_llm(
         &world,
         "dl-contract",

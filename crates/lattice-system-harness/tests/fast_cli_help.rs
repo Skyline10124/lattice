@@ -13,8 +13,9 @@ fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
 }
 
-/// Public subcommands the `lattice --help` surface must advertise.
-const EXPECTED_PUBLIC_COMMANDS: &[&str] = &["auth", "models", "session", "audit", "lancet", "tui"];
+/// `lattice --help` 必须列出的公开子命令。
+const EXPECTED_PUBLIC_COMMANDS: &[&str] = &["run", "daemon", "auth", "models", "session", "tui"];
+const REMOVED_PUBLIC_COMMANDS: &[&str] = &["audit", "lancet"];
 
 #[test]
 fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
@@ -90,7 +91,18 @@ fn fast_cli_help_lists_public_commands() {
     // previously only the exit-success branch was wired to capture, and the
     // public-commands loop below panicked without writing any artifacts.
     let result = assert_exit_success(&output)
-        .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS));
+        .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS))
+        .and_then(|_| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for removed in REMOVED_PUBLIC_COMMANDS {
+                if stdout.split_whitespace().any(|token| token == *removed) {
+                    return Err(lattice_system_harness::AssertError::StdoutMissing {
+                        expected: format!("已移除的子命令 `{removed}` 不得再出现在 --help 中"),
+                    });
+                }
+            }
+            Ok(())
+        });
     finalize_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
         .unwrap_or_else(|report| panic!("help exits 0 and lists all public commands\n{report}"));
 

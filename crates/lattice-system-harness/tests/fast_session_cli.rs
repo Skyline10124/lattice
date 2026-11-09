@@ -8,7 +8,7 @@ use support::{assert_clean_send, cli, direct_world, driver, parse_send_stdout, w
 
 #[test]
 fn session_queries_and_rewind_preserve_the_tree_across_restart() {
-    let (world, spec) = direct_world("session-query-tree", "plain", "[]", "");
+    let (world, spec) = direct_world("session-query-tree", "plain", "");
     let server = wire_fake_llm(&world, "plain", SseScript::plain("durable answer"));
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
@@ -104,9 +104,6 @@ fn missing_store_read_does_not_create_a_database() {
         evidence.record_command("session list", &out);
         lattice_system_harness::assert_exit_code(&out, 1).unwrap();
         lattice_system_harness::assert_stderr_contains(&out, "store unavailable").unwrap();
-        let audit = cli(&world, &spec, &["--json", "audit"]);
-        evidence.record_command("--json audit", &audit);
-        assert!(audit.is_clean_exit(1));
         let exists = world.session_store_dir().join("lattice.redb").exists();
         assert!(!exists);
         evidence
@@ -117,14 +114,19 @@ fn missing_store_read_does_not_create_a_database() {
                 }),
             )
             .unwrap();
-        evidence.record_json("parameters", &serde_json::json!({"commands":["session list","--json audit"],"profile":null,"provider":null})).unwrap();
+        evidence
+            .record_json(
+                "parameters",
+                &serde_json::json!({"commands":["session list"],"profile":null,"provider":null}),
+            )
+            .unwrap();
     }));
     support::finish_recorded(evidence, result);
 }
 
 #[test]
 fn missing_session_and_missing_profile_fail_before_dispatch() {
-    let (world, spec) = direct_world("session-lookup-refusal", "plain", "[]", "");
+    let (world, spec) = direct_world("session-lookup-refusal", "plain", "");
     let server = wire_fake_llm(&world, "plain", SseScript::plain("seed"));
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
@@ -238,7 +240,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
 #[test]
 fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
     use serde_json::json;
-    let (world, spec) = direct_world("usage-prefix", "plain", "[]", "");
+    let (world, spec) = direct_world("usage-prefix", "plain", "");
     let budget = world.budget(&spec);
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
@@ -309,9 +311,19 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("provider-config-known-key", "providers.toml"),
         ("model", "model reference must be <provider>/<model>"),
         ("model-typo", "model reference must be <provider>/<model>"),
-        ("tools", "unknown enabled tools [\"[REDACTED]\"]"),
-        ("tools-known-key", "unknown enabled tools [\"[REDACTED]\"]"),
-        ("short-key", "unknown enabled tools [\"EMPTY\"]"),
+        (
+            "tools",
+            "`[tools]` has been removed; delete this section from agent.toml",
+        ),
+        (
+            "lancet",
+            "`[lancet]` has been removed; delete this section from agent.toml",
+        ),
+        (
+            "known-key",
+            "invalid value `[REDACTED]` for `name` in [agent]",
+        ),
+        ("short-key", "invalid value `EMPTY` for `name` in [agent]"),
         ("agent-name", "expected `plain`"),
         (
             "long-profile",
@@ -321,7 +333,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("cli-provider", "available providers:"),
         ("cli-effort", "does not support reasoning effort off"),
     ] {
-        let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "[]", "");
+        let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "");
         let server = wire_fake_llm(&world, "plain", SseScript::plain("must not be requested"));
         let path = world.project_dir().join(".lattice/agents/plain/agent.toml");
         let original = std::fs::read_to_string(&path).unwrap();
@@ -357,7 +369,12 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             "model-typo" => std::fs::write(&path, original.replace(&model, "sonet")).unwrap(),
             "tools" => std::fs::write(
                 &path,
-                original.replace("enabled = []", &format!("enabled = ['{SENTINEL}']")),
+                format!("{original}\n[tools]\nenabled = ['{SENTINEL}']\n"),
+            )
+            .unwrap(),
+            "lancet" => std::fs::write(
+                &path,
+                format!("{original}\n[lancet.workspace]\ndenied_write_patterns = ['{SENTINEL}']\n"),
             )
             .unwrap(),
             "agent-name" => std::fs::write(
@@ -376,21 +393,18 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 )
                 .unwrap();
             }
-            "tools-known-key" => {
+            "known-key" => {
                 world.register_key(provider, Some(ORDINARY_KEY)).unwrap();
                 std::fs::write(
                     &path,
-                    original.replace("enabled = []", &format!("enabled = ['{ORDINARY_KEY}']")),
+                    original.replace("name = \"plain\"", &format!("name = '{ORDINARY_KEY}'")),
                 )
                 .unwrap();
             }
             "short-key" => {
                 world.register_key(provider, Some("EMPTY")).unwrap();
-                std::fs::write(
-                    &path,
-                    original.replace("enabled = []", "enabled = ['EMPTY']"),
-                )
-                .unwrap();
+                std::fs::write(&path, original.replace("name = \"plain\"", "name = 'EMPTY'"))
+                    .unwrap();
             }
             "oauth-chatgpt" => {
                 std::fs::write(world.home().join(".lattice/providers.toml"), "[metadata]\nauto_refresh=false\n").unwrap();
@@ -448,7 +462,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 let message = error.message.as_str();
                 assert!(
                     message.contains(expected),
-                    "{case}: missing expected rejection reason"
+                    "{case}: missing expected rejection reason in `{message}`"
                 );
                 if case == "model-typo" {
                     let canonical_profile = path.canonicalize().unwrap();
@@ -469,9 +483,12 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                         )
                     );
                 }
-                if matches!(case, "tools" | "tools-known-key") {
-                    assert!(message.contains("available catalog tools:"));
-                    assert!(message.contains("observe__workspace"));
+                if case == "tools" {
+                    assert!(message.contains("forbidden top-level section [tools]"));
+                    assert!(!message.contains("available catalog tools:"));
+                }
+                if case == "lancet" {
+                    assert!(message.contains("forbidden top-level section [lancet]"));
                 }
                 if case == "provider-missing-invalid-auth" {
                     for provider in ["anthropic", "openai", "google", "local"] {
@@ -486,7 +503,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 assert!(server.captured_requests().is_empty());
             }
             assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
-            if matches!(case, "toml" | "tools-known-key") {
+            if matches!(case, "toml" | "known-key") {
                 let budget = world.budget(&spec);
                 let mut tui = PtyTuiDriver::spawn(&driver(), &world, agent).unwrap();
                 let pty_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -544,7 +561,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                     std::panic::resume_unwind(payload);
                 }
             }
-            if matches!(case, "long-profile" | "tools-known-key") {
+            if matches!(case, "long-profile" | "tools" | "known-key") {
                 let out = cli(
                     &world,
                     &spec,

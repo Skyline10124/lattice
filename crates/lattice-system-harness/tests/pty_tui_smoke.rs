@@ -281,7 +281,6 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
     let (world, mut spec) = support::direct_world(
         "pty-statusline-usage",
         "m",
-        "[\"session__todo_write\"]",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     spec.layer = ScenarioLayer::PtySmoke;
@@ -488,8 +487,7 @@ fn pty_failure_report_preserves_redacted_panic_reason() {
 fn pty_detach_reloads_pending_and_result_without_cancelling() {
     use lattice_system_harness::{SessionSendDriver, SseScript};
     let driver = driver();
-    let (world, mut spec) =
-        support::direct_world("pty-background-reconnect", "tui-smoke", "[]", "");
+    let (world, mut spec) = support::direct_world("pty-background-reconnect", "tui-smoke", "");
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
@@ -573,7 +571,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     const NEW: &str = "NEW_SUFFIX_R1";
     const INPUT: &str = "continue mid-model";
     let driver = driver();
-    let (world, mut spec) = support::direct_world("pty-mid-model-reconnect", "tui-smoke", "[]", "");
+    let (world, mut spec) = support::direct_world("pty-mid-model-reconnect", "tui-smoke", "");
     spec.layer = ScenarioLayer::PtySmoke;
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
@@ -815,7 +813,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
 fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
     use lattice_system_harness::{SessionSendDriver, SseScript};
     let driver = driver();
-    let (world, mut spec) = support::direct_world("pty-background-cancel", "tui-smoke", "[]", "");
+    let (world, mut spec) = support::direct_world("pty-background-cancel", "tui-smoke", "");
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
@@ -917,12 +915,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         serde_json::from_slice(&result.stdout).unwrap()
     }
     let driver = driver();
-    let (world, mut spec) = support::direct_world(
-        "pty-model-effort",
-        "model-panel",
-        "[\"observe__workspace\"]",
-        "",
-    );
+    let (world, mut spec) = support::direct_world("pty-model-effort", "model-panel", "");
     spec.layer = ScenarioLayer::PtySmoke;
     spec.step_timeout_secs = 120;
     spec.total_timeout_secs = Some(300);

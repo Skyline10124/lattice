@@ -23,5 +23,5 @@ status: active
 - 一个 Turn 中，除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致；停在 `Started` 的槽位结果为 Indeterminate。
 - 只在内存中的取消得到 Failed（进程退出）；已写入的取消原因得到 Cancelled。
 - 发送新消息或退回之后，旧 Turn 的节点不变。
-- 对照[执行者消失后的 Turn](../../../architecture/session/recovery.md#执行者消失后的-turn)，记录每个提交点的停点、状态摘要、树形 `log`、`session turn --json`、`audit` 输出、provider 与 Tool 的调用次数，以及文件效果。
+- 对照[执行者消失后的 Turn](../../../architecture/session/recovery.md#执行者消失后的-turn)，记录每个提交点的停点、状态摘要、树形 `log`、`session turn --json`、provider 与 Tool 的调用次数，以及文件效果。
 - 收尾：同时检查崩溃前后的自有进程组与 stdout/stderr 的 EOF；必要的状态与原始失败进入证据之后，再清理。

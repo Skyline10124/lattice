@@ -173,7 +173,6 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
     let (world, spec) = support::direct_world(
         "session-usage",
         "priced",
-        "[\"observe__workspace\"]",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let driver = support::driver();

@@ -47,7 +47,7 @@ flowchart LR
 | --- | --- |
 | 只经公开入口 | harness 经 `LATTICE_BIN` 取得被测产品，经公开 CLI、Local IPC 与 PTY 驱动；它只依赖通用的系统、序列化、临时目录、PTY 与 Git 库，由 `cargo xtask harness-boundary` 检查 |
 | 产品只有一条路径 | 场景经正式入口与正式配置驱动产品：fake LLM 经场景 HOME 的 `providers.toml` 与 `lattice auth set` 接入；产品代码中测试与用户走同一流程 |
-| 私有状态 | 工作区历史场景用通用 Git 库检查对象与引用；公开接口之外的内部对象关系、引用事务与 fsync 故障，由对应库的测试保护 |
+| 私有状态 | 公开接口之外的内部表编码、引用事务与 fsync 故障，由对应库的测试保护 |
 | fake provider 确定 | 使用与官方 provider 相同的协议与 TLS，对场景保证计数准确、回复确定、失败有界，见 [`fake_llm.rs`](../../crates/lattice-system-harness/src/fake_llm.rs) 的模块文档 |
 | 元数据 | 场景默认写入 `[metadata] auto_refresh = false`，使用内置快照或场景写入的缓存；拉取与写缓存由 `lattice-llm` 的局部测试验证，触发时机由 `lattice-api` 的局部测试验证 |
 | SIWC | `chatgpt` 的 endpoint 由产品固定，harness 场景覆盖其余 provider；SIWC 的验证见[模型接入合同](../architecture/llm/README.md#验证与承接) |
@@ -62,9 +62,10 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 - 被测二进制与验证对象相符：文件存在与路径规范化证明不了二进制是最新的，调用者核对它的来源、构建配置与所测工作区。
 - `xtask ci` 只在 `LATTICE_BIN` 未设置时补入当前仓库的 debug 路径；在 worktree 中显式指向本 worktree 的产物。
 
-### 故障注入
+### 假工具与故障注入
 
-崩溃、调度交错与模拟错误由产品 feature `test-crash-barriers` 插桩，钩子只在这个 feature 下编译；harness 用 `crash-barriers` feature 启用对应场景。
+- 生产二进制不暴露内置工具。需要工具循环的场景配合带 `test-fake-tools` 的被测二进制与 harness 的 `fake-tools` feature，在后台首次启动前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 传入逗号分隔的工具名启用假执行器。
+- 崩溃、调度交错与模拟错误由产品 feature `test-crash-barriers` 插桩，钩子只在这个 feature 下编译；harness 用 `crash-barriers` feature 启用对应场景。
 
 | 插桩 | 作用 |
 | --- | --- |
@@ -89,7 +90,7 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 | 项目中的 `.env` | 产品只从后台启动环境与配置目录取配置；负向场景在场景项目中写入 `.env` 与 `providers.toml`，核对它们不起作用 |
 | 并发与取消 | 用 `ResponseGate` 等可控事件与有界等待同步；每个场景自己完成同步，结果与其他场景的执行顺序无关 |
 | 夹具与断言 | 通用驱动共享；场景专用的夹具与断言留在该场景 |
-| 记录 | 每个场景记录自己的 gate、进程对象与实际命中的窗口；涉及会话库状态的场景记录状态摘要、树形 `log` 与 `audit` 输出，失败时写入 bundle |
+| 记录 | 每个场景记录自己的 gate、进程对象与实际命中的窗口；涉及会话库状态的场景记录状态摘要、树形 `log` 与 `session turn` 输出，失败时写入 bundle |
 
 ### 超时与进程生命周期
 
@@ -122,9 +123,9 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 | 验证集 | 内容 | 运行 |
 | --- | --- | --- |
-| 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景 | 普通 CI；本地按需 |
-| 崩溃屏障 | `direct_crash_barriers`：需要 harness 的 `crash-barriers` feature 与带 `test-crash-barriers` 的被测二进制 | 普通 CI 在默认测试之后构建该二进制并运行 |
-| release_operator | `release-operator` feature | 按需手动运行，普通 CI 之外 |
+| 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景，配无测试 feature 的 `lattice` 二进制 | 普通 CI；本地按需 |
+| 假工具场景 | 标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景：需要 harness 的 `fake-tools` feature、带 `test-fake-tools` 的被测二进制，以及后台启动前设置的 `LATTICE_TEST_TOOLS` | 按影响范围或 CI 显式构建该二进制运行 |
+| 崩溃屏障 | `direct_crash_barriers`：需要 harness 的 `crash-barriers` feature 与带 `test-crash-barriers`（含工具调用时加 `test-fake-tools`）的被测二进制 | 普通 CI 在默认测试之后构建该二进制并运行 |
 
 报告列明测试目标、feature、构建模式与实际结果；普通套件的结论只覆盖普通套件。
 

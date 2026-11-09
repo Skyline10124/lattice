@@ -8,13 +8,8 @@ description = "External system tests for the lattice binary (no product crate de
 publish = false
 
 [features]
-release-operator = []
+fake-tools = []
 crash-barriers = []
-
-[[test]]
-name = "release_operator"
-path = "tests/release_operator.rs"
-required-features = ["release-operator"]
 
 [[test]]
 name = "direct_crash_barriers"
@@ -22,9 +17,7 @@ path = "tests/direct_crash_barriers.rs"
 required-features = ["crash-barriers"]
 
 [dependencies]
-# General hashing library (not a product crate): scenarios need the same
-# Local Revision string the product computes to script `mutate__edit`
-# preconditions through the fake LLM.
+# 通用哈希库（非产品 crate）：工作区快照对比与场景产物摘要核对使用。
 blake3 = "1"
 # Default features off: they would re-enable gix's defaults for the whole
 # workspace through feature unification (see root `Cargo.toml`).
@@ -47,7 +40,7 @@ thiserror = "2"
 portable-pty = "0.9"
 libc = "0.2"
 
-# fake provider 与真实 provider 一样跑 TLS + HTTP/2；`fetch__web` 夹具可选 TLS。
+# fake provider 与真实 provider 一样跑 TLS + HTTP/2；本地 HTTP 测试夹具可选 TLS。
 # 都是通用网络库，版本已在锁文件里。
 bytes = "1"
 h2 = "0.4"

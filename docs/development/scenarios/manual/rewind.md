@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 查看完整会话树，退回到节点 `N` 或根节点 `0`（改写首条消息），并从该处分叉提交 |
-| 前提 | 位于会话绑定的项目工作区内，且该会话无运行中的 Owner；工作区文件与历史库 `current` 不变 |
+| 前提 | 位于会话绑定的项目工作区内，且该会话无运行中的 Owner；工作区文件不变 |
 | 规则 | [表与 rewind](../../../architecture/session/README.md#表读取范围与-rewind)、[项目绑定](../../../architecture/session/concurrency.md#会话库与项目绑定) |
 
 ## 命令

@@ -221,7 +221,6 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
     let (world, spec) = support::direct_world(
         "operator-global-matrix",
         "operator",
-        "[\"observe__workspace\",\"session__todo_write\",\"fetch__web\"]",
         "\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
     );
     let budget = world.budget(&spec);
@@ -693,12 +692,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
 
 #[test]
 fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
-    let (world, spec) = support::direct_world(
-        "r2-s2-vertical",
-        "vertical",
-        "[\"observe__workspace\",\"mutate__create\"]",
-        "",
-    );
+    let (world, spec) = support::direct_world("r2-s2-vertical", "vertical", "");
     world.write_project_file("seed.txt", "seed\n").unwrap();
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
@@ -1105,7 +1099,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
 
 #[test]
 fn crash_start_cannot_reset_an_expired_scenario_budget() {
-    let (world, spec) = support::direct_world("crash-budget-expired", "budget", "[]", "");
+    let (world, spec) = support::direct_world("crash-budget-expired", "budget", "");
     let budget = lattice_system_harness::ScenarioBudget::new(Some(Duration::ZERO));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         support::crash::start(&world, &spec, &budget)
@@ -1222,7 +1216,7 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
 
 #[test]
 fn cli_recovers_accepted_receipt_after_backend_crash() {
-    let (world, spec) = support::direct_world("cli-recovered-acceptance", "recover", "[]", "");
+    let (world, spec) = support::direct_world("cli-recovered-acceptance", "recover", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1375,7 +1369,6 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
         let (world, spec) = support::direct_world(
             &format!("r2-crash-{name}"),
             "matrix",
-            "[\"observe__workspace\",\"mutate__create\",\"session__todo_write\"]",
             "\n[llm.retry]\nmax_retries = 1\n",
         );
         world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -1763,12 +1756,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
 
 #[test]
 fn persisted_cancel_after_mutation_survives_crash_without_replay() {
-    let (world, spec) = support::direct_world(
-        "r2-crash-cancelled",
-        "cancelled",
-        "[\"observe__workspace\",\"mutate__create\"]",
-        "",
-    );
+    let (world, spec) = support::direct_world("r2-crash-cancelled", "cancelled", "");
     world.write_project_file("seed.txt", "seed\n").unwrap();
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
@@ -1882,12 +1870,8 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
 #[test]
 fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
     for target in [2u64, 0] {
-        let (world, spec) = support::direct_world(
-            &format!("r2-rewind-crash-{target}"),
-            "rewind",
-            "[\"observe__workspace\",\"mutate__create\"]",
-            "",
-        );
+        let (world, spec) =
+            support::direct_world(&format!("r2-rewind-crash-{target}"), "rewind", "");
         world.write_project_file("seed.txt", "seed\n").unwrap();
         let budget = world.budget(&spec);
         let mut evidence = support::evidence(&world, &spec);
@@ -2032,7 +2016,6 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
     let (world, spec) = support::direct_world(
         "r2-observation-windows",
         "windows",
-        "[\"observe__workspace\",\"mutate__create\"]",
         "\n[llm.retry]\nmax_retries = 1\n",
     );
     world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -2356,7 +2339,6 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
         let (world, spec) = support::direct_world(
             &format!("r2-cancel-slot-{crash}"),
             "slot",
-            "[\"observe__workspace\",\"mutate__create\",\"fetch__web\"]",
             "\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
         );
         world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -2554,7 +2536,6 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
     let (world, spec) = support::direct_world(
         "r2-dispatch-deadline",
         "deadline",
-        "[\"observe__workspace\",\"mutate__create\"]",
         "\n[llm]\ntimeout_secs = 2\n",
     );
     world.write_project_file("seed.txt", "seed\n").unwrap();
@@ -2701,7 +2682,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
 
 #[test]
 fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
-    let (world, spec) = support::direct_world("memory-cancel-crash", "cancel", "[]", "");
+    let (world, spec) = support::direct_world("memory-cancel-crash", "cancel", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2834,7 +2815,7 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
 /// 暂停这次提交的任务，后台照常服务其他连接。
 #[test]
 fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted() {
-    let (world, spec) = support::direct_world("admission-window", "admission", "[]", "");
+    let (world, spec) = support::direct_world("admission-window", "admission", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3001,7 +2982,6 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
                 "copy-first-crash"
             },
             "recover",
-            "[]",
             "",
         );
         let budget = world.budget(&spec);

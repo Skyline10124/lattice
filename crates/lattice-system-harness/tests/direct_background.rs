@@ -190,7 +190,7 @@ fn finish(evidence: ScenarioEvidence, result: std::thread::Result<()>) {
 }
 #[test]
 fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
-    let (world, spec) = direct_world("background-cli-detach", "background", "[]", "");
+    let (world, spec) = direct_world("background-cli-detach", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -265,7 +265,6 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
             let (world, spec) = direct_world(
                 &format!("background-unread-{existing_session}-{restart}"),
                 "background",
-                "[]",
                 "",
             );
             let budget = world.budget(&spec);
@@ -394,7 +393,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
 }
 #[test]
 fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
-    let (world, spec) = direct_world("background-concurrent-stop", "background", "[]", "");
+    let (world, spec) = direct_world("background-concurrent-stop", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -554,7 +553,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
 }
 #[test]
 fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
-    let (world, spec) = direct_world("background-start-watch", "background", "[]", "");
+    let (world, spec) = direct_world("background-start-watch", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -641,7 +640,7 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
 }
 #[test]
 fn slow_watcher_cannot_block_execution_and_converges_to_history() {
-    let (world, spec) = direct_world("background-slow-watcher", "background", "[]", "");
+    let (world, spec) = direct_world("background-slow-watcher", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -718,12 +717,7 @@ fn slow_watcher_cannot_block_execution_and_converges_to_history() {
 #[test]
 fn shared_daemon_uses_registered_providers_and_freezes_profiles() {
     use lattice_system_harness::{FakeLlmServer, assert_no_secret};
-    let (world, spec) = direct_world(
-        "background-project-config",
-        "background",
-        "[\"session__todo_write\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-project-config", "background", "");
     let budget = world.budget(&spec);
     let key_a = "project-alpha-private-fixture-key";
     let key_b = "project-beta-private-fixture-key";
@@ -854,7 +848,7 @@ fn shared_daemon_uses_registered_providers_and_freezes_profiles() {
 }
 #[test]
 fn later_session_driver_keeps_the_scenario_budget_origin() {
-    let (world, spec) = direct_world("background-budget-origin", "background", "[]", "");
+    let (world, spec) = direct_world("background-budget-origin", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -874,7 +868,7 @@ fn later_session_driver_keeps_the_scenario_budget_origin() {
 }
 #[test]
 fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
-    let (world, mut spec) = direct_world("background-budget-exhausted", "background", "[]", "");
+    let (world, mut spec) = direct_world("background-budget-exhausted", "background", "");
     spec.total_timeout_secs = Some(0);
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
@@ -918,12 +912,7 @@ fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
 }
 #[test]
 fn daemon_restart_reads_closed_result_without_resubmitting() {
-    let (world, spec) = direct_world(
-        "background-restart-read",
-        "background",
-        "[\"session__todo_write\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-restart-read", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1135,7 +1124,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
 }
 #[test]
 fn a_live_new_turn_does_not_block_old_closed_observation() {
-    let (world, spec) = direct_world("background-read-beside-live", "background", "[]", "");
+    let (world, spec) = direct_world("background-read-beside-live", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1278,7 +1267,6 @@ fn backend_tls_roots_are_shared_with_tools_and_fixed_until_restart() {
     let (world, spec) = direct_world(
         "background-startup-tls",
         "background",
-        "[\"fetch__web\"]",
         "\n[llm.retry]\nmax_retries=0\n[lancet.capabilities]\nmax_boundary=\"ex\"\n[lancet.network]\nallow_localhost=true\nallowed_hosts=[\"localhost\"]\n",
     );
     let budget = world.budget(&spec);
@@ -1408,7 +1396,6 @@ fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
     let (world, spec) = direct_world(
         "background-oversized-roots",
         "background",
-        "[]",
         "\n[llm.retry]\nmax_retries=0\n",
     );
     let budget = world.budget(&spec);
@@ -1511,7 +1498,6 @@ fn concurrent_turns_keep_frozen_network_policies_with_shared_startup_roots() {
     let (world, spec) = direct_world(
         "background-network-isolation",
         "background",
-        "[\"fetch__web\"]",
         "\n[lancet.capabilities]\nmax_boundary=\"ex\"\n[lancet.network]\nallow_localhost=true\nallowed_hosts=[\"localhost\"]\n",
     );
     let budget = world.budget(&spec);
@@ -1628,7 +1614,7 @@ fn concurrent_turns_keep_frozen_network_policies_with_shared_startup_roots() {
 /// 启动时的 `SSL_CERT_FILE` 里没有一张证书：没有可用的根证书，https provider 的提交在接受前
 /// 按配置错误拒绝（http 端点照常放行，见 `oversized_startup_roots_reject_https_provider_at_submit_and_serve_http`）。
 fn no_usable_startup_tls_root_rejects_https_submissions_before_acceptance() {
-    let (world, spec) = direct_world("background-no-tls-root", "background", "[]", "");
+    let (world, spec) = direct_world("background-no-tls-root", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1675,7 +1661,6 @@ fn invalidated_provider_configuration_records_last_resolved_origin_without_sendi
                 "provider-invalid"
             },
             "background",
-            "[\"session__todo_write\"]",
             "\n[llm.retry]\nmax_retries=3\n",
         );
         let budget = world.budget(&spec);
@@ -1746,7 +1731,7 @@ fn invalidated_provider_configuration_records_last_resolved_origin_without_sendi
 
 #[test]
 fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
-    let (world, spec) = direct_world("background-history-pages", "background", "[]", "");
+    let (world, spec) = direct_world("background-history-pages", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1876,7 +1861,7 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
 }
 #[test]
 fn vanished_owner_is_reported_by_the_session_head() {
-    let (world, spec) = direct_world("background-vanished-owner", "background", "[]", "");
+    let (world, spec) = direct_world("background-vanished-owner", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1961,12 +1946,7 @@ fn vanished_owner_is_reported_by_the_session_head() {
 
 #[test]
 fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
-    let (world, spec) = direct_world(
-        "background-global-turn-identity",
-        "background",
-        "[\"session__todo_write\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-global-turn-identity", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2092,7 +2072,7 @@ fn closed_without_owner(
 #[test]
 fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
     use lattice_system_harness::{ProviderFixture, ProviderTarget};
-    let (world, spec) = direct_world("background-model-effort-copy", "background", "[]", "");
+    let (world, spec) = direct_world("background-model-effort-copy", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2448,12 +2428,7 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
 #[test]
 fn cli_off_survives_tool_retry_restart_and_provider_failure() {
     use lattice_system_harness::{FakeLlmServer, ProviderFixture, ProviderTarget};
-    let (world, spec) = direct_world(
-        "cli-luna-off-tools",
-        "background",
-        "[\"observe__workspace\"]",
-        "",
-    );
+    let (world, spec) = direct_world("cli-luna-off-tools", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2717,12 +2692,7 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
 
 #[test]
 fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_policy() {
-    let (world, spec) = direct_world(
-        "background-copy-sources",
-        "background",
-        "[\"observe__workspace\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-copy-sources", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2892,12 +2862,7 @@ fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_policy() {
 
 #[test]
 fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
-    let (world, spec) = direct_world(
-        "background-effort-reload",
-        "background",
-        "[\"observe__workspace\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-effort-reload", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
