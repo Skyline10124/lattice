@@ -8,7 +8,7 @@ status: active
 | --- | --- |
 | 目标 | 后台接管的取消意图，在前端立即退出后仍被处理 |
 | 前提 | 保存原身份；分别控制后台实际接管提交后的准备与执行窗口（工具执行中的取消通过 `LATTICE_TEST_TOOLS` 假工具 `block` 与 `ready_path` 同步）；区分可以证明未建立任务的配置拒绝与未知发布 |
-| 相关测试 | `direct_failures`：`direct_failure_sigint_while_stalled_commits_cancelled`；`pty_tui_smoke`：`pty_second_ctrl_c_preserves_cancel_acknowledgement`；`direct_crash_barriers`：`persisted_cancel_after_mutation_survives_crash_without_replay`、`cancelled_slot_live_and_crash_share_ordered_closure` |
+| 相关测试 | `direct_background`：`busy_cancel_and_stop_do_not_serialize_distinct_sessions`；`direct_failures`：`direct_failure_sigint_while_stalled_commits_cancelled`；`pty_tui_smoke`：`pty_second_ctrl_c_preserves_cancel_acknowledgement`；`direct_crash_barriers`：`persisted_cancel_after_mutation_survives_crash_without_replay`、`cancelled_slot_live_and_crash_share_ordered_closure` |
 
 ## 操作
 

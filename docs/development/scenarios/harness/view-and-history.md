@@ -7,8 +7,8 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 观察者最后持有的条目与关闭后用历史查询重读的一致；已保存的对话、生成中的文字、执行 outcome 与结局，各自的显示与失败边界互相独立 |
-| 前提 | 多步 Turn 脚本：可区分的用户与模型消息、工具结果；模型流中正文与 reasoning 交错到达（含 OpenAI 兼容流）；包含一次可重试的尝试失败 |
-| 相关测试 | `direct_background`：`slow_watcher_cannot_block_execution_and_converges_to_history`、`concurrent_autostart_has_one_owner_and_midway_watch_matches_history`、`long_session_pages_by_turn_and_rewind_replaces_the_path`、`a_live_new_turn_does_not_block_old_closed_observation`；`direct_crash_barriers`：`slow_window_and_closed_snapshot_deliver_exact_history`；`pty_tui_smoke`：`pty_mid_model_reconnect_shows_new_suffix_before_completion` |
+| 前提 | 多步 Turn 脚本（需要工具步骤的用例开启 `fake-tools` feature，配 `test-fake-tools` 二进制与 `LATTICE_TEST_TOOLS`）：可区分的用户与模型消息、工具结果；模型流中正文与 reasoning 交错到达（含 OpenAI 兼容流）；包含一次可重试的尝试失败 |
+| 相关测试 | `direct_background`：`slow_watcher_cannot_block_execution_and_converges_to_history`、`concurrent_autostart_has_one_owner_and_midway_watch_matches_history`、`long_session_pages_by_turn_and_rewind_replaces_the_path`、`a_live_new_turn_does_not_block_old_closed_observation`、`daemon_restart_reads_closed_result_without_resubmitting`；`direct_crash_barriers`：`slow_window_and_closed_snapshot_deliver_exact_history`；`pty_tui_smoke`：`pty_mid_model_reconnect_shows_new_suffix_before_completion` |
 
 ## 操作
 

@@ -40,8 +40,7 @@ thiserror = "2"
 portable-pty = "0.9"
 libc = "0.2"
 
-# fake provider 与真实 provider 一样跑 TLS + HTTP/2；本地 HTTP 测试夹具可选 TLS。
-# 都是通用网络库，版本已在锁文件里。
+# fake provider 与真实 provider 一样跑 TLS + HTTP/2；都是通用网络库，版本已在锁文件里。
 bytes = "1"
 h2 = "0.4"
 http = "1"

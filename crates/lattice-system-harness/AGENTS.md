@@ -11,7 +11,6 @@
 | `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 路径解析、独立进程组命令执行、超时终止、`CommandOutcome` 采集与快速 CLI 辅助 |
 | `src/scenario.rs` | 场景分层与单命令、整场景时长预算计算 |
 | `src/fake_llm.rs`、`src/provider.rs`、`src/tls.rs` | 五协议 TLS + HTTP/2 `FakeLlmServer`、`ResponseGate`、工具 schema 校验、临时 CA 签发及经 `providers.toml` 与 `lattice auth set` 的正式配置接入 |
-| `src/fixture_http.rs` | 本地 HTTP/TLS 测试服务夹具 |
 | `src/session_send.rs` | `lattice --json session send` JSONL 解析（保留未知有效记录为 `Unknown` 并单独记录畸形行）与 `0`/`1`/`2` 退出码核验 |
 | `src/pty_tui.rs` | 基于 `portable-pty` 的真实 TUI 终端冒烟驱动 |
 | `src/artifacts.rs`、`src/assert.rs` | 失败产物目录独占锁占用、秘密字面脱敏、工作区快照对比与 `FailureReport` 生成 |
