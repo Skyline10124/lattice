@@ -4,7 +4,7 @@ status: active
 
 # Git 与 GitHub
 
-本文规定 Git 与 GitHub 的操作流程，以及提交、PR 与评论的格式。身份与权限见 [Agent 身份与权限](agent-permissions.md)。
+本文规定 Git 与 GitHub 的操作流程，以及提交、Issue、PR 与评论的格式。身份与权限见 [Agent 身份与权限](agent-permissions.md)。
 
 ## 工具
 
@@ -62,6 +62,20 @@ fix(store): 打开会话库时拒绝缺少根节点的会话
 
 Refs: #123
 ```
+
+## Issue 格式
+
+标题用中文直陈问题、计划目标或实施对象。正文使用 [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) 中的模板，尖括号内的说明在发布前替换为实际内容，不需要的可选小节删除：
+
+| 模板 | 用途 |
+| --- | --- |
+| [`bug.md`](../../.github/ISSUE_TEMPLATE/bug.md) | 登记错误行为、回归或缺失规则 |
+| [`task.md`](../../.github/ISSUE_TEMPLATE/task.md) | 登记特性计划、重构提案（`待决定`）或已批准 ADR 的分阶段实施（`实施跟踪`） |
+
+- Agent 创建时保留首行身份头 `> Agent：lattice-devbot[bot] · 类型：<缺陷 | 待决定 | 实施跟踪>`，并在 `## 目的` 写明来源与授权；非交互 CLI 创建时先读取对应模板文件，填好后经 `--body-file` 提交（`gh` 不支持同时传 `--template` 与 `--body-file`）。
+- 已有合同或 ADR 写明的规则直接链接过去；核对代码写明基准提交与 `文件:行`，外部事实写明来源。
+- 验收标准写正向、可核验的完成条件；留待他处处理的事项集中在 `## 范围之外`。
+- 标签见 [分诊标签](../agents/triage-labels.md)；关闭 Issue 由维护者执行。
 
 ## PR 格式
 
