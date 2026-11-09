@@ -11,7 +11,7 @@
 
 - [项目宪章](governance/charter.md)：角色、规则怎样生效，以及 Agent 的工作原则。
 - [Agent 身份与权限](governance/agent-permissions.md)：bot 身份，Agent 与维护者各自执行的操作，安全边界与委派。
-- [Git 与 GitHub](governance/git-operations.md)：操作流程，以及提交、PR 与评论的格式模板。
+- [Git 与 GitHub](governance/git-operations.md)：操作流程，以及提交、Issue、PR 与评论的格式模板。
 - [文档写作](governance/writing.md)：文档位置、语言与状态、写法，以及架构合同与 ADR 的模板。
 
 ## 架构

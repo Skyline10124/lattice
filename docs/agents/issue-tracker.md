@@ -4,7 +4,7 @@ status: active
 
 # GitHub 任务跟踪
 
-本仓库任务与 PRD 位于 `Skyline10124/lattice` 的 GitHub Issues。GitHub 操作通过当前宿主的命令执行工具调用 `gh-app`；Pi 使用 `hypa_shell`，Delta 使用其实际可用的命令工具。身份与权限见 [Agent 身份与权限](../governance/agent-permissions.md)，评论格式见 [Git 与 GitHub](../governance/git-operations.md#评论格式)。
+本仓库任务与 PRD 位于 `Skyline10124/lattice` 的 GitHub Issues。GitHub 操作通过当前宿主的命令执行工具调用 `gh-app`；Pi 使用 `hypa_shell`，Delta 使用其实际可用的命令工具。身份与权限见 [Agent 身份与权限](../governance/agent-permissions.md)，Issue 与评论格式见 [Git 与 GitHub](../governance/git-operations.md#issue-格式)。
 
 ## 操作入口
 
@@ -17,7 +17,7 @@ status: active
 | 编辑任务或标签 | `gh-app issue edit <编号> --repo Skyline10124/lattice` |
 | 关闭任务 | `gh-app issue close <编号> --repo Skyline10124/lattice` |
 
-收集需求时读取正文、评论和标签；评论可用 `--comments`，结构化内容可用 `--json body,comments,labels`。创建、评论与编辑由 Agent 直接执行，创建时使用仓库模板；关闭任务由维护者执行。`gh-app` 认证失败时暂停 GitHub 操作并报告。
+收集需求时读取正文、评论和标签；评论可用 `--comments`，结构化内容可用 `--json body,comments,labels`。创建、评论与编辑由 Agent 直接执行，创建时使用 [`.github/ISSUE_TEMPLATE/`](../../.github/ISSUE_TEMPLATE/) 中的仓库模板；关闭任务由维护者执行。`gh-app` 认证失败时暂停 GitHub 操作并报告。
 
 分诊标签见 [标签映射](triage-labels.md)。源流程的 triage 处理 Issues；PR 使用对应的 `gh-app pr` 操作，合并与发布由维护者执行。
 
