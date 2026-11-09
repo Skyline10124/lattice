@@ -33,7 +33,8 @@ pub use lancet_protocol::canonical_json;
 // `BoundToolCall::address`), so consumers of the crate can name them without
 // reaching for `lancet-protocol` themselves.
 pub use lancet_protocol::{
-    InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId, arguments_digest,
+    IdParseError, InvocationId, ModelAttemptKey, ModelMessageAddress, SessionId, ToolCallAddress,
+    TurnId, arguments_digest,
 };
 
 pub use attempt::{AttemptInterruption, AttemptRejection};

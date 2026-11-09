@@ -239,7 +239,7 @@ impl ObserverSink {
     pub(crate) fn capture(
         &self,
         store: &SessionStore,
-        session_id: lancet_protocol::SessionId,
+        session_id: lattice_conversation::SessionId,
         cursor: &Mutex<PushState>,
     ) -> lattice_session::store::Result<Vec<ViewUpdate>> {
         let (initial, reload, replaced, mut pending, attempt, head_changed) = {
@@ -357,7 +357,7 @@ fn content(entry: &ConversationEntry) -> &Node {
 }
 fn session_record(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<lattice_session::store::SessionRecord> {
     read.find_session(session_id)?
         .ok_or_else(|| StoreError::NotFound {
@@ -367,7 +367,7 @@ fn session_record(
 }
 pub(crate) fn session_head(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<SessionHead> {
     let record = session_record(read, session_id)?;
     let current = read.path_node(session_id, record.current)?;
@@ -375,7 +375,7 @@ pub(crate) fn session_head(
 }
 fn head_from_node(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
     position: NodeId,
     current: &Node,
 ) -> lattice_session::store::Result<SessionHead> {

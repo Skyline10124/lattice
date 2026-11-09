@@ -3,9 +3,9 @@
 
 use super::*;
 use super::{codec::*, local::Selection};
-use lancet_protocol::{InvocationId, ModelAttemptKey};
 use lattice_conversation::{
-    CostEstimate, ModelId, ProviderId, TokenUsage, ToolResultOutcome, UsageCompleteness,
+    CostEstimate, InvocationId, ModelAttemptKey, ModelId, ProviderId, TokenUsage,
+    ToolResultOutcome, UsageCompleteness,
 };
 use lattice_store::ProjectStoreKey;
 use redb::ReadableTable;
@@ -161,7 +161,7 @@ fn slot_detail(slot: &InvocationSlot) -> SlotDetail {
 fn attempt(
     index: usize,
     a: &AttemptRecord,
-    address: lancet_protocol::ModelMessageAddress,
+    address: lattice_conversation::ModelMessageAddress,
 ) -> AttemptDetail {
     let progress = match &a.progress {
         AttemptProgress::Sent => AttemptProgressDetail::Sent,
@@ -218,7 +218,7 @@ fn detail(session_id: SessionId, node: NodeId, step: &Node) -> Result<StepDetail
                 attempt(
                     index,
                     a,
-                    lancet_protocol::ModelMessageAddress {
+                    lattice_conversation::ModelMessageAddress {
                         session_id,
                         turn_id: *turn_id,
                         model_step_ordinal: *step_ordinal,

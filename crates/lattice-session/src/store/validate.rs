@@ -2,10 +2,10 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{CellEvidenceTriple, InvocationBinding, InvocationId, ModelMessageAddress};
+use lancet_protocol::{CellEvidenceTriple, InvocationBinding};
 use lattice_conversation::{
-    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderId, RawToolCall,
-    ToolCallState, validate_tool_call_batch,
+    BoundToolCall, InvocationId, MessageRole, MessageSemantic, ModelMessageAddress, NativeMessage,
+    ProviderId, RawToolCall, ToolCallState, validate_tool_call_batch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -77,7 +77,7 @@ pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<
             MessageSemantic::ToolCall { call } => Some(RawToolCall {
                 provider_call_id: call.provider_call_id().map(str::to_owned),
                 name: call.name().into(),
-                arguments: lancet_protocol::canonical_json(call.arguments()),
+                arguments: lattice_conversation::canonical_json(call.arguments()),
             }),
             _ => None,
         })
@@ -166,7 +166,7 @@ pub(super) fn terminal(
             digest,
             byte_length,
         }) => {
-            let bytes = lancet_protocol::canonical_json(value);
+            let bytes = lattice_conversation::canonical_json(value);
             if bytes.len() > MAX_TOOL_CONTENT_BYTES
                 || bytes.len() as u64 != *byte_length
                 || lattice_conversation::tool_content_digest(&bytes) != *digest
@@ -219,7 +219,7 @@ fn bound_reply(
             || b.identity.method != call.name
             || b.identity.descriptor_identity != entry.descriptor_identity
             || b.identity.arguments_digest != call.arguments_digest
-            || call.arguments_digest != lancet_protocol::arguments_digest(&call.arguments)
+            || call.arguments_digest != lattice_conversation::arguments_digest(&call.arguments)
         {
             return Err(invalid("slots", "binding/reply mismatch"));
         }

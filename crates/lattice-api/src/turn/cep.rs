@@ -358,7 +358,7 @@ pub(crate) fn map_cep_tool_event(event: ToolEvent) -> Option<TurnEvent> {
     let invocation_id = params
         .get("invocation_id")
         .and_then(|value| value.as_str())
-        .and_then(|raw| lancet_protocol::InvocationId::parse(raw).ok())?;
+        .and_then(|raw| lattice_conversation::InvocationId::parse(raw).ok())?;
     match event.method.as_str() {
         "cep.call_started" => Some(TurnEvent::CepCallStarted {
             invocation_id,

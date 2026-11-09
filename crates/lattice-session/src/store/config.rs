@@ -167,7 +167,7 @@ impl ToolCatalogSnapshot {
     ) -> Result<(String, [u8; 32])> {
         let value = serde_json::to_value((runtime_build_id, entries))
             .map_err(|_| invalid("catalog", "cannot serialize catalog"))?;
-        let canonical = lancet_protocol::canonical_json(&value);
+        let canonical = lattice_conversation::canonical_json(&value);
         let digest = digest_with_domain(CATALOG_DOMAIN, canonical.as_bytes());
         Ok((canonical, digest))
     }
@@ -185,7 +185,7 @@ impl StoredTurnConfig {
     pub fn digest(&self) -> Result<[u8; 32]> {
         let value = serde_json::to_value(self)
             .map_err(|_| invalid("config", "cannot serialize turn config"))?;
-        let canonical = lancet_protocol::canonical_json(&value);
+        let canonical = lattice_conversation::canonical_json(&value);
         Ok(digest_with_domain(CONFIG_DOMAIN, canonical.as_bytes()))
     }
 

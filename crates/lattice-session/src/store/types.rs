@@ -4,12 +4,12 @@
 use super::hex_digest;
 pub use crate::model::{AgentName, RetryPolicy, TurnTimeout};
 use lancet_protocol::{
-    BindingIdentity, CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId,
-    ModelAttemptKey, ModelMessageAddress, Retriability, SessionId, ToolCallAddress, TurnId,
+    BindingIdentity, CellEvidenceTriple, CepErrorCode, InvocationBinding, Retriability,
 };
 use lattice_conversation::{
-    BoundToolCall, ModelId, NativeMessage, ProviderId, TokenUsage, ToolCallValidation,
-    ToolResultOutcome, UnboundToolCall,
+    BoundToolCall, InvocationId, ModelAttemptKey, ModelId, ModelMessageAddress, NativeMessage,
+    ProviderId, SessionId, TokenUsage, ToolCallAddress, ToolCallValidation, ToolResultOutcome,
+    TurnId, UnboundToolCall,
 };
 use lattice_store::ProjectStoreKey;
 use serde::{Deserialize, Serialize};

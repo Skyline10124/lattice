@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{codec::*, *};
-use lancet_protocol::InvocationId;
+use lattice_conversation::InvocationId;
 use redb::ReadableTable;
 use std::collections::BTreeSet;
 

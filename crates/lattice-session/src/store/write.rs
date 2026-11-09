@@ -3,11 +3,11 @@
 
 use super::local::Selection;
 use super::*;
-use lancet_protocol::{
-    BindingIdentity, InvocationBinding, InvocationId, ModelAttemptKey, ModelMessageAddress,
-    ToolCallAddress,
+use lancet_protocol::{BindingIdentity, InvocationBinding};
+use lattice_conversation::{
+    InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey, ModelMessageAddress,
+    NativeMessage, ToolCallAddress,
 };
-use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, NativeMessage};
 use redb::ReadableTable;
 use std::collections::BTreeSet;
 

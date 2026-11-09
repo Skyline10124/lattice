@@ -7,10 +7,9 @@ pub use crate::{
     AgentName, AgentNameError, ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId,
     ProviderIdError,
 };
-pub use lancet_protocol::{InvocationId, ModelAttemptKey, SessionId, TurnId};
 pub use lattice_conversation::{
-    CostEstimate, CostSummary, Effort, ResultPayload, StepContent, StoredToolResult,
-    SuccessContent, TokenSummary, UsageCompleteness,
+    CostEstimate, CostSummary, Effort, InvocationId, ModelAttemptKey, ResultPayload, SessionId,
+    StepContent, StoredToolResult, SuccessContent, TokenSummary, TurnId, UsageCompleteness,
 };
 pub use lattice_llm::{
     Availability, ConfigurationRequirement,

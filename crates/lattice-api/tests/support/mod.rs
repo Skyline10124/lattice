@@ -4,9 +4,10 @@
 
 //! Shared direct-Component integration-test helpers.
 
-use lancet_protocol::{CepError, InvocationId, ModelAttemptKey, SessionId, TurnId};
+use lancet_protocol::CepError;
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, UnboundToolCall,
+    InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey, NativeMessage,
+    Protocol, SessionId, TurnId, UnboundToolCall,
 };
 use lattice_session::store::{
     AcceptSession, AcceptTurn, AgentSelection, AttemptOrigin, AttemptProtocol, CloseStep,

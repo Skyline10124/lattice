@@ -12,8 +12,7 @@ use crate::{
     session::{ApiError, RequestConflict, Result, SessionApi},
 };
 use futures::FutureExt;
-use lancet_protocol::{SessionId, TurnId};
-use lattice_conversation::Effort;
+use lattice_conversation::{Effort, SessionId, TurnId};
 use lattice_session::{StateLayout, store::*};
 use std::sync::{
     Arc,

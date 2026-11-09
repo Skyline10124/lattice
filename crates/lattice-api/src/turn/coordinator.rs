@@ -5,7 +5,8 @@
 
 use std::{future::Future, sync::Arc};
 
-use lancet_protocol::{InvocationBinding, InvocationId, ModelAttemptKey, SessionId};
+use lancet_protocol::InvocationBinding;
+use lattice_conversation::{InvocationId, ModelAttemptKey, SessionId};
 use lattice_session::store::*;
 
 #[derive(Debug, thiserror::Error)]
