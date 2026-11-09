@@ -122,11 +122,13 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 ### 验证集与显式 feature
 
+`xtask ci`、`ci.yml` 与 `full-gate.yml` 均按两轮运行：第一轮构建无测试 feature 的生产二进制，运行全部 crate 默认测试与默认 harness 场景；第二轮先对 `lattice-api`、`lattice-cli`（`test-fake-tools,test-crash-barriers`）及 `lattice-system-harness`（`fake-tools,crash-barriers`）执行 clippy，再用带 `test-fake-tools,test-crash-barriers` 的构建覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 不变），运行 `lattice-api`（`test-fake-tools,test-crash-barriers`）与 `lattice-system-harness`（`fake-tools,crash-barriers`）的全部目标。
+
 | 验证集 | 内容 | 运行 |
 | --- | --- | --- |
-| 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景，配无测试 feature 的 `lattice` 二进制 | 普通 CI；本地按需 |
-| 假工具场景 | 标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景：需要 harness 的 `fake-tools` feature、带 `test-fake-tools` 的被测二进制，以及后台启动前设置的 `LATTICE_TEST_TOOLS` | 按影响范围或 CI 显式构建该二进制运行 |
-| 崩溃屏障 | `direct_crash_barriers`：需要 harness 的 `fake-tools,crash-barriers` feature 与带 `test-fake-tools,test-crash-barriers` 的被测二进制 | 普通 CI 在默认测试之后构建该二进制并运行 |
+| 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景，配无测试 feature 的 `lattice` 二进制 | 三处 CI 门禁第一轮、`rollout`（release 二进制）；本地按需 |
+| 假工具场景 | `lattice-api` 的假执行器测试，以及标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景（需要带 `test-fake-tools` 的被测二进制、harness 的 `fake-tools` feature 与后台启动前设置的 `LATTICE_TEST_TOOLS`） | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
+| 崩溃屏障 | `direct_crash_barriers`：需要带 `test-fake-tools,test-crash-barriers` 的被测二进制与 harness 的 `fake-tools,crash-barriers` feature | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
 
 报告列明测试目标、feature、构建模式与实际结果；普通套件的结论只覆盖普通套件。
 
@@ -148,11 +150,11 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 | 入口 | 职责 |
 | --- | --- |
-| `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再跑默认测试与崩溃屏障目标；只改 Markdown 的 PR 只运行文档链接检查 |
-| `.github/workflows/full-gate.yml` | 手动或定时的完整验证、release rollout 与 Component 可复现性证据 |
+| `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再执行两轮验证（含测试 feature 的 clippy）与依赖边界检查；只改 Markdown 的 PR 只运行文档链接检查 |
+| `.github/workflows/full-gate.yml` | 手动或定时的完整验证：执行两轮验证（含测试 feature 的 clippy）、alpha release rollout 与 Component 可复现性证据 |
 | `cargo xtask docs-check` | 检查 Git 跟踪的 Markdown 文件中相对链接的目标文件与标题锚点 |
-| `cargo xtask ci` | 本地验证编排，控制编译并发与每个 crate 的测试超时 |
-| `cargo xtask rollout --channel alpha` | 对锁定的 release 构建记录产物身份、验证步骤与发布证据 |
+| `cargo xtask ci` | 本地两轮验证编排（第二轮覆盖 `target/debug/lattice`），控制编译并发与每个 crate 的测试超时 |
+| `cargo xtask rollout --channel alpha` | 对锁定的无测试 feature release 构建记录产物身份、依赖边界与生产形态验证步骤 |
 
 - rollout 在全部必需步骤实际通过时通过：失败、阻塞或跳过都算未通过，测试步骤要有非零的通过数。步骤结果逐步保存，未执行的步骤保持阻塞，失败证据与产物身份关联到对应构建。发布由维护者执行，见[项目宪章](../governance/charter.md)。
 - Component 可复现性检查中，只有产物摘要漂移为警告；guest 构建、Component 编码、验证、imports 或 WIT 不符合要求都是失败。跨机可复现的证据要升级为硬门禁时，另提提案，由维护者决定。

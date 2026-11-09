@@ -13,6 +13,12 @@
 //! 超时上限。某个 crate 失控时（例如网络测试在 DNS 黑洞环境里挂起），只耗尽它自己的时间
 //! 预算并快速失败，整个门禁随之结束。原始记录见
 //! `git show ead22771^:docs/archive/records/FIX.md` 中的 L-26-01。
+//!
+//! 门禁按两轮验证被测二进制：第一轮构建无测试 feature 的生产二进制并跑全部默认测试；
+//! 第二轮先检查测试 feature 下的 clippy，再用 `--features test-fake-tools,test-crash-barriers`
+//! 重新构建并覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 路径不变），随后运行假执行器与
+//! 全部 harness 目标（含假工具场景与崩溃屏障）。`xtask ci` 结束后，`target/debug/lattice`
+//! 留存的是第二轮带测试 feature 的构建产物。
 
 use std::env;
 use std::os::unix::process::CommandExt;
@@ -82,6 +88,66 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
 
     step("test", || {
         run_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
+    })?;
+
+    // 第二轮：检查测试专用 feature 的编译与 lint，再用带测试 feature 的产物覆盖同一个
+    // target/debug/lattice（LATTICE_BIN 不变），运行假执行器单元测试、假工具场景与崩溃屏障。
+    step("clippy (test features: product)", || {
+        run_cargo(
+            &root,
+            &[
+                "clippy",
+                "-p",
+                "lattice-api",
+                "-p",
+                "lattice-cli",
+                "--all-targets",
+                "--features",
+                "test-fake-tools,test-crash-barriers",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &build_jobs,
+        )
+    })?;
+
+    step("clippy (test features: harness)", || {
+        run_cargo(
+            &root,
+            &[
+                "clippy",
+                "-p",
+                "lattice-system-harness",
+                "--all-targets",
+                "--features",
+                "fake-tools,crash-barriers",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &build_jobs,
+        )
+    })?;
+
+    step("build lattice (debug, test features)", || {
+        run_cargo(
+            &root,
+            &[
+                "build",
+                "-p",
+                "lattice-cli",
+                "--bin",
+                "lattice",
+                "--features",
+                "test-fake-tools,test-crash-barriers",
+            ],
+            &build_jobs,
+        )
+    })?;
+
+    step("test (test features)", || {
+        run_feature_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
     })?;
 
     step("tool-build --verify (warn-only)", tool_build::verify)?;
@@ -245,6 +311,13 @@ fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow:
     Ok(())
 }
 
+fn test_timeout_secs() -> u64 {
+    env::var("LATTICE_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TEST_TIMEOUT_SECS)
+}
+
 fn run_tests(
     root: &Path,
     lattice_bin: &Path,
@@ -256,10 +329,7 @@ fn run_tests(
         .exec()
         .map_err(|e| anyhow::anyhow!("failed to read workspace metadata: {e}"))?;
     let crates = ordered_test_crates(&metadata)?;
-    let timeout_secs = env::var("LATTICE_TEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_TEST_TIMEOUT_SECS);
+    let timeout_secs = test_timeout_secs();
 
     println!();
     println!(
@@ -272,7 +342,7 @@ fn run_tests(
         match run_cargo_test(
             root,
             name,
-            &[],
+            None,
             build_jobs,
             lattice_bin,
             harness_failures,
@@ -296,24 +366,77 @@ fn run_tests(
     Ok(())
 }
 
+fn run_feature_tests(
+    root: &Path,
+    lattice_bin: &Path,
+    harness_failures: &Path,
+    build_jobs: &str,
+) -> anyhow::Result<()> {
+    let targets = [
+        ("lattice-api", "test-fake-tools,test-crash-barriers"),
+        ("lattice-system-harness", "fake-tools,crash-barriers"),
+    ];
+    let timeout_secs = test_timeout_secs();
+
+    println!();
+    println!(
+        "\u{1b}[1m── test (test features: {} crates, {build_jobs} build jobs, {timeout_secs}s/crate) ──\u{1b}[0m",
+        targets.len()
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for (name, features) in targets {
+        let label = format!("{name} ({features})");
+        match run_cargo_test(
+            root,
+            name,
+            Some(features),
+            build_jobs,
+            lattice_bin,
+            harness_failures,
+            timeout_secs,
+        ) {
+            Ok(()) => println!("\u{1b}[0;32m✓\u{1b}[0m test {label}"),
+            Err(e) => {
+                println!("\u{1b}[0;31m✗\u{1b}[0m test {label}: {e}");
+                failures.push(label);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "带测试 feature 的 cargo test 在 {} 个目标上失败：{}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn run_cargo_test(
     root: &Path,
     crate_name: &str,
-    extra_libtest_args: &[&str],
+    features: Option<&str>,
     build_jobs: &str,
     lattice_bin: &Path,
     harness_failures: &Path,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
+    let cmd_desc = match features {
+        Some(f) => format!("cargo test -p {crate_name} --features {f}"),
+        None => format!("cargo test -p {crate_name}"),
+    };
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root)
         .env("CARGO_BUILD_JOBS", build_jobs)
         .arg("test")
         .arg("-p")
-        .arg(crate_name)
-        .arg("--")
-        .args(extra_libtest_args)
-        .stdout(Stdio::inherit())
+        .arg(crate_name);
+    if let Some(features) = features {
+        cmd.arg("--features").arg(features);
+    }
+    cmd.stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Put cargo in its own process group so a timeout can kill the whole
         // tree (cargo + rustc + test binaries) instead of orphaning them.
@@ -329,7 +452,7 @@ fn run_cargo_test(
     let deadline = Duration::from_secs(timeout_secs);
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("failed to spawn `cargo test -p {crate_name}`"))?;
+        .with_context(|| format!("启动 `{cmd_desc}` 失败"))?;
     // `process_group(0)` makes the child its own pgrp leader, so its pid is the
     // pgrp id used to signal the whole tree on timeout.
     let pgid = child.id();
@@ -340,7 +463,7 @@ fn run_cargo_test(
                 if status.success() {
                     return Ok(());
                 }
-                anyhow::bail!("`cargo test -p {crate_name}` failed: {status}");
+                anyhow::bail!("`{cmd_desc}` 失败：{status}");
             }
             None => {
                 if start.elapsed() >= deadline {
@@ -355,8 +478,7 @@ fn run_cargo_test(
                     let _ = child.kill();
                     let _ = child.wait();
                     anyhow::bail!(
-                        "`cargo test -p {crate_name}` timed out after {timeout_secs}s \
-                         (set LATTICE_TEST_TIMEOUT_SECS to raise the bound)"
+                        "`{cmd_desc}` 在 {timeout_secs}s 后超时（可设置 LATTICE_TEST_TIMEOUT_SECS 提高上限）"
                     );
                 }
                 std::thread::sleep(Duration::from_millis(200));
