@@ -9,7 +9,7 @@
 //! new one, and an unrelated project reusing a path sees the existing
 //! namespace. Derivation uses the raw `OsStrExt` bytes of the canonical full
 //! Local Workspace root — no UTF-8 conversion, content fingerprint, Git
-//! remote, inode, generation registry, or `[lancet.project_root].root`.
+//! remote, inode, generation registry, or profile configuration.
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;

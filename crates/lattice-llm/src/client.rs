@@ -429,11 +429,9 @@ fn is_localhost_request_host(host: &str) -> bool {
 /// `resolve_to_addrs` pinning in [`build_http_client_for_url`] — binds the
 /// *first* hop only. reqwest's default policy follows up to 10 hops, so a
 /// redirect would reach an unvalidated host with none of those checks, and on
-/// 307/308 would replay the request body (the whole conversation, including
-/// workspace file contents the agent just read). Provider-specific auth
-/// headers make it worse: reqwest strips `Authorization` across hosts but not
-/// `x-api-key` (Anthropic) or `x-goog-api-key` (Gemini). `fetch__web` disables
-/// redirects for the same reason.
+/// 307/308 would replay the request body (the whole conversation).
+/// Provider-specific auth headers make it worse: reqwest strips `Authorization`
+/// across hosts but not `x-api-key` (Anthropic) or `x-goog-api-key` (Gemini).
 fn http_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .redirect(reqwest::redirect::Policy::none())

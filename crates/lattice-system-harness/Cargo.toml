@@ -17,7 +17,7 @@ path = "tests/direct_crash_barriers.rs"
 required-features = ["crash-barriers", "fake-tools"]
 
 [dependencies]
-# 通用哈希库（非产品 crate）：工作区快照对比与场景产物摘要核对使用。
+# 通用哈希库（非产品 crate）：场景中二进制身份与工作区文件摘要核对使用。
 blake3 = "1"
 # Default features off: they would re-enable gix's defaults for the whole
 # workspace through feature unification (see root `Cargo.toml`).

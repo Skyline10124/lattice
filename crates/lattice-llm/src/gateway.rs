@@ -63,7 +63,7 @@ impl RequestGateway {
         self.configuration.has_usable_roots()
     }
 
-    /// Tool Host 使用同一份启动时信任根，每个 Turn 独立构造信任配置。
+    /// 返回网关启动时经筛选保留的信任根 DER，供 provider 请求与元数据刷新使用。
     pub fn tls_roots_der(&self) -> &[Vec<u8>] {
         &self.configuration.roots_der
     }

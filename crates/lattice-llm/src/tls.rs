@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-/// 按启动环境载入平台根证书的原始 DER，供 provider 与 Tool Host 共用。
+/// 按启动环境载入平台根证书的原始 DER，供 provider 请求与元数据刷新使用。
 ///
 /// 这里不解析、不过滤，也不因为集合为空而失败，结果可能为空。大小与有效性的筛选和警告在
 /// [`crate::RequestGateway::new`] 经 `select_roots`（真实 `parse_root`）做一次；“有没有可用的根”

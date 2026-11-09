@@ -7,8 +7,8 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 查询、停止或前台运行后台，处理升级差异，适配脚本字段 |
-| 前提 | 客户端与后台构建相符（IPC `LTLOCAL=`，`lattice.redb` 版本 `7`）；升级前备旧二进制 |
-| 规则 | [停止后台](../../../architecture/session/recovery.md#停止后台)、[版本打开](../../../architecture/storage.md#身份版本与打开)、[重建边界](../../tool-development.md#开发状态诊断与重建边界)、[测试工程](../../testing.md)、[用量费用](../../../architecture/llm/usage.md)、[关闭 Turn](../../../architecture/session/steps.md)、[模型候选](../../../architecture/llm/models.md#模型候选) |
+| 前提 | 客户端与后台构建相符（IPC 协议版本与 `lattice.redb` 格式版本一致）；升级前备旧二进制 |
+| 规则 | [停止后台](../../../architecture/session/recovery.md#停止后台)、[版本打开](../../../architecture/storage.md#身份版本与打开)、[测试工程](../../testing.md)、[用量费用](../../../architecture/llm/usage.md)、[关闭 Turn](../../../architecture/session/steps.md)、[模型候选](../../../architecture/llm/models.md#模型候选) |
 
 ## 命令
 
@@ -42,9 +42,9 @@ lattice --json daemon status
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `incompatible_backend` | 较旧后台（如 `LTLOCAL<`）用旧二进制 `stop`，较新换新二进制 |
+| `incompatible_backend` | 后台协议版本较旧时用旧二进制 `stop`，较新时换新二进制 |
 | `transport`（零字节断开） | 更早后台或崩溃断开；核对存活与版本 |
-| 拒绝格式 `6` 或 `*.git` 旧库 | 原库不变并列路径；存档或删除须获授权 |
+| 拒绝格式版本较旧的库或 `*.git` 旧库 | 原库不变并列路径；存档或删除须获授权 |
 
 脚本字段对照：
 
@@ -56,3 +56,4 @@ lattice --json daemon status
 | `session usage` | `total` | `path_total`、`session_total` |
 | 提交、`head`、`UserMessage` | 无覆盖字段 | 提交可选 `model`、`effort`；`head` 含当前与默认档位；`UserMessage` 存档位 |
 | `models` | 无档位与状态 | 含 `supported_efforts`、`availability`；表增 `EFFORTS`、`AUTH` |
+| `session turn` 槽位与工具错误 | `descriptor_identity`、`evidence`、分类错误对象 | `tool_identity`（无 `evidence`）；失败载荷为 `ToolError { code, message }` |

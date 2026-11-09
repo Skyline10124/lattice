@@ -43,4 +43,4 @@
 | 修改后台重连、会话树或 provider 默认场景 | 先构建无测试 feature 的 `lattice`，再按影响范围运行对应的 `cargo test -p lattice-system-harness --test direct_<场景>` |
 | 修改工具循环场景或 `tui_mock` 工具分支 | 先构建 `cargo build -p lattice-cli --bin lattice --features test-fake-tools`，再运行对应的 `cargo test -p lattice-system-harness --features fake-tools --test direct_<场景>` |
 | 修改 TUI 冒烟驱动或 `pty_tui_smoke` | 默认非工具子集：构建无测试 feature 的 `lattice` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke`；含假工具块与面板重试的全集：构建 `--features test-fake-tools` 的 `lattice` 后运行 `cargo test -p lattice-system-harness --features fake-tools --test pty_tui_smoke` |
-| 修改崩溃窗口场景 | 先构建带 `test-crash-barriers`（含工具调用时加 `test-fake-tools`）的 `lattice`，运行 `cargo test -p lattice-system-harness --features crash-barriers --test direct_crash_barriers`，并在报告中注明 |
+| 修改崩溃窗口场景 | 先构建带 `--features test-fake-tools,test-crash-barriers` 的 `lattice`，运行 `cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers`，并在报告中注明 |
