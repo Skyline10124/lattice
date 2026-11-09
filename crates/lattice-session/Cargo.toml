@@ -10,7 +10,6 @@ description = "LATTICE 全局事务会话库"
 chrono = { workspace = true, features = ["serde"] }
 redb = { workspace = true }
 rustix = { workspace = true }
-lancet-protocol = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-store = { workspace = true }
 serde = { workspace = true }

@@ -551,8 +551,6 @@ impl SessionRead {
             .ok_or_else(|| corrupt("profile_copies", &key, "profile copy missing"))?;
         let copy: SessionProfileCopy =
             attach_path(&self.path, decode_profile_copy(&key, value.value()))?;
-        copy.validate()
-            .map_err(|_| corrupt("profile_copies", &key, "invalid profile copy"))?;
         Ok(copy)
     }
 

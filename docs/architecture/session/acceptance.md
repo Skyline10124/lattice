@@ -40,12 +40,12 @@ status: active
 | 字段类别 | 来源 | 冻结时点 | 接收/持有者 | 是否持久化 | 用途 |
 | --- | --- | --- | --- | --- | --- |
 | 提交的选择 | 前端：agent、模型、推理档位，都可以不选 | 提交时 | 后台准入 | 不单独保存；生效的值写入副本与 UserMessage 节点 | 用户在本次提交中的选择 |
-| 有效 profile | profile 副本，或 agent 的 profile；策略文件解析所得有效工作区、网络和观察限制填回具体字段 | 接受事务前 | 执行核心 | 是，在 profile 副本中 | 固定 agent、LLM 重试与超时、启用工具及能力策略 |
+| 有效 profile | profile 副本，或 agent 的 profile | 接受事务前 | 执行核心 | 是，在 profile 副本中 | 固定 agent、默认模型与档位、LLM 重试与超时 |
 | 凭据 | `auth.json` | 不冻结；请求网关每次请求时取得，SIWC 的 access token 按需刷新，见[刷新](../llm/credentials.md#刷新) | 请求网关，只在内存中 | 否 | 认证 provider 请求 |
 | TLS 根证书 | 后台启动时载入的内容 | 后台启动时 | provider 连接与本 Turn 的 Tool Host 信任配置 | 否 | 验证 TLS 连接 |
 | `FrozenTurnConfig.agent_name/model/provider/effort` | 有效 profile、模型解析与档位选择的结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份、模型与推理档位 |
 | `FrozenTurnConfig.system_prompt` | 有效 profile 加载的系统提示 | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
-| `FrozenTurnConfig.catalog` | 本次运行时的启用工具目录 | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存运行时构建身份、按工具名排序的 entries 及摘要；entry 含名称、Descriptor 身份、描述、规范输入 schema |
+| `FrozenTurnConfig.catalog` | 本次运行时的启用工具目录 | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存按工具名排序的 entries 及摘要；entry 含名称、不透明工具身份 `tool_identity`、描述、规范输入 schema（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)） |
 | `FrozenTurnConfig.limits` | profile 超时、每步尝试数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
 
 持久冻结事实的类型由 `lattice-session` 维护，接受接线见[接受接线](../../../crates/lattice-api/src/turn/live.rs)。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。

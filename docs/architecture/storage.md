@@ -108,7 +108,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 身份、版本与打开
 
-会话库保存一张元信息表，记录库格式版本；各记录的值带格式版本。表定义、值格式及其演化由 `lattice-session` 维护。
+会话库保存一张元信息表，记录库格式版本（当前为 `8`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。
 
 | 打开时的状态 | 处理 |
 | --- | --- |
@@ -275,7 +275,7 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 会话树只追加、不删除，只有末端未关闭的 Step 节点会被改写，配置表只增不改；本阶段没有清理、压缩或备份机制。全部会话集中在一个库文件，文件损坏影响所有 Session；redb 自身提供崩溃恢复与完整性检查。
 
-会话库中的 TurnId 索引、InvocationId 索引与调用变更日志是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
+会话库中的 TurnId 索引与 InvocationId 索引是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
 
 工作区历史库的已确认状态由 `current` 引用的祖先链保持可达，不能依赖 reflog 保留；`current` 只前进，历史上每个提交都是它的祖先。当前不运行自动 GC、repack、maintenance、级联删除或历史改写，不为处理损坏自动重新初始化，不向外部 remote 添加 `refs/lattice/**` 推送规则。工作区历史不是整项目备份。
 
@@ -307,6 +307,6 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 
 纯文档修订核对接口责任、发布顺序、锁范围、来源、状态及图示。修改内核或会话库接线时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。
 
-承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，以及 [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
+承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件，以及 [ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛) 的会话库升版与存储收敛。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
 创建残留的完整报告与跨位置能力覆盖仍需核验。

@@ -3,7 +3,6 @@
 
 use super::local::Selection;
 use super::*;
-use lancet_protocol::{BindingIdentity, InvocationBinding};
 use lattice_conversation::{
     InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey, ModelMessageAddress,
     NativeMessage, ToolCallAddress,
@@ -343,7 +342,6 @@ impl SessionStore {
                     turn_id: input.turn_id,
                 });
             }
-            input.profile_copy.validate()?;
             if !input.profile_copy.matches_config(&input.config) {
                 return Err(invalid(
                     "profile",
@@ -620,7 +618,7 @@ impl SessionStore {
                                 model_step_ordinal: reply.key.model_step_ordinal,
                                 part_ordinal,
                                 method: bound.name.clone(),
-                                descriptor_identity: entry.descriptor_identity.clone(),
+                                tool_identity: entry.tool_identity.clone(),
                                 arguments_digest: bound.arguments_digest,
                             },
                         });

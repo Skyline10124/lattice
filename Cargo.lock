@@ -2910,7 +2910,6 @@ name = "lattice-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
- "lancet-protocol",
  "lattice-conversation",
  "lattice-store",
  "redb",

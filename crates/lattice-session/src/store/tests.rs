@@ -3,7 +3,6 @@
 
 use super::codec::*;
 use super::*;
-use lancet_protocol::InvocationBinding;
 use lattice_conversation::{
     CostEstimate, InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey,
     ModelId, NativeMessage, OpaqueProviderState, Protocol, ProviderId, SessionId, TokenUsage,
@@ -231,15 +230,12 @@ fn config() -> FrozenTurnConfig {
         provider: provider("openai"),
         effort: None,
         system_prompt: None,
-        catalog: ToolCatalogSnapshot::new(
-            "build".into(),
-            vec![ToolCatalogEntry {
-                name: "observe__workspace".into(),
-                descriptor_identity: "a".repeat(64),
-                description: "observe".into(),
-                input_schema: json!({"type":"object"}),
-            }],
-        )
+        catalog: ToolCatalogSnapshot::new(vec![ToolCatalogEntry {
+            name: "observe__workspace".into(),
+            tool_identity: "lancet-node:observe@v1".into(),
+            description: "observe".into(),
+            input_schema: json!({"type":"object"}),
+        }])
         .unwrap(),
         limits: TurnExecutionLimits {
             timeout_secs: TurnTimeout::default(),
@@ -459,7 +455,7 @@ fn structured_result_wire() {
 }
 
 #[test]
-fn domain_types_v7_wire() {
+fn domain_types_v8_wire() {
     let choice_wire = json!({
         "provider": "openai",
         "model": "org/gpt-5",
@@ -474,39 +470,12 @@ fn domain_types_v7_wire() {
             "description": "coding agent",
             "default_model": "openai/org/gpt-5",
             "default_effort": "medium",
-            "enabled_tools": ["observe__workspace"],
             "timeout_secs": 300,
             "retry": {
                 "max_retries": 3,
                 "initial_delay_ms": 500,
                 "max_delay_ms": 3000
-            },
-            "capabilities": {
-                "deny": [],
-                "max_boundary": "in"
-            },
-            "policy": {
-                "project_root": "/",
-                "workspace": {
-                    "denied_write_patterns": [],
-                    "included_ignored_read_patterns": [],
-                    "denied_read_patterns": []
-                },
-                "network": {
-                    "allow_public_https": true,
-                    "allow_localhost": false,
-                    "allowed_hosts": [],
-                    "max_web_response_bytes": 10485760
-                },
-                "observation": {
-                    "max_single_read_bytes": 10485760,
-                    "max_turn_observation_bytes": 10485760,
-                    "max_grep_matches": 1000,
-                    "max_list_entries": 1000,
-                    "max_find_paths": 1000
-                }
-            },
-            "extensions": {}
+            }
         },
         "prompt_config_digest": "ab".repeat(32),
         "current": {
@@ -518,7 +487,7 @@ fn domain_types_v7_wire() {
     let copy: SessionProfileCopy = serde_json::from_value(copy_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&copy).unwrap(), copy_wire);
     let encoded_copy = encode(&copy).unwrap();
-    assert_eq!(&encoded_copy[..4], &7_u32.to_be_bytes());
+    assert_eq!(&encoded_copy[..4], &8_u32.to_be_bytes());
     assert_eq!(decode_profile_copy("s1", &encoded_copy).unwrap(), copy);
 
     let user_wire = json!({
@@ -550,7 +519,7 @@ fn domain_types_v7_wire() {
     let user: Node = serde_json::from_value(user_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&user).unwrap(), user_wire);
     let encoded_user = encode(&user).unwrap();
-    assert_eq!(&encoded_user[..4], &7_u32.to_be_bytes());
+    assert_eq!(&encoded_user[..4], &8_u32.to_be_bytes());
     assert!(decode::<Node>("nodes", "n1", &encoded_user).unwrap() == user);
 }
 
@@ -899,18 +868,15 @@ fn tool_reply_mapping_and_privacy() {
 #[test]
 fn input_and_diagnostic_boundaries() {
     let mut c = config();
-    let base = codec::canonical(&(c.catalog.runtime_build_id.clone(), &c.catalog.entries))
-        .unwrap()
-        .len();
+    let base = codec::canonical(&c.catalog.entries).unwrap().len();
     c.catalog.entries[0]
         .description
         .push_str(&"x".repeat(MAX_CATALOG_SNAPSHOT_BYTES - base));
-    c.catalog =
-        ToolCatalogSnapshot::new(c.catalog.runtime_build_id.clone(), c.catalog.entries).unwrap();
+    c.catalog = ToolCatalogSnapshot::new(c.catalog.entries).unwrap();
     assert!(validate::config(&c).is_ok());
     let mut entries = c.catalog.entries.clone();
     entries[0].description.push('x');
-    assert!(ToolCatalogSnapshot::new(c.catalog.runtime_build_id, entries).is_err());
+    assert!(ToolCatalogSnapshot::new(entries).is_err());
     let (_d, _l, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
     let mut receipt = terminal(&calls.bindings[0], ok_reply());
@@ -1145,7 +1111,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..8 {
+    for case in 0..9 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -1177,13 +1143,14 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
-            4 | 5 | 7 => {
+            4 | 5 | 7 | 8 => {
                 let mut meta = tx.open_table(META).unwrap();
                 // 固定旧版元信息，独立于当前编码器核对严格打开。
                 let old_version = match case {
                     4 => 3_u32,
                     5 => 4_u32,
-                    _ => 6_u32,
+                    7 => 6_u32,
+                    _ => 7_u32,
                 };
                 for (key, value) in [
                     ("store_kind", "\"lattice-session\"".to_owned()),
@@ -1206,11 +1173,12 @@ fn schema_and_legacy_rejection_matrix() {
         let error = SessionStore::open(&layout)
             .err()
             .unwrap_or_else(|| panic!("case {case}"));
-        if matches!(case, 4 | 5 | 7) {
+        if matches!(case, 4 | 5 | 7 | 8) {
             let expected = match case {
                 4 => 3,
                 5 => 4,
-                _ => 6,
+                7 => 6,
+                _ => 7,
             };
             let path = layout.lattice_root().join("lattice.redb");
             assert!(error.to_string().contains(&path.display().to_string()));
@@ -1319,7 +1287,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x077"
+            b"\x00\x00\x00\x088"
         );
     }
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -1801,7 +1769,17 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
                 Some("invalid frozen configuration")
             }
             8 => {
-                a.config.catalog.entries[0].descriptor_identity = "A".repeat(64);
+                use sha2::{Digest, Sha256};
+                let first = a.config.catalog.entries[0].clone();
+                let mut z = first.clone();
+                z.name = "z_tool".into();
+                a.config.catalog.entries = vec![z, first];
+                let canonical = codec::canonical(&a.config.catalog.entries).unwrap();
+                let mut hasher = Sha256::new();
+                hasher.update(b"lattice-tool-catalog-snapshot-v1\0");
+                hasher.update((canonical.len() as u64).to_be_bytes());
+                hasher.update(&canonical);
+                a.config.catalog.digest = hasher.finalize().into();
                 None
             }
             _ => unreachable!(),
@@ -2092,12 +2070,12 @@ fn replay_origin_records_no_endpoint() {
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     let session = encode(&r.sessions[&sid(1)]).unwrap();
-    assert_eq!(&session[..4], &7u32.to_be_bytes(), "会话记录格式版本为 7");
+    assert_eq!(&session[..4], &8u32.to_be_bytes(), "会话记录格式版本为 8");
     assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
     let mut origins = 0;
     for ((_, id), node) in &r.nodes {
         let bytes = encode(node).unwrap();
-        assert_eq!(&bytes[..4], &7u32.to_be_bytes(), "节点 {id:?} 格式版本为 7");
+        assert_eq!(&bytes[..4], &8u32.to_be_bytes(), "节点 {id:?} 格式版本为 8");
         let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
         origins += text.matches("\"origin\"").count();
         assert_no_endpoint(&format!("节点 {id:?}"), &text);
@@ -3513,6 +3491,8 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "reply_attempt_stopped",
         "reply_slot_count",
         "slot_turn",
+        "slot_arguments_digest",
+        "slot_tool_identity",
         "terminal_not_executed",
         "terminal_no_result",
         "duplicate_invocation",
@@ -3648,6 +3628,10 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                         slots.pop();
                     }
                     "slot_turn" => slots[0].binding.identity.turn_id = tid(99),
+                    "slot_arguments_digest" => slots[0].binding.identity.arguments_digest = [0; 32],
+                    "slot_tool_identity" => {
+                        slots[0].binding.identity.tool_identity = "other-tool@v2".into()
+                    }
                     "terminal_not_executed" | "terminal_no_result" => {
                         let SlotProgress::Terminal { result } = &mut slots[0].progress else {
                             unreachable!()
@@ -4775,8 +4759,9 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
     // 当前二进制的 catalog 可变化，提示引用仍指向首次副本的配置。
     next.turn_id = tid(3);
     next.expected_profile_digest = Some(next.profile_copy.digest().unwrap());
-    next.config.catalog =
-        ToolCatalogSnapshot::new("new-build".into(), next.config.catalog.entries.clone()).unwrap();
+    let mut updated_entries = next.config.catalog.entries.clone();
+    updated_entries[0].tool_identity = "lancet-node:observe@v2".into();
+    next.config.catalog = ToolCatalogSnapshot::new(updated_entries).unwrap();
     assert_ne!(
         next.config.digest().unwrap(),
         next.profile_copy.prompt_config_digest
@@ -4802,7 +4787,7 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
         db.begin_read().unwrap().profile_copy(sid(1)).unwrap(),
         unchanged
     );
-    // 同名重建只改策略，旧的合法 Explicit 准备也必须由完整摘要拒绝。
+    // 同名重建只改描述等非 Turn 冻结字段，旧的合法 Explicit 准备也必须由完整摘要拒绝。
     let mut stale = accept(sid(1), tid(5));
     stale.session = AcceptSession::Existing { id: sid(1) };
     stale.expected_profile_digest = Some(unchanged.digest().unwrap());
@@ -4810,13 +4795,7 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
     stale.profile_copy = unchanged;
     let mut rebuilt = stale.clone();
     rebuilt.turn_id = tid(4);
-    rebuilt
-        .profile_copy
-        .profile
-        .policy
-        .workspace
-        .denied_read_patterns
-        .push("private/**".into());
+    rebuilt.profile_copy.profile.description = Some("updated description".into());
     db.accept_turn(&lock, rebuilt).unwrap();
     let before_stale = records(&db);
     assert!(matches!(
@@ -4937,6 +4916,7 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
     }
     for case in [
         "unknown",
+        "legacy_profile_field",
         "effort",
         "agent_name",
         "default_model",
@@ -4960,6 +4940,7 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
             let mut value = serde_json::to_value(&base.profile_copies[&sid(1)]).unwrap();
             match case {
                 "unknown" => value["unknown"] = json!(true),
+                "legacy_profile_field" => value["profile"]["enabled_tools"] = json!(["observe"]),
                 "effort" => value["current"]["effort"] = json!("default"),
                 "agent_name" => value["profile"]["agent_name"] = json!("../bad"),
                 "default_model" => value["profile"]["default_model"] = json!("missing-slash"),
@@ -4971,7 +4952,7 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
             }
             let mut bytes = encode(&value).unwrap();
             if case == "version" {
-                bytes[..4].copy_from_slice(&6_u32.to_be_bytes());
+                bytes[..4].copy_from_slice(&7_u32.to_be_bytes());
             }
             if case == "canonical" {
                 bytes.push(b' ');
@@ -4993,7 +4974,14 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
         let reopened = SessionStore::open(&layout).map(|_| ());
         if case == "version" {
             assert!(
-                matches!(reopened, Err(StoreError::UnsupportedVersion { .. })),
+                matches!(
+                    reopened,
+                    Err(StoreError::UnsupportedVersion {
+                        found: 7,
+                        supported: VERSION,
+                        ..
+                    })
+                ),
                 "{case}: {reopened:?}"
             );
         } else {
@@ -5003,4 +4991,166 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
             );
         }
     }
+}
+
+#[test]
+fn non_hex_tool_identity_catalog_digest_and_binding_mismatch() {
+    use sha2::{Digest, Sha256};
+
+    let entries = vec![
+        ToolCatalogEntry {
+            name: "z_write".into(),
+            tool_identity: "".into(),
+            description: "empty identity".into(),
+            input_schema: json!({"type": "object"}),
+        },
+        ToolCatalogEntry {
+            name: "observe__workspace".into(),
+            tool_identity: "mcp:filesystem/read_file@v2#非十六进制".into(),
+            description: "opaque identity".into(),
+            input_schema: json!({"type": "object"}),
+        },
+    ];
+    let snapshot = ToolCatalogSnapshot::new(entries).expect("非十六进制 tool_identity 应当合法");
+    assert_eq!(snapshot.entries[0].name, "observe__workspace");
+    assert_eq!(snapshot.entries[1].name, "z_write");
+
+    // 确认目录摘要只对 entries 规范 JSON 编码计算，不含 runtime_build_id。
+    let canonical_entries =
+        lattice_conversation::canonical_json(&serde_json::to_value(&snapshot.entries).unwrap());
+    let mut hasher = Sha256::new();
+    hasher.update(b"lattice-tool-catalog-snapshot-v1\0");
+    hasher.update((canonical_entries.len() as u64).to_be_bytes());
+    hasher.update(canonical_entries.as_bytes());
+    let expected_digest: [u8; 32] = hasher.finalize().into();
+    assert_eq!(
+        snapshot.digest, expected_digest,
+        "目录摘要应仅由条目列表决定"
+    );
+
+    let mut wire_snapshot = serde_json::to_value(&snapshot).unwrap();
+    assert!(
+        wire_snapshot.get("runtime_build_id").is_none(),
+        "序列化目录不应含 runtime_build_id"
+    );
+    wire_snapshot["runtime_build_id"] = json!("build-1");
+    assert!(
+        serde_json::from_value::<ToolCatalogSnapshot>(wire_snapshot).is_err(),
+        "反序列化目录必须拒绝旧字段 runtime_build_id"
+    );
+
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let mut turn_accept = accept(sid(1), tid(1));
+    turn_accept.config.catalog = snapshot.clone();
+    turn_accept.profile_copy = SessionProfileCopy::for_test(&turn_accept.config);
+    db.accept_turn(&lock, turn_accept)
+        .expect("接受含非十六进制 tool_identity 的 Turn");
+
+    let k = key(tid(1), 0, 0);
+    db.start_request(&lock, k, origin(), now()).unwrap();
+    let registered = db
+        .register_calls(&lock, reply(k, 1), &[iid(1)], now())
+        .expect("登记非十六进制 tool_identity 的工具调用");
+    assert_eq!(
+        registered.bindings[0].identity.tool_identity,
+        "mcp:filesystem/read_file@v2#非十六进制"
+    );
+    assert!(
+        registered.bindings[0]
+            .matches_request("observe__workspace", &json!({"path": "private-input"}))
+    );
+    assert!(
+        !registered.bindings[0].matches_request("observe__workspace", &json!({"path": "OTHER.md"})),
+        "参数摘要失配时 matches_request 必须返回 false"
+    );
+
+    let started = db
+        .start_invocation(&lock, &registered.bindings[0], now())
+        .unwrap();
+    assert_eq!(
+        started.binding().identity.tool_identity,
+        "mcp:filesystem/read_file@v2#非十六进制"
+    );
+    let receipt = terminal(&registered.bindings[0], ok_reply());
+    db.finish_invocation(
+        &lock,
+        TerminalInput {
+            invocation_id: iid(1),
+            terminal: receipt,
+        },
+        now(),
+    )
+    .unwrap();
+
+    {
+        let read = db.begin_read().unwrap();
+        let stored_cfg = read.turn_config(sid(1), tid(1)).unwrap();
+        assert_eq!(stored_cfg.catalog, snapshot);
+        let Node::Step { slots, .. } = read
+            .node(NodeRef {
+                session_id: sid(1),
+                node: NodeId(2),
+            })
+            .unwrap()
+        else {
+            panic!("预期 Step 节点");
+        };
+        assert_eq!(
+            slots[0].binding.identity.tool_identity,
+            "mcp:filesystem/read_file@v2#非十六进制"
+        );
+        assert_eq!(
+            read.turn_detail(sid(1), tid(1)).unwrap().steps[0]
+                .slots
+                .len(),
+            1
+        );
+    }
+
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).expect("重开含非十六进制 tool_identity 的会话库");
+
+    // 篡改持久槽位的绑定参数摘要后，只读投影与严格重开均必须报错。
+    reopened
+        .edit_test_node(
+            NodeRef {
+                session_id: sid(1),
+                node: NodeId(2),
+            },
+            |wire| {
+                wire["slots"][0]["binding"]["identity"]["arguments_digest"] =
+                    json!("00".repeat(32));
+            },
+        )
+        .unwrap();
+    {
+        let read = reopened.begin_read().unwrap();
+        assert!(
+            matches!(
+                read.node(NodeRef {
+                    session_id: sid(1),
+                    node: NodeId(2),
+                }),
+                Err(StoreError::Corruption { .. })
+            ),
+            "读取节点时绑定参数摘要失配必须报错"
+        );
+        assert!(
+            matches!(
+                read.turn_detail(sid(1), tid(1)),
+                Err(StoreError::Corruption { .. })
+            ),
+            "读取轮次详情时绑定参数摘要失配必须报错"
+        );
+    }
+    drop(reopened);
+    assert!(
+        matches!(
+            SessionStore::open(&layout),
+            Err(StoreError::Corruption { .. })
+        ),
+        "重开会话库时绑定参数摘要失配必须报错"
+    );
 }

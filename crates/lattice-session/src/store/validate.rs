@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::InvocationBinding;
 use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, ModelMessageAddress, NativeMessage, ProviderId,
     RawToolCall, ToolCallState, validate_tool_call_batch,
@@ -33,24 +32,10 @@ pub(super) fn stored_config(digest: &[u8; 32], stored: &StoredTurnConfig) -> Res
     if stored.digest()? != *digest {
         return Err(invalid("config", "stored configuration digest mismatch"));
     }
-    let rebuilt = ToolCatalogSnapshot::new(
-        stored.catalog.runtime_build_id.clone(),
-        stored.catalog.entries.clone(),
-    )
-    .map_err(|_| invalid("catalog", "invalid catalog entries"))?;
-    if rebuilt != stored.catalog
-        || stored.catalog.entries.iter().any(|e| {
-            e.descriptor_identity.len() != 64
-                || !e
-                    .descriptor_identity
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-    {
-        return Err(invalid(
-            "catalog",
-            "catalog ordering or descriptor identity invalid",
-        ));
+    let rebuilt = ToolCatalogSnapshot::new(stored.catalog.entries.clone())
+        .map_err(|_| invalid("catalog", "工具目录条目无效"))?;
+    if rebuilt != stored.catalog {
+        return Err(invalid("catalog", "工具目录排序不一致"));
     }
     Ok(())
 }
@@ -173,7 +158,7 @@ fn bound_reply(
             || call.address != a
             || call.invocation_id != b.invocation_id
             || b.identity.method != call.name
-            || b.identity.descriptor_identity != entry.descriptor_identity
+            || b.identity.tool_identity != entry.tool_identity
             || b.identity.arguments_digest != call.arguments_digest
             || call.arguments_digest != lattice_conversation::arguments_digest(&call.arguments)
         {
@@ -510,7 +495,6 @@ fn profile_copy(r: &Records, session: SessionId) -> Result<()> {
         )
     };
     let copy = r.profile_copies.get(&session).ok_or_else(error)?;
-    copy.validate().map_err(|_| error())?;
     let config = r
         .max_node(session)
         .and_then(|node| r.nodes.get(&(session, node)))

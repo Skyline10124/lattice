@@ -61,7 +61,7 @@ stateDiagram-v2
 
 ## 调用槽位
 
-模型回复含工具调用时，登记事务为每个调用建立槽位并分配 InvocationId。该身份随后贯穿执行、取消与结果保存。InvocationId 在同一事务插入全局索引；键冲突时放弃该事务，重新生成后重试。登记记录每个调用的 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。
+模型回复含工具调用时，登记事务为每个调用建立槽位并分配 InvocationId。该身份随后贯穿执行、取消与结果保存。InvocationId 在同一事务插入全局索引；键冲突时放弃该事务，重新生成后重试。登记记录每个调用的 Session/Turn/步骤/片段地址、方法、不透明工具身份 `tool_identity` 和规范参数摘要（`InvocationBinding`，见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)），顺序与原回复一致。
 
 同一回复的调用按片段顺序逐个执行，每次只处理最低序号的未返回槽位：
 

@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::InvocationBinding;
 
 /// 上游先脱敏；本函数仅按 Unicode 字符数执行持久诊断上限。
 pub fn bound_provider_diagnostic(already_redacted: &str) -> String {

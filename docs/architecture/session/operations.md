@@ -18,7 +18,7 @@ status: active
 | `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
 | `lattice-llm` | 请求网关：统一判定可用性，`GatewayTurn::prepare` 单次完成准入与档位选择，每次请求按 provider `id` 与模型 `id` 解析配置、取得凭据，完成 provider wire 请求、流事件适配和对话投影 |
 | `lattice-conversation` | 维护模型选择值（`ProviderId`、`ModelId`、`ModelRef`）、推理档位 `Effort`、有序消息、ToolCall typestate、调用结果、双摘要、尝试诊断和 usage 等纯数据 |
-| `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录、会话树、配置表、TurnId 索引、InvocationId 索引与调用变更日志；提供带类型的事务操作、由阶段给出结论、读取校验，以及操作员只读查询 |
+| `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录、会话树、profile 副本、配置表、TurnId 索引与 InvocationId 索引；提供带类型的事务操作、由阶段给出结论、读取校验，以及操作员只读查询 |
 
 公开操作按用户要完成的工作划分：
 

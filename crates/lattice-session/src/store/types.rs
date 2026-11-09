@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use super::binding::{BindingIdentity, InvocationBinding};
 use super::hex_digest;
 pub use crate::model::{AgentName, RetryPolicy, TurnTimeout};
-use lancet_protocol::{BindingIdentity, InvocationBinding};
 use lattice_conversation::{
     BoundToolCall, InvocationId, ModelAttemptKey, ModelId, ModelMessageAddress, NativeMessage,
     ProviderId, SessionId, TokenUsage, ToolCallAddress, ToolCallValidation, ToolResultOutcome,
@@ -336,7 +336,7 @@ pub struct RegisteredCalls {
 /// ```
 ///
 /// ```compile_fail
-/// fn forge(binding: lancet_protocol::InvocationBinding) {
+/// fn forge(binding: lattice_session::store::InvocationBinding) {
 ///     let _ = lattice_session::store::StartedInvocation { binding };
 /// }
 /// ```
