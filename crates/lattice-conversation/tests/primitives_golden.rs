@@ -408,6 +408,19 @@ fn uuid_v4_rejection_cases() -> Vec<(&'static str, IdParseError, &'static str)> 
             IdParseError::InvalidSeparator { position: 8 },
             "invalid separator at byte 8",
         ),
+        // 多处错误并存时按位置先遇到的错误优先返回：
+        // 字节 14 版本位非法（'1'）先于字节 35 非法字符（'z'）
+        (
+            "3f8b2c1a-7d4e-1f5a-8b9c-0d1e2f3a4b5z",
+            IdParseError::InvalidVersion { found: '1' },
+            "invalid version nibble '1'",
+        ),
+        // 字节 19 variant 位非法（'c'）先于字节 23 分隔位缺失连字符（'x'）
+        (
+            "3f8b2c1a-7d4e-4f5a-cb9cx0d1e2f3a4b5c",
+            IdParseError::InvalidVariant { found: 'c' },
+            "invalid variant nibble 'c'",
+        ),
     ]
 }
 
@@ -683,6 +696,21 @@ fn canonical_json_scalars_numbers_and_string_escapes() {
         canonical_json(&escaping),
         r#"{"backslash":"c\\d","controls":"\u0000\b\t\n\f\r\u001f","quote":"a\"b","unicode":"é中文🦀"}"#,
         "引号、反斜杠、控制字符与非 ASCII 文本转义不匹配"
+    );
+
+    // 对象键经 write_string 输出，字符串值经 write_value 的标量分支输出，二者转义走两条路径；
+    // 此处单独锁定含引号、反斜杠与控制字符的对象键排序及完整转义输出字节。
+    let escaped_keys = json!({
+        "a\"b": 1,
+        "c\\d": 2,
+        "e\nf": 3,
+        "\u{0001}": 4,
+        "\u{0000}\u{0008}\t\u{000c}\r\u{001f}": 5,
+    });
+    assert_eq!(
+        canonical_json(&escaped_keys),
+        r#"{"\u0000\b\t\f\r\u001f":5,"\u0001":4,"a\"b":1,"c\\d":2,"e\nf":3}"#,
+        "对象键的引号、反斜杠与控制字符转义输出不匹配"
     );
 }
 
