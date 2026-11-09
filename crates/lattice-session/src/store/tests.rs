@@ -3,7 +3,7 @@
 
 use super::codec::*;
 use super::*;
-use lancet_protocol::{CellEvidenceTriple, CepError, CepErrorCode, CepErrorData, Retriability};
+use lancet_protocol::InvocationBinding;
 use lattice_conversation::{
     CostEstimate, InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey,
     ModelId, NativeMessage, OpaqueProviderState, Protocol, ProviderId, SessionId, TokenUsage,
@@ -382,39 +382,26 @@ fn running(
     (lock, calls)
 }
 
-fn terminal(
-    binding: &lancet_protocol::InvocationBinding,
-    code: Option<CepErrorCode>,
-) -> InvocationTerminal {
-    let receipt = match code {
-        None => Ok(json!({"secret-result":42})),
-        Some(code) => {
-            let mut e = CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "private-error",
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    operation: "internal".into(),
-                    detail: None,
-                }),
-                Retriability::Transient,
-            );
-            e.code = code;
-            Err(e)
-        }
-    };
-    prepare_terminal(
-        binding,
-        receipt,
-        CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-    )
-    .unwrap()
+fn ok_reply() -> ToolReply {
+    ToolReply::Succeeded(json!({"secret-result": 42}))
+}
+
+fn failed_reply(code: &str) -> ToolReply {
+    ToolReply::Failed(ToolError {
+        code: code.into(),
+        message: "private-error".into(),
+    })
+}
+
+fn terminal(binding: &InvocationBinding, reply: ToolReply) -> InvocationTerminal {
+    prepare_terminal(binding, reply)
 }
 
 fn finish(
     db: &SessionStore,
     lock: &SessionExecutionLock,
-    binding: &lancet_protocol::InvocationBinding,
-    code: Option<CepErrorCode>,
+    binding: &InvocationBinding,
+    reply: ToolReply,
 ) {
     let started = db.start_invocation(lock, binding, now()).unwrap();
     assert_eq!(started.binding(), binding);
@@ -422,21 +409,11 @@ fn finish(
         lock,
         TerminalInput {
             invocation_id: binding.invocation_id,
-            terminal: terminal(binding, code),
+            terminal: terminal(binding, reply),
         },
         now(),
     )
     .unwrap();
-}
-
-fn filter(p: ProjectStoreKey) -> AuditFilter {
-    AuditFilter {
-        project_store_key: p,
-        session_id: None,
-        turn_id: None,
-        method: None,
-        outcome: None,
-    }
 }
 
 fn corrupt_json(
@@ -765,12 +742,7 @@ fn deep_results_are_rejected_before_commit() {
     for depth in [124, 80] {
         let json = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
         let value: Value = serde_json::from_str(&json).unwrap();
-        let terminal = prepare_terminal(
-            &calls.bindings[0],
-            Ok(value.clone()),
-            CellEvidenceTriple::refused_before_admission("observe__workspace"),
-        )
-        .unwrap();
+        let terminal = prepare_terminal(&calls.bindings[0], ToolReply::Succeeded(value.clone()));
         let result = db.finish_invocation(
             &lock,
             TerminalInput {
@@ -811,7 +783,7 @@ fn deep_results_are_rejected_before_commit() {
                 unreachable!()
             };
             assert!(
-                matches!(&resolve_slot(&slots[0]).0.payload, ResultPayload::Succeeded(SuccessContent::Json { value: actual, .. }) if *actual == value)
+                matches!(&resolve_slot(&slots[0]).payload, ResultPayload::Succeeded(SuccessContent::Json { value: actual, .. }) if *actual == value)
             );
         }
     }
@@ -821,18 +793,13 @@ fn deep_results_are_rejected_before_commit() {
 }
 
 #[test]
-fn payload_evidence_and_privacy() {
+fn tool_reply_mapping_and_privacy() {
     let (_dir, _layout, db) = store();
-    let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
     let binding = &calls.bindings[0];
     for (len, large) in [(65534, false), (65535, true)] {
         let value = json!("x".repeat(len));
-        let term = prepare_terminal(
-            binding,
-            Ok(value),
-            CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-        )
-        .unwrap();
+        let term = prepare_terminal(binding, ToolReply::Succeeded(value));
         match term.result.payload {
             ResultPayload::Succeeded(SuccessContent::Json { byte_length, .. }) => {
                 assert_eq!((byte_length, large), (65536, false))
@@ -840,79 +807,34 @@ fn payload_evidence_and_privacy() {
             ResultPayload::Succeeded(SuccessContent::OutputTooLarge { byte_length, .. }) => {
                 assert_eq!((byte_length, large), (65537, true))
             }
-            _ => panic!("success"),
+            _ => panic!("预期为成功结果"),
         }
     }
-    let a = prepare_terminal(
-        binding,
-        Ok(json!({"z":"树","a":1})),
-        CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-    )
-    .unwrap();
-    let b = prepare_terminal(
-        binding,
-        Ok(json!({"a":1,"z":"树"})),
-        CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-    )
-    .unwrap();
+    let a = prepare_terminal(binding, ToolReply::Succeeded(json!({"z":"树","a":1})));
+    let b = prepare_terminal(binding, ToolReply::Succeeded(json!({"a":1,"z":"树"})));
     assert_eq!(a, b);
-    for case in 0..4 {
-        let mut e = CellEvidenceTriple::refused_before_admission(&binding.identity.method);
-        match case {
-            0 => e.admission.version = 2,
-            1 => e.effects.version = 2,
-            2 => e.denied.version = 2,
-            _ => e.admission.tool = "wrong".into(),
-        };
-        assert!(prepare_terminal(binding, Ok(json!(null)), e).is_err());
-    }
-    let mut ev = serde_json::to_value(CellEvidenceTriple::refused_before_admission(
-        &binding.identity.method,
-    ))
-    .unwrap();
-    ev["effects"]["future"] = json!(true);
-    let ev = serde_json::from_value(ev).unwrap();
-    assert!(prepare_terminal(binding, Ok(json!(null)), ev).is_ok());
-    for (code, payload) in [
+    for (reply, expected) in [
         (
-            CepErrorCode::ExecutionFailed,
-            ResultPayload::Failed(Box::new(CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "",
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    operation: "internal".into(),
-                    detail: None,
-                }),
-                Retriability::Transient,
-            ))),
+            ToolReply::Failed(ToolError {
+                code: "execution_failed".into(),
+                message: "private-error".into(),
+            }),
+            ResultPayload::Failed(ToolError {
+                code: "execution_failed".into(),
+                message: "private-error".into(),
+            }),
         ),
         (
-            CepErrorCode::GuardDenied,
-            ResultPayload::Failed(Box::new(CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "",
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    operation: "internal".into(),
-                    detail: None,
-                }),
-                Retriability::Transient,
-            ))),
-        ),
-        (
-            CepErrorCode::CallCancelled,
+            ToolReply::Cancelled,
             ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
         ),
         (
-            CepErrorCode::OutcomeIndeterminate,
+            ToolReply::Indeterminate,
             ResultPayload::Indeterminate(IndeterminateCause::Reported),
         ),
     ] {
-        let actual = terminal(binding, Some(code)).result.payload;
-        match (&actual, &payload) {
-            // 拒绝类错误归 Failed，错误码原样保留。
-            (ResultPayload::Failed(e), ResultPayload::Failed(_)) => assert_eq!(e.code, code),
-            _ => assert_eq!(actual, payload),
-        }
+        let actual = prepare_terminal(binding, reply).result.payload;
+        assert_eq!(actual, expected);
     }
     assert_eq!(
         bound_provider_diagnostic(&"树".repeat(2049))
@@ -920,27 +842,62 @@ fn payload_evidence_and_privacy() {
             .count(),
         2048
     );
-    finish(&db, &lock, binding, None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
+    finish(
+        &db,
+        &lock,
+        &calls.bindings[1],
+        failed_reply("execution_failed"),
+    );
     let read = db.begin_read().unwrap();
-    let bytes =
-        serde_json::to_string(&read.query_audit(&filter(project(1)), None, 100).unwrap()).unwrap();
-    let detail = serde_json::to_string(&read.turn_detail(sid(1), tid(1)).unwrap()).unwrap();
-    for text in [bytes, detail] {
-        for secret in [
-            "private-input",
-            "secret-result",
-            "private-error",
-            "input_schema",
-            "profile_snapshot",
-        ] {
-            assert!(!text.contains(secret));
+    let turn = read.turn_detail(sid(1), tid(1)).unwrap();
+    assert_eq!(
+        turn.steps[0].slots[0].progress,
+        SlotState::Terminal {
+            outcome: ToolResultOutcome::Succeeded,
+            reason: None,
+            material: MaterialSummary::Available {
+                digest: lattice_conversation::tool_content_digest(r#"{"secret-result":42}"#),
+                byte_length: 20,
+            },
         }
+    );
+    assert_eq!(turn.steps[0].slots[0].reason, None);
+    assert_eq!(
+        turn.steps[0].slots[1].progress,
+        SlotState::Terminal {
+            outcome: ToolResultOutcome::Failed,
+            reason: Some(SlotReason::Failed {
+                code: "execution_failed".into(),
+            }),
+            material: MaterialSummary::NoContent,
+        }
+    );
+    assert_eq!(
+        turn.steps[0].slots[1].reason,
+        Some(SlotReason::Failed {
+            code: "execution_failed".into(),
+        })
+    );
+    let detail = serde_json::to_string(&turn).unwrap();
+    for secret in [
+        "private-input",
+        "secret-result",
+        "private-error",
+        "input_schema",
+        "profile_snapshot",
+    ] {
+        assert!(!detail.contains(secret));
     }
-    assert!(!format!("{:?}", terminal(binding, None)).contains("secret-result"));
+    assert!(!format!("{:?}", terminal(binding, ok_reply())).contains("secret-result"));
+    assert!(
+        !format!("{:?}", terminal(binding, failed_reply("execution_failed")))
+            .contains("private-error")
+    );
 }
 
 #[test]
-fn input_and_evidence_boundaries() {
+fn input_and_diagnostic_boundaries() {
     let mut c = config();
     let base = codec::canonical(&(c.catalog.runtime_build_id.clone(), &c.catalog.entries))
         .unwrap()
@@ -956,7 +913,7 @@ fn input_and_evidence_boundaries() {
     assert!(ToolCatalogSnapshot::new(c.catalog.runtime_build_id, entries).is_err());
     let (_d, _l, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
-    let mut receipt = terminal(&calls.bindings[0], None);
+    let mut receipt = terminal(&calls.bindings[0], ok_reply());
     db.start_invocation(&lock, &calls.bindings[0], now())
         .unwrap();
     receipt.result.name = "other".into();
@@ -971,7 +928,7 @@ fn input_and_evidence_boundaries() {
         )
         .is_err()
     );
-    let mut receipt = terminal(&calls.bindings[0], None);
+    let mut receipt = terminal(&calls.bindings[0], ok_reply());
     receipt.result.invocation_id = iid(2);
     assert!(
         db.finish_invocation(
@@ -988,7 +945,7 @@ fn input_and_evidence_boundaries() {
         &lock,
         TerminalInput {
             invocation_id: iid(1),
-            terminal: terminal(&calls.bindings[0], None),
+            terminal: terminal(&calls.bindings[0], ok_reply()),
         },
         now(),
     )
@@ -1002,35 +959,6 @@ fn input_and_evidence_boundaries() {
         now(),
     )
     .unwrap();
-    let e = json!({"seq":0,"cell":{"ctx_op":"alloc","ext_impact":"none","scope":"workspace"},"scope":{"scope":"workspace","trust":"in","channel":"workspace"},"target":{"kind":"path","path":"a"},"source":"operation"});
-    let effect: lancet_protocol::evidence::ObservedEffect = serde_json::from_value(e).unwrap();
-    let mut evidence = CellEvidenceTriple::refused_before_admission("observe__workspace");
-    evidence.effects.effects.push(effect.clone());
-    let value = prepare_terminal(
-        &calls.bindings[0],
-        Err(CepError::new(
-            CepErrorCode::ExecutionFailed,
-            "failure",
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                operation: "internal".into(),
-                detail: None,
-            }),
-            Retriability::Transient,
-        )),
-        evidence.clone(),
-    )
-    .unwrap();
-    assert!(
-        matches!(value.evidence(),InvocationEvidence::Recorded(e) if e.effects.effects.len()==1)
-    );
-    evidence.effects.effects.push(effect);
-    assert!(prepare_terminal(&calls.bindings[0], Ok(json!({})), evidence).is_err());
-    let mut ev = serde_json::to_value(CellEvidenceTriple::refused_before_admission(
-        "observe__workspace",
-    ))
-    .unwrap();
-    ev["admission"]["max_boundary"] = json!("unknown_trust");
-    assert!(serde_json::from_value::<CellEvidenceTriple>(ev).is_err());
     let mut bad = stopped(
         key(tid(1), 1, 0),
         StopCause::ProviderError { retryable: false },
@@ -1041,27 +969,6 @@ fn input_and_evidence_boundaries() {
     assert!(validate::diagnostic(&bad.cause, &bad.diagnostic).is_err());
     bad.diagnostic.provider_error = Some("界".repeat(2048));
     assert!(validate::diagnostic(&bad.cause, &bad.diagnostic).is_ok());
-    let mut f = filter(project(1));
-    f.outcome = Some(ToolResultOutcome::Succeeded);
-    assert_eq!(
-        db.begin_read()
-            .unwrap()
-            .query_audit(&f, None, 100)
-            .unwrap()
-            .rows
-            .len(),
-        1
-    );
-    f.outcome = Some(ToolResultOutcome::NotExecuted);
-    f.method = Some("other".into());
-    assert!(
-        db.begin_read()
-            .unwrap()
-            .query_audit(&f, None, 100)
-            .unwrap()
-            .rows
-            .is_empty()
-    );
 }
 
 #[test]
@@ -1281,7 +1188,6 @@ fn schema_and_legacy_rejection_matrix() {
                 for (key, value) in [
                     ("store_kind", "\"lattice-session\"".to_owned()),
                     ("store_format_version", old_version.to_string()),
-                    ("last_change_seq", "0".to_owned()),
                 ] {
                     let mut bytes = old_version.to_be_bytes().to_vec();
                     bytes.extend(value.as_bytes());
@@ -1291,7 +1197,7 @@ fn schema_and_legacy_rejection_matrix() {
             _ => {
                 tx.open_table(META)
                     .unwrap()
-                    .insert("last_change_seq", &[0u8, 0, 0, 99, 48][..])
+                    .insert("store_kind", &[0u8, 0, 0, 99, b'"', b'x', b'"'][..])
                     .unwrap();
             }
         }
@@ -1416,7 +1322,7 @@ fn keys_versions_and_encoding() {
             b"\x00\x00\x00\x077"
         );
     }
-    let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     assert_eq!(
         decode::<SessionRecord>("sessions", "1", &encode(&r.sessions[&sid(1)]).unwrap()).unwrap(),
@@ -1515,20 +1421,6 @@ fn keys_versions_and_encoding() {
             "计数字段损坏未被拒绝：{invalid}"
         );
     }
-    let wire = serde_json::to_value(r.changes[&ChangeSeq(1)]).unwrap();
-    assert_eq!(
-        wire,
-        json!({"sequence":1,"invocation_id":calls.bindings[0].invocation_id,"stage":"registered"})
-    );
-    assert_eq!(
-        decode::<StoredInvocationChange>(
-            "invocation_changes",
-            "1",
-            &encode(&r.changes[&ChangeSeq(1)]).unwrap()
-        )
-        .unwrap(),
-        r.changes[&ChangeSeq(1)]
-    );
 }
 
 #[test]
@@ -1539,7 +1431,7 @@ fn nested_unknown_fields_are_rejected() {
         &db,
         &lock,
         &calls.bindings[0],
-        Some(CepErrorCode::ExecutionFailed),
+        failed_reply("execution_failed"),
     );
     let original = serde_json::to_value(node_at(&db, 2)).unwrap();
     for pointer in [
@@ -1555,8 +1447,6 @@ fn nested_unknown_fields_are_rejected() {
         "/slots/0/binding/identity",
         "/slots/0/progress",
         "/slots/0/progress/result/payload/payload",
-        "/slots/0/progress/evidence",
-        "/slots/0/progress/evidence/value",
     ] {
         let mut v = original.clone();
         v.pointer_mut(pointer)
@@ -1584,26 +1474,9 @@ fn nested_unknown_fields_are_rejected() {
             "{pointer}"
         );
     }
-    let mut value = original.clone();
+    let mut value = original;
     value["attempts"][0]["origin"]["protocol"] = json!("unknown");
     assert!(decode::<Node>("nodes", "2", &encode(&value).unwrap()).is_err());
-    let mut extended = original;
-    extended
-        .pointer_mut("/slots/0/progress/evidence/value/admission")
-        .unwrap()["future"] = json!({"nested":true});
-    assert!(decode::<Node>("nodes", "2", &encode(&extended).unwrap()).is_ok());
-    let effect = json!({"seq":0,"cell":{"ctx_op":"alloc","ext_impact":"none","scope":"workspace"},"scope":{"scope":"workspace","trust":"in","channel":"workspace"},"target":{"kind":"path","path":"a"},"source":"operation","future":true});
-    extended
-        .pointer_mut("/slots/0/progress/evidence/value/effects/effects")
-        .unwrap()
-        .as_array_mut()
-        .unwrap()
-        .push(effect);
-    assert!(decode::<Node>("nodes", "2", &encode(&extended).unwrap()).is_ok());
-    extended
-        .pointer_mut("/slots/0/progress/evidence/value/effects/effects/0/cell")
-        .unwrap()["unknown"] = json!(true);
-    assert!(decode::<Node>("nodes", "2", &encode(&extended).unwrap()).is_err());
     for pointer in ["", "/catalog", "/catalog/entries/0"] {
         let mut v = serde_json::to_value(config().stored()).unwrap();
         v.pointer_mut(pointer).unwrap()["private-field"] = json!(true);
@@ -1621,60 +1494,46 @@ fn progress_conclusions_and_stop_precedence() {
     };
     let mut started = registered.clone();
     started.progress = SlotProgress::Started;
-    for (slot, payload, reason) in [
-        (
-            &registered,
-            ResultPayload::NotExecuted,
-            EvidenceUnavailableReason::NotDispatched,
-        ),
+    for (slot, payload) in [
+        (&registered, ResultPayload::NotExecuted),
         (
             &started,
             ResultPayload::Indeterminate(IndeterminateCause::NoResult),
-            EvidenceUnavailableReason::NoResult,
         ),
     ] {
         assert_eq!(
             resolve_slot(slot),
-            (
-                StoredToolResult {
-                    invocation_id: iid(1),
-                    name: "observe__workspace".into(),
-                    payload
-                },
-                InvocationEvidence::Unavailable { reason }
-            )
+            StoredToolResult {
+                invocation_id: iid(1),
+                name: "observe__workspace".into(),
+                payload,
+            }
         );
     }
-    for code in [
-        None,
-        Some(CepErrorCode::ExecutionFailed),
-        Some(CepErrorCode::CallCancelled),
-        Some(CepErrorCode::OutcomeIndeterminate),
+    for reply in [
+        ok_reply(),
+        failed_reply("execution_failed"),
+        ToolReply::Cancelled,
+        ToolReply::Indeterminate,
     ] {
-        let term = terminal(&calls.bindings[0], code);
+        let term = terminal(&calls.bindings[0], reply.clone());
         let slot = InvocationSlot {
             binding: calls.bindings[0].clone(),
             progress: SlotProgress::Terminal {
                 result: term.result.clone(),
-                evidence: term.evidence.clone(),
             },
         };
-        assert_eq!(
-            resolve_slot(&slot),
-            (term.result.clone(), term.evidence.clone())
-        );
+        assert_eq!(resolve_slot(&slot), term.result);
         for stop in [
             DispatchStop::Cancelled,
             DispatchStop::Deadline,
             DispatchStop::ProcessExit,
         ] {
-            let expected = match code {
-                Some(CepErrorCode::CallCancelled) => Some(StopCause::Cancelled),
-                Some(CepErrorCode::OutcomeIndeterminate) => {
-                    Some(StopCause::InvocationIndeterminate {
-                        invocation_id: iid(1),
-                    })
-                }
+            let expected = match &reply {
+                ToolReply::Cancelled => Some(StopCause::Cancelled),
+                ToolReply::Indeterminate => Some(StopCause::InvocationIndeterminate {
+                    invocation_id: iid(1),
+                }),
                 _ if stop == DispatchStop::ProcessExit => Some(StopCause::ProcessExit),
                 _ => None,
             };
@@ -2035,7 +1894,11 @@ fn every_commit_reopens_with_read_only_conclusions() {
                         invocation_id: iid(1),
                         terminal: terminal(
                             &calls.bindings[0],
-                            (cut == 8).then_some(CepErrorCode::CallCancelled),
+                            if cut == 8 {
+                                ToolReply::Cancelled
+                            } else {
+                                ok_reply()
+                            },
                         ),
                     },
                     now(),
@@ -2043,7 +1906,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
                 .unwrap();
             }
             if cut >= 9 {
-                finish(&db, &lock, &calls.bindings[1], None);
+                finish(&db, &lock, &calls.bindings[1], ok_reply());
             }
             if cut == 10 {
                 db.close_step(
@@ -2139,7 +2002,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
             if cut == 6 {
                 assert_eq!(
                     first.reason,
-                    Some(OperatorReason::Indeterminate(IndeterminateCause::NoResult))
+                    Some(SlotReason::Indeterminate(IndeterminateCause::NoResult))
                 );
             }
             assert_eq!(
@@ -2194,9 +2057,6 @@ fn every_commit_reopens_with_read_only_conclusions() {
         }
         read.log(sid(1)).unwrap();
         read.list(None, 10).unwrap();
-        read.query_audit(&filter(project(1)), None, 100).unwrap();
-        read.tail_audit(&filter(project(1)), ChangeSeq(0), 100)
-            .unwrap();
         assert!(before == records(&db), "read changed cut {cut}");
         drop(read);
         let lock = db.try_lock_session(sid(1)).unwrap();
@@ -2332,7 +2192,7 @@ fn attempt_sources_survive_retry_and_reopen() {
     let calls = db
         .register_calls(&lock, complete, &[iid(1)], now())
         .unwrap();
-    finish(&db, &lock, &calls.bindings[0], None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
     db.close_step(
         &lock,
         CloseStep::Continue {
@@ -2677,7 +2537,7 @@ fn step_budget_reserves_and_closes_limit_node() {
                 now(),
             )
             .unwrap();
-        finish(&db, &lock, &calls.bindings[0], None);
+        finish(&db, &lock, &calls.bindings[0], ok_reply());
         let closed = db
             .close_step(
                 &lock,
@@ -2726,7 +2586,7 @@ fn conversation_tree() -> (
 ) {
     let (dir, layout, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
-    finish(&db, &lock, &calls.bindings[0], None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
     db.close_step(
         &lock,
         CloseStep::Continue {
@@ -2972,7 +2832,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
             "retries": [], "summary": expected.summary,
         })
     );
-    finish(&db, &lock, &calls.bindings[0], None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
     let entry = db.begin_read().unwrap().entry(node).unwrap();
     assert!(matches!(
         entry,
@@ -3574,112 +3434,9 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
     }
 }
 
-#[test]
-fn audit_resolves_terminal_from_nodes_without_close_rows() {
-    let (_d, layout, db) = store();
-    let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
-    let before = db.begin_read().unwrap();
-    finish(
-        &db,
-        &lock,
-        &calls.bindings[0],
-        Some(CepErrorCode::CallCancelled),
-    );
-    let read = db.begin_read().unwrap();
-    let tail = read
-        .tail_audit(&filter(project(1)), ChangeSeq(0), 100)
-        .unwrap();
-    assert_eq!(tail.rows.len(), 4);
-    assert!(matches!(
-        tail.rows[0].row.state,
-        OperatorInvocationState::Registered
-    ));
-    assert!(matches!(
-        tail.rows[2].row.state,
-        OperatorInvocationState::Started
-    ));
-    assert!(matches!(
-        tail.rows[3].row.state,
-        OperatorInvocationState::Terminal {
-            outcome: ToolResultOutcome::Indeterminate,
-            ..
-        }
-    ));
-    assert_eq!(
-        before
-            .tail_audit(&filter(project(1)), ChangeSeq(0), 100)
-            .unwrap()
-            .rows
-            .len(),
-        2
-    );
-    assert!(
-        db.start_invocation(&lock, &calls.bindings[1], now())
-            .is_err()
-    );
-    db.close_step(
-        &lock,
-        CloseStep::StopExecuting {
-            key: step(tid(1), 0),
-            stop: DispatchStop::Deadline,
-        },
-        now(),
-    )
-    .unwrap();
-    assert_eq!(detail(&db).summary.outcome, PublicTurnOutcome::Cancelled);
-    assert_eq!(records(&db).last_change, ChangeSeq(4));
-    let current = db.begin_read().unwrap();
-    assert_eq!(
-        current
-            .query_audit(&filter(project(1)), None, 1)
-            .unwrap()
-            .next,
-        Some(iid(1))
-    );
-    assert_eq!(
-        current
-            .query_audit(&filter(project(1)), Some(iid(1)), 1)
-            .unwrap()
-            .rows[0]
-            .state,
-        OperatorInvocationState::Registered
-    );
-    let mut cursor = ChangeSeq(0);
-    let mut rows = Vec::new();
-    loop {
-        let p = current.tail_audit(&filter(project(1)), cursor, 1).unwrap();
-        rows.extend(p.rows);
-        cursor = p.next_after;
-        if p.done {
-            break;
-        }
-    }
-    assert_eq!(rows, tail.rows);
-    let other = filter(project(2));
-    let p = current.tail_audit(&other, ChangeSeq(0), 100).unwrap();
-    assert!(p.rows.is_empty());
-    assert!(p.done);
-    assert!(current.tail_audit(&other, ChangeSeq(5), 1).is_err());
-    assert!(current.query_audit(&other, None, 0).is_err());
-    let replay = current.replay_audit(&project(1), sid(1), tid(1)).unwrap();
-    assert_eq!(replay.calls.len(), 2);
-    assert!(matches!(
-        current.replay_audit(&project(1), sid(9), tid(1)),
-        Err(StoreError::NotFound {
-            kind: "session",
-            ..
-        })
-    ));
-    drop(current);
-    drop(read);
-    drop(before);
-    drop(lock);
-    drop(db);
-    SessionStore::open(&layout).unwrap();
-}
 fn corruptible_fixture(db: &SessionStore) -> SessionExecutionLock {
     let (lock, calls) = running(db, sid(1), tid(1), 1, 1);
-    finish(db, &lock, &calls.bindings[0], None);
+    finish(db, &lock, &calls.bindings[0], ok_reply());
     db.close_step(
         &lock,
         CloseStep::Continue {
@@ -3709,7 +3466,7 @@ fn corruptible_fixture(db: &SessionStore) -> SessionExecutionLock {
             now(),
         )
         .unwrap();
-    finish(db, &lock, &calls.bindings[0], None);
+    finish(db, &lock, &calls.bindings[0], ok_reply());
     db.start_invocation(&lock, &calls.bindings[1], now())
         .unwrap();
     lock
@@ -3758,19 +3515,11 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "slot_turn",
         "terminal_not_executed",
         "terminal_no_result",
-        "terminal_without_receipt",
         "duplicate_invocation",
-        "evidence_version",
         "result_digest",
         "index_missing",
         "index_extra",
         "index_address",
-        "index_last",
-        "change_gap",
-        "change_sequence",
-        "change_lifecycle",
-        "change_orphan",
-        "high_water",
     ] {
         let mut r = base.clone();
         match case {
@@ -3829,16 +3578,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 r.index.insert(iid(99), r.index[&iid(2)].clone());
             }
             "index_address" => r.index.get_mut(&iid(2)).unwrap().address.part_ordinal = 99,
-            "index_last" => r.index.get_mut(&iid(2)).unwrap().last_change = ChangeSeq(1),
-            "change_gap" => {
-                r.changes.remove(&ChangeSeq(1));
-            }
-            "change_sequence" => r.changes.get_mut(&ChangeSeq(1)).unwrap().sequence = ChangeSeq(99),
-            "change_lifecycle" => {
-                r.changes.get_mut(&ChangeSeq(1)).unwrap().stage = InvocationStage::Started
-            }
-            "change_orphan" => r.changes.get_mut(&ChangeSeq(1)).unwrap().invocation_id = iid(99),
-            "high_water" => r.last_change = ChangeSeq(99),
             _ => {
                 let Node::Step {
                     parent,
@@ -3909,39 +3648,19 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                         slots.pop();
                     }
                     "slot_turn" => slots[0].binding.identity.turn_id = tid(99),
-                    "terminal_not_executed" | "terminal_no_result" | "terminal_without_receipt" => {
-                        let SlotProgress::Terminal { result, evidence } = &mut slots[0].progress
-                        else {
+                    "terminal_not_executed" | "terminal_no_result" => {
+                        let SlotProgress::Terminal { result } = &mut slots[0].progress else {
                             unreachable!()
                         };
-                        result.payload = match case {
-                            "terminal_not_executed" => ResultPayload::NotExecuted,
-                            "terminal_no_result" => {
-                                ResultPayload::Indeterminate(IndeterminateCause::NoResult)
-                            }
-                            _ => ResultPayload::Indeterminate(IndeterminateCause::Reported),
-                        };
-                        *evidence = InvocationEvidence::Unavailable {
-                            reason: if case == "terminal_not_executed" {
-                                EvidenceUnavailableReason::NotDispatched
-                            } else {
-                                EvidenceUnavailableReason::NoResult
-                            },
+                        result.payload = if case == "terminal_not_executed" {
+                            ResultPayload::NotExecuted
+                        } else {
+                            ResultPayload::Indeterminate(IndeterminateCause::NoResult)
                         };
                     }
                     "duplicate_invocation" => slots[2].binding.invocation_id = iid(2),
-                    "evidence_version" => {
-                        let SlotProgress::Terminal {
-                            evidence: InvocationEvidence::Recorded(e),
-                            ..
-                        } = &mut slots[0].progress
-                        else {
-                            unreachable!()
-                        };
-                        e.effects.version += 1;
-                    }
                     "result_digest" => {
-                        let SlotProgress::Terminal { result, .. } = &mut slots[0].progress else {
+                        let SlotProgress::Terminal { result } = &mut slots[0].progress else {
                             unreachable!()
                         };
                         let ResultPayload::Succeeded(SuccessContent::Json { digest, .. }) =
@@ -4015,7 +3734,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
 
 #[test]
 fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
-    for case in 0..7 {
+    for case in 0..6 {
         let (_d, layout, db) = store();
         let lock = corruptible_fixture(&db);
         let (_other, _calls) = running(&db, sid(2), tid(2), 1, 99);
@@ -4032,8 +3751,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
             3 => {
                 r.index.remove(&iid(2));
             }
-            4 => r.changes.get_mut(&ChangeSeq(8)).unwrap().invocation_id = iid(99),
-            5 => {
+            4 => {
                 let Node::Step { parent, .. } = r.nodes.get_mut(&(sid(1), NodeId(3))).unwrap()
                 else {
                     unreachable!()
@@ -4052,7 +3770,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
         replace_all_for_test(&tx, &r).unwrap();
         tx.commit().unwrap();
         let read = db.begin_read().unwrap();
-        if case == 6 {
+        if case == 5 {
             read.turn_detail(sid(1), tid(1)).unwrap();
         } else {
             assert!(
@@ -4092,22 +3810,18 @@ fn value_versions_and_schema_rejections_name_the_database() {
             matches!(SessionStore::open(&layout),Err(StoreError::UnsupportedVersion{path,found:1,supported:VERSION,..}) if path==layout.lattice_root().join("lattice.redb"))
         );
     }
-    for table in ["nodes", "invocation_changes"] {
+    {
         let (_d, layout, db) = store();
         let (lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
         drop(lock);
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
-        if table == "nodes" {
+        {
             let mut t = tx.open_table(NODES).unwrap();
             let bytes = 1u32.to_be_bytes();
             t.insert(node_key(sid(1), NodeId(0)).as_slice(), bytes.as_slice())
                 .unwrap();
-        } else {
-            let mut t = tx.open_table(CHANGES).unwrap();
-            let bytes = 1u32.to_be_bytes();
-            t.insert(1, bytes.as_slice()).unwrap();
         }
         tx.commit().unwrap();
         drop(raw);
@@ -4122,115 +3836,6 @@ fn value_versions_and_schema_rejections_name_the_database() {
         SessionStore::open(&layout),
         Err(StoreError::Corruption { .. })
     ));
-}
-
-#[test]
-fn open_rejects_invalid_invocation_lifecycle() {
-    for case in ["repeated_registered", "missing_started", "repeated_started"] {
-        let (_dir, layout, db) = store();
-        let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
-        let (_other, _) = running(&db, sid(2), tid(2), 1, 2);
-        finish(&db, &lock, &calls.bindings[0], None);
-
-        let mut selected = filter(project(1));
-        selected.session_id = Some(sid(1));
-        // 两个调用的 Registered 交错；单条分页应还原同一个调用的前态。
-        for after in 0..4 {
-            let page = db
-                .begin_read()
-                .unwrap()
-                .tail_audit(&selected, ChangeSeq(after), 1)
-                .unwrap();
-            assert_eq!(page.next_after, ChangeSeq(after + 1));
-            assert_eq!(page.rows.len(), usize::from(after != 1));
-        }
-        let tx = db.db.begin_write().unwrap();
-        let mut records = load_write(&tx).unwrap();
-        let terminal_seq = match case {
-            "repeated_registered" => {
-                records.changes.get_mut(&ChangeSeq(3)).unwrap().stage = InvocationStage::Registered;
-                4
-            }
-            "missing_started" => {
-                records.changes.remove(&ChangeSeq(3));
-                let mut terminal = records.changes.remove(&ChangeSeq(4)).unwrap();
-                terminal.sequence = ChangeSeq(3);
-                records.changes.insert(ChangeSeq(3), terminal);
-                3
-            }
-            _ => {
-                let mut terminal = records.changes.remove(&ChangeSeq(4)).unwrap();
-                terminal.sequence = ChangeSeq(5);
-                records.changes.insert(ChangeSeq(5), terminal);
-                let mut started = records.changes[&ChangeSeq(3)];
-                started.sequence = ChangeSeq(4);
-                records.changes.insert(ChangeSeq(4), started);
-                5
-            }
-        };
-        records.last_change = ChangeSeq(terminal_seq);
-        records.index.get_mut(&iid(1)).unwrap().last_change = ChangeSeq(terminal_seq);
-        replace_all_for_test(&tx, &records).unwrap();
-        tx.commit().unwrap();
-        assert!(records == load_read(&db.begin_read().unwrap().tx).unwrap());
-        drop(db);
-        assert!(matches!(
-            SessionStore::open(&layout),
-            Err(StoreError::Corruption { .. })
-        ));
-    }
-}
-
-#[test]
-fn registration_rejects_corrupt_change_high_water() {
-    for high_water in [0, 4] {
-        let (_dir, _layout, db) = store();
-        let (first, calls) = running(&db, sid(1), tid(1), 1, 1);
-        finish(&db, &first, &calls.bindings[0], None);
-
-        let lock = db.try_lock_session(sid(2)).unwrap();
-        accept_prepared(&db, &lock, accept(sid(2), tid(2))).unwrap();
-        db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
-            .unwrap();
-        let tx = db.db.begin_write().unwrap();
-        tx.open_table(META)
-            .unwrap()
-            .insert(
-                "last_change_seq",
-                encode(&ChangeSeq(high_water)).unwrap().as_slice(),
-            )
-            .unwrap();
-        tx.commit().unwrap();
-        let before = load_read(&db.begin_read().unwrap().tx).unwrap();
-        let result = db.register_calls(&lock, reply(key(tid(2), 0, 0), 1), &[iid(2)], now());
-        assert!(
-            matches!(result, Err(StoreError::Corruption { .. })),
-            "registration accepted corrupt high water {high_water}: {result:?}"
-        );
-        assert!(before == load_read(&db.begin_read().unwrap().tx).unwrap());
-    }
-}
-
-#[test]
-fn change_publication_rejects_occupied_sequence() {
-    let (_dir, _layout, db) = store();
-    let (_lock, _) = running(&db, sid(1), tid(1), 1, 1);
-    let original = load_read(&db.begin_read().unwrap().tx).unwrap();
-    let mut before = original.clone();
-    before.changes.clear();
-    let mut after = before.clone();
-    let mut conflicting = original.changes[&ChangeSeq(1)];
-    conflicting.invocation_id = iid(99);
-    after.changes.insert(ChangeSeq(1), conflicting);
-    let tx = db.db.begin_write().unwrap();
-    let result = persist(&tx, &before, &after);
-    assert!(
-        matches!(result, Err(StoreError::Corruption { .. })),
-        "publication accepted occupied sequence: {result:?}"
-    );
-    assert!(original == load_write(&tx).unwrap());
-    drop(tx);
-    assert!(original == load_read(&db.begin_read().unwrap().tx).unwrap());
 }
 
 #[test]
@@ -4261,14 +3866,14 @@ fn transaction_failure_matrix() {
                     &lock,
                     TerminalInput {
                         invocation_id: iid(1),
-                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], None),
+                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], ok_reply()),
                     },
                     now(),
                 )
                 .unwrap();
             }
             if phase == 9 {
-                finish(&db, &lock, &calls.as_ref().unwrap().bindings[1], None);
+                finish(&db, &lock, &calls.as_ref().unwrap().bindings[1], ok_reply());
             }
             let read = db.begin_read().unwrap();
             let before = codec::load_read(&read.tx).unwrap();
@@ -4301,7 +3906,7 @@ fn transaction_failure_matrix() {
                     &lock,
                     TerminalInput {
                         invocation_id: iid(1),
-                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], None),
+                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], ok_reply()),
                     },
                     now(),
                 ),
@@ -4363,11 +3968,11 @@ fn rejected_error_round_trip_and_privacy() {
     let (_dir, layout, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
     let binding = &calls.bindings[0];
-    let term = terminal(binding, Some(CepErrorCode::CapabilityNotGranted));
+    let term = terminal(binding, failed_reply("capability_denied"));
     let wire = serde_json::to_value(&term).unwrap();
     assert_eq!(
-        wire["result"]["payload"]["payload"]["message"],
-        "private-error"
+        wire["result"]["payload"]["payload"],
+        json!({"code": "capability_denied", "message": "private-error"})
     );
     let bytes = codec::encode(&term).unwrap();
     assert_eq!(
@@ -4402,14 +4007,20 @@ fn rejected_error_round_trip_and_privacy() {
     let Node::Step { slots, .. } = node_at(&db, 2) else {
         unreachable!()
     };
-    assert_eq!(resolve_slot(&slots[0]), (term.result, term.evidence));
-    let operator = db
+    assert_eq!(resolve_slot(&slots[0]), term.result);
+    let turn = db
         .begin_read()
         .unwrap()
-        .operator_status(&project(1))
+        .turn_detail(sid(1), tid(1))
         .unwrap();
+    assert_eq!(
+        turn.steps[0].slots[0].reason,
+        Some(SlotReason::Failed {
+            code: "capability_denied".into(),
+        })
+    );
     assert!(
-        !serde_json::to_string(&operator)
+        !serde_json::to_string(&turn)
             .unwrap()
             .contains("private-error")
     );
@@ -4452,17 +4063,6 @@ fn overwrite_records(tx: &redb::WriteTransaction, r: &Records) {
                 .unwrap();
         }
     }
-    {
-        let mut t = tx.open_table(CHANGES).unwrap();
-        t.retain(|_, _| false).unwrap();
-        for (k, v) in &r.changes {
-            t.insert(k.0, bytes(v).as_slice()).unwrap();
-        }
-    }
-    tx.open_table(META)
-        .unwrap()
-        .insert("last_change_seq", bytes(&r.last_change).as_slice())
-        .unwrap();
 }
 #[test]
 fn ordinary_operations_load_only_referenced_turns() {
@@ -4639,7 +4239,7 @@ fn invocation_registration_and_transitions_are_atomic() {
             &lock,
             TerminalInput {
                 invocation_id: iid(2),
-                terminal: terminal(&calls.bindings[0], None)
+                terminal: terminal(&calls.bindings[0], ok_reply())
             },
             now()
         )
@@ -4659,7 +4259,7 @@ fn invocation_registration_and_transitions_are_atomic() {
         &db,
         &lock,
         &calls.bindings[0],
-        Some(CepErrorCode::ExecutionFailed),
+        failed_reply("execution_failed"),
     );
     assert!(
         db.start_invocation(&lock, &calls.bindings[0], now())
@@ -4670,24 +4270,19 @@ fn invocation_registration_and_transitions_are_atomic() {
             &lock,
             TerminalInput {
                 invocation_id: iid(2),
-                terminal: terminal(&calls.bindings[0], None)
+                terminal: terminal(&calls.bindings[0], ok_reply())
             },
             now()
         )
         .is_err()
     );
-    finish(
-        &db,
-        &lock,
-        &calls.bindings[1],
-        Some(CepErrorCode::GuardDenied),
-    );
+    finish(&db, &lock, &calls.bindings[1], failed_reply("guard_denied"));
     assert!(
         db.finish_invocation(
             &lock,
             TerminalInput {
                 invocation_id: iid(3),
-                terminal: terminal(&calls.bindings[1], None)
+                terminal: terminal(&calls.bindings[1], ok_reply())
             },
             now()
         )
@@ -4762,12 +4357,12 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
                         now(),
                     )
                     .unwrap();
-                finish(&db, &lock, &calls.bindings[0], None);
+                finish(&db, &lock, &calls.bindings[0], ok_reply());
                 finish(
                     &db,
                     &lock,
                     &calls.bindings[1],
-                    Some(CepErrorCode::ExecutionFailed),
+                    failed_reply("execution_failed"),
                 );
                 if index < ordinal {
                     db.close_step(&lock, CloseStep::Continue { key: calls.key }, now())
@@ -4844,7 +4439,7 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
                     completed
                         .slots
                         .iter()
-                        .all(|s| matches!(s.progress, OperatorInvocationState::Terminal { .. }))
+                        .all(|s| matches!(s.progress, SlotState::Terminal { .. }))
                 );
                 let last = turn.steps.last().unwrap();
                 assert_eq!(last.end, StepEnd::Stop { cause: stop.into() });
@@ -4889,13 +4484,7 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
 
 #[test]
 fn sequence_exhaustion_aborts_transactions() {
-    for case in [
-        "accept_second_node",
-        "continue_node",
-        "stop_node",
-        "change_at_max",
-        "change_in_batch",
-    ] {
+    for case in ["accept_second_node", "continue_node", "stop_node"] {
         let (_dir, _layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
@@ -4905,52 +4494,33 @@ fn sequence_exhaustion_aborts_transactions() {
             let calls = db
                 .register_calls(&lock, reply(key(tid(1), 0, 0), 1), &[iid(1)], now())
                 .unwrap();
-            finish(&db, &lock, &calls.bindings[0], None);
+            finish(&db, &lock, &calls.bindings[0], ok_reply());
             Some(calls)
         } else {
             None
         };
-        if case.starts_with("change") {
-            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
-                .unwrap();
-            let (_other, _) = running(&db, sid(2), tid(2), 1, 99);
-            let tx = db.db.begin_write().unwrap();
-            let mut r = load_write(&tx).unwrap();
-            let high = ChangeSeq(if case == "change_in_batch" {
-                u64::MAX - 1
-            } else {
-                u64::MAX
-            });
-            let mut change = r.changes.remove(&ChangeSeq(1)).unwrap();
-            change.sequence = high;
-            r.changes.insert(high, change);
-            r.index.get_mut(&iid(99)).unwrap().last_change = high;
-            r.last_change = high;
-            replace_all_for_test(&tx, &r).unwrap();
-            tx.commit().unwrap();
+        // 压缩可分配的序号空间，保持根、Turn 内相邻节点和索引关系；分配器仍走真实领域事务。
+        let tip = NodeId(if case == "accept_second_node" {
+            u64::MAX - 1
         } else {
-            // 压缩可分配的序号空间，保持根、Turn 内相邻节点和索引关系；分配器仍走真实领域事务。
-            let tip = NodeId(if case == "accept_second_node" {
-                u64::MAX - 1
-            } else {
-                u64::MAX
-            });
-            let user_id = NodeId(tip.0 - 1);
-            let tx = db.db.begin_write().unwrap();
-            let mut r = load_write(&tx).unwrap();
-            let user = r.nodes.remove(&(sid(1), NodeId(1))).unwrap();
-            let mut step_node = r.nodes.remove(&(sid(1), NodeId(2))).unwrap();
-            let Node::Step { parent, .. } = &mut step_node else {
-                unreachable!()
-            };
-            *parent = user_id;
-            r.nodes.insert((sid(1), user_id), user);
-            r.nodes.insert((sid(1), tip), step_node);
-            r.turn_index.get_mut(&tid(1)).unwrap().node = user_id;
-            r.sessions.get_mut(&sid(1)).unwrap().current = tip;
-            replace_all_for_test(&tx, &r).unwrap();
-            tx.commit().unwrap();
-        }
+            u64::MAX
+        });
+        let user_id = NodeId(tip.0 - 1);
+        let tx = db.db.begin_write().unwrap();
+        let mut r = load_write(&tx).unwrap();
+        let user = r.nodes.remove(&(sid(1), NodeId(1))).unwrap();
+        let mut step_node = r.nodes.remove(&(sid(1), NodeId(2))).unwrap();
+        let Node::Step { parent, .. } = &mut step_node else {
+            unreachable!()
+        };
+        *parent = user_id;
+        r.nodes.insert((sid(1), user_id), user);
+        r.nodes.insert((sid(1), tip), step_node);
+        r.turn_index.get_mut(&tid(1)).unwrap().node = user_id;
+        r.sessions.get_mut(&sid(1)).unwrap().current = tip;
+        replace_all_for_test(&tx, &r).unwrap();
+        tx.commit().unwrap();
+
         let mut input = accept(sid(1), tid(3));
         input.session = AcceptSession::Existing { id: sid(1) };
         input.config.system_prompt = Some("new config must not survive exhaustion".into());
@@ -4966,7 +4536,7 @@ fn sequence_exhaustion_aborts_transactions() {
             },
             || match case {
                 "accept_second_node" => accept_prepared(&db, &lock, input).map(|_| ()),
-                "continue_node" | "stop_node" => db
+                _ => db
                     .close_step(
                         &lock,
                         if case == "stop_node" {
@@ -4982,18 +4552,10 @@ fn sequence_exhaustion_aborts_transactions() {
                         now(),
                     )
                     .map(|_| ()),
-                _ => db
-                    .register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
-                    .map(|_| ()),
             },
         );
-        let expected_kind = if case.starts_with("change") {
-            "change"
-        } else {
-            "node"
-        };
         assert!(
-            matches!(result, Err(StoreError::SequenceExhausted { kind }) if kind == expected_kind),
+            matches!(result, Err(StoreError::SequenceExhausted { kind: "node" })),
             "{case}: {result:?}"
         );
         assert!(
@@ -5004,17 +4566,6 @@ fn sequence_exhaustion_aborts_transactions() {
         assert!(before == after, "{case}: partial transaction survived");
         assert!(!after.turn_index.contains_key(&tid(3)));
         assert!(!after.configs.contains_key(&new_digest));
-        if case.starts_with("change") {
-            for id in [iid(1), iid(2)] {
-                assert!(!after.index.contains_key(&id));
-                assert!(
-                    !after
-                        .changes
-                        .values()
-                        .any(|change| change.invocation_id == id)
-                );
-            }
-        }
     }
 }
 
@@ -5031,7 +4582,7 @@ fn ordered_terminal_causes() {
             &db,
             &lock,
             &calls.bindings[0],
-            Some(CepErrorCode::ExecutionFailed),
+            failed_reply("execution_failed"),
         );
         db.close_step(
             &lock,
@@ -5050,22 +4601,22 @@ fn ordered_terminal_causes() {
         assert_eq!(first_stopping_cause(&slots).unwrap(), None);
         for slot in &slots[1..] {
             assert_eq!(slot.progress, SlotProgress::Registered);
-            assert_eq!(resolve_slot(slot).0.payload, ResultPayload::NotExecuted);
+            assert_eq!(resolve_slot(slot).payload, ResultPayload::NotExecuted);
         }
     }
-    let (_dir, _layout, db) = store();
-    let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
-    finish(
-        &db,
-        &lock,
-        &calls.bindings[0],
-        Some(CepErrorCode::CallCancelled),
-    );
-    assert!(
-        db.start_invocation(&lock, &calls.bindings[1], now())
-            .is_err()
-    );
-    assert_eq!(detail(&db).summary.outcome, PublicTurnOutcome::Cancelled);
+    for (reply, expected_outcome) in [
+        (ToolReply::Cancelled, PublicTurnOutcome::Cancelled),
+        (ToolReply::Indeterminate, PublicTurnOutcome::Failed),
+    ] {
+        let (_dir, _layout, db) = store();
+        let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
+        finish(&db, &lock, &calls.bindings[0], reply);
+        assert!(
+            db.start_invocation(&lock, &calls.bindings[1], now())
+                .is_err()
+        );
+        assert_eq!(detail(&db).summary.outcome, expected_outcome);
+    }
 }
 
 #[test]
@@ -5075,12 +4626,7 @@ fn json_payload_field_names_are_not_store_records() {
     let value = json!({"evidence":{"kind":"recorded","value":{"custom":true},"custom":true}});
     db.start_invocation(&lock, &calls.bindings[0], now())
         .unwrap();
-    let terminal = prepare_terminal(
-        &calls.bindings[0],
-        Ok(value.clone()),
-        CellEvidenceTriple::refused_before_admission("observe__workspace"),
-    )
-    .unwrap();
+    let terminal = prepare_terminal(&calls.bindings[0], ToolReply::Succeeded(value.clone()));
     db.finish_invocation(
         &lock,
         TerminalInput {
@@ -5103,7 +4649,7 @@ fn json_payload_field_names_are_not_store_records() {
 
 #[test]
 fn strict_open_rejects_corruption() {
-    for field in ["store_kind", "store_format_version", "last_change_seq"] {
+    for field in ["store_kind", "store_format_version"] {
         let (_dir, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();

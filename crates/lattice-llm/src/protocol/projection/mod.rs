@@ -384,7 +384,7 @@ fn closure_content(payload: &ResultPayload) -> String {
             while !error.message.is_char_boundary(end) {
                 end -= 1;
             }
-            json!({"error":{"code":error.code.as_i32(), "message":&error.message[..end]}})
+            json!({"error":{"code":&error.code, "message":&error.message[..end]}})
         }
         ResultPayload::NotExecuted => json!({"outcome":"not_executed"}),
         ResultPayload::Indeterminate(cause) => json!({"outcome":"indeterminate","cause":cause}),

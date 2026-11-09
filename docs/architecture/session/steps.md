@@ -15,14 +15,14 @@ Step 节点保存这一步的全部内容：
 | `progress` | 这一步最后到达的阶段；`Closed` 带结束方式 `end` |
 | 尝试 | 按尝试序号排列的各次模型请求：来源（协议与 provider `id`）、用量、`usage_kind`、费用结果 `cost` 与 `progress`，`Ended` 带终态与诊断；失败后安排了重试的尝试另有等待时长 |
 | 回复 | 完整模型回复；还没有完整回复时为空 |
-| 槽位 | 回复中每个工具调用一个，顺序与回复一致：调用的身份与 `progress`，`Terminal` 带结局、载荷与证据 |
+| 槽位 | 回复中每个工具调用一个，顺序与回复一致：调用的身份与 `progress`，`Terminal` 带结构化工具结果 |
 | 推进时间 | 最后一次推进这一步的时间 |
 
 ```text
 StepEnd = Continue | Finish | Stop { cause }
 ```
 
-每次推进是一个会话库事务，事务内不等待模型、Tool 或网络。事务写入到达的阶段，最后一个阶段连同实际结果一起写入，并更新推进时间：
+每次推进是一个会话库事务，事务内不等待模型、工具执行器或网络。事务写入到达的阶段，最后一个阶段连同实际结果一起写入，并更新推进时间：
 
 | 事务 | 写入内容 | 之后的状态 |
 | --- | --- | --- |
@@ -30,8 +30,8 @@ StepEnd = Continue | Finish | Stop { cause }
 | 开始请求 | Step 推进到 `Requesting`；新增一次尝试，`Sent` | 等待 provider |
 | 尝试停止 | 该尝试推进到 `Ended`，带实际终态与诊断；安排重试时同一事务写入等待时长，不再重试时同一事务关闭 Step | 重试或关闭 |
 | 登记调用 | 该尝试推进到 `Ended`，终态为 `Completed`；写入完整回复；每个调用一个槽位，`Registered`；写入 InvocationId 索引；Step 推进到 `Executing` | `Executing` |
-| 调用开始 | 一个槽位推进到 `Started` | 等待 LANCET 返回 |
-| 调用返回 | 一个槽位推进到 `Terminal`，带 LANCET 给出的结局、载荷与证据 | 下一调用或关闭 Step |
+| 调用开始 | 一个槽位推进到 `Started` | 等待执行器返回 |
+| 调用返回 | 一个槽位推进到 `Terminal`，带工具结局与载荷 | 下一调用或关闭 Step |
 | 关闭 Step | Step 推进到 `Closed`，带实际的结束方式 `end`；无工具调用的回复同时写入 `Completed` 与回复；`end` 为 `Continue` 时同一事务预留下一个 Step 并前移当前位置 | 下一 Step 或 Turn 结束 |
 
 `Completed` 不单独提交：它总与登记调用或关闭 Step 在同一事务写入，所以不存在“完整回复已保存、尚未登记也未关闭”的持久状态。
@@ -61,49 +61,44 @@ stateDiagram-v2
 
 ## 调用槽位
 
-模型回复含工具调用时，登记事务为每个调用建立槽位并分配 InvocationId。该身份随后贯穿执行、取消、结果保存和审计。InvocationId 在同一事务插入全局索引；键冲突时放弃该事务，重新生成后重试。登记记录每个调用的 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。
+模型回复含工具调用时，登记事务为每个调用建立槽位并分配 InvocationId。该身份随后贯穿执行、取消与结果保存。InvocationId 在同一事务插入全局索引；键冲突时放弃该事务，重新生成后重试。登记记录每个调用的 Session/Turn/步骤/片段地址、方法、Descriptor 身份和规范参数摘要，顺序与原回复一致。
 
 同一回复的调用按片段顺序逐个执行，每次只处理最低序号的未返回槽位：
 
-1. 把该槽位推进到 `Started` 并提交。从这时起，它停下时的结论是 `Indeterminate(NoResult)`。这是“可能已执行”的保守边界：它不证明 Tool 已开始或外部效果已发生，但越过它之后不能仅凭没有结果推定未执行。
-2. 把调用交给 LANCET 执行，取得执行结果、载荷与 Cell 证据。
-3. 把该槽位推进到 `Terminal` 并提交，同时写入 LANCET 给出的结局、载荷与证据。
+1. 把该槽位推进到 `Started` 并提交。从这时起，它停下时的结论是 `Indeterminate(NoResult)`。这是“可能已执行”的保守边界：它不证明执行器已开始或外部效果已发生，但越过它之后不能仅凭没有结果推定未执行。
+2. 把调用交给执行器执行，取得返回结果。
+3. 执行器因调用期到达本轮 deadline 返回 `Deadline` 时，协调层不补写槽位终态，直接以 `Stop { Deadline }` 关闭 Step（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）；其余返回经 `ToolReply` 推进该槽位到 `Terminal` 并提交，写入结局与载荷。
 
-每个槽位任何时刻都有 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷：`Terminal` 的槽位保存它们，其他阶段由阶段确定。结局与[模型尝试](acceptance.md#模型请求与执行预算)一样分两维：结局是结束形状，只说明 LANCET 给出了什么；原因放在载荷的 `CepError` 或 `IndeterminateCause` 里。判定只看两件事：槽位到达了哪个阶段，以及 LANCET 返回了什么。
+每个槽位任何时刻都有 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷：`Terminal` 的槽位保存它们，其他阶段由阶段确定。结局与[模型尝试](acceptance.md#模型请求与执行预算)一样分两维：结局是结束形状，说明执行器给出了什么；原因放在载荷的 `ToolError` 或 `IndeterminateCause` 里。判定只看两件事：槽位到达了哪个阶段，以及执行器返回了什么。
 
 | 结局 | 槽位的阶段 | 判定依据 | 载荷 | 外部效果 |
 | --- | --- | --- | --- | --- |
-| Succeeded | `Terminal` | LANCET 返回 JSON | 完整 JSON value | 可能已发生 |
-| Failed | `Terminal` | LANCET 返回 `CepError`，且不是 `CallCancelled` 或 `OutcomeIndeterminate`；策略或校验拒绝也在其中 | 结构化 CepError，错误码与可重试性原样保存 | 可能已发生 |
-| NotExecuted | `Registered` | 调用还没有交给 LANCET；Step 在它开始之前停止时，它一直停在这里 | 无 | 保证没有 |
+| Succeeded | `Terminal` | 执行器返回 `ToolReply::Succeeded(value)` | 完整 JSON value（超限时保存摘要与长度） | 可能已发生 |
+| Failed | `Terminal` | 执行器返回 `ToolReply::Failed(ToolError)` | 结构化 `ToolError { code, message }`，错误码与消息原样保存 | 可能已发生 |
+| NotExecuted | `Registered` | 调用尚未交给执行器；Step 在它开始之前停止时，它一直停在这里 | 无 | 保证没有 |
 | Indeterminate | `Started`，或 `Terminal` | 越过 `Started` 后没有取得确定结果 | `IndeterminateCause`，见下文 | 未知 |
 
-错误族由 [`CepErrorCode::family`](../../../crates/lancet-protocol/src/error.rs) 定义，映射由 [`prepare_terminal`](../../../crates/lattice-session/src/store/close.rs) 执行：返回 JSON 为 Succeeded，返回 `CallCancelled` 为 `Indeterminate(Cancelled)`，返回 `OutcomeIndeterminate` 为 `Indeterminate(Reported)`，其余任何 `CepError` 为 Failed。
-
-拒绝是 Failed 中 Validation（参数或结果校验）、Permission（权限与准入）和 Guard（策略守卫）错误族的错误，不是单独的结局，因为被拒绝不等于没有执行。拒绝可能发生在准入阶段，此时 Component 未运行（如 `CapabilityNotGranted`）；也可能发生在 Component 执行途中，某次宿主操作被拒（如 `PathContainment`、`ReplanRequired`，运行时优先采用宿主记录的拒绝），或返回结果未通过校验，这时此前的宿主操作可能已经生效。读者按错误码及其错误族区分拒绝。
+终态映射由 [`prepare_terminal`](../../../crates/lattice-session/src/store/close.rs) 按 [`ToolReply`](../../../crates/lattice-session/src/store/types.rs) 执行：`ToolReply::Succeeded` 映射为 Succeeded（按 65,536 字节边界分成 `Json` 或 `OutputTooLarge`），`ToolReply::Failed(ToolError)` 映射为 `Failed(ToolError)`，`ToolReply::Cancelled` 映射为 `Indeterminate(Cancelled)`，`ToolReply::Indeterminate` 映射为 `Indeterminate(Reported)`（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）。
 
 Indeterminate 的原因 `IndeterminateCause` 有三种：
 
-- `NoResult`：槽位停在 `Started`，还没有取得结果。它是这个阶段的结论；Step 停止或进程退出时仍在这个阶段的槽位，结果就是它。`Started` 已提交、交给 LANCET 之前发现取消或 Deadline 也属于这种情况：越过 `Started` 后不能再证明未执行。
-- `Cancelled`：LANCET 返回 `CallCancelled`，即交出后被取消。
-- `Reported`：LANCET 返回 `OutcomeIndeterminate`，由执行方报告效果不确定。
+- `NoResult`：槽位停在 `Started`，还没有取得结果。它是这个阶段的结论；Step 停止、调用期到达本轮 deadline 或进程退出时仍在这个阶段的槽位，结果就是它。`Started` 已提交、交给执行器之前发现取消或 Deadline 也属于这种情况：越过 `Started` 后不能再证明未执行。
+- `Cancelled`：执行器返回取消（`ToolReply::Cancelled`），即交出后被取消。
+- `Reported`：执行器报告结果不确定（`ToolReply::Indeterminate`）。
 
 NotExecuted 不带原因。停止原因沿 Turn → Step → 槽位的嵌套只从下往上传：为什么停只在 Step 的 `end.cause` 中记录一次，不抄到每个未执行的槽位，推导规则见[执行中 Step 的停止原因](#执行中-step-的停止原因)。
 
-`Terminal` 中的 Succeeded 与 Failed 是 LANCET 给出的确定结果，允许继续下一调用；`Terminal` 中的 Indeterminate 停止后续分发（[`stops_batch`](../../../crates/lattice-session/src/store/close.rs)），之后的槽位留在 `Registered`，结果为 NotExecuted。所以一个槽位越过 `Registered` 时，它之前的槽位都已返回 Succeeded 或 Failed。批次控制只由有序的槽位结果得出，执行者在哪个时刻消失不改变 Turn 结局。Failed 中拒绝类错误之后是否继续请求模型、混合批次如何执行，由 [#220](https://github.com/Skyline10124/lattice/issues/220) 另行裁决，不改变槽位形态。
+`Terminal` 中的 Succeeded 与 Failed 是执行器给出的确定结果，允许继续下一调用；`Terminal` 中的 Indeterminate 停止后续分发（[`stops_batch`](../../../crates/lattice-session/src/store/close.rs)），之后的槽位留在 `Registered`，结果为 NotExecuted。所以一个槽位越过 `Registered` 时，它之前的槽位都已返回 Succeeded 或 Failed。批次控制只由有序的槽位结果得出，执行者在哪个时刻消失不改变 Turn 结局。
 
 载荷还遵循：
 
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
-- 发给模型的结果文字不存储，由 provider 投影从载荷派生。Failed 给出有界的错误码与 message，模型可据此修正参数；NotExecuted 与 Indeterminate 使用固定的最小文案 `{"outcome":"not_executed"}` 与 `{"outcome":"indeterminate","cause":"no_result|cancelled|reported"}`。provider 的错误标记（Anthropic `is_error`、Gemini `error`）只用于 Failed。#220 定下统一反馈后对齐。
-- result Cell 不另存。它是槽位证据中来源为 `Result` 的那一条效果，由 LANCET 在返回成功结果时记录；对话条目给出它的形态由 [#117](https://github.com/Skyline10124/lattice/issues/117) 确定。
+- 发给模型的结果文字不存储，由 provider 投影从载荷派生。Failed 投影为 `{"error":{"code":...,"message":...}}`（`message` 按字符边界限制在 4,096 字节内），模型可据此修正参数；NotExecuted 与 Indeterminate 使用固定的最小文案 `{"outcome":"not_executed"}` 与 `{"outcome":"indeterminate","cause":"no_result|cancelled|reported"}`。provider 的错误标记（Anthropic `is_error`、Gemini `error`）只用于 Failed。
 
 停止与收尾的写入：
 
-- 停止分发或关闭 Step 时不为槽位补写。没有返回的槽位，结果由所在阶段确定：`Registered` 为 NotExecuted，证据为 `Unavailable { NotDispatched }`；`Started` 为 `Indeterminate(NoResult)`，证据为 `Unavailable { NoResult }`。已返回的结果保持原值，不伪造成功输出，也不依据缺少结果推定文件未改变。
-- Tool 执行返回后，写入它的结果属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](concurrency.md#事务与一致性)处理，后续调用不分发。
-
-LANCET 的执行、准入与证据由 [LANCET 调用流程](../lancet.md#调用身份与执行流程)维护。
+- 停止分发或关闭 Step 时不为槽位补写。没有返回的槽位，结果由所在阶段确定：`Registered` 为 NotExecuted，`Started` 为 `Indeterminate(NoResult)`。已返回的结果保持原值，不伪造成功输出，也不依据缺少结果推定文件未改变。
+- 执行器返回非 `Deadline` 结果后，写入它的结果属于必要收尾，不受 Turn deadline 约束。写入失败按[事务失败](concurrency.md#事务与一致性)处理，后续调用不分发。
 
 ## 关闭 Step 与 Turn
 

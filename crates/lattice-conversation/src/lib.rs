@@ -25,6 +25,7 @@ pub mod model_selection;
 pub mod outcome;
 pub mod result;
 pub mod tool_call;
+pub mod tool_error;
 pub mod usage;
 
 pub use lancet_protocol::canonical_json;
@@ -40,7 +41,6 @@ pub use lancet_protocol::{
 pub use attempt::{AttemptInterruption, AttemptRejection};
 pub use effort::{Effort, ParseEffortError};
 pub use history::ConversationItem;
-pub use lancet_protocol::{CepError, CepErrorCode, CepErrorData, Retriability};
 pub use limits::{
     AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
     MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
@@ -63,6 +63,7 @@ pub use tool_call::{
     ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,
     validate_tool_call_batch,
 };
+pub use tool_error::ToolError;
 pub use usage::{
     CostEstimate, CostSummary, TokenSummary, TokenUsage, UsageCompleteness, UsageSummary,
 };

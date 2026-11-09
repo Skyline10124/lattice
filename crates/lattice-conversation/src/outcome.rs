@@ -1,42 +1,35 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Provider-neutral Tool result closure.
+//! Provider-neutral 工具结果闭合枚举。
 //!
-//! The execution outcome is a closed sum. A `ToolResult` conversation part
-//! must close its ToolCall through the provider result block with exactly one
-//! of these outcomes; it is never re-labeled after the fact. The durable
-//! invocation slot in `lattice-session` stores the same vocabulary plus the
-//! outcome-shaped payload (see `docs/architecture/session/steps.md#调用槽位`).
+//! 执行结果是封闭枚举。每个 `ToolCall` 都由且仅由其中一种结果闭合，事后不再改标。
+//! `lattice-session` 的持久调用槽位保存同一套结果词汇以及按结果形态区分的载荷
+//! （见 `docs/architecture/session/steps.md#调用槽位`）。
 //!
-//! Two dimensions, as for model attempts: the outcome is the end shape, and
-//! `IndeterminateCause` or the returned `CepError` carries the reason. Only
-//! `NotExecuted` means the call was never handed to LANCET and guarantees no
-//! external effect; every other outcome is recorded after the slot crossed
-//! `Started`. Policy or validation refusals are `Failed` with a Validation,
-//! Permission or Guard `CepError`; cancellation after dispatch is
-//! `Indeterminate`.
+//! 与模型调用尝试一样分为两个维度：结果表示终态形态，[`crate::IndeterminateCause`] 或执行器返回的
+//! [`crate::ToolError`] 承载具体原因。只有 [`ToolResultOutcome::NotExecuted`] 表示调用从未交给执行器，
+//! 保证无外部效果；其余结果都在槽位越过 `Started` 之后记录。派发后的取消记为
+//! [`ToolResultOutcome::Indeterminate`]（`Cancelled`）。
 
 use serde::{Deserialize, Serialize};
 
-/// Closed sum of Tool execution outcomes for conversation closure.
+/// 工具执行结果的封闭枚举。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ToolResultOutcome {
-    /// LANCET returned a JSON result.
+    /// 执行器返回 JSON 结果。
     Succeeded,
-    /// LANCET returned a `CepError`; its family and retriability say why.
+    /// 执行器返回 `ToolError`。
     Failed,
-    /// The coordinator never handed the call to LANCET; the Step's stop cause
-    /// says why. The only outcome that guarantees no external effect.
+    /// 从未交给执行器；停止原因记在 Step 的结束原因中，是唯一保证无外部效果的结果。
     NotExecuted,
-    /// The slot crossed `Started` without a determinate result: effects are
-    /// unknown.
+    /// 槽位越过 `Started` 但没有确定结果，外部效果未知。
     Indeterminate,
 }
 
 impl ToolResultOutcome {
-    /// Stable wire/digest spelling.
+    /// 稳定的编码与摘要拼写。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Succeeded => "succeeded",

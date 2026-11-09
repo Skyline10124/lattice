@@ -31,21 +31,7 @@ macro_rules! load_local {
         let configs = $tx.open_table(CONFIGS).map_err(table_error)?;
         let turn_index = $tx.open_table(TURN_INDEX).map_err(table_error)?;
         let index = $tx.open_table(INDEX).map_err(table_error)?;
-        let changes = $tx.open_table(CHANGES).map_err(table_error)?;
-        let meta = $tx.open_table(META).map_err(table_error)?;
-        let mut r = Records {
-            last_change: decode(
-                "meta",
-                "last_change_seq",
-                meta.get("last_change_seq")?
-                    .ok_or_else(|| corrupt("meta", "last_change_seq", "missing metadata"))?
-                    .value(),
-            )?,
-            ..Default::default()
-        };
-        if r.last_change != ChangeSeq(changes.last()?.map_or(0, |(key, _)| key.value())) {
-            return Err(corrupt("meta", "last_change_seq", "high water mark mismatch"));
-        }
+        let mut r = Records::default();
         let turn_id = match selection {
             Selection::Turn(id) | Selection::Accept(id) => Some(id),
             Selection::Invocation(id) => {
@@ -269,23 +255,7 @@ macro_rules! load_local {
                     .ok_or_else(|| corrupt("invocation_index", &id.to_string(), "missing index"))?
                     .value(),
             )?;
-            let seq = entry.last_change;
-            let change = decode(
-                "invocation_changes",
-                &seq.0.to_string(),
-                changes
-                    .get(seq.0)?
-                    .ok_or_else(|| {
-                        corrupt(
-                            "invocation_changes",
-                            &seq.0.to_string(),
-                            "missing latest change",
-                        )
-                    })?
-                    .value(),
-            )?;
             r.index.insert(id, entry);
-            r.changes.insert(seq, change);
         }
         validate::local(&r, &scope)?;
         Ok::<_, StoreError>((r, scope))

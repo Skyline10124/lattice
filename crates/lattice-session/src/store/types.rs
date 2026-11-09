@@ -3,9 +3,7 @@
 
 use super::hex_digest;
 pub use crate::model::{AgentName, RetryPolicy, TurnTimeout};
-use lancet_protocol::{
-    BindingIdentity, CellEvidenceTriple, CepErrorCode, InvocationBinding, Retriability,
-};
+use lancet_protocol::{BindingIdentity, InvocationBinding};
 use lattice_conversation::{
     BoundToolCall, InvocationId, ModelAttemptKey, ModelId, ModelMessageAddress, NativeMessage,
     ProviderId, SessionId, TokenUsage, ToolCallAddress, ToolCallValidation, ToolResultOutcome,
@@ -32,11 +30,6 @@ macro_rules! redacted_debug { ($($ty:ty),+ $(,)?) => {$ (
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(pub u64);
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct ChangeSeq(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepKey {
@@ -100,10 +93,7 @@ impl Node {
                 ..
             } => Some(StepContent {
                 assistant: assistant.clone(),
-                results: slots
-                    .iter()
-                    .map(|slot| super::close::resolve_slot(slot).0)
-                    .collect(),
+                results: slots.iter().map(super::close::resolve_slot).collect(),
             }),
             _ => None,
         }
@@ -243,74 +233,34 @@ pub struct InvocationSlot {
 pub enum SlotProgress {
     Registered,
     Started,
-    Terminal {
-        result: StoredToolResult,
-        evidence: InvocationEvidence,
-    },
+    Terminal { result: StoredToolResult },
 }
-/// 真实 receipt 只能经 `prepare_terminal` 构造，调用方不能伪造摘要或缺失证据。
+/// 真实终态结果只能经 `prepare_terminal` 构造，调用方不能伪造摘要。
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationTerminal {
     pub(super) result: StoredToolResult,
-    pub(super) evidence: InvocationEvidence,
 }
 impl InvocationTerminal {
     pub fn result(&self) -> &StoredToolResult {
         &self.result
     }
-    pub fn evidence(&self) -> &InvocationEvidence {
-        &self.evidence
-    }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum InvocationEvidence {
-    Recorded(Box<CellEvidenceTriple>),
-    Unavailable { reason: EvidenceUnavailableReason },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceUnavailableReason {
-    /// 调用从未交给 LANCET（NotExecuted）。
-    NotDispatched,
-    /// 已 Started 但未取得结果（Indeterminate NoResult）。
-    NoResult,
+/// 工具执行器返回给协调层并可写入会话槽位终态的答复。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolReply {
+    Succeeded(serde_json::Value),
+    Failed(ToolError),
+    Cancelled,
+    Indeterminate,
 }
 pub use lattice_conversation::{
-    IndeterminateCause, ResultPayload, StepContent, StoredToolResult, SuccessContent,
+    IndeterminateCause, ResultPayload, StepContent, StoredToolResult, SuccessContent, ToolError,
 };
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationIndexEntry {
     pub address: ToolCallAddress,
-    pub last_change: ChangeSeq,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InvocationStage {
-    Registered,
-    Started,
-    Terminal,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoredInvocationChange {
-    pub sequence: ChangeSeq,
-    pub invocation_id: InvocationId,
-    pub stage: InvocationStage,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InvocationChange {
-    pub sequence: ChangeSeq,
-    pub project_store_key: ProjectStoreKey,
-    pub row: OperatorInvocation,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -565,11 +515,10 @@ pub enum AttemptEndDetail {
 pub struct SlotDetail {
     pub invocation_id: InvocationId,
     pub binding: BindingIdentity,
-    pub progress: OperatorInvocationState,
+    pub progress: SlotState,
     pub outcome: ToolResultOutcome,
-    pub reason: Option<OperatorReason>,
+    pub reason: Option<SlotReason>,
     pub material: MaterialSummary,
-    pub evidence: InvocationEvidence,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -607,31 +556,15 @@ pub struct Page<T, C> {
     pub next: Option<C>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuditFilter {
-    pub project_store_key: ProjectStoreKey,
-    pub session_id: Option<SessionId>,
-    pub turn_id: Option<TurnId>,
-    pub method: Option<String>,
-    pub outcome: Option<ToolResultOutcome>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorInvocation {
-    pub invocation_id: InvocationId,
-    pub binding: BindingIdentity,
-    pub state: OperatorInvocationState,
-}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OperatorInvocationState {
+pub enum SlotState {
     Registered,
     Started,
     Terminal {
         outcome: ToolResultOutcome,
-        reason: Option<OperatorReason>,
+        reason: Option<SlotReason>,
         material: MaterialSummary,
-        evidence: InvocationEvidence,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -641,11 +574,8 @@ pub enum OperatorInvocationState {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub enum OperatorReason {
-    Failed {
-        code: CepErrorCode,
-        retriability: Retriability,
-    },
+pub enum SlotReason {
+    Failed { code: String },
     Indeterminate(IndeterminateCause),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -662,31 +592,6 @@ pub enum MaterialSummary {
         byte_length: u64,
     },
     NoContent,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditPage {
-    pub latest_change: ChangeSeq,
-    pub rows: Vec<OperatorInvocation>,
-    pub next: Option<InvocationId>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditTailPage {
-    pub latest_change: ChangeSeq,
-    pub rows: Vec<InvocationChange>,
-    pub next_after: ChangeSeq,
-    pub done: bool,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditReplay {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub latest_change: ChangeSeq,
-    pub calls: Vec<OperatorInvocation>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OperatorStatus {
-    pub latest_change: ChangeSeq,
-    pub recent: Vec<OperatorInvocation>,
 }
 
 redacted_debug!(
@@ -745,8 +650,6 @@ pub enum StoreError {
     SessionCollision { session_id: SessionId },
     #[error("sequence exhausted: {kind}")]
     SequenceExhausted { kind: &'static str },
-    #[error("invalid read cursor")]
-    InvalidCursor,
     #[error("writes disabled; close and reopen the database")]
     WriteDisabled,
     #[error("commit failed ({kind:?}); close and reopen the database: {source}")]
