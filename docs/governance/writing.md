@@ -17,9 +17,12 @@ status: active
 | `docs/reference/` | 术语表与设计资产 | 一个词、一个值是什么意思 |
 | `docs/adr/` | 决策记录 | 为什么这样决定 |
 | `docs/agents/` | Agent skill 的辅助资料 | skill 怎样接入本仓库 |
+| `docs/archive/` | 已删除文档的本地副本；被 `.gitignore` 忽略，不进仓库 | 过去怎样（仅本地参考） |
 | GitHub Issue 与 PR | 任务、提案、进展与审查 | 正在做什么 |
 
 - 合同写“现在怎样”，ADR 写“为什么这样”；现行规则以合同为准。
+- 已从仓库删除的文档由 Git 历史保存。仓库内的文档引用它时，链接到固定提交的版本：`https://github.com/Skyline10124/lattice/blob/<提交>/<路径>`。
+- `cargo xtask docs-check` 只检查 Git 跟踪的文件，`docs/archive/` 不在其中；仓库内的文档链接到 `docs/archive/` 时，报为目标不存在。
 - 任务进展、测试通过的数量和审查过程记在 Issue 与 PR 里。
 - 术语的定义写在[领域术语表](../reference/glossary.md)，合同链接过去。
 
