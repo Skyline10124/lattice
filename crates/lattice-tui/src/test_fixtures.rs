@@ -271,8 +271,29 @@ impl StepEntry {
         self
     }
     /// 回复末尾加一个工具调用；`terminal` 时槽位已有成功结果，否则停在 Started。
-    pub(super) fn tool(mut self, n: u32, terminal: bool) -> Self {
+    pub(super) fn tool(self, n: u32, terminal: bool) -> Self {
         let id = invocation(n);
+        let progress = if terminal {
+            json!({"progress":"terminal","result":{
+                "invocation_id":id,"name":"observe__workspace",
+                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,
+                    "digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
+            }})
+        } else {
+            json!({"progress":"started"})
+        };
+        self.push_tool_slot(n, id, progress)
+    }
+    /// 回复末尾加一个以 `ToolError` 终结的失败工具调用。
+    pub(super) fn failed_tool(self, n: u32, code: &str, message: &str) -> Self {
+        let id = invocation(n);
+        let progress = json!({"progress":"terminal","result":{
+            "invocation_id":id,"name":"observe__workspace",
+            "payload":{"outcome":"failed","payload":{"code":code,"message":message}}
+        }});
+        self.push_tool_slot(n, id, progress)
+    }
+    fn push_tool_slot(mut self, n: u32, id: String, progress: Value) -> Self {
         let parts = self.parts.get_or_insert_with(Vec::new);
         let part = parts.len();
         parts.push(json!({"semantic":{"tool_call":{"call":{
@@ -280,19 +301,10 @@ impl StepEntry {
             "arguments":{"path":"a.txt"},"arguments_digest":DIGEST,
             "address":{"message":{"session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal},"part_ordinal":part}
         }}}}));
-        let progress = if terminal {
-            json!({"progress":"terminal","result":{
-                "invocation_id":id,"name":"observe__workspace",
-                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,
-                    "digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
-            },"evidence":{"kind":"unavailable","value":{"reason":"no_result"}}})
-        } else {
-            json!({"progress":"started"})
-        };
         self.slots.push(json!({
             "binding":{"invocation_id":id,"identity":{
                 "session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal,"part_ordinal":part,
-                "method":"observe__workspace","descriptor_identity":"observe__workspace","arguments_digest":DIGEST}},
+                "method":"observe__workspace","tool_identity":"observe__workspace","arguments_digest":DIGEST}},
             "progress":progress
         }));
         self

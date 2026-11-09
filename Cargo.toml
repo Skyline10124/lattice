@@ -10,7 +10,6 @@ members = [
     "crates/lattice-agent",
     "crates/lancet-protocol",
     "crates/lancet-authority",
-    "crates/lancet-api",
     "crates/lattice-tui",
     "crates/lattice-cli",
     "crates/lattice-profile",
@@ -45,7 +44,6 @@ lattice-conversation = { path = "crates/lattice-conversation" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lancet-protocol = { path = "crates/lancet-protocol" }
 lancet-authority = { path = "crates/lancet-authority" }
-lancet-api      = { path = "crates/lancet-api" }
 lancet-runtime  = { path = "crates/lancet-runtime" }
 lattice-tui      = { path = "crates/lattice-tui" }
 lattice-cli      = { path = "crates/lattice-cli" }

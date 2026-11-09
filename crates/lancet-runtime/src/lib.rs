@@ -33,8 +33,8 @@
 //!   文件系统操作都在这里执行。安全路径解析、System Path Exclusion、可见性、
 //!   有界读取、原子安装与变更历史共用这一个具体模块。
 //!
-//! `lancet-runtime` **不**依赖 `lancet-api` 或任何 LATTICE session/agent/profile
-//! crate。与 `lancet-authority` 的依赖边指向下层。
+//! `lancet-runtime` **不**依赖任何 LATTICE session/agent/profile crate。与
+//! `lancet-authority` 的依赖边指向下层。
 pub mod admission;
 pub mod bindings;
 pub mod catalog;
@@ -42,7 +42,6 @@ pub mod composition;
 pub mod control;
 pub mod error_map;
 pub mod evidence;
-pub mod execution;
 pub mod generated;
 pub mod history;
 pub mod host;
@@ -62,9 +61,8 @@ pub use admission::{
 };
 pub use catalog::{CatalogSelectionError, ToolDefinition, enabled_tool_definitions};
 pub use composition::{ClosedCatalog, CompositionError, EmbeddedTool, ExpectedToolIdentity};
-pub use control::{Cancellation, CancellationSender, EventSink, ExecutionReceipt};
+pub use control::{Cancellation, CancellationSender, EventSink};
 pub use evidence::CellEvidenceLedger;
-pub use execution::RuntimeExecution;
 pub use history::{
     HistorySnapshot, MutationRecord, RecordedMutation, WorkspaceHistory, WorkspaceHistoryBacking,
     WorkspaceHistoryError,

@@ -240,7 +240,7 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
     {
         *progress = serde_json::from_value(json!({"progress":"executing"})).unwrap();
         *summary = None;
-        slots.push(serde_json::from_value(json!({"binding":{"invocation_id":"10000000-0000-4000-8000-000000000001","identity":{"session_id":ipc_tests::sid(),"turn_id":id,"model_step_ordinal":0,"part_ordinal":0,"method":"observe__workspace","descriptor_identity":"test","arguments_digest":"00".repeat(32)}},"progress":{"progress":"registered"}})).unwrap());
+        slots.push(serde_json::from_value(json!({"binding":{"invocation_id":"10000000-0000-4000-8000-000000000001","identity":{"session_id":ipc_tests::sid(),"turn_id":id,"model_step_ordinal":0,"part_ordinal":0,"method":"observe__workspace","tool_identity":"test","arguments_digest":"00".repeat(32)}},"progress":{"progress":"registered"}})).unwrap());
     }
     let mut state = RunRenderState::default();
     let mut out = Vec::new();
@@ -347,4 +347,124 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
         );
         assert_eq!(text.lines().filter(|l| l.starts_with("tool ")).count(), 1);
     }
+}
+
+#[test]
+fn human_and_json_tool_failure_renders_tool_error_without_legacy_evidence() {
+    let id = lattice_api::local::new_turn_id();
+    let inv_id = "10000000-0000-4000-8000-000000000001";
+    let mut node = ipc_tests::entry(id, "completed");
+    if let ConversationEntry::Step {
+        content: Node::Step { slots, .. },
+        step,
+        ..
+    } = node.as_mut()
+    {
+        slots.push(
+            serde_json::from_value(json!({
+                "binding": {
+                    "invocation_id": inv_id,
+                    "identity": {
+                        "session_id": ipc_tests::sid(),
+                        "turn_id": id,
+                        "model_step_ordinal": 0,
+                        "part_ordinal": 0,
+                        "method": "observe__workspace",
+                        "tool_identity": "fake-tool-v1",
+                        "arguments_digest": "00".repeat(32)
+                    }
+                },
+                "progress": {
+                    "progress": "terminal",
+                    "result": {
+                        "invocation_id": inv_id,
+                        "name": "observe__workspace",
+                        "payload": {
+                            "outcome": "failed",
+                            "payload": {
+                                "code": "permission_denied",
+                                "message": "路径被拒绝"
+                            }
+                        }
+                    }
+                }
+            }))
+            .expect("解析新结构终端槽位"),
+        );
+        step.slots.push(
+            serde_json::from_value(json!({
+                "invocation_id": inv_id,
+                "binding": {
+                    "session_id": ipc_tests::sid(),
+                    "turn_id": id,
+                    "model_step_ordinal": 0,
+                    "part_ordinal": 0,
+                    "method": "observe__workspace",
+                    "tool_identity": "fake-tool-v1",
+                    "arguments_digest": "00".repeat(32)
+                },
+                "progress": {
+                    "state": "terminal",
+                    "outcome": "failed",
+                    "reason": {"kind": "failed", "value": {"code": "permission_denied"}},
+                    "material": {"kind": "no_content"}
+                },
+                "outcome": "failed",
+                "reason": {"kind": "failed", "value": {"code": "permission_denied"}},
+                "material": {"kind": "no_content"}
+            }))
+            .expect("解析新结构 SlotDetail"),
+        );
+    }
+
+    let mut state = RunRenderState::default();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    render_update(
+        &LocalUpdate::Head(ipc_tests::head(id, false)),
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+        false,
+    )
+    .unwrap();
+    render_update(
+        &LocalUpdate::Entry {
+            entry: node.clone(),
+        },
+        &mut state,
+        &mut out,
+        &mut err,
+        false,
+        false,
+    )
+    .unwrap();
+    let err_text = String::from_utf8(err).unwrap();
+    assert!(
+        err_text.contains(
+            "tool observe__workspace {\"outcome\":\"failed\",\"payload\":{\"code\":\"permission_denied\",\"message\":\"路径被拒绝\"}}"
+        ),
+        "人类模式应输出 ToolError 载荷：{err_text}"
+    );
+
+    let mut json_out = Vec::new();
+    let mut json_err = Vec::new();
+    let mut json_state = RunRenderState::default();
+    render_update(
+        &LocalUpdate::Entry { entry: node },
+        &mut json_state,
+        &mut json_out,
+        &mut json_err,
+        false,
+        true,
+    )
+    .unwrap();
+    let record: serde_json::Value =
+        serde_json::from_slice(&json_out).expect("解析 entry JSONL 记录");
+    assert!(record["step"]["slots"][0].get("evidence").is_none());
+    assert_eq!(
+        record["step"]["slots"][0]["binding"]["tool_identity"],
+        "fake-tool-v1"
+    );
 }

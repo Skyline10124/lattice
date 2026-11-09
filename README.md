@@ -175,12 +175,6 @@ lattice models --auth
 
 # 立即刷新模型元数据
 lattice models refresh
-
-# 工具调用审计
-lattice audit --help
-
-# LANCET 自检
-lattice lancet doctor
 ```
 
 ## 开发与贡献

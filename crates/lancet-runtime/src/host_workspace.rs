@@ -272,13 +272,11 @@ pub struct FindOutcome {
     pub truncated: bool,
 }
 
-/// Call-scoped host authority for workspace observation.
+/// 单次调用作用域内的工作区观察 Host 权威。
 ///
-/// Holds the concrete workspace, the resolved visibility policy, the
-/// per-operation limits, the turn budget sink, and the workspace scope name —
-/// everything the guest is not allowed to hold. `RuntimeExecution` constructs it
-/// for one call; admission, evidence, and Turn identity arrive through
-/// [`ObservationCallContext`].
+/// 持有具体工作区、已解析的可见性策略、单操作上限、本轮预算记账回调与工作区 scope 名称——
+/// 即所有不允许直接交给 guest 的状态。调用方为单次调用构造本实例；准入结果、证据账本与
+/// Turn 身份经 [`ObservationCallContext`] 传入。
 pub struct WorkspaceObservationHost {
     workspace: Arc<LocalWorkspace>,
     visibility_policy: ReadVisibilityPolicy,

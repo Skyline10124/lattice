@@ -24,10 +24,9 @@ status: active
 
 | 命令 | 与后台的关系 |
 | --- | --- |
-| `run`、`session`、`tui`、`auth`、`models`、`audit`、`lancet status` | 连接当前状态根的后台；后台未运行时自动启动 |
+| `run`、`session`、`tui`、`auth`、`models` | 连接当前状态根的后台；后台未运行时自动启动 |
 | `daemon status`、`daemon stop` | 只连接已有后台；后台未运行时报 `not_running` |
 | `daemon serve` | 在前台运行一个后台实例 |
-| `lancet doctor` | 在本进程内自检，不连接后台 |
 
 ## 判读结果
 

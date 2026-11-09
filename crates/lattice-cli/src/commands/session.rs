@@ -631,4 +631,81 @@ mod session_cli {
         assert!(text.contains("process_exit"), "{text}");
         assert!(text.contains("process exited"), "{text}");
     }
+
+    #[test]
+    fn turn_slot_output_uses_slot_state_reason_and_tool_identity_without_evidence() {
+        let slot_json = serde_json::json!({
+            "invocation_id": "10000000-0000-4000-8000-000000000001",
+            "binding": {
+                "session_id": "11111111111141118111111111111111",
+                "turn_id": "10000000-0000-4000-8000-000000000001",
+                "model_step_ordinal": 0,
+                "part_ordinal": 0,
+                "method": "observe__workspace",
+                "tool_identity": "fake-observe-v1",
+                "arguments_digest": "00".repeat(32)
+            },
+            "progress": {
+                "state": "terminal",
+                "outcome": "failed",
+                "reason": {"kind": "failed", "value": {"code": "execution_failed"}},
+                "material": {"kind": "no_content"}
+            },
+            "outcome": "failed",
+            "reason": {"kind": "failed", "value": {"code": "execution_failed"}},
+            "material": {"kind": "no_content"}
+        });
+        let mut legacy = slot_json.clone();
+        legacy["evidence"] = serde_json::json!({"kind": "unavailable"});
+        assert!(
+            serde_json::from_value::<lattice_session::store::SlotDetail>(legacy).is_err(),
+            "SlotDetail 必须拒绝旧 evidence 字段"
+        );
+
+        let turn: lattice_api::local::TurnDetail = serde_json::from_value(serde_json::json!({
+            "session_id": "11111111111141118111111111111111",
+            "turn_id": "10000000-0000-4000-8000-000000000001",
+            "user_node": 1,
+            "agent_name": "alpha",
+            "accepted_at": "2026-09-27T00:00:00Z",
+            "ended_at": "2026-09-27T00:00:01Z",
+            "summary": {
+                "outcome": "completed",
+                "progress": {"progress": "closed", "end": {"end": "finish"}},
+                "notice": null
+            },
+            "usage": lattice_api::UsageSummary::from_attempts([]),
+            "steps": [{
+                "node": 2,
+                "key": {"turn_id": "10000000-0000-4000-8000-000000000001", "ordinal": 0},
+                "progress": {"progress": "closed", "end": {"end": "finish"}},
+                "end": {"end": "finish"},
+                "attempts": [],
+                "slots": [slot_json],
+                "updated_at": "2026-09-27T00:00:01Z"
+            }]
+        }))
+        .expect("解析包含新结构 SlotDetail 的 TurnDetail");
+
+        let text = render_turn(&turn);
+        assert!(
+            text.contains("  slot 10000000-0000-4000-8000-000000000001: "),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"tool_identity\":\"fake-observe-v1\""),
+            "{text}"
+        );
+        assert!(text.contains("\"state\":\"terminal\""), "{text}");
+        assert!(text.contains("\"code\":\"execution_failed\""), "{text}");
+        assert!(!text.contains("evidence"), "{text}");
+        assert!(!text.contains("descriptor_identity"), "{text}");
+
+        let encoded = serde_json::to_value(&turn).expect("序列化 TurnDetail");
+        assert_eq!(
+            encoded["steps"][0]["slots"][0]["binding"]["tool_identity"],
+            "fake-observe-v1"
+        );
+        assert!(encoded["steps"][0]["slots"][0].get("evidence").is_none());
+    }
 }
