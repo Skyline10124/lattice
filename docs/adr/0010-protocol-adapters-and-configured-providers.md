@@ -18,6 +18,7 @@ status: accepted
 - 修正：2026-11-03 维护者裁决 SIWC 的刷新与使用由同一取 access token 入口封装，推理请求与账号模型列表请求共用；准入、状态和档位查询不触发刷新。刷新保留登录时的 id token，不校验或替换刷新响应中的 id token；第 11 节随之修正（#315）
 - 修正：2026-11-03 维护者裁决首次登录换码返回 invalid_grant 时保留回调带回的正式 client_id，丢弃 code，本次登录失败，下次复用注册；模型接入合同登录第 5 步随之修正（#315）
 - 修正：2026-11-05 维护者裁决内置免凭据的 provider 须在 `providers.toml` 中声明后才可使用；provider 与模型的可用性改为按认证方式与配置事实判定的通用规则（`ready`、`unconfigured`、`invalid`）；TUI `/model` 只列出 `ready` 的候选（#376）
+- 部分被取代：ADR 0009（第 13 节与后果中解析外部策略文件及收紧 `[lancet]` 策略的表述；范围见 ADR 0009 的[与其他 ADR 的关系](0009-remove-legacy-lancet-tool-executor.md#与其他-adr-的关系)）
 
 ## 背景
 
