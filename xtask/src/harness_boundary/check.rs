@@ -167,15 +167,14 @@ fn iter_dep_tables<'a>(table: &'a Value, prefix: &str) -> Vec<(String, &'a str, 
     out
 }
 
-/// A test-only feature enabled from a production `[dependencies]` entry cancels
-/// the `#[cfg(feature = "...")]` gate it is supposed to respect: the helpers
-/// ship in the release binary and in every downstream dependency graph. There
-/// is never a need for it — `#[cfg(test)]` unit tests already see
-/// `[dev-dependencies]`, which is where `lattice-cli` reaches
-/// `init_fixture_repo` from after #88.
+/// 测试专用 feature 一旦进入生产依赖图，它守护的 `#[cfg(feature = "...")]` 门控随之失效：测试
+/// 辅助代码会进入 release 二进制与所有下游依赖图。测试代码经 `[dev-dependencies]` 启用这些
+/// feature。本检查覆盖三种泄漏：非测试 feature 转发到测试 feature、普通依赖显式启用测试 feature，
+/// 以及普通依赖的默认 feature 转发到测试 feature；dev-dependencies 与 build-dependencies 不在检查
+/// 范围内。
 ///
-/// Keyed on the feature-name prefix rather than an enumerated list, so a new
-/// `test-*` feature on any crate is covered without touching this gate.
+/// 按 feature 名的 `test-` 前缀识别，不维护枚举列表，任何 crate 新增的 `test-*` feature 都自动
+/// 纳入检查。
 pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<String>> {
     let metadata = MetadataCommand::new()
         .current_dir(repo_root)
