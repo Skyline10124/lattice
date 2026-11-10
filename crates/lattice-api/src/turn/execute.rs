@@ -248,7 +248,7 @@ async fn execute_owned(
         new_session,
     } = input;
     let tools = request.tools.take().unwrap_or_else(default_tool_executor);
-    let project = workspace.store_key();
+    let project = workspace.project_path();
     if session
         .read(move |read| read.turn_node(turn_id))
         .await?
@@ -270,7 +270,7 @@ async fn execute_owned(
             .io
             .read(move |read| read.session(session_id))
             .await?;
-        if record.project_store_key != project {
+        if record.project_path != project {
             return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
         }
     }
@@ -422,7 +422,7 @@ async fn execute_owned(
                 AcceptSession::New { id: session_id }
             },
             turn_id,
-            project_store_key: project,
+            project_path: project,
             input: request.input,
             config,
             accepted_at: chrono::Utc::now(),

@@ -413,16 +413,26 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let beta_sid = beta_turn["session_id"].as_str().unwrap().to_owned();
         assert_ne!(beta_sid, sid);
         let sessions = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
-        let keys: BTreeSet<_> = sessions
+        let paths: BTreeSet<Vec<u8>> = sessions
             .as_array()
             .unwrap()
             .iter()
-            .map(|row| row["project_store_key"].as_str().unwrap())
+            .map(|row| {
+                row["project_path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+                    .collect()
+            })
             .collect();
+        let expected_paths = BTreeSet::from([
+            support::path_bytes(&world.project_dir().canonicalize().unwrap()).to_vec(),
+            support::path_bytes(&beta.canonicalize().unwrap()).to_vec(),
+        ]);
         assert_eq!(
-            keys.len(),
-            2,
-            "两个项目在共享后台中各自绑定独立的 project_store_key"
+            paths, expected_paths,
+            "两个项目在共享后台中各自绑定各自的规范项目路径"
         );
         // 跨项目写操作（在 alpha 工作区 rewind beta 会话）被项目绑定检查拒绝。
         cli(
@@ -796,7 +806,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         drop(resumed);
         for (index, request) in [
             submit_request(&world, OTHER, json!({"existing":sid}), "must be busy", Some("vertical")),
-            json!({"operation":"rewind","session_id":sid,"target":2,"workspace":world.project_dir()}),
+            json!({"operation":"rewind","session_id":sid,"target":2,"workspace":support::path_bytes(world.project_dir())}),
         ]
         .into_iter()
         .enumerate()

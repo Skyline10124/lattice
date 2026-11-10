@@ -26,7 +26,7 @@ pub mod turn;
 pub use lattice_conversation::Effort;
 pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
 pub use lattice_session::{
-    AgentName, AgentNameError, ProjectStoreKey, RetryPolicy, RetryPolicyError, StateLayout,
+    AgentName, AgentNameError, ProjectPath, RetryPolicy, RetryPolicyError, StateLayout,
     TurnTimeout, TurnTimeoutError,
 };
 pub use models::{

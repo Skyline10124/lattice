@@ -368,7 +368,7 @@ impl Backend {
                 let api = self.open().await?;
                 *lock(&owner.store) = Some(api.clone());
                 let binding = api.read(move |r| r.session(session_id)).await?;
-                if binding.project_store_key != root.store_key() {
+                if binding.project_path != root.project_path() {
                     return Err(conflict(ConflictReason::BindingMismatch));
                 }
                 let io = CoordinatorStoreIo::acquire_api(api, session_id)
@@ -426,7 +426,7 @@ impl Backend {
             }
             SubmitSession::Existing(_) => {
                 let record = record.as_ref().ok_or_else(not_found)?;
-                if record.project_store_key != workspace.store_key() {
+                if record.project_path != workspace.project_path() {
                     return Err(conflict(ConflictReason::BindingMismatch));
                 }
             }

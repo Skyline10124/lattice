@@ -8,7 +8,7 @@ use lattice_conversation::{
     ModelId, NativeMessage, OpaqueProviderState, Protocol, ProviderId, SessionId, TokenUsage,
     ToolResultOutcome, TurnId, UnboundToolCall, UsageCompleteness,
 };
-use lattice_store::{ProjectStoreKey, StateLayout};
+use lattice_store::StateLayout;
 use redb::ReadableTable;
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::symlink, sync::Arc};
@@ -188,8 +188,8 @@ fn iid(n: u64) -> InvocationId {
     InvocationId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap()
 }
 
-fn project(n: u8) -> ProjectStoreKey {
-    ProjectStoreKey::from_canonical_path_bytes(&[b'/', n])
+fn project(n: u8) -> ProjectPath {
+    ProjectPath::from_bytes(format!("/project-{n}")).expect("构造测试项目路径")
 }
 
 fn key(t: TurnId, s: u32, a: u32) -> ModelAttemptKey {
@@ -249,7 +249,7 @@ fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
     AcceptTurn {
         session: AcceptSession::New { id: s },
         turn_id: t,
-        project_store_key: project(1),
+        project_path: project(1),
         input: "用户问题🌳".into(),
         config: config(),
         accepted_at: now(),
@@ -487,7 +487,7 @@ fn domain_types_v8_wire() {
     let copy: SessionProfileCopy = serde_json::from_value(copy_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&copy).unwrap(), copy_wire);
     let encoded_copy = encode(&copy).unwrap();
-    assert_eq!(&encoded_copy[..4], &8_u32.to_be_bytes());
+    assert_eq!(&encoded_copy[..4], &9_u32.to_be_bytes());
     assert_eq!(decode_profile_copy("s1", &encoded_copy).unwrap(), copy);
 
     let user_wire = json!({
@@ -519,7 +519,7 @@ fn domain_types_v8_wire() {
     let user: Node = serde_json::from_value(user_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&user).unwrap(), user_wire);
     let encoded_user = encode(&user).unwrap();
-    assert_eq!(&encoded_user[..4], &8_u32.to_be_bytes());
+    assert_eq!(&encoded_user[..4], &9_u32.to_be_bytes());
     assert!(decode::<Node>("nodes", "n1", &encoded_user).unwrap() == user);
 }
 
@@ -532,10 +532,11 @@ fn creation_and_legacy() {
         Err(StoreError::NotInitialized { .. })
     ));
     assert!(!layout.lattice_root().exists());
-    fs::create_dir_all(layout.project_dir(&project(9))).unwrap();
+    let legacy_proj = layout.projects_dir().join("p9");
+    fs::create_dir_all(&legacy_proj).unwrap();
     let old = layout.lattice_root().join("sessions.git");
     fs::write(&old, b"old").unwrap();
-    let inv = layout.project_dir(&project(9)).join("invocations.git");
+    let inv = legacy_proj.join("invocations.git");
     symlink("missing", &inv).unwrap();
     for create in [false, true] {
         let result = if create {
@@ -1088,12 +1089,13 @@ fn schema_and_legacy_rejection_matrix() {
         for location in 0..3 {
             let dir = tempfile::tempdir().unwrap();
             let layout = StateLayout::in_state_root(dir.path());
-            fs::create_dir_all(layout.project_dir(&project(9))).unwrap();
+            fs::create_dir_all(layout.projects_dir().join("p9")).unwrap();
             let path = if location == 0 {
                 layout.lattice_root().join("sessions.git")
             } else {
                 layout
-                    .project_dir(&project(if location == 1 { 1 } else { 9 }))
+                    .projects_dir()
+                    .join(if location == 1 { "p1" } else { "p9" })
                     .join("invocations.git")
             };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -1110,7 +1112,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..9 {
+    for case in 0..10 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -1142,14 +1144,15 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
-            4 | 5 | 7 | 8 => {
+            4 | 5 | 7 | 8 | 9 => {
                 let mut meta = tx.open_table(META).unwrap();
                 // 固定旧版元信息，独立于当前编码器核对严格打开。
                 let old_version = match case {
                     4 => 3_u32,
                     5 => 4_u32,
                     7 => 6_u32,
-                    _ => 7_u32,
+                    8 => 7_u32,
+                    _ => 8_u32,
                 };
                 for (key, value) in [
                     ("store_kind", "\"lattice-session\"".to_owned()),
@@ -1286,7 +1289,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x088"
+            b"\x00\x00\x00\x099"
         );
     }
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
@@ -1605,14 +1608,30 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
         let mut conflicting = accept(sid(1), tid(1));
         match case {
             0 => conflicting.input.push('!'),
-            1 => conflicting.project_store_key = project(2),
+            1 => conflicting.project_path = project(2),
             _ => conflicting.session = AcceptSession::Existing { id: sid(2) },
         }
-        assert!(matches!(
-            accept_prepared(&db, if case == 2 { &lock2 } else { &lock }, conflicting),
-            Err(StoreError::Conflict { .. })
-        ));
+        assert!(
+            matches!(
+                accept_prepared(&db, if case == 2 { &lock2 } else { &lock }, conflicting),
+                Err(StoreError::Conflict { .. })
+            ),
+            "重放已有 TurnId 时输入、项目路径或会话 ID 不一致必须返回冲突（case={case}）"
+        );
     }
+    let mut wrong_project = accept(sid(1), tid(99));
+    wrong_project.session = AcceptSession::Existing { id: sid(1) };
+    wrong_project.project_path = project(2);
+    assert!(
+        matches!(
+            accept_prepared(&db, &lock, wrong_project),
+            Err(StoreError::InvalidInput {
+                field: "project",
+                ..
+            })
+        ),
+        "向已有会话写入新 Turn 时项目路径不一致必须被拒绝"
+    );
     db.rewind(&lock, NodeId(0), now()).unwrap();
     let mut next = accept(sid(1), tid(3));
     next.session = AcceptSession::Existing { id: sid(1) };
@@ -2069,12 +2088,12 @@ fn replay_origin_records_no_endpoint() {
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     let session = encode(&r.sessions[&sid(1)]).unwrap();
-    assert_eq!(&session[..4], &8u32.to_be_bytes(), "会话记录格式版本为 8");
+    assert_eq!(&session[..4], &9u32.to_be_bytes(), "会话记录格式版本为 9");
     assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
     let mut origins = 0;
     for ((_, id), node) in &r.nodes {
         let bytes = encode(node).unwrap();
-        assert_eq!(&bytes[..4], &8u32.to_be_bytes(), "节点 {id:?} 格式版本为 8");
+        assert_eq!(&bytes[..4], &9u32.to_be_bytes(), "节点 {id:?} 格式版本为 9");
         let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
         origins += text.matches("\"origin\"").count();
         assert_no_endpoint(&format!("节点 {id:?}"), &text);
@@ -5143,5 +5162,36 @@ fn non_hex_tool_identity_catalog_digest_and_binding_mismatch() {
             Err(StoreError::Corruption { .. })
         ),
         "重开会话库时绑定参数摘要失配必须报错"
+    );
+}
+
+#[test]
+fn non_utf8_project_path_persists_across_reopen() {
+    let (_dir, layout, db) = store();
+    let non_utf8 = ProjectPath::from_bytes(b"/tmp/proj-\xff\xfe/sub".as_slice())
+        .expect("构造非 UTF-8 项目路径");
+    let lock = db.try_lock_session(sid(1)).expect("获取会话锁");
+    let mut input = accept(sid(1), tid(1));
+    input.project_path = non_utf8.clone();
+    accept_prepared(&db, &lock, input).expect("写入非 UTF-8 项目路径会话");
+    drop(lock);
+    drop(db);
+
+    let reopened = SessionStore::open(&layout).expect("重新打开会话库");
+    let read = reopened.begin_read().expect("开启只读事务");
+    let session = read.session(sid(1)).expect("读取会话记录");
+    assert_eq!(
+        session.project_path, non_utf8,
+        "重开后读取 SessionRecord 的非 UTF-8 项目路径应保持不变"
+    );
+    let listed = read.list(None, 10).expect("列出会话");
+    assert_eq!(
+        listed.items[0].project_path, non_utf8,
+        "重开后会话列表投影中的非 UTF-8 项目路径应保持不变"
+    );
+    let log = read.log(sid(1)).expect("读取会话日志");
+    assert_eq!(
+        log.session.project_path, non_utf8,
+        "重开后会话日志中的非 UTF-8 项目路径应保持不变"
     );
 }

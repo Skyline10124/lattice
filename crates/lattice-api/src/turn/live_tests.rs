@@ -40,7 +40,7 @@ fn seed(
                 expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: turn,
-                project_store_key: fixture.root.store_key(),
+                project_path: fixture.root.project_path(),
                 input: "old request".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,
@@ -194,15 +194,9 @@ async fn session_turns_do_not_create_or_require_workspace_history() {
             .build(),
     );
     let fixture = setup_fixture(llm.clone(), &[]);
-    let history_dir = fixture
-        .layout
-        .project_dir(&fixture.root.store_key())
-        .join("workspace-history.git");
+    let projects_dir = fixture.layout.projects_dir();
     let (first, _) = fixture.run(fixture.request.clone()).await;
-    assert!(
-        !history_dir.exists(),
-        "新建会话不应创建 workspace-history.git"
-    );
+    assert!(!projects_dir.exists(), "新建会话不应创建 projects/ 目录");
     let mut request = fixture.request.clone();
     request.session_id = Some(first.session_id);
     request.agent = None;
@@ -210,8 +204,8 @@ async fn session_turns_do_not_create_or_require_workspace_history() {
     let (second, _) = fixture.run(request).await;
     assert_eq!(second.summary.outcome, PublicTurnOutcome::Completed);
     assert!(
-        !history_dir.exists(),
-        "续写会话不应创建或依赖 workspace-history.git"
+        !projects_dir.exists(),
+        "续写会话不应创建或依赖 projects/ 目录"
     );
     assert_eq!(llm.call_count(), 2);
 }

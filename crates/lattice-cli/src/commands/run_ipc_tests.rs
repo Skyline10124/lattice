@@ -81,7 +81,7 @@ impl Wire {
 }
 async fn resolve_session(peer: &Peer) {
     let mut wire = peer.request("resolve_session").await;
-    wire.reply("session", json!({"session_id":sid(),"project_store_key":"a".repeat(64),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
+    wire.reply("session", json!({"session_id":sid(),"project_path":b"/test-project".as_slice(),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
 }
 
 #[tokio::test]
@@ -850,7 +850,7 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
         let driver = async {
             if existing {
                 let mut resolve = peer.request("resolve_session").await;
-                resolve.reply("session",json!({"session_id":sid(),"project_store_key":"a".repeat(64),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
+                resolve.reply("session",json!({"session_id":sid(),"project_path":b"/test-project".as_slice(),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
             }
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];

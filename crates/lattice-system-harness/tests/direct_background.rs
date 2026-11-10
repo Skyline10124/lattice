@@ -1143,7 +1143,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             &world,
             wait(&budget),
             json!({"operation":"rewind","session_id":sid,
-            "target":0,"workspace":world.project_dir()}),
+            "target":0,"workspace":support::path_bytes(world.project_dir())}),
         );
         assert_eq!(blocked["value"]["kind"], "busy", "{blocked}");
         // 已用的 TurnId 先于 Busy 核对：同一身份重新提交得到 Conflict，不是找回。
@@ -1879,7 +1879,8 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
             "alpha",
             None,
         );
-        elsewhere["request"]["workspace"] = json!(project);
+        elsewhere["request"]["workspace"] =
+            json!(support::path_bytes(&project.canonicalize().unwrap()));
         let binding = ipc(&world, wait(&budget), elsewhere);
         assert_eq!(conflict(&binding), Some("binding_mismatch"), "{binding}");
         // 被拒绝的请求都没有建立 Turn：THIRD 仍查不到，会话数不变。

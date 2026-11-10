@@ -5,7 +5,7 @@ use super::*;
 use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, TurnId, UnboundToolCall,
 };
-use lattice_session::{ProjectStoreKey, StateLayout};
+use lattice_session::{ProjectPath, StateLayout};
 use serde_json::json;
 
 fn sid() -> SessionId {
@@ -42,7 +42,7 @@ fn input() -> AcceptTurn {
         expected_profile_digest: None,
         session: AcceptSession::New { id: sid() },
         turn_id: tid(1),
-        project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/coordinator-test"),
+        project_path: ProjectPath::from_bytes(b"/coordinator-test".as_slice()).unwrap(),
         input: "原始输入\n".into(),
         accepted_at: chrono::Utc::now(),
         agent_selection: AgentSelection::Explicit,
@@ -247,10 +247,9 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     let tmp = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(tmp.path());
     let input = input();
-    let key = input.project_store_key;
     let history = layout
         .projects_dir()
-        .join(key.to_string())
+        .join("legacy-project")
         .join("workspace-history.git");
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     std::fs::write(&history, "损坏历史，不准访问").unwrap();
@@ -259,7 +258,7 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
             .lattice_root()
             .join("locks")
             .join("projects")
-            .join(key.to_string())
+            .join("legacy-project")
             .join("workspace.lock"),
         lattice_store::LockMode::Exclusive,
         lattice_store::Blocking::NonBlocking,
@@ -404,7 +403,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     let state = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
     let root = workspace.path().canonicalize().unwrap();
-    let key = ProjectStoreKey::derive(&root).unwrap();
+    let key = ProjectPath::from_path(&root).unwrap();
     let tools = CallbackTools::single("observe__workspace", |_, _, args, _, _| {
         if args.get("path").and_then(|v| v.as_str()) == Some("visible.txt") {
             crate::ToolOutcome::Succeeded(json!({"content": "实际文件"}))
@@ -420,7 +419,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         .await
         .unwrap();
     let mut accepted = input();
-    accepted.project_store_key = key;
+    accepted.project_path = key;
     accepted.config.provider = crate::ProviderId::parse("openai-compatible").unwrap();
     accepted.config.system_prompt = Some("冻结提示".into());
     accepted.config.catalog = ToolCatalogSnapshot::new(
@@ -654,7 +653,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     let state = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
     let root = workspace.path().canonicalize().unwrap();
-    let project = ProjectStoreKey::derive(&root).unwrap();
+    let project = ProjectPath::from_path(&root).unwrap();
     let tools = CallbackTools::single("observe__workspace", |_, _, _, _, _| {
         crate::ToolOutcome::Succeeded(json!({"ok": true}))
     });
@@ -663,7 +662,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
         .await
         .unwrap();
     let mut accepted = input();
-    accepted.project_store_key = project;
+    accepted.project_path = project;
     accepted.config.catalog = ToolCatalogSnapshot::new(
         tools
             .specs

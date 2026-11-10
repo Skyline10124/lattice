@@ -18,7 +18,7 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::{ProjectStoreKey, StoreError};
+use crate::StoreError;
 
 /// Directory name directly under the XDG state root.
 pub const LATTICE_STATE_DIR: &str = "lattice";
@@ -80,11 +80,6 @@ impl StateLayout {
         self.lattice_root.join("projects")
     }
 
-    /// `<state>/lattice/projects/<ProjectStoreKey>`
-    pub fn project_dir(&self, key: &ProjectStoreKey) -> PathBuf {
-        self.projects_dir().join(key.to_string())
-    }
-
     /// `<state>/lattice/locks/sessions` — session lock files live one per
     /// SessionId under this directory.
     pub fn session_locks_dir(&self) -> PathBuf {
@@ -110,12 +105,6 @@ mod tests {
         assert_eq!(
             layout.session_locks_dir(),
             Path::new("/state/lattice/locks/sessions")
-        );
-        let key = ProjectStoreKey::from_canonical_path_bytes(b"/ws");
-        let hex = key.to_string();
-        assert_eq!(
-            layout.project_dir(&key),
-            PathBuf::from(format!("/state/lattice/projects/{hex}"))
         );
         assert_eq!(
             layout.session_lock("abc.lock"),

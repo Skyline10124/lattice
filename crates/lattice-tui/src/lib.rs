@@ -26,9 +26,14 @@ pub struct TuiOptions {
 }
 
 pub async fn run(options: TuiOptions) -> anyhow::Result<std::process::ExitCode> {
+    let workspace = if options.session_id.is_some() && options.agent.is_none() {
+        Some(tokio::task::spawn_blocking(lattice_api::LocalWorkspaceRoot::resolve).await??)
+    } else {
+        None
+    };
     let client = lattice_api::local::LocalClient::new(lattice_api::StateLayout::resolve()?);
     client.ensure_running().await?;
-    let ctx = session::open_or_create(&options, &client).await?;
+    let ctx = session::open_or_create(&options, workspace.as_ref(), &client).await?;
     app::run_app(options, ctx, client).await?;
     Ok(std::process::ExitCode::SUCCESS)
 }

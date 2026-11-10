@@ -2633,3 +2633,71 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
         assert!(exit.result.is_ok());
     }
 }
+
+#[tokio::test]
+async fn readonly_open_rejects_mismatched_project_path_before_watch() {
+    let sid = sid();
+    let other_raw = b"/other/project-\xff";
+    let peer = Peer::start(move |request| match request["operation"].as_str() {
+        Some("resolve_session") => Reply::Now(json!({
+            "response": "session",
+            "value": {
+                "session_id": sid,
+                "project_path": other_raw.as_slice(),
+                "current": 0,
+                "created_at": "2026-10-17T00:00:00Z",
+                "updated_at": "2026-10-17T00:00:01Z"
+            }
+        })),
+        Some("log") => Reply::Now(json!({
+            "response": "log",
+            "value": {
+                "session": {
+                    "session_id": sid,
+                    "project_path": other_raw.as_slice(),
+                    "current": 0,
+                    "created_at": "2026-10-17T00:00:00Z",
+                    "updated_at": "2026-10-17T00:00:01Z"
+                },
+                "current_agent": "coder",
+                "unclosed_turn": null,
+                "nodes": []
+            }
+        })),
+        _ => Reply::Never,
+    });
+    let current = tempfile::tempdir().expect("创建当前工作区临时目录");
+    let workspace =
+        lattice_api::LocalWorkspaceRoot::from_path(current.path()).expect("解析当前工作区");
+    let options = crate::TuiOptions {
+        session_id: Some("abcd".into()),
+        agent: None,
+        session_dir: current.path().join("state"),
+        project_root: workspace.canonical_path().to_path_buf(),
+    };
+    let error = match crate::session::open_or_create(&options, Some(&workspace), &peer.client).await
+    {
+        Ok(_) => panic!("只读打开属于另一个项目的会话必须在 watch 之前失败"),
+        Err(error) => error,
+    };
+    let seen = peer.wait(|seen| count(seen, "resolve_session") == 1).await;
+    assert_eq!(count(&seen, "watch"), 0, "项目路径不一致时不得开始 watch");
+    assert_eq!(
+        count(&seen, "log"),
+        0,
+        "项目路径不一致时应在读取 log 之前退出"
+    );
+    let local = error
+        .downcast_ref::<lattice_api::local::LocalError>()
+        .expect("启动错误应保持为可被 CLI 分类输出的 LocalError");
+    assert_eq!(local.kind, lattice_api::local::LocalErrorKind::Conflict);
+    assert_eq!(
+        local.conflict,
+        Some(lattice_api::local::ConflictReason::BindingMismatch)
+    );
+    assert!(
+        local.message.contains("/other/project-\u{FFFD}"),
+        "错误消息应使用中文写明会话所属项目的有损路径: {}",
+        local.message
+    );
+}

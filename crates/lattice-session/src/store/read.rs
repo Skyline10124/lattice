@@ -617,7 +617,7 @@ impl SessionRead {
                 })?;
             items.push(SessionListRow {
                 session_id: id,
-                project_store_key: s.project_store_key,
+                project_path: s.project_path.clone(),
                 current: s.current,
                 node_count,
                 unclosed_turn,

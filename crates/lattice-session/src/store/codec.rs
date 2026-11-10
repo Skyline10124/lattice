@@ -15,7 +15,7 @@ pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("no
 pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
-pub(super) const VERSION: u32 = 8;
+pub(super) const VERSION: u32 = 9;
 
 pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
     result.map_err(|err| match err {

@@ -402,12 +402,34 @@ impl From<std::io::Error> for LocalError {
     }
 }
 
+mod path_bytes {
+    use std::{
+        ffi::OsString,
+        os::unix::ffi::{OsStrExt, OsStringExt},
+        path::{Path, PathBuf},
+    };
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        path.as_os_str().as_bytes().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Ok(PathBuf::from(OsString::from_vec(bytes)))
+    }
+}
+
 /// 私有请求不实现正文 Debug；两种身份均在发送之前确定。
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct TurnRequest {
     pub turn_id: TurnId,
     pub session: SubmitSession,
+    #[serde(with = "path_bytes")]
     pub workspace: PathBuf,
     pub input: String,
     pub agent: Option<AgentName>,
@@ -521,6 +543,7 @@ pub(super) enum Request {
     Rewind {
         session_id: SessionId,
         target: NodeId,
+        #[serde(with = "path_bytes")]
         workspace: PathBuf,
     },
     Submit {
@@ -559,11 +582,15 @@ pub(super) enum Response {
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
     use super::*;
     #[test]
     fn request_shapes_preserve_selections_and_explicit_session_identity() {
         let sid = super::super::new_session_id();
         let tid = super::super::new_turn_id();
+        let raw_workspace = b"/tmp/proj-\xff\xfe/work";
+        let non_utf8_ws = PathBuf::from(OsStr::from_bytes(raw_workspace));
         for (session, model, effort) in [
             (SubmitSession::New(sid), None, None),
             (
@@ -577,11 +604,16 @@ mod tests {
                 effort,
                 turn_id: tid,
                 session,
-                workspace: "/tmp/project".into(),
+                workspace: non_utf8_ws.clone(),
                 input: "original".into(),
                 agent: Some(AgentName::parse("local-test").unwrap()),
             };
             let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                wire["workspace"],
+                serde_json::to_value(raw_workspace.as_slice()).unwrap(),
+                "submit 请求的 workspace 线上表示应为原始字节数组"
+            );
             assert_eq!(
                 wire["session"][if session.is_new() { "new" } else { "existing" }],
                 sid.to_string()
@@ -598,6 +630,22 @@ mod tests {
             extra["configuration"] = serde_json::json!({"profile_toml":"untrusted"});
             assert!(serde_json::from_value::<Request>(extra).is_err());
         }
+        let rewind_wire = serde_json::to_value(Request::Rewind {
+            session_id: sid,
+            target: NodeId(0),
+            workspace: non_utf8_ws.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            rewind_wire["workspace"],
+            serde_json::to_value(raw_workspace.as_slice()).unwrap(),
+            "rewind 请求的 workspace 线上表示应为原始字节数组"
+        );
+        assert!(matches!(
+            serde_json::from_value::<Request>(rewind_wire).unwrap(),
+            Request::Rewind { session_id, target: NodeId(0), workspace }
+                if session_id == sid && workspace == non_utf8_ws
+        ));
         for (query, expected_wire) in [
             (
                 ModelCandidateQuery::List {

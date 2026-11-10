@@ -498,6 +498,22 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     assert!(client.cancel(input.turn_id).await.unwrap());
     provider.release.send_replace(true);
     idle(&backend).await;
+    assert_eq!(
+        client
+            .rewind(
+                sid,
+                NodeId(0),
+                crate::LocalWorkspaceRoot::from_path(wrong.path())
+                    .unwrap()
+                    .canonical_path()
+                    .to_path_buf(),
+            )
+            .await
+            .unwrap_err()
+            .conflict,
+        Some(ConflictReason::BindingMismatch),
+        "在另一个项目目录下执行 rewind 必须返回项目绑定不一致冲突"
+    );
     assert!(!client.cancel(input.turn_id).await.unwrap());
     assert!(!client.list_sessions().await.unwrap()[0].owner);
     let error = client
@@ -629,7 +645,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
     let project =
         crate::LocalWorkspaceRoot::from_path(backend.layout.lattice_root().parent().unwrap())
             .unwrap()
-            .store_key();
+            .project_path();
     api.blocking(move |api| {
         let guard = api.store.try_lock_session(sid)?;
         api.store.accept_turn(&guard, {
@@ -661,7 +677,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                     AcceptSession::Existing { id: sid }
                 },
                 turn_id: id,
-                project_store_key: project,
+                project_path: project,
                 input: "seed".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,
@@ -2010,4 +2026,48 @@ async fn stop_reports_timeout_when_lock_is_never_released() {
     release.send(()).unwrap();
     bounded(serving).await.unwrap().unwrap();
     assert!(owner_lock_free(&layout));
+}
+#[tokio::test]
+async fn symlinked_workspace_shares_canonical_project_binding() {
+    let (dir, backend, client, task) = backend().await;
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let first = request(dir.path());
+    let sid = first.session.id();
+    client.submit(first).await.expect("在原始目录创建会话");
+    idle(&backend).await;
+
+    let link_parent = tempfile::tempdir().expect("创建符号链接父目录");
+    let symlink_ws = link_parent.path().join("project-symlink");
+    std::os::unix::fs::symlink(dir.path(), &symlink_ws).expect("创建指向项目根的符号链接");
+    let original_root = crate::LocalWorkspaceRoot::from_path(dir.path()).expect("解析原始工作区");
+    let via_symlink =
+        crate::LocalWorkspaceRoot::from_path(&symlink_ws).expect("经符号链接解析工作区");
+    assert_eq!(
+        via_symlink.project_path(),
+        original_root.project_path(),
+        "经符号链接解析得到的规范项目路径必须与原始项目一致"
+    );
+
+    let mut second = request(via_symlink.canonical_path());
+    second.session = SubmitSession::Existing(sid);
+    second.agent = None;
+    client
+        .submit(second)
+        .await
+        .expect("经符号链接续写同一会话应成功");
+    idle(&backend).await;
+
+    let rewound = client
+        .rewind(sid, NodeId(0), via_symlink.canonical_path().to_path_buf())
+        .await
+        .expect("经符号链接在同一会话执行 rewind 应成功");
+    assert_eq!(rewound.current, NodeId(0), "rewind 后当前节点应回到根");
+    assert_eq!(
+        rewound.project_path,
+        original_root.project_path(),
+        "rewind 返回的会话记录应保留同一规范项目路径"
+    );
+    assert_eq!(provider.finish().await.len(), 2);
+    finish(&backend, task).await;
 }

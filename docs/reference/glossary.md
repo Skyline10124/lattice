@@ -11,8 +11,8 @@ LATTICE 是以会话为中心的 LLM 运行时，协调层经可注入的 `ToolE
 ## 术语
 
 **Local Workspace**:
-会话绑定的规范化项目根目录，用于推导 ProjectStoreKey 并作为 `ToolExecutor::open_turn` 的工作区参数；LATTICE 自身不读写其中的业务文件。
-见[ProjectStoreKey](../architecture/storage.md#projectstorekey)。
+会话绑定的规范化项目根目录，其规范路径字节保存在 Session 记录中，并作为 `ToolExecutor::open_turn` 的工作区参数；LATTICE 自身不读写其中的业务文件。
+见[项目绑定](../architecture/storage.md#项目绑定)。
 _Avoid_: Lower, Turn Workspace, guest workspace, authoritative snapshot
 
 **Tool**:

@@ -37,9 +37,9 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
                 expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: tid,
-                project_store_key: lattice_api::LocalWorkspaceRoot::from_path(root)
+                project_path: lattice_api::LocalWorkspaceRoot::from_path(root)
                     .unwrap()
-                    .store_key(),
+                    .project_path(),
                 input: "原始输入".into(),
                 accepted_at: chrono::Utc::now(),
                 agent_selection: AgentSelection::Explicit,

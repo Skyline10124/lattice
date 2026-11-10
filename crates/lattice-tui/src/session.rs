@@ -19,10 +19,27 @@ pub(crate) struct SessionContext {
 /// 只读打开；新会话的 SessionId 在首次提交时生成，接受前不算已建立。
 pub(crate) async fn open_or_create(
     options: &TuiOptions,
+    workspace: Option<&lattice_api::LocalWorkspaceRoot>,
     client: &LocalClient,
 ) -> anyhow::Result<SessionContext> {
     if let Some(id) = &options.session_id {
         let session = client.resolve_session(id).await?;
+        if let Some(workspace) = workspace
+            && session.project_path != workspace.project_path()
+        {
+            return Err(lattice_api::local::LocalError {
+                kind: lattice_api::local::LocalErrorKind::Conflict,
+                message: format!(
+                    "会话 {} 属于项目 {}，与当前项目路径不一致",
+                    session.session_id,
+                    session.project_path.to_string_lossy()
+                ),
+                conflict: Some(lattice_api::local::ConflictReason::BindingMismatch),
+                recovery: None,
+                store: None,
+            }
+            .into());
+        }
         let log = client.log(session.session_id).await?;
         return Ok(SessionContext {
             session_id: Some(session.session_id),

@@ -10,7 +10,7 @@ status: active
 
 ## 目的与范围
 
-本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供 ProjectStoreKey 推导、状态布局、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
+本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供状态布局、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
 
 私有状态目录下的存储是会话库 `lattice.redb`：全局一份，保存 Session、会话树（Step 节点内含调用槽位）、配置表与各索引，由 `lattice-session` 维护。
 
@@ -60,21 +60,13 @@ status: active
 - 后台启动不创建或修复缺失领域库，也不写入未关闭的 Turn。常驻句柄继续遵守各领域的身份、严格打开和发布规则，不增加第二份请求状态库。
 - 单例锁只排除第二个后台，不串行化各 Session 的 Turn。短准入管理与领域锁分开，常驻持库不改变[锁序与持有期限](#锁与并发语义)。
 
-### ProjectStoreKey
+### 项目绑定
 
-ProjectStoreKey 是 Session 项目绑定使用的键，由完整规范工作区路径推导。推导规则由 [`key.rs`](../../crates/lattice-store/src/key.rs)维护：
+Session 记录保存完整 Local Workspace 根的规范项目路径原始字节（[`ProjectPath`](../../crates/lattice-session/src/model/project_path.rs)）。路径由 [`root.rs`](../../crates/lattice-api/src/root.rs) 经 `canonicalize` 解析符号链接得到，按 Linux `OsStrExt` 字节保存，校验以 `/` 开头且不含 NUL 字节，不要求路径为 UTF-8。
 
-```text
-canonical_root = canonicalize(full Local Workspace root)
-path_bytes = Linux OsStrExt bytes of canonical_root
-ProjectStoreKey = lower_hex(SHA256(
-    "lattice-project-store-key-v1\0" || u64_be(len(path_bytes)) || path_bytes
-))
-```
+在会话库、本地 IPC 与 `--json` 结构化输出中，项目路径表示为每项 `0..=255` 的 JSON 整数数组；面向人阅读的输出使用有损 UTF-8 文本，非 UTF-8 字节显示为替换字符。
 
-键使用 64 个小写十六进制字符，不要求路径为 UTF-8。
-
-同一规范路径得到同一个键，项目移动到其他路径后得到不同的键；无关项目复用原路径时得到同一个键，可以续写绑定在该路径上的 Session。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目。Session 永久绑定一个键，路径迁移后创建新 Session，不自动 relink。
+同一规范路径对应同一项目绑定，项目移动到其他路径后得到不同路径，需要创建新 Session；无关项目复用原路径时得到同一路径，可以续写绑定在该路径上的 Session。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目，也不自动 relink。
 
 ## 会话库
 
@@ -103,7 +95,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 身份、版本与打开
 
-会话库保存一张元信息表，记录库格式版本（当前为 `8`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。
+会话库保存一张元信息表，记录库格式版本（当前为 `9`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md)）。
 
 | 打开时的状态 | 处理 |
 | --- | --- |
@@ -184,6 +176,6 @@ SIGKILL 后重开证明相应进程崩溃场景。文件系统探测、进程崩
 
 纯文档修订核对接口责任、锁范围、来源、状态及图示。修改内核或会话库接线时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。
 
-承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件，以及 [ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛) 的会话库升版与存储收敛。机制接口与实现核对位置为 [`layout.rs`](../../crates/lattice-store/src/layout.rs)、[`key.rs`](../../crates/lattice-store/src/key.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
+承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件，以及 [ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md) 的会话库升版与存储收敛。机制接口与实现核对位置为 [`layout.rs`](../../crates/lattice-store/src/layout.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
 创建残留的完整报告与跨位置能力覆盖仍需核验。

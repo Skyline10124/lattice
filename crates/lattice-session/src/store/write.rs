@@ -298,7 +298,7 @@ impl SessionStore {
                     .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
                 let existing_input = r.turn_input(s, input.turn_id)?;
                 if existing_input != input.input
-                    || existing_session.project_store_key != input.project_store_key
+                    || existing_session.project_path != input.project_path
                     || matches!(input.session, AcceptSession::Existing { id } if id != s)
                 {
                     return Err(StoreError::Conflict {
@@ -323,7 +323,7 @@ impl SessionStore {
                     s,
                     SessionRecord {
                         session_id: s,
-                        project_store_key: input.project_store_key,
+                        project_path: input.project_path.clone(),
                         current: NodeId(0),
                         created_at: input.accepted_at,
                         updated_at: input.accepted_at,
@@ -332,7 +332,7 @@ impl SessionStore {
                 r.nodes.insert((s, NodeId(0)), Node::Root);
             }
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
-            if session.project_store_key != input.project_store_key {
+            if session.project_path != input.project_path {
                 return Err(invalid("project", "session binding mismatch"));
             }
             let previous = r.profile_copies.get(&s);

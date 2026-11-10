@@ -153,7 +153,7 @@ pub async fn run(
                     println!(
                         "{} project={} current={} nodes={} unclosed_turn={} owner={} updated={}",
                         display_id(&row.session.session_id.to_string()),
-                        row.session.project_store_key,
+                        row.session.project_path.to_string_lossy(),
                         row.session.current.0,
                         row.session.node_count,
                         row.session
@@ -593,7 +593,7 @@ mod session_cli {
     #[test]
     fn tree_output_keeps_root_branches_current_and_notice() {
         let log: lattice_api::local::SessionLog = serde_json::from_value(serde_json::json!({
-            "session": {"session_id":"11111111111111111111111111111111", "project_store_key":"a".repeat(64), "current":4, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
+            "session": {"session_id":"11111111111111111111111111111111", "project_path": b"/test-project".as_slice(), "current":4, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
             "current_agent":"beta", "unclosed_turn":"20000000-0000-4000-8000-000000000002",
             "nodes":[
                 {"node":{"id":0,"parent":null,"turn_id":null,"kind":{"kind":"root"}},"current":false,"turn_start":null},
