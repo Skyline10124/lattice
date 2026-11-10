@@ -47,7 +47,7 @@ status: active
 | `lmstudio` | `chat-completions` | `http://127.0.0.1:1234/v1` | `none` | `lmstudio` | — |
 
 - `generate-content` 协议保留，需要它的用户在 `providers.toml` 中新增一个使用该协议的 provider；内置 `google` 不能改 `protocol`。OpenAI 的新模型在 Chat Completions 上不能使用工具（[OpenAI 推理指南](https://developers.openai.com/api/docs/guides/reasoning)），所以 `openai` 以 Responses 为准。
-- `chatgpt` 是 OpenAI 的订阅通道，不计入第一轮收录的 20 家，限制见 [Sign in with ChatGPT](credentials.md#sign-in-with-chatgpt)。
+- `chatgpt` 是 OpenAI 的订阅通道，限制见 [Sign in with ChatGPT](credentials.md#sign-in-with-chatgpt)。
 - 阿里云的文档推荐按工作空间区分的域名（`https://{WorkspaceId}.<地域>.maas.aliyuncs.com/compatible-mode/v1`），表中用的是仍可使用的旧域名；使用工作空间域名的用户在 `providers.toml` 中覆盖 `base_url`。
 - `ollama` 在 models.dev 中没有条目，它的模型没有元数据，可以在 `providers.toml` 中手写。
 
@@ -105,7 +105,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 key 会发到 endpoint，所以 endpoint 只来自内置表与用户全局的 `providers.toml`：
 
 - 项目目录中的任何文件都不提供 provider 配置。agent profile 可以放在项目内，它只能写模型引用，不能改变 endpoint 或认证方式。
-- 环境变量与工作区 `.env` 不提供 key、endpoint 或模型。原有的 `OPENAI_API_KEY`、`ANTHROPIC_API_KEY`、`GEMINI_API_KEY`、`OPENAI_COMPATIBLE_BASE_URL`、`OPENAI_COMPATIBLE_MODEL`、`OPENAI_COMPATIBLE_API_KEY`、`ANTHROPIC_BASE_URL`、`GEMINI_BASE_URL` 不再读取。
+- 环境变量与工作区 `.env` 不提供 key、endpoint 或模型。
 - 模型元数据只有[元数据的来源与合并](models.md#元数据的来源与合并)中列出的字段，不含 endpoint。
 
 地址检查与连接时的地址固定沿用[会话合同的模型 HTTP 传输](../session/concurrency.md#输入与传输限制)与 `net-guard` 的规则：localhost、127.0.0.1、::1 是 loopback，其他私有与保留地址拒绝。
