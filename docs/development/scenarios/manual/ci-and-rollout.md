@@ -40,14 +40,14 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 
 | 门禁 | 触发 | 独有检查 | 不包含 |
 | --- | --- | --- | --- |
-| `xtask ci` | 手动 | 工具链预检；逐 crate 超时；末尾 `tool-build --verify`（漂移仅警告） | rollout |
-| `ci.yml` | `main`、PR | 纯 `.md` PR 只跑 `docs-check` | encoder、`tool-build --verify`、rollout |
-| `full-gate.yml` | 每日、手动 | 装 encoder，跑无测试 feature 的 rollout，`always()` 跑 `tool-build --verify`（写 `component-verify.log`） | `docs-check` |
+| `xtask ci` | 手动 | 工具链预检；逐 crate 超时 | rollout |
+| `ci.yml` | `main`、PR | 纯 `.md` PR 只跑 `docs-check` | rollout |
+| `full-gate.yml` | 每日、手动 | 跑无测试 feature 的 rollout | `docs-check` |
 
 ### Alpha rollout
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `verdict: "pass"` | 8 步（`clean_worktree` 至 `offline_correctness`）全 `passed`（测试步骤 `passed > 0`，release 产物不启用测试 feature） |
+| `verdict: "pass"` | 7 步（`clean_worktree` 至 `offline_correctness`）全 `passed`（测试步骤 `passed > 0`，release 产物不启用测试 feature） |
 | `verdict: "fail"`（退出 `1`） | 某步 `failed`，后续 `blocked`；查记录中的 `detail` 与 `failure_artifacts` |
 | `verdict: "fail"`（退出 `2`） | 工作树脏、Git 失败或参数错误；查 `rejection` |

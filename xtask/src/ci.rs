@@ -30,7 +30,7 @@ use anyhow::Context as _;
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Args;
 
-use crate::{docs_check, harness_boundary, lancet_boundary, repo_root, tool_build, tool_codegen};
+use crate::{docs_check, harness_boundary, repo_root};
 
 #[derive(Args, Debug)]
 pub struct CiArgs {}
@@ -81,10 +81,6 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     })?;
 
     step("system harness boundary", harness_boundary::run)?;
-
-    step("lancet boundary", lancet_boundary::run)?;
-
-    step("tool-codegen --check", tool_codegen::check)?;
 
     step("test", || {
         run_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
@@ -150,8 +146,6 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         run_feature_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
     })?;
 
-    step("tool-build --verify (warn-only)", tool_build::verify)?;
-
     println!();
     println!("\u{1b}[1;32mAll checks passed.\u{1b}[0m");
     Ok(())
@@ -165,11 +159,7 @@ fn step(name: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<
     Ok(())
 }
 
-/// Assert the Source Tool build prerequisites (#5 slice B decision 1): the
-/// pinned rustc from `rust-toolchain.toml`, the `wasm32-unknown-unknown`
-/// target std, and the `wasm-tools` encoder. `tool-codegen`/`tool-build` and
-/// the guest crate both need the wasm target installed; a missing target would
-/// otherwise surface as an opaque linker error deep in `tool-build`.
+/// 核验 `rust-toolchain.toml` 固定的 `rustc` 版本，让工具链版本不符的主机在门禁开头快速失败。
 fn check_toolchain() -> anyhow::Result<()> {
     let rustc_out = Command::new("rustc")
         .arg("--version")
@@ -180,121 +170,11 @@ fn check_toolchain() -> anyhow::Result<()> {
         anyhow::bail!("`rustc --version` failed");
     }
     let version = String::from_utf8_lossy(&rustc_out.stdout);
-    // The pinned channel is 1.96.0 (rust-toolchain.toml). We assert the major
-    // minor so a host on an older stable fails the gate early with a clear
-    // message instead of a later wasmtime/wit-bindgen MSRV error.
     if !version.contains("1.96.0") {
         anyhow::bail!("pinned rustc 1.96.0 required; got: {version}");
     }
 
-    let targets = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .stderr(Stdio::inherit())
-        .output()
-        .context("failed to run `rustup target list --installed`")?;
-    if !targets.status.success() {
-        anyhow::bail!("`rustup target list --installed` failed");
-    }
-    let installed = String::from_utf8_lossy(&targets.stdout);
-    if !installed
-        .lines()
-        .any(|l| l.trim() == "wasm32-unknown-unknown")
-    {
-        anyhow::bail!(
-            "wasm32-unknown-unknown target not installed; run `rustup target add wasm32-unknown-unknown`"
-        );
-    }
-
-    // `wasm-tools` is an implicit external build dependency: `tool-build`
-    // shells out to it to encode the core module into a Component and to
-    // validate the import surface. It is not a Cargo dependency, so nothing
-    // installs it for us, and the encoder determines the committed
-    // Component's bytes. Absence is fatal here (the gate's last step would
-    // fail anyway, but ~9 steps later); a version mismatch is a warning
-    // because reproducibility is still warn-only per #5 decision 1 / #73.
-    match probe_wasm_tools() {
-        WasmToolsProbe::Version(version) => {
-            if version != EXPECTED_WASM_TOOLS {
-                println!(
-                    "warn: wasm-tools {version} installed, expected {EXPECTED_WASM_TOOLS}; \
-                     Component digests may drift (see #73)"
-                );
-            }
-        }
-        WasmToolsProbe::NotOnPath => anyhow::bail!(
-            "wasm-tools not found on PATH; `cargo xtask tool-build` needs it to encode and \
-             validate Source Tool Components. Install {EXPECTED_WASM_TOOLS} (for example \
-             `cargo install wasm-tools --version {EXPECTED_WASM_TOOLS} --locked`)."
-        ),
-        // Present but unusable: reinstalling the same version is the wrong
-        // advice, so report what actually happened instead.
-        WasmToolsProbe::Failed(why) => anyhow::bail!(
-            "wasm-tools is on PATH but {why}; `cargo xtask tool-build` needs a working \
-             {EXPECTED_WASM_TOOLS} encoder. Repair the installation, then re-run."
-        ),
-    }
-
     Ok(())
-}
-
-/// The `wasm-tools` release the committed Component artifacts were encoded
-/// with. Three places must agree, each asserted by a test below: this constant,
-/// the pinned installer in `.github/workflows/full-gate.yml`, and the
-/// `[artifact] toolchain` fingerprint in `tools/*/manifest.toml`.
-pub(crate) const EXPECTED_WASM_TOOLS: &str = "1.254.0";
-
-/// Why `wasm-tools --version` could not be answered. Distinguished so the
-/// caller can tell a user to *install* the encoder versus *repair* it —
-/// collapsing all three into "not found on PATH" sends someone whose binary is
-/// present but broken off to do a reinstall that changes nothing.
-pub(crate) enum WasmToolsProbe {
-    Version(String),
-    NotOnPath,
-    Failed(String),
-}
-
-/// The installed `wasm-tools` version, or `None` when the binary is missing,
-/// exits non-zero, or prints output this can't parse. Prefer
-/// [`probe_wasm_tools`] when the distinction matters.
-pub(crate) fn wasm_tools_version() -> Option<String> {
-    match probe_wasm_tools() {
-        WasmToolsProbe::Version(v) => Some(v),
-        _ => None,
-    }
-}
-
-pub(crate) fn probe_wasm_tools() -> WasmToolsProbe {
-    let out = match Command::new("wasm-tools")
-        .arg("--version")
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(out) => out,
-        // Only ENOENT means "not installed"; anything else (permissions, exec
-        // format) is a broken installation.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WasmToolsProbe::NotOnPath,
-        Err(e) => return WasmToolsProbe::Failed(format!("could not be executed: {e}")),
-    };
-    if !out.status.success() {
-        return WasmToolsProbe::Failed(format!(
-            "`wasm-tools --version` exited with {}",
-            out.status
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    match parse_wasm_tools_version(&stdout) {
-        Some(v) => WasmToolsProbe::Version(v),
-        None => WasmToolsProbe::Failed(format!(
-            "`wasm-tools --version` printed unparseable output: {:?}",
-            stdout.trim()
-        )),
-    }
-}
-
-/// `wasm-tools --version` prints `wasm-tools <semver>`. Split out from the
-/// process call so the parse is unit-testable without the binary installed.
-fn parse_wasm_tools_version(stdout: &str) -> Option<String> {
-    stdout.split_whitespace().nth(1).map(str::to_owned)
 }
 
 fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow::Result<()> {
@@ -552,55 +432,4 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
     }
 
     Ok(order)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The pinned version must stay in step with the installer in
-    /// `.github/workflows/full-gate.yml`; a silent divergence would make the
-    /// local gate warn on exactly the version CI uses (see #80).
-    #[test]
-    fn expected_wasm_tools_matches_the_full_gate_installer_pin() {
-        let root = repo_root::repo_root().unwrap();
-        let workflow =
-            std::fs::read_to_string(root.join(".github/workflows/full-gate.yml")).unwrap();
-        assert!(
-            workflow.contains(&format!("wasm-tools@{EXPECTED_WASM_TOOLS}")),
-            "full-gate.yml must install wasm-tools@{EXPECTED_WASM_TOOLS}"
-        );
-    }
-
-    /// The encoder determines the committed Component's bytes, so every
-    /// manifest's `[artifact] toolchain` fingerprint must name the encoder its
-    /// pinned `sha256` was produced with. Without this the fingerprint claims
-    /// to identify the build while omitting a factor that changes the digest
-    /// (see #80), and `EXPECTED_WASM_TOOLS` could be bumped without anyone
-    /// re-pinning the artifacts.
-    #[test]
-    fn every_tool_manifest_fingerprint_names_the_expected_wasm_tools() {
-        let root = repo_root::repo_root().unwrap();
-        let manifests =
-            crate::tool_codegen::discover_tool_manifests(&root).expect("discover manifests");
-        assert!(
-            !manifests.is_empty(),
-            "expected at least one tools/*/manifest.toml"
-        );
-        let needle = format!("wasm-tools-{EXPECTED_WASM_TOOLS}");
-        for manifest in manifests {
-            let raw = std::fs::read_to_string(&manifest).unwrap();
-            let toolchain = raw
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("toolchain = "))
-                .unwrap_or_else(|| panic!("{} has no [artifact] toolchain", manifest.display()))
-                .trim_matches('"');
-            assert!(
-                toolchain.contains(&needle),
-                "{}: [artifact] toolchain is {toolchain:?}, which does not name {needle}; \
-                 re-run `cargo xtask tool-build` after changing the encoder pin",
-                manifest.display()
-            );
-        }
-    }
 }

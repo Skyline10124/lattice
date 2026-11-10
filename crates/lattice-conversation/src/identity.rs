@@ -7,16 +7,15 @@
 //! `SessionId` is the existing production session identity (32 lowercase hex
 //! characters, as produced by `Uuid::new_v4().simple()` at session creation).
 //!
-//! This crate validates parse, display, serde, and schema forms only. It never
-//! generates either value: `lattice-api::TurnCoordinator` generates
-//! `InvocationId`/`TurnId` from an injectable UUID source. There is no String
-//! alias and no second newtype for the same identity.
+//! 本模块仅校验解析、显示与 serde 表示，不生成身份值：`InvocationId` 由
+//! `lattice-api::TurnCoordinator` 经可注入的 UUID v4 源生成，`SessionId` 与
+//! `TurnId` 由客户端经 `lattice_api::local` 生成（ADR 0009 决策 5）。同一身份不设
+//! `String` 别名或第二个 newtype。
 
 use std::borrow::Cow;
 use std::fmt;
 use std::str::FromStr;
 
-use schemars::{JsonSchema, Schema, SchemaGenerator};
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de::Error as _};
 use thiserror::Error;
 
@@ -135,11 +134,8 @@ impl fmt::Debug for UuidV4 {
     }
 }
 
-const UUID_V4_PATTERN: &str =
-    "^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$";
-
 macro_rules! strict_uuid_v4_id {
-    ($(#[$meta:meta])* $name:ident, $schema_name:literal) => {
+    ($(#[$meta:meta])* $name:ident, $type_name:literal) => {
         $(#[$meta])*
         #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
         pub struct $name(UuidV4);
@@ -168,7 +164,7 @@ macro_rules! strict_uuid_v4_id {
 
         impl fmt::Debug for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, concat!($schema_name, "({})"), self.as_str())
+                write!(f, concat!($type_name, "({})"), self.as_str())
             }
         }
 
@@ -195,27 +191,12 @@ macro_rules! strict_uuid_v4_id {
                 Self::parse(&raw).map_err(D::Error::custom)
             }
         }
-
-        impl JsonSchema for $name {
-            fn schema_name() -> Cow<'static, str> {
-                $schema_name.into()
-            }
-
-            fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-                schemars::json_schema!({
-                    "type": "string",
-                    "pattern": UUID_V4_PATTERN,
-                })
-            }
-        }
     };
 }
 
 strict_uuid_v4_id!(
-    /// One Tool invocation identity (ADR 0005 §1): a strict lowercase
-    /// hyphenated UUID v4. The same value identifies the conversation binding,
-    /// CEP request ID, transport events/cancellation, Host execution context,
-    /// terminal Cell evidence, ToolResult closure, and operator output.
+    /// 一次工具调用的身份（ADR 0005 §1）：严格的小写连字符 UUID v4，贯穿调用槽位绑定、
+    /// 执行、取消与结果保存。
     InvocationId,
     "InvocationId"
 );
@@ -304,19 +285,6 @@ impl<'de> Deserialize<'de> for SessionId {
     {
         let raw = <Cow<'de, str>>::deserialize(deserializer)?;
         Self::parse(&raw).map_err(D::Error::custom)
-    }
-}
-
-impl JsonSchema for SessionId {
-    fn schema_name() -> Cow<'static, str> {
-        "SessionId".into()
-    }
-
-    fn json_schema(_generator: &mut SchemaGenerator) -> Schema {
-        schemars::json_schema!({
-            "type": "string",
-            "pattern": "^[0-9a-f]{32}$",
-        })
     }
 }
 
@@ -461,19 +429,11 @@ mod tests {
     }
 
     #[test]
-    fn session_id_serde_and_schema() {
+    fn session_id_serde_roundtrip_and_strict_deserialize() {
         let id = SessionId::parse(VALID_SESSION).expect("valid");
         let json = serde_json::to_string(&id).expect("serialize");
         let back: SessionId = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(id, back);
         assert!(serde_json::from_str::<SessionId>("\"ABCD\"").is_err());
-
-        let mut generator = SchemaGenerator::default();
-        let schema = SessionId::json_schema(&mut generator);
-        let value = serde_json::to_value(&schema).expect("schema to value");
-        assert_eq!(
-            value["pattern"].as_str().expect("pattern"),
-            "^[0-9a-f]{32}$"
-        );
     }
 }

@@ -6,7 +6,11 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 重导出对话类型、协议上限常量，以及 `lancet-protocol` 的调用身份、地址、`canonical_json` 与 `arguments_digest`，`lattice-*` 经此导入这些项 |
+| `src/lib.rs` | 重导出身份类型、结构地址、规范 JSON、参数摘要、对话类型与协议上限常量 |
+| `src/identity.rs` | `SessionId`（32 位小写十六进制）、`TurnId` 与 `InvocationId`（小写连字符 UUID v4）严格解析、显示与 serde 表示，以及 `IdParseError` |
+| `src/address.rs` | 结构化地址 `ModelMessageAddress`、`ToolCallAddress` 与模型尝试键 `ModelAttemptKey` |
+| `src/canonical.rs` | 键按 UTF-8 字节序显式排序的无空白规范 JSON 序列化 `canonical_json` |
+| `src/digest.rs` | 工具调用参数对象的域分离 SHA-256 摘要 `arguments_digest` |
 | `src/effort.rs` | 推理档位 `Effort` 解析与排序 |
 | `src/model_selection.rs` | `ProviderId`、`ModelId`、`ModelRef` 构造与字符、长度校验 |
 | `src/message.rs` | 有序 `NativeMessage<ToolCallState>`、`MessagePart`、回放来源 `ReplayOrigin` 与 64 KiB `OpaqueProviderState` |
@@ -30,7 +34,8 @@
 
 ## 约束
 
-- `Cargo.toml` 仅依赖 `lancet-protocol` 与纯数据序列化、摘要库，保持确定性的内存数据结构与校验逻辑。
+- `Cargo.toml` 仅依赖纯数据序列化、摘要与错误库，保持确定性的内存数据结构与校验逻辑。
+- `tests/primitives_golden.rs` 锁定身份解析、显示、serde、`canonical_json` 与 `arguments_digest` 的逐字节行为，改动这些行为须由维护者确认。
 - 工具调用以 `UnboundToolCall` 与 `BoundToolCall` typestate 区分待登记与已绑定状态；参数在构造时解析为单个 JSON 对象，完整批次经 `validate_tool_call_batch` 核验（单批上限 `MAX_TOOL_CALLS_PER_BATCH = 32`，任一无效或超限则整批拒绝），保证进入会话库的调用槽位均对应完整有效回复，见[有序消息与 ToolCall](../../docs/architecture/session/conversation.md#有序消息与-toolcall)。
 - 参数摘要按 `SHA-256(domain_separator + u64_be(len) + canonical_bytes)` 计算，`BoundToolCall` 反序列化时从参数重算摘要并在失配时返回 `ArgumentsDigestMismatch`；`src/tool_call.rs` 的 golden 摘要值锁定持久与 wire 兼容性，变更该算法前须由维护者确认迁移方案。
 - `OpaqueProviderState` 按片段原样保留不透明回放材料（上限 64 KiB，包含正文为空的片段），见[回放与跨 provider 投影](../../docs/architecture/session/conversation.md#回放与跨-provider-投影)。
@@ -43,5 +48,5 @@
 | 改动 | 运行 |
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-conversation` |
-| 修改参数规范化或摘要构造 | 运行 `cargo test -p lattice-conversation`，保持 `src/tool_call.rs` 的 golden 摘要用例原值通过 |
+| 修改身份解析、结构地址、参数规范化或摘要构造 | 运行 `cargo test -p lattice-conversation`，保持 `tests/primitives_golden.rs` 与 `src/tool_call.rs` 的 golden 用例原值通过 |
 | 修改公开对话类型、上限常量或用量结构 | `cargo test -p lattice-session`、`cargo test -p lattice-llm`、`cargo test -p lattice-api` |

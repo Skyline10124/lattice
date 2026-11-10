@@ -7,10 +7,10 @@
 //! a versioned JSON record:
 //!
 //!   1. clean tracked worktree check (explicit rejection on tracked dirt)
-//!   2. capability probes (rustc pin, wasm32 target, informational host facts)
+//!   2. capability probes (rustc pin, informational host facts)
 //!   3. `cargo build --locked --release -p lattice-cli --bin lattice`
 //!   4. artifact identity (sha256 + size)
-//!   5. dependency/architecture boundary checks (public xtask contracts)
+//!   5. `cargo xtask harness-boundary` (dependency/architecture boundary check)
 //!   6. Direct-Local harness scenarios against the release binary (`LATTICE_BIN`)
 //!   7. offline correctness suites (with an anti-vacuous zero-pass guard)
 //!
@@ -326,11 +326,6 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         .current_dir(&ctx.root)
         .args(["xtask", "harness-boundary"]);
 
-    let mut lancet_boundary = Command::new("cargo");
-    lancet_boundary
-        .current_dir(&ctx.root)
-        .args(["xtask", "lancet-boundary"]);
-
     let mut direct_local = Command::new("cargo");
     direct_local
         .current_dir(&ctx.root)
@@ -342,11 +337,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
     offline.current_dir(&ctx.root).args([
         "test",
         "-p",
-        "lancet-protocol",
-        "-p",
-        "lancet-runtime",
-        "-p",
-        "lancet-authority",
+        "lattice-conversation",
         "-p",
         "lattice-api",
         "-p",
@@ -378,11 +369,6 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
             id: "harness_boundary",
             display: display_command(&harness_boundary),
             action: Action::Cmd(harness_boundary, CMD_TIMEOUT),
-        },
-        Planned {
-            id: "lancet_boundary",
-            display: display_command(&lancet_boundary),
-            action: Action::Cmd(lancet_boundary, CMD_TIMEOUT),
         },
         Planned {
             id: "direct_local",
@@ -491,8 +477,7 @@ fn git_output(root: &Path, args: &[&str]) -> Result<String, String> {
 fn collect_probes() -> Vec<CapabilityProbe> {
     let mut probes = Vec::new();
 
-    // Same toolchain contract as `cargo xtask ci`: pinned 1.96.0 +
-    // wasm32-unknown-unknown std.
+    // 与 `cargo xtask ci` 一致：核验 `rust-toolchain.toml` 固定的 rustc 1.96.0。
     let rustc = Command::new("rustc").arg("--version").output();
     let (value, ok) = match rustc {
         Ok(o) if o.status.success() => {
@@ -507,45 +492,6 @@ fn collect_probes() -> Vec<CapabilityProbe> {
         name: "rustc_version".into(),
         value,
         gating: true,
-        ok,
-    });
-
-    let targets = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .output();
-    let ok = targets
-        .as_ref()
-        .map(|o| {
-            o.status.success()
-                && String::from_utf8_lossy(&o.stdout)
-                    .lines()
-                    .any(|l| l.trim() == "wasm32-unknown-unknown")
-        })
-        .unwrap_or(false);
-    probes.push(CapabilityProbe {
-        name: "wasm32_target_installed".into(),
-        value: "wasm32-unknown-unknown".into(),
-        gating: true,
-        ok,
-    });
-
-    // The Component encoder. Non-gating (rollout builds the CLI, not the
-    // Source Tool Components), but recorded so a release record can answer
-    // "which encoder produced the embedded Components" — the `[artifact]
-    // toolchain` fingerprint does not carry it yet. See #73 / #80.
-    // `ok` tracks whether the probe *answered*, not whether the capability is
-    // required — same convention as `git_version` below. A missing encoder
-    // still must not gate (rollout builds the CLI, not the Components), but
-    // recording ok:true for "not installed" would make the release record
-    // claim a successful probe of a tool that was never found.
-    let (value, ok) = match crate::ci::wasm_tools_version() {
-        Some(v) => (v, true),
-        None => ("`wasm-tools --version` unavailable".to_owned(), false),
-    };
-    probes.push(CapabilityProbe {
-        name: "wasm_tools_version".into(),
-        value,
-        gating: false,
         ok,
     });
 
@@ -849,7 +795,6 @@ mod tests {
                 "build_release_locked",
                 "artifact_identity",
                 "harness_boundary",
-                "lancet_boundary",
                 "direct_local",
                 "offline_correctness",
             ],

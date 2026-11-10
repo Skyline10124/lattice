@@ -10,11 +10,11 @@ status: active
 
 | 原则 | 做法 |
 | --- | --- |
-| 宿主与 guest 分开构建 | 宿主用 `cargo build -p lattice-cli --bin lattice`；Source Tool guest 由 `cargo xtask tool-build` 构建。`cargo build --workspace` 会按宿主链接 guest 的 `cdylib`，所以宿主构建指定包与二进制 |
+| 构建宿主 CLI | 用 `cargo build -p lattice-cli --bin lattice` 构建被测宿主二进制 |
 | 被测二进制与验证对象相符 | `LATTICE_BIN` 指向当前产物的绝对路径；`cargo test -p lattice-system-harness` 的工作目录是 crate 目录，相对路径会落在那里；worktree 中指向本 worktree 的产物。见[被测二进制](testing.md#被测二进制) |
 | 测试与产品的 profile 分开 | `cargo test --release` 只切换测试自身的 profile；验证 release 产品时，先构建 release 产物并更新 `LATTICE_BIN` |
 | 带 feature 的产物只用于对应场景 | 假工具与崩溃屏障场景使用带 `test-fake-tools`、`test-crash-barriers` 的产物（`cargo xtask ci` 第二轮也会用它覆盖 `target/debug/lattice`）；之后做普通验证前先重新构建无 feature 的二进制 |
-| 工具链固定 | Rust、guest 目标与 encoder 的版本以 `rust-toolchain.toml`、[`EXPECTED_WASM_TOOLS`](../../xtask/src/ci.rs) 与 `tools/*/manifest.toml` 为准 |
+| 工具链固定 | Rust 工具链版本以 [`rust-toolchain.toml`](../../rust-toolchain.toml) 为准 |
 
 ## 环境与后台
 
@@ -53,8 +53,8 @@ status: active
 
 | 门禁 | 触发 | 独有的检查 | 不包含 |
 | --- | --- | --- | --- |
-| 本地 [`xtask ci`](../../xtask/src/ci.rs) | 手动 | 工具链预检；逐 crate 测试带超时；最后运行 `tool-build --verify`，只有摘要漂移为警告 | rollout |
-| 普通 CI [`ci.yml`](../../.github/workflows/ci.yml) | `main` push 与所有 PR | 只改 `.md` 的 PR 只运行 `docs-check` | encoder 安装、`tool-build --verify`、rollout |
-| [`full-gate`](../../.github/workflows/full-gate.yml) | 每日定时与手动 | 安装固定 encoder，运行无测试 feature 的 alpha rollout，并以 `if: always()` 运行 `tool-build --verify` | `docs-check` |
+| 本地 [`xtask ci`](../../xtask/src/ci.rs) | 手动 | 工具链预检；逐 crate 测试带超时 | rollout |
+| 普通 CI [`ci.yml`](../../.github/workflows/ci.yml) | `main` push 与所有 PR | 只改 `.md` 的 PR 只运行 `docs-check` | rollout |
+| [`full-gate`](../../.github/workflows/full-gate.yml) | 每日定时与手动 | 运行无测试 feature 的 alpha rollout | `docs-check` |
 
 运行重型验证之前，核对并行的编译任务、内存与磁盘余量；资源限制按[工程规范](engineering.md#验证)执行。

@@ -40,7 +40,7 @@ status: active
 
 | 卡片 | 内容 |
 | --- | --- |
-| [构建被测产物](manual/build.md) | 安装工具链，构建宿主 CLI 与 Source Tool Component |
+| [构建被测产物](manual/build.md) | 构建宿主 CLI，设置被测路径 |
 | [提交与找回](manual/submit-and-recover.md) | 新建与续接会话、选择模型与档位、提交中断后按 TurnId 找回 |
 | [查询、观察与用量](manual/observe-and-usage.md) | 读取 Turn 详情、持续观察、在 TUI 中打开会话、查询用量 |
 | [会话退回与分叉](manual/rewind.md) | 查看会话树，退回到节点后分叉提交 |

@@ -12,7 +12,7 @@ status: active
 
 Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的规范工作区必须与该绑定一致。提交端保留规范 SessionId，输入或显示中的缩写由公开 API 解析。
 
-会话库只在创建新 Session 的提交路径上首次创建；打开不初始化、不修复。发现旧版会话库或调用库时打开失败并指出路径，由人删除或存档。创建、打开与格式版本规则由[存储合同](../storage.md#会话库)维护。
+会话库只在创建新 Session 的提交路径上首次创建；打开不初始化、不修复。状态根下存在 `sessions.git` 或 `projects/*/invocations.git` 时打开失败并指出路径，由人删除或存档。创建、打开与格式版本规则由[存储合同](../storage.md#会话库)维护。
 
 ## 事务与一致性
 
@@ -30,10 +30,9 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | `rewind` | 独占 SessionExecutionLock | 覆盖该写操作；与 live Turn 互斥 |
 | `list`、`log`、`turn`，视图与历史查询的读取 | 会话库读事务 | 不取操作锁，不等待 live Turn 排空 |
 | 后台准入 | Backend 短临界区 | 只管理接管权，释放后才执行 provider、存储或整段 Turn |
-| 工作区观察与变更 | 项目 WorkspaceOperationLock | 按[工作区操作锁](../workspace.md#操作锁)覆盖相应操作；关闭 Step 不取得该锁 |
 | 会话库写入 | 该库的写事务 | 库保证同一时刻只有一个写事务；覆盖一次推进 |
 
-不同 Session 的执行锁独立，同项目不同 Session 的模型执行可以重叠。共享工作区按操作协调，而非按整个 Turn 排队。涉及多类锁时依次取得 SessionExecutionLock、WorkspaceOperationLock，最后是会话库写事务或至多一个 repository write lock，两者不同时持有；锁序与释放规则由[存储合同](../storage.md#锁与并发语义)维护。
+不同 Session 的执行锁独立，同项目不同 Session 的模型执行可以重叠。涉及多类锁时先取 SessionExecutionLock、再进入会话库写事务；锁序与释放规则由[存储合同](../storage.md#锁与并发语义)维护。
 
 ## 范围与禁止事项
 
@@ -48,7 +47,7 @@ Session 永久绑定产品组合层提供的 `ProjectStoreKey`，执行请求的
 | 对话与会话领域 | conversation 不持有存储、运行时、HTTP 客户端或身份生成器；session 只接收组合层提供的项目绑定，不从进程 cwd 推导 |
 | 配置与凭据 | 后台读取，前端只交选择；endpoint 只来自内置表与用户全局的 `providers.toml`，凭据只在 `auth.json` 与后台内存中，见[模型接入合同](../llm/providers.md#endpoint-的来源) |
 | 文件与跨库效果 | 退回不修改文件，取消/超时/断连不推定效果未发生，也不提供跨库事务或回滚；文件恢复不在本合同提供 |
-| 锁与阻塞操作 | 不同时持有会话库写事务与仓库写锁，不持写事务或仓库锁反向取操作锁或升级共享锁；写事务内不等待外部操作 |
+| 锁与阻塞操作 | 不持会话库写事务反向取操作锁、不升级共享锁、写事务内不等待外部操作 |
 | 部署与数据能力 | 本地 Linux 后台与本地持久化范围内工作；远程服务、HA、多进程访问会话库、真实数据迁移和逐 token 持久化不属于本合同 |
 
 ## 输入与传输限制

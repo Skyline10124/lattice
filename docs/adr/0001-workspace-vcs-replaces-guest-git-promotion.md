@@ -6,7 +6,7 @@ status: superseded
 
 - Status: Superseded by ADR 0002
 - Date: 2026-07-15
-- 历史状态：本 ADR 已由 ADR 0002 取代，不作为当前规范。后续 Direct-Local 与私有历史规则见[工作区合同](../architecture/workspace.md)，术语见[领域术语表](../reference/glossary.md)。原文保留供追溯。
+- 历史状态：本 ADR 已由 ADR 0002 取代，不作为当前规范。后续 Direct-Local 与私有历史规则见[工作区合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/workspace.md)，术语见[领域术语表](../reference/glossary.md)。原文保留供追溯。
 
 ## Context
 

@@ -132,7 +132,9 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
 
     let layout = StateLayout::in_state_root(state.path());
     let workspace = LocalWorkspaceRoot::from_path(workspace_dir.path()).unwrap();
-    let history_path = layout.project_store(&workspace.store_key(), "workspace-history.git");
+    let history_path = layout
+        .project_dir(&workspace.store_key())
+        .join("workspace-history.git");
 
     let serving = tokio::spawn(serve_for_test(layout.clone(), Some(home.path().into())));
     let client = LocalClient::new(layout);
@@ -196,7 +198,9 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
 
     let layout = StateLayout::in_state_root(state.path());
     let workspace = LocalWorkspaceRoot::from_path(workspace_dir.path()).unwrap();
-    let history_dir = layout.project_store(&workspace.store_key(), "workspace-history.git");
+    let history_dir = layout
+        .project_dir(&workspace.store_key())
+        .join("workspace-history.git");
     std::fs::create_dir_all(history_dir.join("refs/heads")).unwrap();
     let head_sentinel = history_dir.join("HEAD");
     let extra_sentinel = history_dir.join("refs/heads/legacy-sentinel");

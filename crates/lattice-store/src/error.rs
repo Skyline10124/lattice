@@ -60,43 +60,11 @@ pub enum StoreError {
         source: std::io::Error,
     },
 
-    /// Legacy lock-upgrade classification retained for API compatibility.
-    /// Current independent operation-lock conflicts are [`Self::Busy`]; the
-    /// kernel never infers ownership from a thread or task identity.
-    #[error("lock upgrade forbidden: '{}'", .path.display())]
-    LockUpgrade {
-        /// The lock file.
-        path: PathBuf,
-    },
-
     /// A non-blocking acquire found the lock held.
     #[error("lock busy: '{}'", .path.display())]
     Busy {
         /// The lock file.
         path: PathBuf,
-    },
-
-    /// Strict-open target does not exist. Never an invitation to initialize.
-    #[error("store not initialized at '{}'", .path.display())]
-    NotInitialized {
-        /// The expected repository path.
-        path: PathBuf,
-    },
-
-    /// Existing state failed identity or invariant validation.
-    #[error("store corruption: {detail}")]
-    Corruption {
-        /// What is broken.
-        detail: String,
-    },
-
-    /// A ref compare-and-set lost the race or its precondition failed.
-    #[error("ref CAS conflict on {ref_name}: {detail}")]
-    CasConflict {
-        /// The ref being updated.
-        ref_name: String,
-        /// Why it conflicted.
-        detail: String,
     },
 
     /// A required Linux/filesystem primitive is missing at this location.
@@ -106,20 +74,6 @@ pub enum StoreError {
         /// Which primitive (e.g. `renameat2(RENAME_NOREPLACE)`).
         primitive: &'static str,
         /// How the absence manifested.
-        detail: String,
-    },
-
-    /// Git object/reference mechanics failure.
-    #[error("git error: {0}")]
-    Git(String),
-
-    /// A caller violated a documented kernel precondition or input contract
-    /// (e.g. an empty store name or a ref outside `refs/lattice/`). This is
-    /// an API misuse, not store damage — unlike `Corruption`, the store's
-    /// contents are not at fault.
-    #[error("invalid kernel input: {detail}")]
-    InvalidInput {
-        /// What was invalid.
         detail: String,
     },
 }

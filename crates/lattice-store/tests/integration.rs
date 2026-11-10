@@ -6,19 +6,12 @@
 //!
 //! - raw path-byte `ProjectStoreKey` coverage: same-path reuse, move ⇒ new
 //!   key, non-UTF8 paths, symlink canonical identity;
-//! - `$XDG_STATE_HOME` fallback semantics;
-//! - SIGKILL/reopen consistency of first-create: a store is either absent or
-//!   fully valid, never half-published (ADR 0005 §18: this demonstrates
-//!   process-crash consistency, not hardware power-loss consistency).
+//! - `$XDG_STATE_HOME` fallback semantics.
 
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
-use lattice_store::{ProjectStoreKey, StateLayout, StoreError, StoreRepo, xdg_state_root};
-
-fn key() -> ProjectStoreKey {
-    ProjectStoreKey::from_canonical_path_bytes(b"/ws")
-}
+use lattice_store::{ProjectStoreKey, StoreError, xdg_state_root};
 
 #[test]
 fn project_store_key_path_semantics() {
@@ -106,146 +99,4 @@ fn xdg_state_root_fallback_order() {
             None => std::env::remove_var("HOME"),
         }
     }
-}
-
-#[test]
-fn create_returns_after_releasing_create_lock_and_repo_lock_is_distinct() {
-    let state = tempfile::tempdir().unwrap();
-    let layout = StateLayout::in_state_root(state.path());
-    let repo = StoreRepo::create_project(
-        &layout,
-        &key(),
-        "workspace-history.git",
-        "workspace-history",
-        1,
-        |_| Ok(()),
-    )
-    .unwrap();
-
-    // 首次创建锁文件保留在父目录中，但 `StoreRepo::create*` 返回前已经释放。
-    // 稳态仓库写操作使用仓库内另一条锁文件路径。
-    let create_lock = layout
-        .project_dir(&key())
-        .join(".workspace-history.git.create.lock");
-    assert!(create_lock.exists());
-
-    let write = repo.write_lock().expect("repository write lock");
-    assert!(write.path().starts_with(repo.git_dir()));
-    assert!(write.path().ends_with("lattice-repo.lock"));
-    assert_ne!(write.path(), create_lock.as_path());
-    drop(write);
-
-    let create = lattice_store::lock::acquire_flock_strict(
-        &create_lock,
-        lattice_store::Blocking::NonBlocking,
-    )
-    .expect("create lock must be free after create returns");
-    drop(create);
-}
-
-/// Child mode: publish one store, then stop inside a second store's init callback
-/// so the parent can SIGKILL us at a known pre-publication point.
-fn crash_child_loop(dir: &Path) {
-    let layout = StateLayout::in_state_root(dir);
-    StoreRepo::create_project(
-        &layout,
-        &key(),
-        "store-0.git",
-        "workspace-history",
-        1,
-        |_| Ok(()),
-    )
-    .unwrap();
-    StoreRepo::create_project(
-        &layout,
-        &key(),
-        "store-1.git",
-        "workspace-history",
-        1,
-        |_| {
-            std::fs::write(dir.join("crash-child-ready"), b"ready").unwrap();
-            loop {
-                std::thread::park();
-            }
-        },
-    )
-    .unwrap();
-}
-
-#[test]
-fn sigkill_mid_create_leaves_only_absent_or_fully_valid_stores() {
-    if let Ok(dir) = std::env::var("LATTICE_STORE_CRASH_CHILD") {
-        crash_child_loop(Path::new(&dir));
-        return;
-    }
-
-    let dir = tempfile::tempdir().unwrap();
-    let exe = std::env::current_exe().unwrap();
-    let mut child = std::process::Command::new(exe)
-        .args([
-            "sigkill_mid_create_leaves_only_absent_or_fully_valid_stores",
-            "--exact",
-            "--nocapture",
-        ])
-        .env("LATTICE_STORE_CRASH_CHILD", dir.path())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn crash child");
-
-    // Wait until the child has published one complete store and is blocked
-    // inside a second store's pre-publication init callback, then SIGKILL it.
-    let ready = dir.path().join("crash-child-ready");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let kill_result = loop {
-        if ready.exists() {
-            break unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
-        }
-        if let Some(status) = child.try_wait().expect("poll crash child") {
-            panic!("crash child exited before reaching the kill point: {status}");
-        }
-        if std::time::Instant::now() >= deadline {
-            unsafe { libc::kill(child.id() as i32, libc::SIGKILL) };
-            child.wait().expect("reap timed-out crash child");
-            panic!("crash child did not reach the kill point");
-        }
-        std::thread::sleep(std::time::Duration::from_millis(1));
-    };
-    assert_eq!(kill_result, 0, "SIGKILL must reach the crash child");
-    let status = child.wait().expect("wait for child");
-    assert!(!status.success(), "child should have been killed");
-
-    // Every target is either absent or a fully valid store; a stale sibling
-    // temp never blocks recreation.
-    let layout = StateLayout::in_state_root(dir.path());
-    StoreRepo::open_project(&layout, &key(), "store-0.git", "workspace-history", 1).unwrap();
-    assert!(
-        !layout.project_store(&key(), "store-1.git").exists(),
-        "the store interrupted before publication must remain absent"
-    );
-
-    // A fresh create at the same state root still works (stale temps and
-    // lock files from the dead child are reclaimed/harmless).
-    StoreRepo::create_project(
-        &layout,
-        &key(),
-        "after-crash.git",
-        "workspace-history",
-        1,
-        |_| Ok(()),
-    )
-    .unwrap();
-    StoreRepo::open_project(&layout, &key(), "after-crash.git", "workspace-history", 1).unwrap();
-
-    // And re-creating the target interrupted before publication works too.
-    StoreRepo::create_project(
-        &layout,
-        &key(),
-        "store-1.git",
-        "workspace-history",
-        1,
-        |_| Ok(()),
-    )
-    .unwrap();
-    StoreRepo::open_project(&layout, &key(), "store-1.git", "workspace-history", 1).unwrap();
 }

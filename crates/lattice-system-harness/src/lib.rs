@@ -3,7 +3,7 @@
 
 //! External system harness for the `lattice` binary.
 //!
-//! This crate must not depend on any `lattice-*`, `lancet-*`, or workspace product
+//! This crate must not depend on any `lattice-*` or workspace product
 //! crate. It only drives a pre-built binary from `LATTICE_BIN`.
 
 pub mod artifacts;

@@ -8,17 +8,14 @@
 //! exists, and they are the address vocabulary shared by conversation binding
 //! and the Session store's invocation slots.
 //!
-//! This crate is pure data: no I/O, no runtime, no tokio.
+//! 本模块为纯数据定义：无 I/O、无运行时、无 tokio。
 
-use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::identity::{SessionId, TurnId};
 
 /// Structural address of one provider-produced model message inside a Turn.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModelMessageAddress {
     /// Session that owns the conversation.
     pub session_id: SessionId,
@@ -29,9 +26,7 @@ pub struct ModelMessageAddress {
 }
 
 /// Structural address of one ToolCall part inside a model message.
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ToolCallAddress {
     /// Address of the containing model message.
     pub message: ModelMessageAddress,
@@ -44,9 +39,7 @@ pub struct ToolCallAddress {
 ///
 /// A retry after a pre-stream failure starts a new `attempt_ordinal` without
 /// consuming another model step (ADR 0005 §10).
-#[derive(
-    Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize, JsonSchema,
-)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ModelAttemptKey {
     /// Accepted user Turn the attempt belongs to.
     pub turn_id: TurnId,

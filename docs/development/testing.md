@@ -151,17 +151,15 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 | 入口 | 职责 |
 | --- | --- |
 | `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再执行两轮验证（含测试 feature 的 clippy）与依赖边界检查；只改 Markdown 的 PR 只运行文档链接检查 |
-| `.github/workflows/full-gate.yml` | 手动或定时的完整验证：执行两轮验证（含测试 feature 的 clippy）、alpha release rollout 与 Component 可复现性证据 |
+| `.github/workflows/full-gate.yml` | 手动或定时的完整验证：执行两轮验证（含测试 feature 的 clippy）与 alpha release rollout |
 | `cargo xtask docs-check` | 检查 Git 跟踪的 Markdown 文件中相对链接的目标文件与标题锚点 |
 | `cargo xtask ci` | 本地两轮验证编排（第二轮覆盖 `target/debug/lattice`），控制编译并发与每个 crate 的测试超时 |
 | `cargo xtask rollout --channel alpha` | 对锁定的无测试 feature release 构建记录产物身份、依赖边界与生产形态验证步骤 |
 
 - rollout 在全部必需步骤实际通过时通过：失败、阻塞或跳过都算未通过，测试步骤要有非零的通过数。步骤结果逐步保存，未执行的步骤保持阻塞，失败证据与产物身份关联到对应构建。发布由维护者执行，见[项目宪章](../governance/charter.md)。
-- Component 可复现性检查中，只有产物摘要漂移为警告；guest 构建、Component 编码、验证、imports 或 WIT 不符合要求都是失败。跨机可复现的证据要升级为硬门禁时，另提提案，由维护者决定。
 - `.githooks/pre-commit` 只阻止误暂存被忽略的文件，测试由上表的入口运行。
 
 ## 验证
 
 - 修改驱动或证据机制时，先验证超时、清理、脱敏与报告的直接边界，再选必要的场景卡片。
 - 核对实际行为的入口：[harness 局部指引](../../crates/lattice-system-harness/AGENTS.md)、[场景定义](../../crates/lattice-system-harness/src/scenario.rs)、[进程驱动](../../crates/lattice-system-harness/src/driver.rs)、[harness manifest](../../crates/lattice-system-harness/Cargo.toml)、[普通 CI](../../.github/workflows/ci.yml)、[完整验证](../../.github/workflows/full-gate.yml)、[本地验证入口](../../xtask/src/ci.rs)与 [rollout](../../xtask/src/rollout.rs)。
-- [Bundle 安装与活动版本切换](../architecture/lancet.md#bundle-安装设计)尚未实现，它的验证在现有默认产品矩阵之外。

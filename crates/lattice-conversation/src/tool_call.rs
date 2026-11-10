@@ -11,17 +11,16 @@
 //! `InvocationId`, or conversation-tree content — this validator is the
 //! fail-closed gate that decision is built from.
 
-use lancet_protocol::{InvocationId, ToolCallAddress, arguments_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
 
 use crate::limits::{MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH};
 use crate::message::{ToolCallState, sealed};
+use crate::{InvocationId, ToolCallAddress, arguments_digest};
 
-/// A Tool call as produced by a provider before binding: the optional
-/// provider-native call ID plus canonical semantics. Never carries a LANCET
-/// identity.
+/// provider 产生的未绑定工具调用：可选的 provider 原生调用 ID 与规范语义；
+/// 登记前不携带 `InvocationId`，登记时才绑定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnboundToolCall {
     /// The provider-native Tool Call ID, preserved verbatim when the provider
@@ -354,7 +353,7 @@ mod tests {
         let hex: String = digest.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(hex, expected);
     }
-    use lancet_protocol::{ModelMessageAddress, SessionId, TurnId};
+    use crate::{ModelMessageAddress, SessionId, TurnId};
 
     fn raw(name: &str, arguments: &str) -> RawToolCall {
         RawToolCall {
@@ -405,7 +404,7 @@ mod tests {
         let validated = validate_tool_call_batch(&calls).expect("valid batch");
         assert_eq!(validated.len(), 1);
         assert_eq!(
-            lancet_protocol::canonical_json(&validated[0].arguments),
+            crate::canonical_json(&validated[0].arguments),
             r#"{"a":1,"b":2}"#
         );
     }

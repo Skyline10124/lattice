@@ -1,8 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Canonical JSON serialization — the single implementation behind the
-//! deterministic context measures and versioned Cell-evidence construction.
+//! 规范 JSON 序列化——工具参数摘要、会话库配置摘要与 provider 投影共用的确定性实现。
 //!
 //! Object keys are sorted explicitly at every depth: `serde_json::Map`
 //! iteration order is a build-time choice (the `preserve_order` feature),

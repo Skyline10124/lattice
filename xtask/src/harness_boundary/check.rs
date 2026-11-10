@@ -1,11 +1,11 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use cargo_metadata::{Metadata, MetadataCommand, PackageId};
+use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, PackageId};
 use regex::Regex;
 use toml::Value;
 
@@ -30,7 +30,7 @@ pub fn manifest_forbidden_deps(
     let mut hits = Vec::new();
     for (table_path, dep_key, dep_val) in iter_dep_tables(&data, "") {
         let (actual_name, path_val) = dep_identity(dep_key, dep_val);
-        if actual_name.starts_with("lattice-") || actual_name.starts_with("lancet-") {
+        if actual_name.starts_with("lattice-") {
             hits.push(format!(
                 "{}: [{table_path}] {dep_key}: forbidden product crate name '{actual_name}'",
                 manifest_path.display()
@@ -167,6 +167,101 @@ fn iter_dep_tables<'a>(table: &'a Value, prefix: &str) -> Vec<(String, &'a str, 
     out
 }
 
+/// 测试专用 feature 一旦进入生产依赖图，它守护的 `#[cfg(feature = "...")]` 门控随之失效：测试
+/// 辅助代码会进入 release 二进制与所有下游依赖图。测试代码经 `[dev-dependencies]` 启用这些
+/// feature。本检查覆盖三种泄漏：非测试 feature 转发到测试 feature、普通依赖显式启用测试 feature，
+/// 以及普通依赖的默认 feature 转发到测试 feature；dev-dependencies 与 build-dependencies 不在检查
+/// 范围内。
+///
+/// 按 feature 名的 `test-` 前缀识别，不维护枚举列表，任何 crate 新增的 `test-*` feature 都自动
+/// 纳入检查。
+pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<String>> {
+    let metadata = MetadataCommand::new()
+        .current_dir(repo_root)
+        .no_deps()
+        .exec()
+        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
+
+    let packages: BTreeMap<_, _> = metadata
+        .packages
+        .iter()
+        .map(|package| (package.name.as_str(), package))
+        .collect();
+    let mut parts = Vec::new();
+    for pkg in &metadata.packages {
+        for feature in pkg
+            .features
+            .keys()
+            .filter(|name| !name.starts_with("test-"))
+        {
+            if feature_reaches_test_only(&pkg.features, feature, &mut BTreeSet::new()) {
+                parts.push(format!(
+                    "{}: production feature '{feature}' forwards to a test-only feature",
+                    pkg.name
+                ));
+            }
+        }
+        for dep in &pkg.dependencies {
+            if dep.kind != DependencyKind::Normal {
+                continue;
+            }
+            let target = packages.get(dep.name.as_str()).copied();
+            let mut flagged = Vec::new();
+            for feature in &dep.features {
+                if feature.starts_with("test-")
+                    || target.is_some_and(|package| {
+                        feature_reaches_test_only(&package.features, feature, &mut BTreeSet::new())
+                    })
+                {
+                    flagged.push(feature.as_str());
+                }
+            }
+            if dep.uses_default_features
+                && target.is_some_and(|package| {
+                    feature_reaches_test_only(&package.features, "default", &mut BTreeSet::new())
+                })
+            {
+                flagged.push("default");
+            }
+            if !flagged.is_empty() {
+                parts.push(format!(
+                    "{}: [dependencies] {} enables test-only feature(s) {}; move the feature to the [dev-dependencies] entry",
+                    pkg.name.as_str(),
+                    dep.name,
+                    flagged.join(", ")
+                ));
+            }
+        }
+    }
+    Ok(parts)
+}
+
+fn feature_reaches_test_only(
+    features: &BTreeMap<String, Vec<String>>,
+    feature: &str,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    if feature.starts_with("test-") {
+        return true;
+    }
+    if !visiting.insert(feature.to_string()) {
+        return false;
+    }
+    let reaches = features.get(feature).is_some_and(|members| {
+        members.iter().any(|member| {
+            if let Some((_, dependency_feature)) = member.split_once('/') {
+                dependency_feature.starts_with("test-")
+            } else if member.starts_with("dep:") {
+                false
+            } else {
+                feature_reaches_test_only(features, member, visiting)
+            }
+        })
+    });
+    visiting.remove(feature);
+    reaches
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -207,12 +302,12 @@ lattice-api = "0.1"
             &manifest,
             r#"
 [dependencies]
-guard = { package = "lancet-protocol", path = '../crates/lancet-protocol' }
+guard = { package = "lattice-session", path = '../crates/lattice-session' }
 "#,
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(joined(&out).contains("forbidden product crate name 'lancet-protocol'"));
+        assert!(joined(&out).contains("forbidden product crate name 'lattice-session'"));
     }
 
     #[test]
@@ -299,5 +394,79 @@ edition = "2024"
         fs::write(guard.join("src/lib.rs"), "").unwrap();
         let out = metadata_transitive_workspace_members(root).unwrap();
         assert!(joined(&out).contains("net-guard"));
+    }
+
+    /// A two-crate virtual workspace where the consumer enables `test-utils`
+    /// from both dependency sections. Only the `[dependencies]` entry is a
+    /// finding; the `[dev-dependencies]` one is the fix #88 applied.
+    fn write_test_feature_workspace(root: &Path, production_features: &str) {
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nresolver = \"3\"\nmembers = [\"crates/consumer\", \"crates/helper\"]\n",
+        )
+        .unwrap();
+        let consumer = root.join("crates/consumer");
+        fs::create_dir_all(consumer.join("src")).unwrap();
+        fs::write(consumer.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            consumer.join("Cargo.toml"),
+            format!(
+                "[package]\nname = \"consumer\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\
+                 [dependencies]\nhelper = {{ path = \"../helper\"{production_features} }}\n\
+                 [dev-dependencies]\nhelper = {{ path = \"../helper\", features = [\"test-utils\"] }}\n"
+            ),
+        )
+        .unwrap();
+        let helper = root.join("crates/helper");
+        fs::create_dir_all(helper.join("src")).unwrap();
+        fs::write(helper.join("src/lib.rs"), "").unwrap();
+        fs::write(
+            helper.join("Cargo.toml"),
+            "[package]\nname = \"helper\"\nversion = \"0.0.0\"\nedition = \"2024\"\n[features]\ntest-utils = []\n",
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn production_test_feature_flagged_only_in_dependencies_section() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), ", features = [\"test-utils\"]");
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        let text = joined(&hits);
+        assert!(
+            text.contains("consumer") && text.contains("test-utils"),
+            "production test-utils not flagged: {text}"
+        );
+        assert_eq!(
+            hits.len(),
+            1,
+            "dev-dependencies entry must not count: {text}"
+        );
+    }
+
+    #[test]
+    fn production_feature_forwarding_to_test_utils_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), "");
+        let manifest = dir.path().join("crates/consumer/Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("[features]\nrelease = [\"helper/test-utils\"]\n");
+        fs::write(&manifest, text).unwrap();
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        assert!(joined(&hits).contains("production feature 'release'"));
+    }
+
+    #[test]
+    fn dependency_default_forwarding_to_test_utils_is_flagged() {
+        let dir = TempDir::new().unwrap();
+        write_test_feature_workspace(dir.path(), "");
+        let manifest = dir.path().join("crates/helper/Cargo.toml");
+        let mut text = fs::read_to_string(&manifest).unwrap();
+        text.push_str("default = [\"test-utils\"]\n");
+        fs::write(&manifest, text).unwrap();
+        let hits = production_test_feature_hits(dir.path()).unwrap();
+        let text = joined(&hits);
+        assert!(text.contains("consumer: [dependencies] helper"));
+        assert!(text.contains("default"));
     }
 }

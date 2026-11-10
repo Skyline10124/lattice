@@ -196,7 +196,8 @@ async fn session_turns_do_not_create_or_require_workspace_history() {
     let fixture = setup_fixture(llm.clone(), &[]);
     let history_dir = fixture
         .layout
-        .project_store(&fixture.root.store_key(), "workspace-history.git");
+        .project_dir(&fixture.root.store_key())
+        .join("workspace-history.git");
     let (first, _) = fixture.run(fixture.request.clone()).await;
     assert!(
         !history_dir.exists(),

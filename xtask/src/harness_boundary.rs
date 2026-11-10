@@ -26,6 +26,10 @@ pub fn run() -> anyhow::Result<()> {
                 "cargo metadata product dependencies (transitive)",
                 check::metadata_transitive_workspace_members(&root)?,
             ),
+            (
+                "test-only features reachable from production features/dependencies",
+                check::production_test_feature_hits(&root)?,
+            ),
         ],
     )
 }

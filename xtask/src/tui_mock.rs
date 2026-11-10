@@ -8,8 +8,6 @@ use clap::Args;
 
 use crate::repo_root;
 
-const TUI_MOCK_PROFILE: &str = "tui-mock";
-
 #[derive(Args, Debug)]
 pub struct TuiMockArgs {
     /// Scenario: long-text, tool-call, disconnect, slow, or error.
@@ -18,11 +16,9 @@ pub struct TuiMockArgs {
 }
 
 /// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，被测二进制须带 `test-fake-tools`。
-fn build_args() -> [&'static str; 9] {
+fn build_args() -> [&'static str; 7] {
     [
         "build",
-        "--profile",
-        TUI_MOCK_PROFILE,
         "-p",
         "lattice-cli",
         "--bin",
@@ -33,7 +29,7 @@ fn build_args() -> [&'static str; 9] {
 }
 
 fn lattice_binary(target_dir: &std::path::Path) -> std::path::PathBuf {
-    target_dir.join(TUI_MOCK_PROFILE).join("lattice")
+    target_dir.join("debug").join("lattice")
 }
 
 pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {

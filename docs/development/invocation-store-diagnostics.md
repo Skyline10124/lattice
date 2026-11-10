@@ -12,7 +12,7 @@ status: superseded
 
 [#153](https://github.com/Skyline10124/lattice/issues/153)及其[后续复核](https://github.com/Skyline10124/lattice/issues/153#issuecomment-5424871210)记录旧测量模型中 schema/数字校验、baseline estimator 一致性、campaign 路径隔离、构建 provenance 封存、累计成本与持久屏障的未决缺口。本次仅标明历史范围，不宣称缺口修复，不重评旧 verdict，也不恢复旧资格化为当前产品门禁。未来 blocking gate 必须另行提案和批准，以独立同实现 campaign 的可重复性与已知退化 fixture 的辨别能力支持裁决。
 
-下文的版本、阈值、预算耦合和统计解释均指旧 Git ledger 工具及其 campaign，不适用于 redb。历史 [FinalizeBudget](https://github.com/Skyline10124/lattice/blob/9f0a861fee80af1bd8114ec3146b65314cd605aa/docs/architecture/session.md#resultdraft-与关闭材料)与 [InvocationStore](https://github.com/Skyline10124/lattice/blob/9f0a861fee80af1bd8114ec3146b65314cd605aa/docs/architecture/lancet.md#invocationstore-与操作员接口)使用固定版本链接；当前工作区 Git 历史的屏障另见[存储合同](../architecture/storage.md#屏障覆盖)。
+下文的版本、阈值、预算耦合和统计解释均指旧 Git ledger 工具及其 campaign，不适用于 redb。历史 [FinalizeBudget](https://github.com/Skyline10124/lattice/blob/9f0a861fee80af1bd8114ec3146b65314cd605aa/docs/architecture/session.md#resultdraft-与关闭材料)与 [InvocationStore](https://github.com/Skyline10124/lattice/blob/9f0a861fee80af1bd8114ec3146b65314cd605aa/docs/architecture/lancet.md#invocationstore-与操作员接口)使用固定版本链接；旧工作区 Git 历史的屏障见[历史存储合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/storage.md#屏障覆盖)。
 
 ## 输入与版本来源
 

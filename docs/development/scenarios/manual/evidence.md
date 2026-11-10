@@ -23,4 +23,3 @@ jq '{commit_sha, verdict, rejection, steps: [.steps[] | {id, status}]}' target/r
 | `crates/lattice-system-harness/target/harness-failures/<scenario>/` | 单跑 harness 失败 bundle：依次查主断言、终止与输出完整性、清理或扫描错误 |
 | `target/harness-failures/<scenario>/`、`target/rollout/harness-failures/<scenario>/` | 本地 CI 或显式目录失败 bundle（远程 `harness-failures-ubuntu-latest`、`harness-failures-full-gate`），及 rollout 失败 bundle（记入 `failure_artifacts`） |
 | `target/rollout/rollout-alpha-<yyyymmddTHHMMSSZ>.json`、`alpha-latest.json` | 主记录（`--out` 可改）与最近记录（远程 `rollout-alpha-record`，`schema_version: 1`）；核对 `commit_sha`、`artifact`、`probes`、`steps`、`failure_artifacts`、`verdict`、`rejection` |
-| `target/rollout/component-verify.log` | `full-gate` 的 `tool-build --verify` 输出；核对产物摘要漂移警告或校验错误 |

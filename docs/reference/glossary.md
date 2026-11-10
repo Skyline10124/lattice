@@ -11,74 +11,14 @@ LATTICE 是以会话为中心的 LLM 运行时，协调层经可注入的 `ToolE
 ## 术语
 
 **Local Workspace**:
-用户的当前项目文件树，是 Agent 观察与变更的唯一文件事实来源。
-见[工作区模型](../architecture/workspace.md#工作区内容身份与历史)。
+会话绑定的规范化项目根目录，用于推导 ProjectStoreKey 并作为 `ToolExecutor::open_turn` 的工作区参数；LATTICE 自身不读写其中的业务文件。
+见[ProjectStoreKey](../architecture/storage.md#projectstorekey)。
 _Avoid_: Lower, Turn Workspace, guest workspace, authoritative snapshot
 
-**Policy-Visible Workspace**:
-读取策略允许 Agent 观察的 Local Workspace 路径集合，是当前本地状态的过滤视图，不是副本或跨调用快照。
-默认包含已跟踪及未被忽略的文件，显式包含、读取拒绝与系统排除的优先级见[路径策略](../architecture/workspace.md#路径策略)。
-_Avoid_: Workspace Projection, sandbox tree, transferred workspace
-
 **Tool**:
-封闭 Agent 目录中具有类型化参数与结果的能力，不是任意程序；一次 Tool call 是 Agent 在模型步骤后选择的该能力的一次调用。
-见[工具模型](../architecture/lancet.md#概念与契约来源)。
+工具执行器经 `ToolSpec` 为一轮提供的类型化能力，接受事务把本轮 `ToolSpec` 列表冻结为工具目录，模型的一次 Tool call 由注入的 `ToolExecutor` 执行；生产默认注入空目录的 `NoTools`。
+见[执行配置冻结](../architecture/session/acceptance.md#执行配置冻结)及[调用槽位](../architecture/session/steps.md#调用槽位)。
 _Avoid_: command, script, plugin, executable, untyped tool string
-
-**Tool Descriptor**:
-Tool 自有的权威契约，定义名称、结构化参数与结果、能力、作用域及可观察效果。
-唯一维护源是 Source Tool manifest，生成物与 provider 投影的关系见[契约来源](../architecture/lancet.md#概念与契约来源)及[生成与校验](../architecture/lancet.md#生成与校验)。
-_Avoid_: registry-owned duplicate schema, adapter-specific tool definition
-
-**Closed Tool Catalog**:
-一个已构建运行时中固定且经批准的 Tool Descriptor 集合，缺失、重复或未经批准的组成均被拒绝。
-默认发行包含五个内置 Tool；增加 Source Tool 须在新运行时构建前完成准入，运行中不能加载更多代码，见[封闭组成](../architecture/lancet.md#构建与封闭组成)。
-_Avoid_: runtime plugin registry, arbitrary tool loading, parallel central catalog
-
-**Source Tool**:
-独立编写和维护源代码、以隔离的 WASM Component 参与受批准运行时组成的 Tool，只能通过 Tool Host 影响外界。
-仓库内生成、构建与嵌入和外部 Bundle 安装设计的区别见[构建与封闭组成](../architecture/lancet.md#构建与封闭组成)。
-_Avoid_: trusted native dependency, runtime-loaded plugin, user process
-
-**Tool Bundle**:
-Source Tool 的安装设计形式，包含唯一权威 Tool Descriptor 的 manifest、预编译隔离 Component，以及完整性与来源证据；安装不得执行第三方构建代码。
-外部 Bundle 安装尚未实现，设计及实现边界见[Bundle 安装设计](../architecture/lancet.md#bundle-安装设计)。
-_Avoid_: source dependency, native executable, unverified artifact
-
-**Tool Host**:
-Tool 接触宿主的唯一权限边界，提供执行策略并记录效果的受控工作区、网络、会话及调用控制接口，不暴露环境中的文件系统、网络、进程权限或运行时内部句柄。
-见[运行时与 Host 边界](../architecture/lancet.md#运行时与-host-边界)。
-_Avoid_: convenience context, raw backend handle, ambient host access
-
-**Structured Workspace Operation**:
-对 Local Workspace 的类型化观察或变更，其数据不被重新解释为 shell 语法或 Agent 编写的指令。
-见[工作区组件接口](../architecture/workspace.md#组件接口)。
-_Avoid_: execution backend, Upper operation, command string
-
-**Local Revision**:
-一次观察所依据的本地文件内容身份，用于核验后续变更是否仍适用于该状态。
-见[工作区模型](../architecture/workspace.md#工作区内容身份与历史)及[观察接口](../architecture/workspace.md#观察接口与边界)。
-_Avoid_: baseline commit, Turn Snapshot, workspace version
-
-**Mutation Precondition**:
-本地变更前必须仍成立的事实，例如预期 Local Revision 或创建目标仍不存在。
-最终核验边界见[请求与安装](../architecture/workspace.md#请求与安装)。
-_Avoid_: merge base, best-effort overwrite
-
-**Atomic Local Mutation**:
-获准的结构化变更，安装后立即成为 Local Workspace 状态，且通过单个目标名称不会读到半写入内容；后续 Tool、模型或 Turn 失败不自动撤销它。
-此处原子可见性不等于多文件或跨库事务、持久性确认及并发隔离，见[文件变更](../architecture/workspace.md#文件变更)及[并发边界](../architecture/workspace.md#操作锁)。
-_Avoid_: checkpoint, delayed writeback, sandbox promotion
-
-**Replan Required**:
-当前 Local 状态不再满足调用的 Mutation Precondition，或语义编辑需要重新规划时的结果，要求 Agent 重新观察并发起新调用。
-见[失败与后续处理](../architecture/workspace.md#失败与后续处理)。
-_Avoid_: automatic retry, automatic merge, replay
-
-**System Path Exclusion**:
-运行时维护且 profile 不得放宽的路径排除规则，覆盖项目 Git 管理状态、LATTICE 私有状态及项目根外路径。
-见[路径策略](../architecture/workspace.md#路径策略)。
-_Avoid_: configurable deny pattern, projection exclusion
 
 **Session**:
 持续对话的容器，以 SessionId 标识并绑定一个项目，保存一棵会话树和当前位置；不带 Session 的首次提交在接受事务中创建它。
@@ -174,12 +114,6 @@ _Avoid_: snapshot, event window, subscription cursor, Gap
 视图与历史查询交付的会话内容单位，一个条目对应一个节点，以 NodeId 标识，同一节点的新值整条替换旧值。UserMessage 条目带轮次序号，Step 条目带结论与重试提示，本轮最后一步的条目另带 `TurnSummary`。
 见[观察与重连](../architecture/session/recovery.md#观察与重连)。
 _Avoid_: TurnEvent, HistoryEntry, per-call item
-
-**Workspace History**:
-旧版本用于记录工作区文件变更历史的私有 bare Git 库路径 `projects/<ProjectStoreKey>/workspace-history.git`。本版本不再创建、读取或清理该仓库，旧版本留下的目录原样保留。
-见[私有状态根](../architecture/storage.md#私有状态根)。
-_Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
-receipt store
 
 **Rewind**:
 把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不恢复工作区文件。
