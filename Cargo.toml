@@ -32,7 +32,6 @@ lattice-session  = { path = "crates/lattice-session" }
 lattice-conversation = { path = "crates/lattice-conversation" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lattice-tui      = { path = "crates/lattice-tui" }
-lattice-cli      = { path = "crates/lattice-cli" }
 lattice-profile  = { path = "crates/lattice-profile" }
 
 # External dependencies — shared versions
