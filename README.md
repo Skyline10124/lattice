@@ -185,7 +185,7 @@ lattice models refresh
 | 文档索引 | [docs/README.md](docs/README.md) |
 | Agent 工作指引 | [AGENTS.md](AGENTS.md) |
 | 领域术语 | [docs/reference/glossary.md](docs/reference/glossary.md) |
-| LANCET 工具执行 | [架构合同](docs/architecture/lancet.md)与[工具开发指南](docs/development/tool-development.md) |
+| 工具执行接缝 | [Step 执行与结果保存](docs/architecture/session/steps.md#调用槽位)与 [ADR 0009](docs/adr/0009-remove-legacy-lancet-tool-executor.md) |
 | 开发测试与验证方式 | [测试工程合同](docs/development/testing.md)与[验证操作指南](docs/development/validation-guide.md) |
 
 ## 许可证

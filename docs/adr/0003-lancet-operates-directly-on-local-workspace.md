@@ -12,8 +12,8 @@ status: superseded
 - Superseded by: [ADR 0009](0009-remove-legacy-lancet-tool-executor.md#与其他-adr-的关系)（旧 LANCET 从本仓库整体剥离）
 - 术语导航：[领域术语表](../reference/glossary.md)
 
-> 承接说明：Direct-Local、路径策略、单路径安装与 Rewind 的已承接规范由[工作区合同](../architecture/workspace.md#来源与承接范围)维护；工具目录与执行归属结合 ADR 0004 的修订，见 [LANCET 合同](../architecture/lancet.md#构建与封闭组成)及[组件职责](../architecture/lancet.md#组件职责)。
-> 本 ADR 保留决策理由、取舍、历史及修订关系，原实施顺序不作为当前任务；现行规则由上述合同承接，仍需核验的路径竞争、效果报告和 Rewind 恢复问题见[工作区合同待核验项](../architecture/workspace.md#实现与验证待办)。
+> 承接说明：Direct-Local、路径策略、单路径安装与 Rewind 的已承接规范由[工作区合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/workspace.md#来源与承接范围)维护；工具目录与执行归属结合 ADR 0004 的修订，见 [LANCET 合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/lancet.md#构建与封闭组成)及[组件职责](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/lancet.md#组件职责)。
+> 本 ADR 保留决策理由、取舍、历史及修订关系，原实施顺序不作为当前任务；现行规则由上述合同承接，仍需核验的路径竞争、效果报告和 Rewind 恢复问题见[工作区合同待核验项](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/workspace.md#实现与验证待办)。
 
 ## Context
 

@@ -17,18 +17,14 @@
 ## 架构
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围。
-- [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、每项目 Git 工作区历史、后台单例、锁序与持久性边界。
+- [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、旧工作区历史目录的保留规则、后台单例、锁序与持久性边界。
 - [会话与 Turn](architecture/session/README.md)：会话树、Step/Turn 与调用槽位、首次提交、配置来源与 profile 副本、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [模型接入](architecture/llm/README.md)：协议适配器、provider 配置与 features、模型引用与元数据、推理档位、用量与费用估算、凭据与 Sign in with ChatGPT。
-- [本地工作区与变更历史](architecture/workspace.md)：观察、文件变更与私有变更历史。
-- [LANCET 工具执行](architecture/lancet.md)：工具组成、Host 权限、调用执行、证据与操作员读取。
-- [Cell 权限与证据](architecture/cell.md)：Cell 模型、能力准入、Host 授权、结果计量与版本化证据。
 - [TUI 交互与视觉](architecture/tui/README.md)：持久对话与临时文字、输入和后台接线、模型与推理档位的选择、重连与取消、工具显示、键位、布局与配色。
 
 ## 开发与验证
 
 - [工程规范](development/engineering.md)：设计中的归属、代码可读性、测试判定、TDD 与验证范围。
-- [工具开发与操作](development/tool-development.md)：manifest/生成链、profile、语义编辑、audit、lancet status 与 lancet doctor。
 - [测试工程](development/testing.md)：测试的原则：测试层、harness 的原则、场景的共同规则、失败证据与发布门禁。
 - [验证操作指南](development/validation-guide.md)：动手验证的原则：产物、环境与后台、结果判读、证据与门禁。
 - [场景卡片](development/scenarios/README.md)：每个自动场景与手动操作一张卡片，写明目标、前提与断言或命令与结果。
