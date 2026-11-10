@@ -19,9 +19,8 @@ use crate::limits::{MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH};
 use crate::message::{ToolCallState, sealed};
 use crate::{InvocationId, ToolCallAddress, arguments_digest};
 
-/// A Tool call as produced by a provider before binding: the optional
-/// provider-native call ID plus canonical semantics. Never carries a LANCET
-/// identity.
+/// provider 产生的未绑定工具调用：可选的 provider 原生调用 ID 与规范语义；
+/// 登记前不携带 `InvocationId`，登记时才绑定。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnboundToolCall {
     /// The provider-native Tool Call ID, preserved verbatim when the provider

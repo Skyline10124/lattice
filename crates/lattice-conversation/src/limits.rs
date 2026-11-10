@@ -17,11 +17,10 @@ use std::collections::BTreeMap;
 /// journal finite independently of argument byte sizes.
 pub const MAX_TOOL_CALLS_PER_BATCH: usize = 32;
 
-/// Maximum byte length of one ToolCall's textual arguments (1 MiB).
+/// 单个 ToolCall 文本参数的最大字节数（1 MiB）。
 ///
-/// Aligned with the LANCET single-file workspace write limit
-/// (`MAX_WORKSPACE_WRITE_BYTES`, 1 MiB): write content travels inside the
-/// arguments, so a larger call could never execute successfully.
+/// 这是单个 ToolCall 参数的对话协议上限，流式组装与写入会话库时按同一常量核对，
+/// 见 `docs/architecture/session/acceptance.md` 的“模型请求与执行预算”。
 pub const MAX_TOOL_CALL_ARGUMENTS_BYTES: usize = 1024 * 1024;
 
 /// Maximum byte length of the assistant content of one attempt (2 MiB).

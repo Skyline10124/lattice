@@ -337,11 +337,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
     offline.current_dir(&ctx.root).args([
         "test",
         "-p",
-        "lancet-protocol",
-        "-p",
-        "lancet-runtime",
-        "-p",
-        "lancet-authority",
+        "lattice-conversation",
         "-p",
         "lattice-api",
         "-p",

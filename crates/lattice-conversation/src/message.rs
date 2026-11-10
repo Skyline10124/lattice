@@ -177,10 +177,9 @@ pub enum MessageSemantic<S: ToolCallState> {
         /// The text payload.
         text: String,
     },
-    /// Complete provider reasoning. Stored and digested, but never replayed
-    /// across providers and never interpreted by LANCET.
+    /// 完整的 provider 推理内容：保存并计入摘要，不跨 provider 回放，也不交给工具执行。
     Reasoning {
-        /// The reasoning payload.
+        /// 推理内容正文。
         text: String,
     },
     /// A Tool call requested by the model.

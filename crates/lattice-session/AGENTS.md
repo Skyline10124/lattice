@@ -33,7 +33,7 @@
 - `open` 执行全库严格核验：旧格式库与任何损坏的会话、类型、值版本、规范 JSON 或绑定摘要均整库拒绝；派生索引（`turn_index`、`invocation_index`）随节点权威记录在同一写事务更新，见[身份、版本与打开](../../docs/architecture/storage.md#身份版本与打开)与[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)。
 - 会话树只追加节点，每次推进以单个写事务改写末端未关闭的 Step，结论只由节点已保存的 `progress` 推导；查询保持纯只读，退回只移动会话当前节点指针，见[预留、progress 与结论](../../docs/architecture/session/README.md#预留progress-与结论)与[表、读取范围与 rewind](../../docs/architecture/session/README.md#表读取范围与-rewind)。
 - 写事务内只做内存编码与提交，同步接口由异步调用方放入 blocking 线程执行；锁范围与提交失败后的停写重开见[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)与[锁与并发语义](../../docs/architecture/storage.md#锁与并发语义)。
-- 调用槽位绑定（`InvocationBinding`、`BindingIdentity`）由本 crate 的 `store` 模块定义并维护，`tool_identity` 为不透明字符串；持久身份、规范 JSON 与参数摘要经 `lattice-conversation` 取得，本 crate 不依赖 `lancet-protocol`（[ADR 0009](../../docs/adr/0009-remove-legacy-lancet-tool-executor.md#5-身份与规范-json-归-lattice-conversation)）。
+- 调用槽位绑定（`InvocationBinding`、`BindingIdentity`）由本 crate 的 `store` 模块定义并维护，`tool_identity` 为不透明字符串；持久身份、规范 JSON 与参数摘要经 `lattice-conversation` 取得（[ADR 0009](../../docs/adr/0009-remove-legacy-lancet-tool-executor.md#5-身份与规范-json-归-lattice-conversation)）。
 - 轮次与槽位详情查询只依赖存储记录，`SlotDetail` 仅投影调用身份、槽位状态、结局、机器错误码与内容摘要元数据（排除参数、结果正文、错误消息原文、schema 与冻结秘密），见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)。
 - 本 crate 之外：对话消息、身份、规范 JSON、模型选择值与用量数据结构由 `lattice-conversation` 负责；profile 发现与解析由 `lattice-profile` 负责；provider 请求、Turn 协调、工具执行接口与 CLI 分别由 `lattice-llm`、`lattice-api` 和 `lattice-cli` 负责。
 
