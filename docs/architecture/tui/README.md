@@ -6,7 +6,6 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../../governance/charter.md)、[宿主平台](../platform.md)
-> 修订记录：Markdown 渲染、代码高亮与终端能力，以及标题线、Dock 与输入区、statusline、浏览光标、评论与排队的修订，随 PR #232 合并，2026-10-02 由维护者批准生效。按 [ADR 0008](../../adr/0008-backend-api-commands-view-queries.md) 修订会话内容的来源、轮次序号、请求身份、找回与取消。按 [ADR 0010](../../adr/0010-protocol-adapters-and-configured-providers.md) 修订：TUI 不再加载 profile，新增 `/model`、`/effort` 与可交互的选择面板，statusline 显示下一次提交将使用的模型与档位及本轮用量。
 
 ## 目的与范围
 
@@ -178,8 +177,10 @@ TUI 只操作当前会话，不提供会话选择器、会话树视图或退回�
 自动化与人工检查分工见[测试工程合同](../../development/testing.md)，运行配方见[验证操作指南](../../development/validation-guide.md)。颜色辨识与终端行为需实机核验，不能仅由布局计算通过推定体验合格。
 
 - [TUI 局部指引](../../../crates/lattice-tui/AGENTS.md)：公开 API 边界、键位、输入历史与验证入口。
-- [ADR 0005](../../adr/0005-durable-turn-invocation-and-private-git-stores.md)：取消和失败的持久状态由 Turn 协议决定。旧指引“取消后照常 commit”的概括不作为 TUI 保证。
+- [ADR 0005](../../adr/0005-durable-turn-invocation-and-private-git-stores.md)：取消和失败的持久状态由 Turn 协议决定。
+- [ADR 0008](../../adr/0008-backend-api-commands-view-queries.md)：会话内容的来源、轮次序号、请求身份、找回与取消。
+- [ADR 0010](../../adr/0010-protocol-adapters-and-configured-providers.md)：协议适配、provider 配置、模型与推理档位选择及用量与费用估算。
 
-布局公式、尺寸示例、键位条件与配色表沿用 R1 前的版本，是界面设计参数；它们不构成实机可读性验证。DimMeta 在 navy-11 上的可读性仍需人工核验。
+布局公式、尺寸示例、键位条件与配色表是界面设计参数，不构成实机可读性验证。DimMeta 在 navy-11 上的可读性仍需人工核验。
 
-文件与目录按渲染职责组织，不固定文件数量或源码行数上限；公开 API 边界与共享渲染归属保持不变；Block 为轮次序号、评论与排队增加的字段只服务显示，不改变持久对话。组织调整不授权新增工具卡片或其他功能。R1 前的 TUI 职责由本文承接；历史过程说明留在任务记录中。
+文件与目录按渲染职责组织，不固定文件数量或源码行数上限；公开 API 边界与共享渲染归属保持不变；Block 中轮次序号、评论与排队的字段只服务显示，不改变持久对话。组织调整不授权新增工具卡片或其他功能。

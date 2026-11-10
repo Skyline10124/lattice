@@ -66,7 +66,7 @@ status: active
 - 后台启动时载入 TLS 根证书，保存在内存中直到退出。个别证书文件读不出时只记 WARN，其余照常使用。单张过大或无法按 rustls 信任锚规则解析 DER 的证书跳过并记 WARN，不占名额，也不计入 DER 总量；其余按加载顺序保留前缀，达到 1,024 张或 DER 总量 4 MiB 时停止并记 WARN，之后的根证书都不信任，由它们签发的 HTTPS 服务请求失败。按上述规则筛完一张可用的根证书都不剩（包括全部过大、全部无法解析或根本没有载入到证书）时，后台记为没有可用的根证书。没有可用的根证书时，后台照常启动、照常回答查询；所选 provider 的端点是 https 的，在接受前按配置错误拒绝并说明原因，http 端点照常放行；不回退到平台根。模型元数据刷新也需要 https，同样以“no usable TLS root certificates”拒绝。
 - 请求不带配置来源。后台运行期间，前端环境的变化不影响它；要让新的环境生效，用 `lattice daemon stop` 停止后台后重新启动。前端的 `HOME` 或 `XDG_STATE_HOME` 不同时通常解析出另一个状态根，连到的是另一个后台。
 - 后台不清空、也不替换启动环境。
-- 工作区 `.env` 不再加载；环境变量不提供 key、endpoint 或模型，见[endpoint 的来源](../llm/providers.md#endpoint-的来源)。
+- 工作区 `.env` 不加载；环境变量不提供 key、endpoint 或模型，见[endpoint 的来源](../llm/providers.md#endpoint-的来源)。
 
 ### 配置安全边界
 

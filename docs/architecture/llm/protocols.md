@@ -28,11 +28,11 @@ status: active
 | `oauth:chatgpt` | `Authorization: Bearer <access token>`，见 [Sign in with ChatGPT](credentials.md#sign-in-with-chatgpt) |
 | `none` | 不带认证头，用于本地服务 |
 
-请求头只有认证头、协议要求的头（`anthropic-version`）与[会话合同](../session/concurrency.md#输入与传输限制)列出的通用头。
+请求头只有认证头、协议要求的头（`anthropic-version`）与[会话合同](../session/concurrency.md#输入与传输限制)列出的通用头；认证头与请求路径由 `protocol` 与 `auth` 决定。
 
 ### 适配器的职责
 
-- **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](../session/conversation.md#回放与跨-provider-投影)维护。
+- **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体；工具名原样发送，generateContent 的工具 schema 放在 `parametersJsonSchema`，Chat Completions 总是发送 `stream_options: {"include_usage": true}`。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](../session/conversation.md#回放与跨-provider-投影)维护。
 - **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
 - **推理文字。** 仅在模型元数据明确 `reasoning = true` 时请求：Interactions 写 `generation_config.thinking_summaries: "auto"`；generateContent 在推理未关闭时写 `generationConfig.thinkingConfig.includeThoughts: true`，`thinkingBudget: 0` 和 toggle 关闭均不写。这两项与是否选档位无关，分别与现有 generation_config、thinkingConfig 字段合并。Messages 在同一元数据条件且 thinking 为 adaptive 时写 `display: "summarized"`，budget 和 disabled 不写；不选档位时不发 `thinking`，具体写法与原因见[档位映射](reasoning.md#档位映射)。`false` 或没有该标志时均不请求推理文字，所选档位照常发送。
 - **Responses 的不完整回复。** `response.incomplete` 先更新用量；原因是 `max_output_tokens` 或 `content_filter` 时按完成处理，分别记 `finish_reason = length` 或 `content_filter`，关闭仍打开的 item 并保存回复，允许缺少 `output_item.done`。半截工具参数仍由累积器的批次校验拒绝，不执行工具；完整调用沿用 Chat Completions 在 `length` 下的处理。其他或未知原因按 provider 错误停止，不保存回复。
@@ -49,7 +49,7 @@ status: active
 
 每次尝试记录来源 `(protocol, provider id)`。reasoning、签名、加密 reasoning 与逐片段回放状态只在协议和 provider `id` 都相同时回放；任一不同时去除这些材料。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。
 
-provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除。旧历史缺少 call ID 时省略对应字段，不合成 ID，也不在本地判断目标协议是否接受，由目标 API 返回错误。所有协议的服务端工具调用响应都必须带 call ID；Chat Completions 流式调用以首次出现的增量为准，后续增量可省略 ID。缺少 ID 时当轮以不可重试的 malformed 错误停止，不保存回复、不执行工具。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。
+provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除。对话历史中的工具调用缺少 call ID 时省略对应字段，不合成 ID，也不在本地判断目标协议是否接受，由目标 API 返回错误。所有协议的服务端工具调用响应都必须带 call ID；Chat Completions 流式调用以首次出现的增量为准，后续增量可省略 ID。缺少 ID 时当轮以不可重试的 malformed 错误停止，不保存回复、不执行工具。跨来源投影保留中立语义，切回原来源时使用树中保存的原消息。
 
 Responses 仅在模型元数据明确 `reasoning = true` 时带 `include: ["reasoning.encrypted_content"]`，使 `store: false` 时取得可回放的加密 reasoning；`false` 或没有该标志时不发送，是否选择档位及档位为 `off` 都不改变 include 的条件。Responses 回放时省略没有最终 `encrypted_content` 的 reasoning item，以及末尾没有后续 item 的 reasoning item；其文字仍以 Reasoning 语义保存。
 
@@ -57,7 +57,7 @@ Anthropic Messages 的 `redacted_thinking` 以空 Reasoning 片段及带 `redact
 
 ## features
 
-feature 由协议适配器的代码定义，配置只能在已有取值中选择。下表是第一轮的全部 feature；新的厂商差异先在适配器中增加取值并测试，再在内置表或 `providers.toml` 中启用。
+feature 由协议适配器的代码定义，配置只能在已有取值中选择。下表是已定义的全部 feature；新的厂商差异先在适配器中增加取值并测试，再在内置表或 `providers.toml` 中启用。
 
 ### Chat Completions
 
@@ -66,7 +66,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | `effort_param` | `reasoning-effort`、`reasoning-object` | `reasoning-effort` | 推理档位写作顶层 `reasoning_effort: "<档位>"`，或 OpenRouter 的 `reasoning: {"effort": "<档位>"}`；`off` 写作 `"none"` |
 | `thinking_toggle` | `none`、`thinking-type`、`enable-thinking` | `none` | 关闭与开启推理的写法：`none` 时来自 toggle 项的 `off` 与 `high` 不可用；`thinking-type` 写 `thinking: {"type": "enabled" \| "disabled"}`；`enable-thinking` 写 `enable_thinking: true \| false` |
 | `thinking_budget` | `none`、`thinking-budget`、`reasoning-max-tokens` | `none` | 按 token 数限制推理的写法：顶层 `thinking_budget: N`，或 OpenRouter 的 `reasoning: {"max_tokens": N}` |
-| `reasoning_replay` | `none`、`reasoning-content`、`content-chunks` | `none` | 同来源回放时，助手消息中的 reasoning 怎样发回：不发；写作 `reasoning_content` 字段；写作 Mistral 的 `content` 分块（`thinking` 块在前） |
+| `reasoning_replay` | `none`、`reasoning-content`、`content-chunks` | `none` | 同来源回放时，助手消息中的 reasoning 怎样发回：不发；写作 `reasoning_content` 字段（内置表中需要它的厂商启用 `reasoning-content`）；写作 Mistral 的 `content` 分块（`thinking` 块在前） |
 | `cache_markers` | 布尔 | `false` | 在系统提示与最后一条消息的末尾内容块上加 `cache_control: {"type": "ephemeral"}`，用于阿里云的显式缓存 |
 
 推理参数各部分的组合见[档位映射](reasoning.md#档位映射)。
@@ -89,15 +89,4 @@ SIWC 的 `response.completed` 终态可能携带 `output: []`；此时解码器�
 
 ### Google generateContent 与 Interactions
 
-第一轮没有 feature。
-
-### 现有厂商差异的迁移
-
-| 现有代码中的行为 | 迁移后 |
-| --- | --- |
-| `ProviderKind` 决定认证头与请求路径（`crates/lattice-llm/src/client.rs`） | 已由 #334 删除，认证头与请求路径由 `protocol` 与 `auth` 决定 |
-| Chat Completions 总是在助手消息中发回 `reasoning_content`（`protocol/projection/chat_completions.rs`） | 已由 #337 改为由 `reasoning_replay` 决定，默认不发；内置表中需要它的厂商启用 `reasoning-content` |
-| Chat Completions 同时读取 `reasoning_content` 与 `reasoning` | 保持，属于解析端的兼容 |
-| Chat Completions 总是发送 `stream_options: {"include_usage": true}` | 保持，属于标准协议行为 |
-| generateContent 的工具 schema 用 `parametersJsonSchema`（#270） | 保持，属于该协议的写法 |
-| OpenAI 兼容路径的工具名映射 | 已由 #311 删除，工具名原样发送 |
+这两种协议没有 feature。
