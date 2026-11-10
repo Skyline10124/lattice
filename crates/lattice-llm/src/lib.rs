@@ -16,7 +16,7 @@ mod logging;
 mod models;
 pub use models::{
     ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning,
-    model_candidates,
+    model_candidates, model_supported_efforts,
 };
 pub(crate) mod metadata;
 pub use metadata::{
