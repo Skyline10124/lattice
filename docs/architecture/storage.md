@@ -62,7 +62,7 @@ status: active
 
 ### ProjectStoreKey
 
-ProjectStoreKey 是完整规范工作区路径的存储地址。推导规则由 [`key.rs`](../../crates/lattice-store/src/key.rs)维护：
+ProjectStoreKey 是 Session 项目绑定使用的键，由完整规范工作区路径推导。推导规则由 [`key.rs`](../../crates/lattice-store/src/key.rs)维护：
 
 ```text
 canonical_root = canonicalize(full Local Workspace root)
@@ -74,7 +74,7 @@ ProjectStoreKey = lower_hex(SHA256(
 
 键使用 64 个小写十六进制字符，不要求路径为 UTF-8。
 
-同一规范路径使用同一命名空间，项目移动到其他路径后得到不同键，无关项目复用原路径会看到既有命名空间。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目。Session 永久绑定一个键，路径迁移后创建新 Session，不自动 relink。会话库是全局的，项目键作为 Session 的绑定字段及 `projects/<ProjectStoreKey>/` 下项目级目录的地址。
+同一规范路径得到同一个键，项目移动到其他路径后得到不同的键；无关项目复用原路径时得到同一个键，可以续写绑定在该路径上的 Session。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目。Session 永久绑定一个键，路径迁移后创建新 Session，不自动 relink。
 
 ## 会话库
 
