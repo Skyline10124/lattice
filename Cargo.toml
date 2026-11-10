@@ -37,7 +37,6 @@ lattice-profile  = { path = "crates/lattice-profile" }
 
 # External dependencies — shared versions
 async-trait = "0.1"
-blake3 = "1"
 chrono = "0.4"
 futures = "0.3"
 getrandom = "0.4"
@@ -77,7 +76,6 @@ dirs = "6"
 colored = "3.1"
 anyhow = "1"
 base64 = "0.22"
-toml_edit = "0.25"
 ratatui = "0.30"
 pulldown-cmark = { version = "0.13.4", default-features = false }
 syntect = { version = "5.3", default-features = false }
