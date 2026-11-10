@@ -18,6 +18,8 @@ Tool 参数通过协议 canonical JSON 生成规范对象和摘要。有效调�
 
 空串、数组、标量、畸形 JSON 不能作为 Tool 参数对象。拒绝尝试不产生可执行调用或 InvocationId，也不把该尝试的助手正文作为成功消息；停止尝试的部分内容不保存，不成为回复，也不发给 provider。超限批次不截断为可执行批次。这些限制让每个调用槽位始终对应一条完整有效回复。
 
+工具结果 `StoredToolResult` 以 `ResultPayload` 按结局保存载荷：成功输出按 65,536 字节规范 JSON 上限保存正文或 `OutputTooLarge` 摘要；失败载荷为 `ToolError { code, message }`，保存字符串机器错误码 `code` 与说明文本 `message`（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）；不确定结果保存 `IndeterminateCause`，未执行结果不带载荷。provider 投影将 `Failed(ToolError)` 编码为 `{"error":{"code":<code 字符串>,"message":<message>}}`（`message` 按 UTF-8 字符边界限制在 4,096 字节内），见[调用槽位](steps.md#调用槽位)。
+
 ## 回放与跨 provider 投影
 每次尝试记录来源：协议与 provider `id`。适配层按[回放来源](../llm/protocols.md#回放来源)的规则生成投影：协议与 provider `id` 都相同时保留 reasoning 和回放状态，否则去除。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除；旧历史缺少 ID 时省略对应字段，不合成 ID，由目标 API 判断是否接受。切回原来源时使用树中保存的原消息。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
 

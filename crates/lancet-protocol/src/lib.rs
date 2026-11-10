@@ -11,7 +11,7 @@
 //! - **Admission evidence** (`evidence`) — approved capabilities vs observed effects.
 //! - **Canonical JSON** (`canonical`) — deterministic bytes for protocol consumers.
 //! - **Typed identities** (`identity`) — UUID-v4 `InvocationId`/`TurnId` and `SessionId`.
-//! - **Durable bindings** (`binding`) — `InvocationBinding` and parameter digest helpers.
+//! - **参数摘要**（`binding`）——工具调用参数对象的规范摘要。
 //! - **Typed errors** (`error`) — error families with structured data and retriability.
 //!
 //! This crate is pure data: no I/O, no runtime, no tokio.
@@ -29,7 +29,7 @@ pub mod jsonrpc;
 
 // Public re-exports of common types
 pub use address::{ModelAttemptKey, ModelMessageAddress, ToolCallAddress};
-pub use binding::{BindingIdentity, InvocationBinding, arguments_digest};
+pub use binding::arguments_digest;
 pub use canonical::canonical_json;
 pub use cell::{
     ArtifactIdentity, Capability, Cell, CellKeyError, ChannelKind, CtxOp, DescriptorError,

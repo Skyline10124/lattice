@@ -59,7 +59,6 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
     let (world, spec) = direct_world(
         name,
         "failure",
-        "[]",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let server = wire_fake_llm(&world, "failure", script);
@@ -134,6 +133,7 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         test,
     );
 }
+#[cfg(feature = "fake-tools")]
 #[test]
 fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     use serde_json::json;
@@ -141,12 +141,9 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     let (world, spec) = direct_world(
         "failure-usage-retry",
         "failure",
-        "[\"observe__workspace\"]",
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
-    world
-        .write_project_file("notes.txt", "persisted tool result\n")
-        .unwrap();
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let usage = json!({"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":100},"completion_tokens_details":{"reasoning_tokens":20}});
     let priced = |script| SseScript::WithUsage {
         script: Box::new(script),
@@ -164,8 +161,8 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
             },
             priced(tool_call(
                 "call",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
+                "read_note",
+                r#"{"action":"read","value":{"note":"persisted tool result"}}"#,
             )),
             priced(SseScript::plain("complete")),
         ]),
@@ -394,7 +391,6 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
     let (world, spec) = direct_world(
         "direct-failure-deadline-stall",
         "deadline",
-        "[]",
         "[llm]\ntimeout_secs = 1\n",
     );
     // 整份响应的 gate 在发送响应头之前等待，保护打开阶段的 deadline 轮询。
@@ -457,7 +453,6 @@ fn stopped_after_reported_usage(deadline: bool) {
     let (world, spec) = direct_world(
         prefix,
         agent,
-        "[]",
         if deadline {
             "[llm]\ntimeout_secs = 5\n"
         } else {
@@ -618,24 +613,32 @@ fn stopped_after_reported_usage(deadline: bool) {
         test,
     );
 }
+#[cfg(feature = "fake-tools")]
 #[test]
 fn direct_failure_mutation_survives_provider_failure() {
     let driver = driver();
     let (world, spec) = direct_world(
         "direct-failure-mutation-survives",
         "mutation",
-        "[\"mutate__create\"]",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
+    world.set_env("LATTICE_TEST_TOOLS", "write_marker");
+    let survivor_path = world
+        .project_dir()
+        .join("survivor.txt")
+        .display()
+        .to_string();
+    let create_args = serde_json::to_string(&json!({
+        "action": "append_marker",
+        "path": survivor_path,
+        "line": "bytes\n",
+    }))
+    .unwrap();
     let server = wire_fake_llm(
         &world,
         "mutation",
         sequence(vec![
-            tool_call(
-                "c1",
-                "mutate__create",
-                r#"{"path":"survivor.txt","content":"bytes\n","create_parents":false}"#,
-            ),
+            tool_call("c1", "write_marker", &create_args),
             SseScript::HttpError {
                 status: 500,
                 body: r#"{"error":{"message":"down"}}"#.into(),
@@ -651,15 +654,15 @@ fn direct_failure_mutation_survives_provider_failure() {
         require(
             turn["steps"][0]["end"]["end"] == "continue"
                 && turn["steps"][0]["slots"][0]["outcome"] == "succeeded",
-            "mutation committed before failed next request",
+            "第一步工具结果已持久提交，随后第二步请求失败",
         )?;
         require(
             std::fs::read_to_string(world.project_dir().join("survivor.txt")).unwrap() == "bytes\n",
-            "installed bytes survive provider failure",
+            "已写出的标记文件在后续 provider 失败后保持不变",
         )?;
         require(
             server.captured_requests().len() == 2,
-            "tool round then failed request only",
+            "只发出工具轮与失败轮两次请求",
         )
     })();
     finish_failure(
@@ -671,10 +674,118 @@ fn direct_failure_mutation_survives_provider_failure() {
         "direct_failure_mutation_survives_provider_failure",
     );
 }
+#[cfg(feature = "fake-tools")]
+#[test]
+fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
+    use lattice_system_harness::{SlotOutcome, SlotState};
+    let driver = driver();
+    let (world, spec) = direct_world("direct-failure-tool-error", "tool-fail", "");
+    world.set_env("LATTICE_TEST_TOOLS", "check_gate");
+    let server = wire_fake_llm(
+        &world,
+        "tool-fail",
+        sequence(vec![
+            tool_call(
+                "call-fail",
+                "check_gate",
+                r#"{"action":"fail","code":"gate_denied","message":"simulated tool failure"}"#,
+            ),
+            SseScript::plain("recovered after tool error"),
+        ]),
+    );
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "tool-fail");
+    let outcome = send.send("run failing tool then recover").unwrap();
+    let detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            outcome.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let captures = server.captured_requests();
+    let result = (|| {
+        assert_clean_send(&outcome)?;
+        assert_accepted_and_closed(&outcome)?;
+        require(
+            outcome.command.is_clean_exit(0)
+                && outcome.has_completed()
+                && outcome.reply_text() == "recovered after tool error",
+            format!(
+                "工具返回 Failed(ToolError) 后仍推进下一步并正常完成：{}",
+                outcome.reply_text()
+            ),
+        )?;
+        require(
+            captures.len() == 2,
+            format!("预期两次模型请求，实际为 {}", captures.len()),
+        )?;
+        let slots = outcome.slots();
+        require(
+            slots.len() == 1
+                && slots[0].method == "check_gate"
+                && slots[0].state == SlotState::Terminal
+                && slots[0].outcome == SlotOutcome::Failed
+                && slots[0].error_code.as_deref() == Some("gate_denied"),
+            format!("公开槽位记录应为 Failed 且携带机器码 gate_denied：{slots:?}"),
+        )?;
+        let expected_wire =
+            r#"{"error":{"code":"gate_denied","message":"simulated tool failure"}}"#;
+        require(
+            captures[1].raw["messages"][3]
+                == json!({
+                    "role": "tool",
+                    "tool_call_id": "call-fail",
+                    "content": expected_wire,
+                }),
+            format!(
+                "第二步请求中的工具错误投影不匹配：{}",
+                captures[1].raw["messages"][3]
+            ),
+        )?;
+        require(detail.is_clean_exit(0), "session turn 查询应返回 0")?;
+        let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let slot = &persisted["steps"][0]["slots"][0];
+        let expected_reason = json!({"kind": "failed", "value": {"code": "gate_denied"}});
+        let expected_material = json!({"kind": "no_content"});
+        require(
+            persisted["summary"]["outcome"] == "completed"
+                && persisted["steps"].as_array().unwrap().len() == 2
+                && persisted["steps"][0]["end"] == json!({"end": "continue"})
+                && persisted["steps"][1]["end"] == json!({"end": "finish"})
+                && slot["outcome"] == "failed"
+                && slot["progress"]
+                    == json!({
+                        "state": "terminal",
+                        "outcome": "failed",
+                        "reason": expected_reason,
+                        "material": expected_material,
+                    })
+                && slot["reason"] == expected_reason
+                && slot["material"] == expected_material
+                && slot["binding"]["method"] == "check_gate"
+                && slot["binding"]["tool_identity"] == "fake:check_gate@1"
+                && same_turn(&final_turn(&outcome), &persisted),
+            format!("持久 Turn 详情与槽位失败结论不一致：{persisted}"),
+        )
+    })();
+    finish_failure(
+        evidence,
+        &send,
+        &[
+            ("tool error turn", &outcome.command),
+            ("turn detail", &detail),
+        ],
+        captures,
+        result,
+        "direct_failure_tool_error_projects_to_model_and_continues_next_step",
+    );
+}
 #[test]
 fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-failure-stale-parent", "busy", "[]", "");
+    let (world, spec) = direct_world("direct-failure-stale-parent", "busy", "");
     let baseline_server = wire_fake_llm(&world, "busy", SseScript::plain("baseline done"));
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "busy");
@@ -744,5 +855,203 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
         captures,
         result,
         "direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry",
+    );
+}
+
+#[cfg(feature = "fake-tools")]
+#[test]
+fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
+    use lattice_system_harness::{SlotOutcome, SlotState};
+
+    let driver = driver();
+    let (world, spec) = direct_world(
+        "direct-failure-tool-deadline",
+        "tool-deadline",
+        "[llm]\ntimeout_secs = 2\n",
+    );
+    world.set_env("LATTICE_TEST_TOOLS", "hold_call,write_marker");
+
+    let ready_path = world.root().join("hold.ready");
+    let marker_path = world.root().join("hold.marker");
+    let skipped_path = world.project_dir().join("skipped.marker");
+    let hold_args = serde_json::to_string(&json!({
+        "action": "block",
+        "ready_path": ready_path,
+        "marker_path": marker_path,
+        "marker_line": "hold-entered\n",
+    }))
+    .unwrap();
+    let write_args = serde_json::to_string(&json!({
+        "action": "append_marker",
+        "path": skipped_path,
+        "line": "must-not-run\n",
+    }))
+    .unwrap();
+
+    let server = wire_fake_llm(
+        &world,
+        "tool-deadline",
+        sequence(vec![
+            SseScript::ToolCalls {
+                calls: vec![
+                    ("call-hold".into(), "hold_call".into(), hold_args),
+                    ("call-write".into(), "write_marker".into(), write_args),
+                ],
+            },
+            SseScript::plain("healthy after tool deadline"),
+        ]),
+    );
+
+    let evidence = evidence(&world, &spec);
+    let send = SessionSendDriver::new(&driver, &world, &spec, "tool-deadline");
+
+    let outcome = send.send("block inside tool until turn deadline").unwrap();
+    let requests_after_deadline = server.captured_requests();
+    let first_tid = outcome.accepted_turn_id().unwrap();
+    let detail = send
+        .run_command(&["--json", "session", "turn", first_tid])
+        .unwrap();
+
+    let followup = send.send("follow up after deadline").unwrap();
+    let followup_detail = send
+        .run_command(&[
+            "--json",
+            "session",
+            "turn",
+            followup.accepted_turn_id().unwrap(),
+        ])
+        .unwrap();
+    let detail_after = send
+        .run_command(&["--json", "session", "turn", first_tid])
+        .unwrap();
+
+    let captures = server.captured_requests();
+    let result = (|| {
+        failed(&outcome, "deadline")?;
+        require(
+            requests_after_deadline.len() == 1,
+            format!(
+                "调用期 deadline 后仅应有 1 次模型请求，实际为 {}",
+                requests_after_deadline.len()
+            ),
+        )?;
+        require(
+            ready_path.exists() && marker_path.exists(),
+            "hold_call 必须已进入执行并写出 ready/marker 文件",
+        )?;
+        let ready_lines: Vec<_> = std::fs::read_to_string(&ready_path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        let marker_lines: Vec<_> = std::fs::read_to_string(&marker_path)
+            .unwrap()
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        require(
+            ready_lines.len() == 1
+                && ready_lines[0].starts_with("hold_call:")
+                && marker_lines == vec!["hold-entered"],
+            format!("hold_call 只应进入一次：ready={ready_lines:?}, marker={marker_lines:?}"),
+        )?;
+        require(
+            !skipped_path.exists(),
+            "后续槽位 write_marker 不得执行或创建目标文件",
+        )?;
+
+        let live_slots = outcome.slots();
+        require(
+            live_slots.len() == 2
+                && live_slots[0].method == "hold_call"
+                && live_slots[0].state == SlotState::Started
+                && live_slots[0].outcome == SlotOutcome::Indeterminate
+                && live_slots[1].method == "write_marker"
+                && live_slots[1].state == SlotState::Registered
+                && live_slots[1].outcome == SlotOutcome::NotExecuted,
+            format!("实时槽位阶段与结局不匹配：{live_slots:?}"),
+        )?;
+
+        require(
+            detail.is_clean_exit(0)
+                && followup_detail.is_clean_exit(0)
+                && detail_after.is_clean_exit(0),
+            "session turn 查询应返回 0",
+        )?;
+        let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
+        let expected_end = json!({"end": "stop", "cause": {"cause": "deadline"}});
+        require(
+            persisted["summary"]["outcome"] == "failed"
+                && persisted["summary"]["notice"]
+                    == json!({"level": "error", "text": "turn deadline exceeded"})
+                && persisted["steps"].as_array().unwrap().len() == 1
+                && persisted["steps"][0]["end"] == expected_end,
+            format!("持久 Turn 结局、提示或 Step.end 不匹配：{persisted}"),
+        )?;
+        let slots = persisted["steps"][0]["slots"].as_array().unwrap();
+        require(slots.len() == 2, format!("预期 2 个槽位：{slots:?}"))?;
+        require(
+            slots[0]["binding"]["method"] == "hold_call"
+                && slots[0]["binding"]["tool_identity"] == "fake:hold_call@1"
+                && slots[0]["progress"] == json!({"state": "started"})
+                && slots[0]["outcome"] == "indeterminate"
+                && slots[0]["reason"] == json!({"kind": "indeterminate", "value": "no_result"})
+                && slots[0]["material"] == json!({"kind": "no_content"}),
+            format!(
+                "槽位 0 应停在 started 且读出 indeterminate(no_result)：{}",
+                slots[0]
+            ),
+        )?;
+        require(
+            slots[1]["binding"]["method"] == "write_marker"
+                && slots[1]["binding"]["tool_identity"] == "fake:write_marker@1"
+                && slots[1]["progress"] == json!({"state": "registered"})
+                && slots[1]["outcome"] == "not_executed"
+                && slots[1]["reason"].is_null()
+                && slots[1]["material"] == json!({"kind": "no_content"}),
+            format!("槽位 1 应停在 registered 且读出 not_executed：{}", slots[1]),
+        )?;
+        require(
+            same_turn(&final_turn(&outcome), &persisted),
+            "实时条目与持久 session turn 详情应一致",
+        )?;
+
+        assert_clean_send(&followup)?;
+        assert_accepted_and_closed(&followup)?;
+        require(
+            followup.command.is_clean_exit(0)
+                && followup.has_completed()
+                && followup.reply_text() == "healthy after tool deadline"
+                && followup.accepted_session_id() == outcome.accepted_session_id(),
+            format!("同一会话后续纯文本轮应正常完成：{}", followup.summary()),
+        )?;
+        require(
+            captures.len() == 2,
+            format!(
+                "后续纯文本轮完成后总模型请求数应为 2，实际为 {}",
+                captures.len()
+            ),
+        )?;
+        require(
+            !skipped_path.exists()
+                && std::fs::read_to_string(&marker_path).unwrap() == "hold-entered\n"
+                && serde_json::from_slice::<Value>(&detail_after.stdout).unwrap() == persisted,
+            "后续轮不得重放旧调用或改写已关闭的 deadline Turn",
+        )
+    })();
+
+    finish_failure(
+        evidence,
+        &send,
+        &[
+            ("tool deadline turn", &outcome.command),
+            ("turn detail", &detail),
+            ("followup turn", &followup.command),
+            ("followup detail", &followup_detail),
+            ("turn detail after followup", &detail_after),
+        ],
+        captures,
+        result,
+        "tool_call_deadline_leaves_slot_started_and_stops_turn",
     );
 }

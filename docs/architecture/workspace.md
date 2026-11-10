@@ -171,7 +171,7 @@ Host 负责写入大小限制、路径与策略核验、取消检查及最终 Mu
 - [ADR 0003](../adr/0003-lancet-operates-directly-on-local-workspace.md)：Direct-Local、路径策略与单路径安装的设计依据；组件归属结合 [ADR 0004](../adr/0004-build-closed-wasm-tool-catalog.md) 的修订读取。其中的文件 Rewind 已由 ADR 0006 取消。
 - [ADR 0005](../adr/0005-durable-turn-invocation-and-private-git-stores.md)：项目工作区历史库与锁序的依据；会话、调用存储、全局 checkpoint 与 Rewind 部分已由 ADR 0006 取代。
 - [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)：会话退回只移动对话位置、取消文件 Rewind 与 Turn checkpoint 的依据。文件恢复如需提供，另行裁决。
-- [lancet-runtime 局部指引](../../crates/lancet-runtime/AGENTS.md)、[lancet-api 局部指引](../../crates/lancet-api/AGENTS.md)、[lattice-api 局部指引](../../crates/lattice-api/AGENTS.md)：现有职责、操作锁与安装后失败要求。
+- [lancet-runtime 局部指引](../../crates/lancet-runtime/AGENTS.md)、[lancet-api 局部指引](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/crates/lancet-api/AGENTS.md)、[lattice-api 局部指引](../../crates/lattice-api/AGENTS.md)：现有职责、操作锁与安装后失败要求。
 
 现行规则以本文及对应合同为准，旧实施计划与根记录保留为历史证据，局部入口另行整理。
 

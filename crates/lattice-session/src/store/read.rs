@@ -4,11 +4,9 @@
 use super::*;
 use super::{codec::*, local::Selection};
 use lattice_conversation::{
-    CostEstimate, InvocationId, ModelAttemptKey, ModelId, ProviderId, TokenUsage,
-    ToolResultOutcome, UsageCompleteness,
+    CostEstimate, ModelAttemptKey, ModelId, ProviderId, TokenUsage, ToolResultOutcome,
+    UsageCompleteness,
 };
-use lattice_store::ProjectStoreKey;
-use redb::ReadableTable;
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -84,7 +82,7 @@ impl UsageAttempt {
 
 fn payload_summary(
     payload: &ResultPayload,
-) -> (ToolResultOutcome, Option<OperatorReason>, MaterialSummary) {
+) -> (ToolResultOutcome, Option<SlotReason>, MaterialSummary) {
     let (reason, material) = match payload {
         ResultPayload::Succeeded(SuccessContent::Json {
             digest,
@@ -108,53 +106,45 @@ fn payload_summary(
             },
         ),
         ResultPayload::Failed(e) => (
-            Some(OperatorReason::Failed {
-                code: e.code,
-                retriability: e.retriability.clone(),
+            Some(SlotReason::Failed {
+                code: e.code.clone(),
             }),
             MaterialSummary::NoContent,
         ),
         ResultPayload::NotExecuted => (None, MaterialSummary::NoContent),
         ResultPayload::Indeterminate(cause) => (
-            Some(OperatorReason::Indeterminate(*cause)),
+            Some(SlotReason::Indeterminate(*cause)),
             MaterialSummary::NoContent,
         ),
     };
     (payload.outcome(), reason, material)
 }
 
-pub(super) fn operator(slot: &InvocationSlot) -> OperatorInvocation {
-    let state = match &slot.progress {
-        SlotProgress::Registered => OperatorInvocationState::Registered,
-        SlotProgress::Started => OperatorInvocationState::Started,
-        SlotProgress::Terminal { result, evidence } => {
+fn slot_state(slot: &InvocationSlot) -> SlotState {
+    match &slot.progress {
+        SlotProgress::Registered => SlotState::Registered,
+        SlotProgress::Started => SlotState::Started,
+        SlotProgress::Terminal { result } => {
             let (outcome, reason, material) = payload_summary(&result.payload);
-            OperatorInvocationState::Terminal {
+            SlotState::Terminal {
                 outcome,
                 reason,
                 material,
-                evidence: evidence.clone(),
             }
         }
-    };
-    OperatorInvocation {
-        invocation_id: slot.binding.invocation_id,
-        binding: slot.binding.identity.clone(),
-        state,
     }
 }
 
 fn slot_detail(slot: &InvocationSlot) -> SlotDetail {
-    let (result, evidence) = close::resolve_slot(slot);
+    let result = close::resolve_slot(slot);
     let (outcome, reason, material) = payload_summary(&result.payload);
     SlotDetail {
         invocation_id: slot.binding.invocation_id,
         binding: slot.binding.identity.clone(),
-        progress: operator(slot).state,
+        progress: slot_state(slot),
         outcome,
         reason,
         material,
-        evidence,
     }
 }
 
@@ -379,21 +369,6 @@ impl Records {
     }
 }
 
-fn matches(filter: &AuditFilter, project: &ProjectStoreKey, row: &OperatorInvocation) -> bool {
-    *project == filter.project_store_key
-        && filter
-            .session_id
-            .is_none_or(|s| s == row.binding.session_id)
-        && filter.turn_id.is_none_or(|t| t == row.binding.turn_id)
-        && filter
-            .method
-            .as_ref()
-            .is_none_or(|m| *m == row.binding.method)
-        && filter.outcome.is_none_or(
-            |o| matches!(row.state, OperatorInvocationState::Terminal { outcome, .. } if outcome == o),
-        )
-}
-
 impl SessionRead {
     /// 同一读事务固定当前位置，汇总当前路径与会话全部节点中的尝试。
     pub fn usage(&self, session_id: SessionId) -> Result<SessionUsage> {
@@ -506,12 +481,6 @@ impl SessionRead {
             .transpose()
     }
 
-    /// 由其他记录引用的 Session 必须存在，缺失即损坏。
-    fn raw_session(&self, id: SessionId) -> Result<SessionRecord> {
-        self.find_session(id)?
-            .ok_or_else(|| corrupt("sessions", &id.to_string(), "missing session"))
-    }
-
     /// 调用方给出的 Session 可能不存在，由调用方报 NotFound。
     pub fn find_session(&self, id: SessionId) -> Result<Option<SessionRecord>> {
         let table = self.tx.open_table(SESSIONS).map_err(table_error)?;
@@ -523,31 +492,6 @@ impl SessionRead {
             return Err(corrupt("sessions", &id.to_string(), "key/value mismatch"));
         }
         Ok(Some(s))
-    }
-
-    fn latest_change(&self) -> Result<ChangeSeq> {
-        let meta = self.tx.open_table(META).map_err(table_error)?;
-        let seq = self.decode(
-            "meta",
-            "last_change_seq",
-            meta.get("last_change_seq")?
-                .ok_or_else(|| corrupt("meta", "last_change_seq", "missing metadata"))?
-                .value(),
-        )?;
-        let last = self
-            .tx
-            .open_table(CHANGES)
-            .map_err(table_error)?
-            .last()?
-            .map_or(0, |(k, _)| k.value());
-        if seq != ChangeSeq(last) {
-            return Err(corrupt(
-                "meta",
-                "last_change_seq",
-                "high water mark mismatch",
-            ));
-        }
-        Ok(seq)
     }
 
     pub fn session(&self, id: SessionId) -> Result<SessionRecord> {
@@ -607,8 +551,6 @@ impl SessionRead {
             .ok_or_else(|| corrupt("profile_copies", &key, "profile copy missing"))?;
         let copy: SessionProfileCopy =
             attach_path(&self.path, decode_profile_copy(&key, value.value()))?;
-        copy.validate()
-            .map_err(|_| corrupt("profile_copies", &key, "invalid profile copy"))?;
         Ok(copy)
     }
 
@@ -928,250 +870,5 @@ impl SessionRead {
         }
         path.reverse();
         Ok((path, earlier_turns))
-    }
-
-    fn index_entry(&self, id: InvocationId) -> Result<InvocationIndexEntry> {
-        let table = self.tx.open_table(INDEX).map_err(table_error)?;
-        self.decode(
-            "invocation_index",
-            &id.to_string(),
-            table
-                .get(id.to_string().as_str())?
-                .ok_or_else(|| corrupt("invocation_index", &id.to_string(), "missing index"))?
-                .value(),
-        )
-    }
-
-    // 打开时已全量核对派生关系；审计页只按索引定位节点并投影。
-    fn invocation(
-        &self,
-        id: InvocationId,
-        index: &InvocationIndexEntry,
-    ) -> Result<OperatorInvocation> {
-        let address = index.address.message;
-        let user = self
-            .raw_turn_node(address.turn_id)?
-            .ok_or_else(|| corrupt("turn_index", &address.turn_id.to_string(), "missing turn"))?;
-        let node = NodeId(
-            user.node
-                .0
-                .checked_add(1)
-                .and_then(|n| n.checked_add(u64::from(address.model_step_ordinal)))
-                .ok_or(StoreError::SequenceExhausted { kind: "node" })?,
-        );
-        let key = node_key(address.session_id, node);
-        let table = self.tx.open_table(NODES).map_err(table_error)?;
-        let step: Node = self.decode(
-            "nodes",
-            &node.0.to_string(),
-            table
-                .get(key.as_slice())?
-                .ok_or_else(|| corrupt("nodes", &node.0.to_string(), "missing invocation step"))?
-                .value(),
-        )?;
-        let Node::Step { slots, .. } = step else {
-            return Err(corrupt(
-                "nodes",
-                &node.0.to_string(),
-                "expected invocation step",
-            ));
-        };
-        slots
-            .iter()
-            .find(|slot| slot.binding.invocation_id == id)
-            .map(operator)
-            .ok_or_else(|| corrupt("nodes", &id.to_string(), "missing invocation slot"))
-    }
-
-    fn resolve_change(&self, stored: StoredInvocationChange) -> Result<InvocationChange> {
-        let index = self.index_entry(stored.invocation_id)?;
-        let session = self.raw_session(index.address.message.session_id)?;
-        let latest = self.invocation(stored.invocation_id, &index)?;
-        let state = match stored.stage {
-            InvocationStage::Registered => OperatorInvocationState::Registered,
-            InvocationStage::Started => OperatorInvocationState::Started,
-            InvocationStage::Terminal => latest.state,
-        };
-        Ok(InvocationChange {
-            sequence: stored.sequence,
-            project_store_key: session.project_store_key,
-            row: OperatorInvocation {
-                invocation_id: stored.invocation_id,
-                binding: latest.binding,
-                state,
-            },
-        })
-    }
-
-    pub fn query_audit(
-        &self,
-        filter: &AuditFilter,
-        after: Option<InvocationId>,
-        limit: usize,
-    ) -> Result<AuditPage> {
-        positive(limit)?;
-        let latest_change = self.latest_change()?;
-        let table = self.tx.open_table(INDEX).map_err(table_error)?;
-        let after = after.map(|id| id.to_string());
-        let mut rows = Vec::new();
-        let mut next = None;
-        for entry in table.range::<&str>((
-            after
-                .as_deref()
-                .map_or(std::ops::Bound::Unbounded, std::ops::Bound::Excluded),
-            std::ops::Bound::Unbounded,
-        ))? {
-            let (key, value) = entry?;
-            let id = InvocationId::parse(key.value())
-                .map_err(|_| corrupt("invocation_index", "key", "invalid id"))?;
-            let index: InvocationIndexEntry =
-                self.decode("invocation_index", key.value(), value.value())?;
-            let session = self.raw_session(index.address.message.session_id)?;
-            if session.project_store_key != filter.project_store_key
-                || filter
-                    .session_id
-                    .is_some_and(|s| s != index.address.message.session_id)
-                || filter
-                    .turn_id
-                    .is_some_and(|t| t != index.address.message.turn_id)
-            {
-                continue;
-            }
-            let row = self.invocation(id, &index)?;
-            if !matches(filter, &session.project_store_key, &row) {
-                continue;
-            }
-            if rows.len() == limit {
-                next = rows.last().map(|r: &OperatorInvocation| r.invocation_id);
-                break;
-            }
-            rows.push(row);
-        }
-        Ok(AuditPage {
-            latest_change,
-            rows,
-            next,
-        })
-    }
-
-    pub fn tail_audit(
-        &self,
-        filter: &AuditFilter,
-        after: ChangeSeq,
-        limit: usize,
-    ) -> Result<AuditTailPage> {
-        positive(limit)?;
-        let latest_change = self.latest_change()?;
-        if after > latest_change {
-            return Err(StoreError::InvalidCursor);
-        }
-        let table = self.tx.open_table(CHANGES).map_err(table_error)?;
-        let mut next_after = after;
-        let mut rows = Vec::new();
-        for entry in table
-            .range((
-                std::ops::Bound::Excluded(after.0),
-                std::ops::Bound::Unbounded,
-            ))?
-            .take(limit)
-        {
-            let (key, value) = entry?;
-            let stored: StoredInvocationChange = self.decode(
-                "invocation_changes",
-                &key.value().to_string(),
-                value.value(),
-            )?;
-            next_after = ChangeSeq(key.value());
-            let index = self.index_entry(stored.invocation_id)?;
-            let session = self.raw_session(index.address.message.session_id)?;
-            if session.project_store_key != filter.project_store_key
-                || filter
-                    .session_id
-                    .is_some_and(|s| s != index.address.message.session_id)
-                || filter
-                    .turn_id
-                    .is_some_and(|t| t != index.address.message.turn_id)
-            {
-                continue;
-            }
-            let change = self.resolve_change(stored)?;
-            if matches(filter, &change.project_store_key, &change.row) {
-                rows.push(change);
-            }
-        }
-        Ok(AuditTailPage {
-            latest_change,
-            rows,
-            next_after,
-            done: next_after == latest_change,
-        })
-    }
-
-    pub fn replay_audit(
-        &self,
-        project: &ProjectStoreKey,
-        session: SessionId,
-        turn: TurnId,
-    ) -> Result<AuditReplay> {
-        let s = self
-            .find_session(session)?
-            .ok_or_else(|| missing("session", session))?;
-        if s.project_store_key != *project {
-            return Err(invalid("project", "turn project mismatch"));
-        }
-        let user = self
-            .raw_turn_node(turn)?
-            .filter(|r| r.session_id == session)
-            .ok_or_else(|| missing("turn", turn))?;
-        let table = self.tx.open_table(NODES).map_err(table_error)?;
-        let mut calls = Vec::new();
-        for entry in table.range(
-            node_key(session, user.node).as_slice()
-                ..=node_key(session, NodeId(u64::MAX)).as_slice(),
-        )? {
-            let (key, value) = entry?;
-            let (_, node) = decode_node_key(key.value())?;
-            if node == user.node {
-                continue;
-            }
-            let step: Node = self.decode("nodes", &node.0.to_string(), value.value())?;
-            match step {
-                Node::Step { slots, .. } => calls.extend(slots.iter().map(operator)),
-                _ => break,
-            }
-        }
-        Ok(AuditReplay {
-            session_id: session,
-            turn_id: turn,
-            latest_change: self.latest_change()?,
-            calls,
-        })
-    }
-
-    pub fn operator_status(&self, project: &ProjectStoreKey) -> Result<OperatorStatus> {
-        let latest_change = self.latest_change()?;
-        let table = self.tx.open_table(CHANGES).map_err(table_error)?;
-        let mut seen = std::collections::BTreeSet::new();
-        let mut recent = Vec::new();
-        for entry in table.iter()?.rev() {
-            let (key, value) = entry?;
-            let stored: StoredInvocationChange = self.decode(
-                "invocation_changes",
-                &key.value().to_string(),
-                value.value(),
-            )?;
-            let index = self.index_entry(stored.invocation_id)?;
-            let session = self.raw_session(index.address.message.session_id)?;
-            if session.project_store_key == *project && seen.insert(stored.invocation_id) {
-                recent.push(self.invocation(stored.invocation_id, &index)?);
-                if recent.len() == 20 {
-                    break;
-                }
-            }
-        }
-        Ok(OperatorStatus {
-            latest_change,
-            recent,
-        })
     }
 }

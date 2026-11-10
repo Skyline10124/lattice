@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{CellEvidenceTriple, CepError, CepErrorCode, InvocationBinding};
 
 /// 上游先脱敏；本函数仅按 Unicode 字符数执行持久诊断上限。
 pub fn bound_provider_diagnostic(already_redacted: &str) -> String {
@@ -12,14 +11,9 @@ pub fn bound_provider_diagnostic(already_redacted: &str) -> String {
         .collect()
 }
 
-pub fn prepare_terminal(
-    binding: &InvocationBinding,
-    result: std::result::Result<serde_json::Value, CepError>,
-    evidence: CellEvidenceTriple,
-) -> Result<InvocationTerminal> {
-    validate::evidence(binding, &evidence)?;
-    let payload = match result {
-        Ok(value) => {
+pub fn prepare_terminal(binding: &InvocationBinding, reply: ToolReply) -> InvocationTerminal {
+    let payload = match reply {
+        ToolReply::Succeeded(value) => {
             let bytes = lattice_conversation::canonical_json(&value);
             let digest = lattice_conversation::tool_content_digest(&bytes);
             let byte_length = bytes.len() as u64;
@@ -36,27 +30,20 @@ pub fn prepare_terminal(
                 }
             })
         }
-        Err(e) => match e.code {
-            CepErrorCode::CallCancelled => {
-                ResultPayload::Indeterminate(IndeterminateCause::Cancelled)
-            }
-            CepErrorCode::OutcomeIndeterminate => {
-                ResultPayload::Indeterminate(IndeterminateCause::Reported)
-            }
-            _ => ResultPayload::Failed(Box::new(e)),
-        },
+        ToolReply::Failed(error) => ResultPayload::Failed(error),
+        ToolReply::Cancelled => ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
+        ToolReply::Indeterminate => ResultPayload::Indeterminate(IndeterminateCause::Reported),
     };
-    Ok(InvocationTerminal {
+    InvocationTerminal {
         result: StoredToolResult {
             invocation_id: binding.invocation_id,
             name: binding.identity.method.clone(),
             payload,
         },
-        evidence: InvocationEvidence::Recorded(Box::new(evidence)),
-    })
+    }
 }
 
-/// 只有 LANCET 给出确定结果时才继续下一调用；其余结局停止后续分发。
+/// 只有执行器给出确定结果时才继续下一调用；其余结局停止后续分发。
 pub fn stops_batch(payload: &ResultPayload) -> bool {
     !matches!(
         payload,
@@ -77,30 +64,20 @@ fn own_stop(binding: &InvocationBinding, payload: &ResultPayload) -> Option<Stop
     }
 }
 
-/// 按对照表从槽位 `progress` 给出结果与证据。
-pub fn resolve_slot(slot: &InvocationSlot) -> (StoredToolResult, InvocationEvidence) {
+/// 按对照表从槽位 `progress` 给出工具结果。
+pub fn resolve_slot(slot: &InvocationSlot) -> StoredToolResult {
     match &slot.progress {
-        SlotProgress::Registered => (
-            StoredToolResult {
-                invocation_id: slot.binding.invocation_id,
-                name: slot.binding.identity.method.clone(),
-                payload: ResultPayload::NotExecuted,
-            },
-            InvocationEvidence::Unavailable {
-                reason: EvidenceUnavailableReason::NotDispatched,
-            },
-        ),
-        SlotProgress::Started => (
-            StoredToolResult {
-                invocation_id: slot.binding.invocation_id,
-                name: slot.binding.identity.method.clone(),
-                payload: ResultPayload::Indeterminate(IndeterminateCause::NoResult),
-            },
-            InvocationEvidence::Unavailable {
-                reason: EvidenceUnavailableReason::NoResult,
-            },
-        ),
-        SlotProgress::Terminal { result, evidence } => (result.clone(), evidence.clone()),
+        SlotProgress::Registered => StoredToolResult {
+            invocation_id: slot.binding.invocation_id,
+            name: slot.binding.identity.method.clone(),
+            payload: ResultPayload::NotExecuted,
+        },
+        SlotProgress::Started => StoredToolResult {
+            invocation_id: slot.binding.invocation_id,
+            name: slot.binding.identity.method.clone(),
+            payload: ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+        },
+        SlotProgress::Terminal { result } => result.clone(),
     }
 }
 
@@ -121,7 +98,7 @@ pub fn resolve_attempt(attempt: &AttemptRecord) -> (AttemptEnd, AttemptDiagnosti
 pub fn first_stopping_cause(slots: &[InvocationSlot]) -> Result<Option<StopCause>> {
     Ok(slots
         .iter()
-        .find_map(|s| own_stop(&s.binding, &resolve_slot(s).0.payload)))
+        .find_map(|s| own_stop(&s.binding, &resolve_slot(s).payload)))
 }
 
 /// Step 的停止原因：槽位自身的停止优先；否则取关闭 Step 的外部停止。
@@ -131,9 +108,7 @@ pub fn step_stop_cause(slots: &[InvocationSlot], stop: DispatchStop) -> Result<O
     if let Some(cause) = first_stopping_cause(slots)? {
         return Ok(Some(cause));
     }
-    let unfinished = slots
-        .iter()
-        .any(|s| stops_batch(&resolve_slot(s).0.payload));
+    let unfinished = slots.iter().any(|s| stops_batch(&resolve_slot(s).payload));
     Ok((unfinished || stop == DispatchStop::ProcessExit).then(|| stop.into()))
 }
 

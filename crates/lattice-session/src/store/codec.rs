@@ -15,8 +15,7 @@ pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("no
 pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
-pub(super) const CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("invocation_changes");
-pub(super) const VERSION: u32 = 7;
+pub(super) const VERSION: u32 = 8;
 
 pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
     result.map_err(|err| match err {
@@ -103,50 +102,11 @@ fn retains_fields(wire: &serde_json::Value, known: &serde_json::Value) -> bool {
     }
     match (wire, known) {
         (Value::Object(w), Value::Object(k)) => w.iter().all(|(name, value)| {
-            let Some(expected) = k.get(name) else {
-                return false;
-            };
-            if name == "evidence"
-                && expected.get("kind").and_then(Value::as_str) == Some("recorded")
-            {
-                // docs/architecture/cell.md「内容与版本边界」允许版本化证据结构扩展，
-                // 不包括 store envelope、三元组包装或其中引用的闭合 Cell 模型。
-                return value.as_object().is_some_and(|fields| {
-                    fields.iter().all(|(f, v)| match f.as_str() {
-                        "kind" => true,
-                        "value" => v.as_object().is_some_and(|roots| {
-                            roots.iter().all(|(root, v)| {
-                                expected["value"]
-                                    .get(root)
-                                    .is_some_and(|k| evidence_fields(v, k))
-                            })
-                        }),
-                        _ => false,
-                    })
-                });
-            }
-            retains_fields(value, expected)
+            k.get(name)
+                .is_some_and(|expected| retains_fields(value, expected))
         }),
         (Value::Array(w), Value::Array(k)) => {
             w.len() == k.len() && w.iter().zip(k).all(|(w, k)| retains_fields(w, k))
-        }
-        _ => true,
-    }
-}
-fn evidence_fields(wire: &serde_json::Value, known: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match (wire, known) {
-        (Value::Object(w), Value::Object(k)) => w.iter().all(|(name, value)| {
-            k.get(name).is_none_or(|expected| {
-                if name == "cell" {
-                    retains_fields(value, expected)
-                } else {
-                    evidence_fields(value, expected)
-                }
-            })
-        }),
-        (Value::Array(w), Value::Array(k)) => {
-            w.len() == k.len() && w.iter().zip(k).all(|(w, k)| evidence_fields(w, k))
         }
         _ => true,
     }
@@ -200,8 +160,6 @@ pub(super) struct Records {
     pub configs: BTreeMap<[u8; 32], StoredTurnConfig>,
     pub turn_index: BTreeMap<TurnId, NodeRef>,
     pub index: BTreeMap<InvocationId, InvocationIndexEntry>,
-    pub changes: BTreeMap<ChangeSeq, StoredInvocationChange>,
-    pub last_change: ChangeSeq,
 }
 
 // 两种事务的 open_table 返回类型不同；宏共用固定的领域表读取。
@@ -233,10 +191,7 @@ macro_rules! load_records {
                 supported: VERSION,
             });
         }
-        let mut r = Records {
-            last_change: decode("meta", "last_change_seq", &read_meta("last_change_seq")?)?,
-            ..Default::default()
-        };
+        let mut r = Records::default();
         for entry in $tx.open_table(SESSIONS).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
             let id = SessionId::parse(k.value())
@@ -283,13 +238,6 @@ macro_rules! load_records {
             r.index
                 .insert(id, decode("invocation_index", k.value(), v.value())?);
         }
-        for entry in $tx.open_table(CHANGES).map_err(table_error)?.iter()? {
-            let (k, v) = entry?;
-            r.changes.insert(
-                ChangeSeq(k.value()),
-                decode("invocation_changes", &k.value().to_string(), v.value())?,
-            );
-        }
         Ok(r)
     }};
 }
@@ -309,7 +257,6 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
             encode(&String::from("lattice-session"))?.as_slice(),
         )?;
         meta.insert("store_format_version", encode(&VERSION)?.as_slice())?;
-        meta.insert("last_change_seq", encode(&ChangeSeq(0))?.as_slice())?;
     }
     tx.open_table(SESSIONS).map_err(table_error)?;
     tx.open_table(PROFILE_COPIES).map_err(table_error)?;
@@ -317,7 +264,6 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
     tx.open_table(CONFIGS).map_err(table_error)?;
     tx.open_table(TURN_INDEX).map_err(table_error)?;
     tx.open_table(INDEX).map_err(table_error)?;
-    tx.open_table(CHANGES).map_err(table_error)?;
     Ok(())
 }
 
@@ -378,26 +324,6 @@ pub(super) fn persist(
             }
         }
     }
-    {
-        let mut t = tx.open_table(CHANGES).map_err(table_error)?;
-        for (k, v) in &after.changes {
-            if before.changes.get(k) != Some(v) {
-                if t.get(k.0)?.is_some() {
-                    return Err(corrupt(
-                        "invocation_changes",
-                        &k.0.to_string(),
-                        "change sequence already exists",
-                    ));
-                }
-                t.insert(k.0, encode(v)?.as_slice())?;
-            }
-        }
-    }
-    if before.last_change != after.last_change {
-        tx.open_table(META)
-            .map_err(table_error)?
-            .insert("last_change_seq", encode(&after.last_change)?.as_slice())?;
-    }
     Ok(())
 }
 #[cfg(test)]
@@ -418,9 +344,6 @@ pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> 
         .map_err(table_error)?
         .retain(|_, _| false)?;
     tx.open_table(INDEX)
-        .map_err(table_error)?
-        .retain(|_, _| false)?;
-    tx.open_table(CHANGES)
         .map_err(table_error)?
         .retain(|_, _| false)?;
     persist(tx, &Records::default(), r)

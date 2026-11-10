@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Call-scoped cancellation, events, and execution receipts.
+//! 单次调用作用域内的取消与有序事件。
 
-use lancet_protocol::{CellEvidenceTriple, CepError, InvocationId, ToolEvent};
+use lancet_protocol::{InvocationId, ToolEvent};
 use serde_json::Value;
 use tokio::sync::{mpsc, watch};
 
@@ -89,13 +89,6 @@ fn bind_invocation_id(params: &mut Value, invocation_id: InvocationId) {
             "payload": params.take(),
         });
     }
-}
-
-/// Result and content-free Cell evidence for one known Component outcome.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ExecutionReceipt {
-    pub result: Result<Value, CepError>,
-    pub evidence: CellEvidenceTriple,
 }
 
 #[cfg(test)]

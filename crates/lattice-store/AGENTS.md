@@ -37,7 +37,7 @@
 - 对象与引用按只追加方式保留，`write_commit_at` 直接使用调用方传入的时间戳，使存储内核保持无后台维护和无时钟副作用，见[保留、索引与演化](../../docs/architecture/storage.md#保留索引与演化)。
 - 跨进程互斥由 Linux `flock` 保证，同进程严格写锁等待者按票号 FIFO 顺序获锁并让排队期间的 `try_acquire` 直接返回忙碌，锁序规则见[锁与并发语义](../../docs/architecture/storage.md#锁与并发语义)；旧 Git 账本的等待指标背景见[历史诊断解读](../../docs/development/invocation-store-diagnostics.md)。
 - `test-fault-injection` 仅在测试中启用以验证创建与屏障失败路径；`lattice-store-probe` 仅在明确指定的目标状态目录运行，见[能力探测](../../docs/architecture/storage.md#能力探测)。
-- 本 crate 之外：全局会话库 `lattice.redb`、redb 表与领域事务、调用槽位与证据持久化由 `lattice-session` 负责；工作区历史的快照与效果写入由 `lancet-runtime` 负责。
+- 本 crate 之外：全局会话库 `lattice.redb`、redb 表与领域事务及调用槽位持久化由 `lattice-session` 负责；本版本产品路径不再创建或读取 `workspace-history.git`。
 
 ## 验证
 

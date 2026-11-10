@@ -157,7 +157,7 @@ pub enum SlotState {
     Terminal,
 }
 
-/// Step 条目中一个调用槽位的结论；`error_code` 取 Failed 原因中的 CEP 错误码。
+/// Step 条目中一个调用槽位的结论；`error_code` 取 Failed 原因中的工具错误码。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
     pub invocation_id: String,

@@ -71,7 +71,7 @@ pub struct CapturedRequest {
     pub model: String,
     /// `role` → count of messages with that role, in arrival order.
     pub message_roles: Vec<String>,
-    /// 原样捕获线上工具名，例如 `observe__workspace`。
+    /// 原样捕获请求体中的线上工具名。
     pub tool_names: Vec<String>,
     /// 请求协议：`openai`、`responses`、`interactions`、`anthropic` 或 `gemini`。
     pub provider: String,

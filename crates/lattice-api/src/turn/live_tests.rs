@@ -28,7 +28,7 @@ fn seed(
                 model: crate::ModelId::parse("old-model").unwrap(),
                 provider: crate::ProviderId::parse("openai-compatible").unwrap(),
                 system_prompt: None,
-                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
                 limits: TurnExecutionLimits {
                     timeout_secs: crate::TurnTimeout::default(),
                     max_model_steps: 32,
@@ -36,12 +36,7 @@ fn seed(
                 },
             };
             AcceptTurn {
-                profile_copy: {
-                    let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
-                    copy.profile.policy.project_root =
-                        fixture.root.canonical_path().to_str().unwrap().into();
-                    copy
-                },
+                profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
                 expected_profile_digest: None,
                 session: AcceptSession::New { id: sid },
                 turn_id: turn,
@@ -53,11 +48,6 @@ fn seed(
             }
         })
         .unwrap();
-    lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
-        fixture.layout.clone(),
-        fixture.root.store_key(),
-    ))
-    .unwrap();
     (sid, turn)
 }
 
@@ -173,7 +163,6 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
     request.session_id = Some(sid);
     let execution = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         id(),
         crate::LocalWorkspaceRoot::from_path(elsewhere.path()).unwrap(),
         request,
@@ -197,7 +186,7 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
 }
 
 #[tokio::test]
-async fn existing_session_requires_its_workspace_history_before_accepting_new_turn() {
+async fn session_turns_do_not_create_or_require_workspace_history() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -205,24 +194,25 @@ async fn existing_session_requires_its_workspace_history_before_accepting_new_tu
             .build(),
     );
     let fixture = setup_fixture(llm.clone(), &[]);
+    let history_dir = fixture
+        .layout
+        .project_store(&fixture.root.store_key(), "workspace-history.git");
     let (first, _) = fixture.run(fixture.request.clone()).await;
-    std::fs::remove_dir_all(fixture.layout.project_store(
-        &fixture.root.store_key(),
-        lancet_runtime::history::HISTORY_REPO_DIR,
-    ))
-    .unwrap();
+    assert!(
+        !history_dir.exists(),
+        "新建会话不应创建 workspace-history.git"
+    );
     let mut request = fixture.request.clone();
     request.session_id = Some(first.session_id);
-    let (execution, _) = fixture.start(request);
-    assert!(execution.acceptance.await.unwrap().is_err());
-    assert!(execution.completion.await.unwrap().is_err());
-    assert_eq!(llm.call_count(), 1);
-    let read = fixture.store.begin_read().unwrap();
-    assert_eq!(
-        read.turn_detail(first.session_id, first.turn_id).unwrap(),
-        first
+    request.agent = None;
+    request.loaded_profile = None;
+    let (second, _) = fixture.run(request).await;
+    assert_eq!(second.summary.outcome, PublicTurnOutcome::Completed);
+    assert!(
+        !history_dir.exists(),
+        "续写会话不应创建或依赖 workspace-history.git"
     );
-    assert_eq!(read.log(first.session_id).unwrap().nodes.len(), 3);
+    assert_eq!(llm.call_count(), 2);
 }
 
 #[tokio::test]
@@ -277,7 +267,6 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     retry.test_llm = None;
     let execution = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         first.turn_id,
         fixture.root.clone(),
         retry.clone(),
@@ -292,7 +281,6 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     retry.input.push(' ');
     let conflict = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         first.turn_id,
         fixture.root.clone(),
         retry,
@@ -329,11 +317,8 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
     );
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 0);
-    let other = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(other.path());
     let execution = start_turn(
         fixture.api.clone(),
-        layout.clone(),
         id(),
         fixture.root.clone(),
         fixture.request.clone(),
@@ -352,13 +337,6 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
             .nodes
             .len(),
         3
-    );
-    assert!(
-        matches!(
-            SessionStore::open(&layout),
-            Err(StoreError::NotInitialized { .. })
-        ),
-        "the execution must not silently reopen a layout-default SessionStore"
     );
     assert_eq!(llm.call_count(), 1);
 }
@@ -461,7 +439,6 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
     *observer.before_accept.lock().unwrap() = Some((entered, resume));
     let execution = super::execute::start_execution(super::execute::ExecutionInput {
         session: fixture.api.clone(),
-        layout: fixture.layout.clone(),
         turn_id,
         workspace: fixture.root.clone(),
         request: fixture.request.clone(),
@@ -479,7 +456,6 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
     // 另一个 Session 的提交在前置查重之后获胜；输家 Session 尚未创建，读回必定失败。
     let winner = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         turn_id,
         fixture.root.clone(),
         fixture.request.clone(),

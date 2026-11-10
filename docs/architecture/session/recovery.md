@@ -108,7 +108,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 ### 取消的效果与持久边界
 
-取消控制本身在内存中，true 确认的是当前操作接管，不保证迟到取消改写已决定的结果。执行核心随后提交的尝试、槽位与 Step 的阶段才是进程退出后仍能读到的事实。以取消为主因关闭的 Step 以 `Stop { cause: Cancelled }` 结束，Turn 结局为 Cancelled；已写入的节点、调用结果和已发生的效果保留，取消不回滚文件。
+取消控制本身在内存中，true 确认的是当前操作接管，不保证迟到取消改写已决定的结果。协调层在每次开始新模型请求或新调用前检查取消标志与本轮 deadline；槽位提交 `Started` 之后，协调层将同一取消标志与本轮 deadline 传给 `TurnTools::execute`，调用期内的取消与超时中断由工具执行器执行（执行器返回 `ToolOutcome::Cancelled` 时写入 `Terminal` 并以 `Stop { cause: Cancelled }` 关闭 Step；返回 `ToolOutcome::Deadline` 时不补写 `Terminal`，槽位留在 `Started`、读出 `Indeterminate(NoResult)`，直接以 `Stop { cause: Deadline }` 关闭 Step）。执行核心随后提交的尝试、槽位与 Step 的阶段才是进程退出后仍能读到的事实。以取消为主因关闭的 Step 以 `Stop { cause: Cancelled }` 结束，Turn 结局为 Cancelled；已写入的节点、调用结果和已发生的效果保留，取消不回滚文件。
 
 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时，退回到该用户消息之前的节点再发送。
 
@@ -118,7 +118,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 - **树上已有的内容就是结局。** 这个 Step、它的尝试和槽位各自停在某个阶段，阶段给出结论，Turn 的结局按[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)从中得出。已保存的结果和已发生的效果保留；只留在进程内、尚未写入的结果无法找回。
 - **由后台判断它是否已经停下。** 会话库只由持有实例锁的后台进程打开，见[存储后台边界](../storage.md#本地后台与访问边界)；执行一个 Turn 需要后台内存中的 Owner 和该 Session 的执行锁。后台没有这个 Turn 的 Owner 时，没有人在执行它；视图的会话头直接说明当前位置所属那一轮有没有 Owner。后台重启后，此前未关闭的 Turn 都已停下。
-- **后台不替它继续。** 后台不为停下的 Turn 请求 provider、执行 Tool 或恢复重试，也不需要当时的 profile、provider 凭据或 Component 组成。
+- **后台不替它继续。** 后台不为停下的 Turn 请求 provider、执行 Tool 或恢复重试，也不需要当时的 profile 或 provider 凭据。
 - **用户直接做下一件事。** 提交新请求或 `rewind` 不需要先处理旧 Turn。新的 UserMessage 接在当前位置之后；旧 Step 从此不再是末端节点，不能再改写。同一 Session 正在由 Owner 执行时，新写操作仍在后台准入阶段返回 Busy。
 
 | 停下时 Step 的 `progress` | 树上已有的内容 | Turn 结局 |
@@ -128,7 +128,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 | `Requesting`，最后一次尝试 `Ended`（重试等待中） | 该尝试带实际原因；Step 的结论为 `Stop { ProcessExit }`，不恢复重试 | Failed |
 | `Executing` | `Terminal` 的槽位带实际结果，`Started` 的为 `Indeterminate(NoResult)`，`Registered` 的为 NotExecuted；Step 的结论按[执行中 Step 的停止原因](steps.md#执行中-step-的停止原因)得出，外部停止为 ProcessExit | Cancelled 或 Failed |
 
-停在 `Executing` 的 Step，槽位自身决定的停止（LANCET 返回的取消或效果不确定）优先，其余情况得到 ProcessExit。协调层已经决定、尚未提交的取消或 Deadline 不在库中，这一步按 ProcessExit 结束；已提交的关闭保持它写入的原因。
+停在 `Executing` 的 Step，槽位自身决定的停止（执行器返回的取消或效果不确定）优先，其余情况得到 ProcessExit。协调层已经决定、尚未提交的取消或 Deadline 不在库中，这一步按 ProcessExit 结束；已提交的关闭保持它写入的原因。
 
 ## 停止后台
 

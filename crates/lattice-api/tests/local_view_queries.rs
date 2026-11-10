@@ -25,7 +25,7 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
                 model: ModelId::parse("test").unwrap(),
                 provider: ProviderId::parse("openai-compatible").unwrap(),
                 system_prompt: None,
-                catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+                catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
                 limits: TurnExecutionLimits {
                     timeout_secs: lattice_api::TurnTimeout::default(),
                     max_model_steps: 32,

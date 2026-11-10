@@ -1689,3 +1689,33 @@ fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
     app.apply_action(KeyAction::Insert(' '));
     assert!(app.dock.shows_input());
 }
+
+#[test]
+fn failed_tool_renders_tool_error_message() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(t), false),
+        vec![
+            user(1, t, 1, "check file"),
+            step(2, t, 0)
+                .failed_tool(1, "permission_denied", "工作区路径被策略拒绝")
+                .finished()
+                .entry(),
+        ],
+    );
+    assert_eq!(
+        tool_states(&app),
+        vec![ToolState::Failed {
+            output_len: 0,
+            error: Some("工作区路径被策略拒绝".into()),
+        }],
+        "工具失败块应保存 ToolError.message"
+    );
+    let text = transcript(&app);
+    assert!(
+        text.contains("工作区路径被策略拒绝"),
+        "对话记录应展开显示 ToolError.message：{text}"
+    );
+}

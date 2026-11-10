@@ -2,10 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{CellEvidenceTriple, InvocationBinding};
 use lattice_conversation::{
-    BoundToolCall, InvocationId, MessageRole, MessageSemantic, ModelMessageAddress, NativeMessage,
-    ProviderId, RawToolCall, ToolCallState, validate_tool_call_batch,
+    BoundToolCall, MessageRole, MessageSemantic, ModelMessageAddress, NativeMessage, ProviderId,
+    RawToolCall, ToolCallState, validate_tool_call_batch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -33,24 +32,10 @@ pub(super) fn stored_config(digest: &[u8; 32], stored: &StoredTurnConfig) -> Res
     if stored.digest()? != *digest {
         return Err(invalid("config", "stored configuration digest mismatch"));
     }
-    let rebuilt = ToolCatalogSnapshot::new(
-        stored.catalog.runtime_build_id.clone(),
-        stored.catalog.entries.clone(),
-    )
-    .map_err(|_| invalid("catalog", "invalid catalog entries"))?;
-    if rebuilt != stored.catalog
-        || stored.catalog.entries.iter().any(|e| {
-            e.descriptor_identity.len() != 64
-                || !e
-                    .descriptor_identity
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-    {
-        return Err(invalid(
-            "catalog",
-            "catalog ordering or descriptor identity invalid",
-        ));
+    let rebuilt = ToolCatalogSnapshot::new(stored.catalog.entries.clone())
+        .map_err(|_| invalid("catalog", "工具目录条目无效"))?;
+    if rebuilt != stored.catalog {
+        return Err(invalid("catalog", "工具目录排序不一致"));
     }
     Ok(())
 }
@@ -105,55 +90,11 @@ pub(super) fn diagnostic(cause: &StopCause, d: &AttemptDiagnostic) -> Result<()>
     Ok(())
 }
 
-pub(super) fn evidence(binding: &InvocationBinding, e: &CellEvidenceTriple) -> Result<()> {
-    use lancet_protocol::evidence::{
-        ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION,
-        OBSERVED_EFFECTS_RECORD_VERSION,
-    };
-    if e.admission.version != ADMISSION_EVIDENCE_VERSION
-        || e.effects.version != OBSERVED_EFFECTS_RECORD_VERSION
-        || e.denied.version != DENIED_OPERATIONS_RECORD_VERSION
-        || e.admission.tool != binding.identity.method
-    {
-        return Err(invalid("evidence", "evidence version or method mismatch"));
-    }
-    let mut seq = BTreeSet::new();
-    if e.effects.effects.windows(2).any(|w| w[0].seq >= w[1].seq)
-        || e.denied.denied.windows(2).any(|w| w[0].seq >= w[1].seq)
-        || e.effects
-            .effects
-            .iter()
-            .map(|e| e.seq)
-            .chain(e.denied.denied.iter().map(|e| e.seq))
-            .any(|s| !seq.insert(s))
-    {
-        return Err(invalid("evidence", "invalid operation order"));
-    }
-    for names in [
-        &e.admission.approved_capabilities,
-        &e.admission.denied_capabilities,
-        &e.admission.boundary_excluded,
-    ] {
-        if names.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(invalid("evidence", "capabilities not sorted and unique"));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn terminal(
-    binding: &InvocationBinding,
-    result: &StoredToolResult,
-    ev: &InvocationEvidence,
-) -> Result<()> {
+pub(super) fn terminal(binding: &InvocationBinding, result: &StoredToolResult) -> Result<()> {
     if result.invocation_id != binding.invocation_id || result.name != binding.identity.method {
         return Err(invalid("terminal", "result identity mismatch"));
     }
-    // 槽位只在 LANCET 实际返回后推进到 Terminal；未分发或无结果的槽位停在 Registered/Started。
-    let InvocationEvidence::Recorded(e) = ev else {
-        return Err(invalid("terminal", "missing receipt evidence"));
-    };
-    evidence(binding, e)?;
+    // 槽位只在执行器实际返回非 Deadline 结果后推进到 Terminal；未分发或无结果的槽位停在 Registered/Started。
     match &result.payload {
         ResultPayload::NotExecuted | ResultPayload::Indeterminate(IndeterminateCause::NoResult) => {
             return Err(invalid(
@@ -197,8 +138,8 @@ fn bound_reply(
         return Err(invalid("slots", "reply/slot count mismatch"));
     }
     for ((ordinal, call), slot) in message.tool_calls().zip(slots) {
-        if let SlotProgress::Terminal { result, evidence } = &slot.progress {
-            terminal(&slot.binding, result, evidence)?;
+        if let SlotProgress::Terminal { result } = &slot.progress {
+            terminal(&slot.binding, result)?;
         }
         let entry = catalog
             .entries
@@ -217,7 +158,7 @@ fn bound_reply(
             || call.address != a
             || call.invocation_id != b.invocation_id
             || b.identity.method != call.name
-            || b.identity.descriptor_identity != entry.descriptor_identity
+            || b.identity.tool_identity != entry.tool_identity
             || b.identity.arguments_digest != call.arguments_digest
             || call.arguments_digest != lattice_conversation::arguments_digest(&call.arguments)
         {
@@ -225,26 +166,6 @@ fn bound_reply(
         }
     }
     Ok(())
-}
-
-pub(super) fn stage(progress: &SlotProgress) -> InvocationStage {
-    match progress {
-        SlotProgress::Registered => InvocationStage::Registered,
-        SlotProgress::Started => InvocationStage::Started,
-        SlotProgress::Terminal { .. } => InvocationStage::Terminal,
-    }
-}
-
-pub(super) fn invocation_transition(
-    previous: Option<InvocationStage>,
-    next: InvocationStage,
-) -> bool {
-    matches!(
-        (previous, next),
-        (None, InvocationStage::Registered)
-            | (Some(InvocationStage::Registered), InvocationStage::Started)
-            | (Some(InvocationStage::Started), InvocationStage::Terminal)
-    )
 }
 
 pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
@@ -446,14 +367,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
                     return Err(err());
                 }
                 let index = r.index.get(&id).ok_or_else(err)?;
-                let change = r.changes.get(&index.last_change).ok_or_else(err)?;
-                if index.address != slot.binding.identity.address()
-                    || index.last_change.0 == 0
-                    || index.last_change > r.last_change
-                    || change.sequence != index.last_change
-                    || change.invocation_id != id
-                    || change.stage != stage(&slot.progress)
-                {
+                if index.address != slot.binding.identity.address() {
                     return Err(err());
                 }
             }
@@ -556,56 +470,16 @@ pub(super) fn records(r: &Records) -> Result<()> {
             "index key set differs from slots",
         ));
     }
-    let mut previous: BTreeMap<InvocationId, (InvocationStage, ChangeSeq)> = BTreeMap::new();
-    let mut seq = 0;
-    for (key, change) in &r.changes {
-        seq = next_sequence(seq, "change")?;
-        if key.0 != seq || change.sequence != *key {
-            return Err(err(
-                "invocation_changes",
-                key.0.to_string(),
-                "non-contiguous changes",
-            ));
-        }
-        if !all_slots.contains_key(&change.invocation_id) {
-            return Err(err(
-                "invocation_changes",
-                key.0.to_string(),
-                "orphan change",
-            ));
-        }
-        let legal = invocation_transition(
-            previous.get(&change.invocation_id).map(|p| p.0),
-            change.stage,
-        );
-        if !legal {
-            return Err(err(
-                "invocation_changes",
-                key.0.to_string(),
-                "illegal lifecycle transition",
-            ));
-        }
-        previous.insert(change.invocation_id, (change.stage, *key));
-    }
-    if r.last_change != ChangeSeq(seq) {
-        return Err(err(
-            "meta",
-            "last_change_seq".into(),
-            "high water mark mismatch",
-        ));
-    }
     for (id, (_, slot)) in all_slots {
         let index = r
             .index
             .get(&id)
             .ok_or_else(|| err("invocation_index", id.to_string(), "missing index"))?;
-        if index.address != slot.binding.identity.address()
-            || previous.get(&id) != Some(&(stage(&slot.progress), index.last_change))
-        {
+        if index.address != slot.binding.identity.address() {
             return Err(err(
                 "invocation_index",
                 id.to_string(),
-                "index or latest change mismatch",
+                "index address mismatch",
             ));
         }
     }
@@ -621,7 +495,6 @@ fn profile_copy(r: &Records, session: SessionId) -> Result<()> {
         )
     };
     let copy = r.profile_copies.get(&session).ok_or_else(error)?;
-    copy.validate().map_err(|_| error())?;
     let config = r
         .max_node(session)
         .and_then(|node| r.nodes.get(&(session, node)))

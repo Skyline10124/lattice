@@ -17,7 +17,7 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
     let fixture = setup_with_events(happy_events(), &[]);
     let result = super::execute::run_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
+        fixture.root.clone(),
         fixture.request.clone(),
     )
     .await

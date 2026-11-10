@@ -9,18 +9,18 @@ pub use crate::{
 };
 pub use lattice_conversation::{
     CostEstimate, CostSummary, Effort, InvocationId, ModelAttemptKey, ResultPayload, SessionId,
-    StepContent, StoredToolResult, SuccessContent, TokenSummary, TurnId, UsageCompleteness,
+    StepContent, StoredToolResult, SuccessContent, TokenSummary, ToolError, TurnId,
+    UsageCompleteness,
 };
 pub use lattice_llm::{
     Availability, ConfigurationRequirement,
     auth::{AuthStatus, ProviderAuthStatus, RevocationStatus, SensitiveLoginUrl},
 };
 pub use lattice_session::store::{
-    AttemptProgress, AuditPage, AuditReplay, AuditTailPage, ChangeSeq, ConversationEntry,
-    MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice, NoticeLevel, OperatorInvocationState,
-    OperatorReason, OperatorStatus, Page, PublicTurnOutcome, RetryNotice, SessionLog,
-    SessionRecord, SessionUsage, SlotProgress, StepDetail, StepEnd, StepKey, StepProgress,
-    TurnDetail, TurnSummary, TurnUsageRow, UsageSummary,
+    AttemptProgress, ConversationEntry, MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice,
+    NoticeLevel, Page, PublicTurnOutcome, RetryNotice, SessionLog, SessionRecord, SessionUsage,
+    SlotProgress, SlotReason, SlotState, StepDetail, StepEnd, StepKey, StepProgress, TurnDetail,
+    TurnSummary, TurnUsageRow, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -373,7 +373,7 @@ impl From<crate::ApiError> for LocalError {
                         result.kind = Busy;
                         None
                     }
-                    StoreError::InvalidInput { .. } | StoreError::InvalidCursor => {
+                    StoreError::InvalidInput { .. } => {
                         result.kind = BadRequest;
                         None
                     }
@@ -470,13 +470,6 @@ pub struct DaemonStatus {
     pub owners: usize,
     pub unconfirmed_operations: usize,
 }
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Default)]
-pub struct AuditSelection {
-    pub session_id: Option<SessionId>,
-    pub turn_id: Option<TurnId>,
-    pub method: Option<String>,
-    pub outcome: Option<lattice_conversation::ToolResultOutcome>,
-}
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Request {
@@ -539,26 +532,6 @@ pub(super) enum Request {
     Watch {
         session_id: SessionId,
     },
-    AuditQuery {
-        workspace: PathBuf,
-        selection: AuditSelection,
-        after: Option<InvocationId>,
-        limit: u32,
-    },
-    AuditTail {
-        workspace: PathBuf,
-        selection: AuditSelection,
-        after: ChangeSeq,
-        limit: u32,
-    },
-    AuditReplay {
-        workspace: PathBuf,
-        session_id: SessionId,
-        turn_id: TurnId,
-    },
-    OperatorStatus {
-        workspace: PathBuf,
-    },
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "response", content = "value", rename_all = "snake_case")]
@@ -581,10 +554,6 @@ pub(super) enum Response {
     Acceptance(Acceptance),
     View(ViewUpdate),
     Cancelled { owned: bool },
-    Audit(AuditPage),
-    AuditTail(AuditTailPage),
-    AuditReplay(AuditReplay),
-    OperatorStatus(OperatorStatus),
     Error(LocalError),
 }
 

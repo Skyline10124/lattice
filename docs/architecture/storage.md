@@ -10,14 +10,14 @@ status: active
 
 ## 目的与范围
 
-本合同规定私有状态寻址、两类领域存储的归属、会话库的使用条件、通用 Git 内核、创建与打开、发布、锁和持久性验证边界。
+本合同规定私有状态寻址、会话库的使用条件、旧版工作区历史目录的保留规则、`lattice-store` 尚存的通用 Git 内核、创建与打开、发布、锁和持久性验证边界。
 
-私有状态只有两类存储：
+私有状态目录下的存储与遗留路径：
 
 - **会话库** `lattice.redb`：全局一份，保存 Session、会话树（Step 节点内含调用槽位）、配置表与各索引，由 `lattice-session` 维护。
-- **工作区历史库** `workspace-history.git`：每项目一份，保存项目全局文件变更历史，由 `lancet-runtime` 维护，经 `lattice-store` 的通用 Git 机制发布。
+- **工作区历史库** `workspace-history.git`：本版本不再创建、读取或清理；旧版本留下的 `projects/<ProjectStoreKey>/workspace-history.git` 原样保留。
 
-会话记录与事务序列见[会话合同](session/README.md)，调用执行与证据见 [LANCET 合同](lancet.md)和 [Cell 合同](cell.md)，文件安装与工作区历史见[工作区合同](workspace.md)。
+会话记录与事务序列见[会话合同](session/README.md)，调用槽位推进与结果载荷见[调用槽位](session/steps.md#调用槽位)。
 
 ## 状态布局与身份
 
@@ -28,7 +28,7 @@ status: active
 | 相对 `<state-root>/lattice/` 的位置 | 归属与作用 |
 | --- | --- |
 | `lattice.redb` | `lattice-session`，全局会话库 |
-| `projects/<ProjectStoreKey>/workspace-history.git` | `lancet-runtime`，项目级变更历史 |
+| `projects/<ProjectStoreKey>/workspace-history.git` | 本版本不再创建、读取或清理；旧版本留下的目录原样保留 |
 | `locks/sessions/<SessionId>.lock` | 会话操作锁 |
 | `locks/projects/<ProjectStoreKey>/workspace.lock` | 项目工作区操作锁 |
 
@@ -45,7 +45,7 @@ status: active
 | `<state-root>/lattice/local/owner.lock` | 后台终身持有其非阻塞独占 flock，排除同作用域的第二个后台；内核在进程退出后释放锁 |
 | `local/api.sock` | 供本机客户端建立 Unix socket 连接，由实例锁持有者绑定和清理 |
 | 后台 epoch | 标识一次后台生命周期，用于判定观察连续性；随进程重启改变 |
-| 会话库句柄、Owner 和内存观察状态 | 后台持有并用于执行、控制和回答请求；持久业务事实在会话库和各项目工作区历史库中 |
+| 会话库句柄、Owner 和内存观察状态 | 后台持有并用于执行、控制和回答请求；持久业务事实保存在会话库中 |
 
 后台生命周期依次为：
 
@@ -77,9 +77,9 @@ ProjectStoreKey = lower_hex(SHA256(
 ))
 ```
 
-键使用 64 个小写十六进制字符，不要求路径为 UTF-8。profile 的 `[lancet.project_root].root` 是策略范围，不参与寻址。
+键使用 64 个小写十六进制字符，不要求路径为 UTF-8。
 
-同一规范路径使用同一命名空间，项目移动到其他路径后得到不同键，无关项目复用原路径会看到既有命名空间。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目。Session 永久绑定一个键，路径迁移后创建新 Session，不自动 relink。会话库是全局的，项目键只作为 Session 的绑定字段和工作区历史库的目录地址。
+同一规范路径使用同一命名空间，项目移动到其他路径后得到不同键，无关项目复用原路径会看到既有命名空间。该规则不使用内容指纹、Git remote、inode 或 generation 注册表识别项目。Session 永久绑定一个键，路径迁移后创建新 Session，不自动 relink。会话库是全局的，项目键作为 Session 的绑定字段及 `projects/<ProjectStoreKey>/` 下项目级目录的地址。
 
 ## 会话库
 
@@ -108,7 +108,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 身份、版本与打开
 
-会话库保存一张元信息表，记录库格式版本；各记录的值带格式版本。表定义、值格式及其演化由 `lattice-session` 维护。
+会话库保存一张元信息表，记录库格式版本（当前为 `8`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。
 
 | 打开时的状态 | 处理 |
 | --- | --- |
@@ -121,7 +121,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 首次创建
 
-会话库只在创建新 Session 的提交路径上首次创建；该路径同时创建或验证所属项目的工作区历史库，再执行接受事务。其他操作遇到库文件不存在时返回未初始化，不创建。
+会话库只在创建新 Session 的提交路径上首次创建，创建后再执行接受事务；该路径不创建或读取工作区历史库。其他操作遇到库文件不存在时返回未初始化，不创建。
 
 创建按以下顺序执行：
 
@@ -136,22 +136,20 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 职责分工
 
-`lattice-store` 为工作区历史库提供通用 Git 机制，不依赖其他项目 crate。它提供 canonical bytes、不可变 blob/tree/commit、窄对象读取、单引用 CAS、Linux 锁、首次创建与同步屏障，也提供上文的 ProjectStoreKey 推导与操作锁。
+`lattice-store` 提供上文的 ProjectStoreKey 推导、状态布局与 Linux 操作锁，并仍保留通用 Git 存储机制（canonical bytes、不可变 blob/tree/commit、窄对象读取、单引用 CAS、首次创建与同步屏障），不依赖其他项目 crate。本版本产品路径不再创建或读取 `workspace-history.git`。
 
-领域封装决定仓库文件名、引用命名空间、记录类型、schema、对象关系及迁移。内核不提供通用业务 `put/get`、原始 gix Repository getter、全存储注册表、可插拔后端或跨库事务。
+Git 仓库调用方决定仓库文件名、引用命名空间、记录类型、schema、对象关系及迁移。内核不提供通用业务 `put/get`、原始 gix Repository getter、全存储注册表、可插拔后端或跨库事务。
 
 ```mermaid
 flowchart TD
     A["lattice-api 协调层"] --> S["lattice-session：会话库"]
-    A --> W["lancet-runtime：工作区历史库"]
     S --> R["redb"]
-    W --> K["lattice-store 通用 Git 机制"]
-    K --> G["Git 对象与引用"]
-    K --> L["Linux 锁与持久化屏障"]
     S --> KL["lattice-store 锁与项目寻址"]
+    K["lattice-store 通用 Git 机制"] --> G["Git 对象与引用"]
+    K --> L["Linux 锁与持久化屏障"]
 ```
 
-图示为领域协作与机制依赖，省略 `lancet-api` 等公开接口层。TurnCoordinator 经领域接口协调两库；一个领域的失败可以保留另一领域已经完成的变化。
+图示为现行协调层与存储机制的依赖关系：TurnCoordinator 只读写会话库，不读写工作区历史库。
 
 ### 仓库身份与版本
 
@@ -179,7 +177,7 @@ StoreRepo 严格打开既有 bare Git 仓库，核对元信息和 loose-object �
 
 | 状态 | 处理 |
 | --- | --- |
-| 目标不存在 | 内核返回 `NotInitialized`；既有 Session 所绑定项目的仓库缺失由产品层作为异常处理 |
+| 目标不存在 | 内核返回 `NotInitialized` |
 | 目标类型、bare 仓库形态、身份或版本不符 | 拒绝打开并报告相应损坏 |
 | loose-object fanout 缺失、为符号链接或不是目录 | 拒绝打开，不补目录 |
 | 领域记录、对象、引用关系无效 | 领域返回类型化损坏或读取错误 |
@@ -188,7 +186,7 @@ StoreRepo 严格打开既有 bare Git 仓库，核对元信息和 loose-object �
 
 ### 仓库首次创建
 
-产品首次创建工作区历史库由创建新 Session 的提交路径发起，在会话库接受事务之前完成。隔离测试可在明确的自有目录调用创建接口。
+本版本产品路径不再创建工作区历史库；隔离测试与位置探测可在明确的自有目录调用 `StoreRepo::create`。
 
 创建按以下顺序执行：
 
@@ -257,7 +255,7 @@ SessionExecutionLock（会话绑定操作）
     → 会话库写事务，或至多一个 repository write lock
 ```
 
-不持有会话库写事务或仓库锁反向取得操作锁，不升级共享锁，不同时持有会话库写事务与仓库写锁，也不同时持有两个仓库写锁。会话库写事务内不等待模型、Tool、网络或其他锁，不跨 await 持有。[会话合同](session/concurrency.md#操作锁)维护会话操作的持有期限，[工作区合同](workspace.md#操作锁)维护观察与变更的项目锁范围；关闭 Turn 只写会话库，不取得工作区操作锁。操作员查询只用会话库读事务，不取得这两种操作锁。
+不持有会话库写事务或仓库锁反向取得操作锁，不升级共享锁，不同时持有会话库写事务与仓库写锁，也不同时持有两个仓库写锁。会话库写事务内不等待模型、Tool、网络或其他锁，不跨 await 持有。[会话合同](session/concurrency.md#操作锁)维护会话操作的持有期限，[工作区合同](workspace.md#操作锁)维护观察与变更的项目锁范围；关闭 Turn 只写会话库，不取得工作区操作锁。只读会话查询只用会话库读事务，不取得这两种操作锁。
 
 | 锁类别 | 同进程语义 |
 | --- | --- |
@@ -275,9 +273,9 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 会话树只追加、不删除，只有末端未关闭的 Step 节点会被改写，配置表只增不改；本阶段没有清理、压缩或备份机制。全部会话集中在一个库文件，文件损坏影响所有 Session；redb 自身提供崩溃恢复与完整性检查。
 
-会话库中的 TurnId 索引、InvocationId 索引与调用变更日志是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
+会话库中的 TurnId 索引与 InvocationId 索引是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
 
-工作区历史库的已确认状态由 `current` 引用的祖先链保持可达，不能依赖 reflog 保留；`current` 只前进，历史上每个提交都是它的祖先。当前不运行自动 GC、repack、maintenance、级联删除或历史改写，不为处理损坏自动重新初始化，不向外部 remote 添加 `refs/lattice/**` 推送规则。工作区历史不是整项目备份。
+旧版本留下的 `projects/<ProjectStoreKey>/workspace-history.git` 原样保留，本版本不再创建、读取或清理，也不运行自动 GC、repack、maintenance、级联删除或历史改写，不向外部 remote 添加 `refs/lattice/**` 推送规则。`StoreRepo` 仓库的已确认状态由引用祖先链保持可达，不依赖 reflog 保留。
 
 会话库格式、Git 内核格式与各领域 schema 分别演化。格式、目录拓扑、事务序列或屏障变化须核验既有数据的打开、可达性及各领域写入接口，破坏性处理须先说明影响并获授权。历史性能与故障证据按[测试工程的证据保留要求](../development/testing.md#脱敏与完整性)处理。
 
@@ -285,7 +283,7 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 ### 能力探测
 
-能力按实际发布位置验证，不由文件系统名称或一次主机检查代替。检查覆盖同挂载点的 sibling publication、`renameat2(RENAME_NOREPLACE)`、文件与目录 fsync、本地 flock，以及最小仓库的创建、发布、重开与身份校验。会话库和工作区历史库的首次创建都对实际父目录执行这些探测。
+能力按实际发布位置验证，不由文件系统名称或一次主机检查代替。检查覆盖同挂载点的 sibling publication、`renameat2(RENAME_NOREPLACE)`、文件与目录 fsync、本地 flock，以及最小仓库的创建、发布、重开与身份校验。会话库与 `StoreRepo` 的首次创建都对实际父目录执行这些探测。
 
 严格打开只验证已有存储，不自动运行创建型探测。诊断入口 `lattice-store-probe` 会建立目录及临时仓库，属于有副作用的验证，应在明确允许的位置运行。
 
@@ -302,11 +300,11 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 | 寻址、Git 仓库身份、严格打开、首次创建、锁及屏障 | `cargo test -p lattice-store` |
 | 内核静态检查 | `cargo clippy -p lattice-store --all-targets -- -D warnings` |
 | 依赖边界 | `cargo tree -p lattice-store --edges normal`、`cargo xtask lancet-boundary` |
-| 工作区历史发布、重试与可达性 | 按影响选择 `lancet-runtime` 及协调层测试 |
+| 会话不创建或读取工作区历史库、遗留目录原样保留 | `cargo test -p lattice-api --test session_without_workspace_history` |
 | 实际存储位置能力 | 在获准目录运行预构建的 `lattice-store-probe` |
 
 纯文档修订核对接口责任、发布顺序、锁范围、来源、状态及图示。修改内核或会话库接线时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。
 
-承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，以及 [ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
+承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件，以及 [ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛) 的会话库升版与存储收敛。机制接口与实现核对位置为 [`repo.rs`](../../crates/lattice-store/src/repo.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
 创建残留的完整报告与跨位置能力覆盖仍需核验。

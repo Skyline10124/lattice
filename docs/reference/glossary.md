@@ -4,7 +4,7 @@ status: active
 
 # LATTICE
 
-LATTICE 是以会话为中心的 LLM 运行时，Agent 通过 LANCET 调用封闭目录中的结构化 Tool，操作用户的 Local Workspace。
+LATTICE 是以会话为中心的 LLM 运行时，协调层经可注入的 `ToolExecutor` 驱动工具调用槽位；当前版本生产环境默认注入空目录的 `NoTools`，以纯对话运行。
 本文件是项目唯一的领域术语表，提供简短定义、关键区别与合同入口；完整规则由对应合同维护。
 术语表不批准新语义。
 
@@ -86,7 +86,7 @@ _Avoid_: configurable deny pattern, projection exclusion
 _Avoid_: terminal connection, background process, workspace copy
 
 **会话树**:
-Session 内由根节点 `0`、UserMessage 与 Step 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录工作区交互，但不拥有 Local Workspace 内容。
+Session 内由根节点 `0`、UserMessage 与 Step 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录对话与工具调用历史，不拥有 Local Workspace 内容。
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
 
@@ -111,7 +111,7 @@ Step、尝试和调用槽位最后到达的阶段，只前进。最后一个阶�
 _Avoid_: ActiveStep, PendingTurn, completion marker
 
 **TurnSummary**:
-一轮结局的公开读取投影 `{ outcome, notice, progress }`，每次读取从最后一个 Step 节点得出，不另存。Turn 与文件变更的关联记在 Workspace History 的变更记录中。
+一轮结局的公开读取投影 `{ outcome, notice, progress }`，每次读取从最后一个 Step 节点得出，不另存。
 见[关闭 Step 与 Turn](../architecture/session/steps.md#关闭-step-与-turn)。
 _Avoid_: Turn 记录, TurnCommit, commit OID
 
@@ -126,14 +126,39 @@ _Avoid_: TurnCoordinator, durable Turn, execution owner
 _Avoid_: NodeId, provider call ID, InvocationId
 
 **InvocationId**:
-一次工具调用的持久身份，贯穿槽位登记、执行、取消、结果和证据；provider Tool Call ID 只属模型协议材料。
-见[登记与持久边界](../architecture/lancet.md#登记与持久边界)。
+一次工具调用的持久身份，贯穿槽位登记、执行、取消与结果保存；provider Tool Call ID 只属模型协议材料。
+见[调用槽位](../architecture/session/steps.md#调用槽位)。
 _Avoid_: provider call ID, tool name, PlanKey
 
 **调用槽位**:
-模型回复中一个 ToolCall 在 Step 节点里的持久记录。登记事务为回复中的每个 ToolCall 建立一个槽位并分配 InvocationId，顺序与回复中的片段顺序一致。它先为该调用将来的 ToolResult 占住位置，故称槽位；之后依次推进到 `Started` 与 `Terminal`，到达 `Terminal` 时写入结果、载荷与 Cell 证据。每个阶段都有确定的结论，所以树上不会出现有调用而无结果的节点。槽位归 `lattice-session`，随 Step 节点在同一个会话库事务里写入。
+模型回复中一个 ToolCall 在 Step 节点里的持久记录。登记事务为回复中的每个 ToolCall 建立一个槽位、分配 InvocationId 并记录不透明工具身份 `tool_identity` 与规范参数摘要，顺序与回复中的片段顺序一致。它先为该调用将来的 ToolResult 占住位置，故称槽位；之后推进到 `Started`，执行器返回非 `Deadline` 结果时再推进到 `Terminal` 并写入结局与载荷（返回 `Deadline` 时保持 `Started` 并按 `Indeterminate(NoResult)` 读出）。每个阶段都有确定的结论，所以树上不会出现有调用而无结果的节点。槽位归 `lattice-session`，随 Step 节点在同一个会话库事务里写入。
 见[调用槽位](../architecture/session/steps.md#调用槽位)。
 _Avoid_: invocation ledger, `invocations.git`, BindingPlan, provider Tool Call ID as slot identity
+
+**ToolExecutor**:
+协调层注入的工具执行接缝：接受事务前按会话与工作区打开一次本轮 `TurnTools`，给出冻结进配置表的 `ToolSpec` 列表（名称、描述、规范输入 schema 与不透明 `tool_identity`），并在调用槽位提交为 `Started` 后分发单次执行。协调层不感知底层运行时或策略细节。
+见[执行配置冻结](../architecture/session/acceptance.md#执行配置冻结)及[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)。
+_Avoid_: LancetRuntime, global mutable tool registry, ambient host executor
+
+**ToolOutcome**:
+`TurnTools::execute` 对单次已 `Started` 调用返回的执行结果：`Succeeded(Value)`、`Failed(ToolError)`、`Cancelled`、`Deadline` 或 `Indeterminate`。除 `Deadline` 直接关闭当前 Step 并令槽位保留 `Started`（读作 `Indeterminate(NoResult)`）外，其余变体由协调层映射为槽位的 `Terminal` 结局与载荷。
+见[调用槽位](../architecture/session/steps.md#调用槽位)。
+_Avoid_: raw Result string, CepError, untyped exit status
+
+**ToolError**:
+工具调用失败时持久保存并投影给模型的结构化载荷 `{ code, message }`，其中 `code` 为机器错误码字符串，`message` 为面向模型与诊断的说明文本；provider 投影将其编码为 `{"error":{"code":...,"message":...}}`。
+见[对话与投影边界](../architecture/session/conversation.md#对话与投影边界)及[调用槽位](../architecture/session/steps.md#调用槽位)。
+_Avoid_: CepError, unstructured error string, Cell evidence error
+
+**NoTools**:
+生产后台默认注入的 `ToolExecutor` 空实现：返回空的 `ToolSpec` 列表，使本轮冻结目录为空、发给模型的请求不带工具定义，所有会话按纯对话运行。
+见[执行配置冻结](../architecture/session/acceptance.md#执行配置冻结)。
+_Avoid_: disabled tool flag, runtime plugin fallback
+
+**测试假执行器**:
+仅在显式开启 `test-fake-tools` Cargo feature 且后台启动环境设置 `LATTICE_TEST_TOOLS`（逗号分隔工具名）时启用的确定性 `FakeToolExecutor`；未开启 feature 或未设置该环境变量时仍使用 `NoTools`。它按调用参数中的动作控制成功、超限输出、结构化失败、阻塞取消/超时与不确定结局，专供测试验证协调层多步工具循环。
+见[会话与 Turn](../architecture/session/README.md#目的与范围)及[验证集与显式 feature](../development/testing.md#验证集与显式-feature)。
+_Avoid_: production fallback tool, mock LLM server
 
 **持久对话内容**:
 已写入会话树的 UserMessage 与 Step 节点，作为对话条目交付，也供后续模型请求使用。
@@ -151,8 +176,8 @@ _Avoid_: snapshot, event window, subscription cursor, Gap
 _Avoid_: TurnEvent, HistoryEntry, per-call item
 
 **Workspace History**:
-LATTICE 已成功安装的 Atomic Local Mutation 的私有持久记录，使用 Git tree 表达前后状态，仅覆盖 LATTICE 变更过的路径；每条变更记录带 `TurnId` 与 `InvocationId`。
-它位于 Local Workspace 和用户项目 Git 之外的私有 bare Git 库，见[私有存储与数据关系](../architecture/workspace.md#私有存储与数据关系)。
+旧版本用于记录工作区文件变更历史的私有 bare Git 库路径 `projects/<ProjectStoreKey>/workspace-history.git`。本版本不再创建、读取或清理该仓库，旧版本留下的目录原样保留。
+见[私有状态根](../architecture/storage.md#私有状态根)。
 _Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
 receipt store
 

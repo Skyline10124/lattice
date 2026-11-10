@@ -4,8 +4,7 @@
 //! 持久结构化工具结果；provider 文本只能在投影边界派生。
 
 use crate::tool_call::hex_digest;
-use crate::{BoundToolCall, NativeMessage, ToolResultOutcome};
-use lancet_protocol::{CepError, InvocationId};
+use crate::{BoundToolCall, InvocationId, NativeMessage, ToolError, ToolResultOutcome};
 use serde::{Deserialize, Serialize};
 
 pub const MAX_TOOL_CONTENT_BYTES: usize = 65_536;
@@ -26,9 +25,9 @@ pub fn tool_content_digest(canonical_content: &str) -> [u8; 32] {
 pub enum IndeterminateCause {
     /// Step 停止或进程退出时尚未取得结果，由关闭事务补写。
     NoResult,
-    /// LANCET 返回 `CallCancelled`。
+    /// 执行器返回取消。
     Cancelled,
-    /// LANCET 返回 `OutcomeIndeterminate`。
+    /// 执行器报告结果不确定。
     Reported,
 }
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
@@ -46,11 +45,11 @@ pub struct StoredToolResult {
     deny_unknown_fields
 )]
 pub enum ResultPayload {
-    /// LANCET 返回 JSON。
+    /// 执行器返回 JSON。
     Succeeded(SuccessContent),
-    /// LANCET 返回 CepError；策略或校验拒绝是其中的错误族。
-    Failed(Box<CepError>),
-    /// 从未交给 LANCET。不带原因：为什么停记在 Step 的结束原因里。
+    /// 执行器返回 `ToolError`。
+    Failed(ToolError),
+    /// 从未交给执行器。不带原因：为什么停记在 Step 的结束原因里。
     NotExecuted,
     /// 已越过 Started，效果未知。
     Indeterminate(IndeterminateCause),

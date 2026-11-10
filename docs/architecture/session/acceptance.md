@@ -31,8 +31,9 @@ status: active
 
 配置的来源：
 
-- **profile。** 会话的 profile 副本；新会话或提交指定了 agent 时，由 `lattice-profile::load_agent_profile` 发现并加载该 agent 的 profile（先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，核对全局目录与文件权限、解析字段与系统提示），再在协调层解析外部策略文件。
+- **profile。** 会话的 profile 副本；新会话或提交指定了 agent 时，由 `lattice-profile::load_agent_profile` 发现并加载该 agent 的 profile（先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，核对全局目录与文件权限，仅接受 `schema_version = 1`、`[agent]`、`[prompt]` 与可选 `[llm]`，解析字段与系统提示；出现已移除的 `[lancet]` 或 `[tools]` 时直接拒绝，见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#6-profile-删除-lancet-与-tools)）。
 - **provider、模型、元数据与凭据。** 提交的选择或副本中的 `ModelRef`；接受时由 `GatewayTurn::prepare` 在一次准备中读取当前配置，核对 provider 与模型处于 `ready`（满足声明、凭据与端点校验，见[可用性判定](../llm/models.md#可用性判定)），并按本次档位策略选定推理档位（见[会话的 profile 副本](settings.md#会话的-profile-副本)）。输出上限、推理预算与凭据本身不在接受时冻结，由请求网关每次请求时按当前状态取得，见[元数据的来源与合并](../llm/models.md#元数据的来源与合并)与[凭据](../llm/credentials.md#凭据)。
+- **工具目录。** 接受事务前由注入的 `ToolExecutor::open_turn(session_id, workspace)` 打开本轮 `TurnTools`，把给出的 `ToolSpec` 列表转换为 `ToolCatalogSnapshot` 冻结进配置表；生产后台默认注入空目录的 `NoTools`，冻结目录为空，发给模型的请求不带工具定义（见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）。
 - **TLS 根证书。** 后台启动时载入，见[配置来源与后台启动](#配置来源与后台启动)。
 
 `FrozenTurnConfig` 是协调层在接受时构造的非秘密执行事实，供执行、结果投影、`log` 显示使用：agent 名、模型、provider、推理档位和执行限制记在 UserMessage 节点上，其余按内容摘要写入配置表。
@@ -40,12 +41,12 @@ status: active
 | 字段类别 | 来源 | 冻结时点 | 接收/持有者 | 是否持久化 | 用途 |
 | --- | --- | --- | --- | --- | --- |
 | 提交的选择 | 前端：agent、模型、推理档位，都可以不选 | 提交时 | 后台准入 | 不单独保存；生效的值写入副本与 UserMessage 节点 | 用户在本次提交中的选择 |
-| 有效 profile | profile 副本，或 agent 的 profile；策略文件解析所得有效工作区、网络和观察限制填回具体字段 | 接受事务前 | 执行核心 | 是，在 profile 副本中 | 固定 agent、LLM 重试与超时、启用工具及能力策略 |
+| 有效 profile | profile 副本，或 agent 的 profile | 接受事务前 | 执行核心 | 是，在 profile 副本中 | 固定 agent、默认模型与档位、LLM 重试与超时 |
 | 凭据 | `auth.json` | 不冻结；请求网关每次请求时取得，SIWC 的 access token 按需刷新，见[刷新](../llm/credentials.md#刷新) | 请求网关，只在内存中 | 否 | 认证 provider 请求 |
-| TLS 根证书 | 后台启动时载入的内容 | 后台启动时 | provider 连接与本 Turn 的 Tool Host 信任配置 | 否 | 验证 TLS 连接 |
+| TLS 根证书 | 后台启动时载入的内容 | 后台启动时 | 请求网关与 provider 连接 | 否 | 验证 TLS 连接 |
 | `FrozenTurnConfig.agent_name/model/provider/effort` | 有效 profile、模型解析与档位选择的结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份、模型与推理档位 |
 | `FrozenTurnConfig.system_prompt` | 有效 profile 加载的系统提示 | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
-| `FrozenTurnConfig.catalog` | 本次运行时的启用工具目录 | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存运行时构建身份、按工具名排序的 entries 及摘要；entry 含名称、Descriptor 身份、描述、规范输入 schema |
+| `FrozenTurnConfig.catalog` | `ToolExecutor::open_turn` 给出的本轮 `ToolSpec` 列表（生产默认 `NoTools` 为空目录） | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存按工具名排序的 entries 及摘要；entry 含名称、不透明工具身份 `tool_identity`、描述、规范输入 schema（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。模型请求使用同一份目录，`NoTools` 下不发送工具定义；回复含目录外工具名时按 `InvalidBatch` 整批拒绝 |
 | `FrozenTurnConfig.limits` | profile 超时、每步尝试数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
 
 持久冻结事实的类型由 `lattice-session` 维护，接受接线见[接受接线](../../../crates/lattice-api/src/turn/live.rs)。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。
@@ -62,20 +63,20 @@ status: active
 
 - **全局 agents 目录的权限。** 配置目录下 `agents` 中的 profile 只在可信时使用：`agents` 目录、`<名字>` 目录与 `agent.toml` 都属于当前用户，不可被同组或其他用户写入（权限与 0o022 无交集，所以默认的 0755 目录与 0644 文件可用），路径的最后一段不是符号链接。外部系统提示文件位于全局 agents 目录内时，按同一规则检查。发现属主不符、同组或其他用户可写或是符号链接时，按配置错误拒绝并说明原因，不自动修改。只检查路径的最后一段，上级目录中的符号链接（例如指向别处的 `$HOME`）不受影响。项目内的 `.lattice/agents` 属于所在工作区，不做这项检查。
 
-- 后台启动时载入 TLS 根证书，保存在内存中直到退出。个别证书文件读不出时只记 WARN，其余照常使用。单张过大或无法按 rustls 信任锚规则解析 DER 的证书跳过并记 WARN，不占名额，也不计入 DER 总量；其余按加载顺序保留前缀，达到 1,024 张或 DER 总量 4 MiB 时停止并记 WARN，之后的根证书都不信任，由它们签发的 HTTPS 服务请求失败。按上述规则筛完一张可用的根证书都不剩（包括全部过大、全部无法解析或根本没有载入到证书）时，后台记为没有可用的根证书。没有可用的根证书时，后台照常启动、照常回答查询；所选 provider 的端点是 https 的，在接受前按配置错误拒绝并说明原因，http 端点照常放行；不回退到平台根。Tool Host 按同一规则处理：没有可用的根证书时，Tool 的 https 请求在通过网络策略与单元授权后、解析与连接前拒绝，证据记为 `tls_roots_unavailable`；不在允许名单或未授权的目标仍记为策略拒绝，http 请求照常；模型元数据刷新也需要 https，同样以“no usable TLS root certificates”拒绝。
+- 后台启动时载入 TLS 根证书，保存在内存中直到退出。个别证书文件读不出时只记 WARN，其余照常使用。单张过大或无法按 rustls 信任锚规则解析 DER 的证书跳过并记 WARN，不占名额，也不计入 DER 总量；其余按加载顺序保留前缀，达到 1,024 张或 DER 总量 4 MiB 时停止并记 WARN，之后的根证书都不信任，由它们签发的 HTTPS 服务请求失败。按上述规则筛完一张可用的根证书都不剩（包括全部过大、全部无法解析或根本没有载入到证书）时，后台记为没有可用的根证书。没有可用的根证书时，后台照常启动、照常回答查询；所选 provider 的端点是 https 的，在接受前按配置错误拒绝并说明原因，http 端点照常放行；不回退到平台根。模型元数据刷新也需要 https，同样以“no usable TLS root certificates”拒绝。
 - 请求不带配置来源。后台运行期间，前端环境的变化不影响它；要让新的环境生效，用 `lattice daemon stop` 停止后台后重新启动。前端的 `HOME` 或 `XDG_STATE_HOME` 不同时通常解析出另一个状态根，连到的是另一个后台。
-- 后台不清空、也不替换启动环境。所以后台创建或打开 Git 库时一律使用隔离方式，不读用户与全局的 Git 配置。
+- 后台不清空、也不替换启动环境。
 - 工作区 `.env` 不再加载；环境变量不提供 key、endpoint 或模型，见[endpoint 的来源](../llm/providers.md#endpoint-的来源)。
 
 ### 配置安全边界
 
 后台按 Turn 冻结 profile，执行中不重读它，不切换共享环境或 cwd。provider 配置与凭据由请求网关每次请求时取得，SIWC 的 access token 在请求前按需刷新，见[模型接入合同](../llm/credentials.md#刷新)。凭据只在 `auth.json` 与后台内存中，不进入会话库、profile 副本、公开 DTO、Debug、错误回显或日志。
 
-provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn 独立构造信任配置。Tool 网络继续遵守 [LANCET 逐跳授权与地址固定](../lancet.md#网络获取)。
+请求网关持有后台启动时载入的 TLS 根证书内容，供各 provider 连接与元数据刷新使用。
 
 ### 配置拒绝的原因
 
-新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找、权限校验、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、provider 与模型未满足的可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效）、模型引用与带来源归属的推理档位错误（`--effort`、`agent.toml` 的 `[agent].effort` 或会话 profile 副本），以及没有可用的根证书时所选 provider 的端点是 https。后台在接受前发现启用了目录外的工具时，同样把说明带回前端。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
+新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找、权限校验、已移除或禁止的顶层节（如 `[lancet]`、`[tools]`）、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、provider 与模型未满足的可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效）、模型引用与带来源归属的推理档位错误（`--effort`、`agent.toml` 的 `[agent].effort` 或会话 profile 副本），以及没有可用的根证书时所选 provider 的端点是 https。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
 
 说明由 [`ConfigRejection`](../../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
@@ -92,7 +93,7 @@ provider 与 Tool Host 共享后台启动时载入的 TLS 根内容，各 Turn �
 
 TOML 解析错误给出路径、行号与解析器的错误描述，不附源码行。说明是单行文字：控制字符换成空格，空白折叠，最多 1024 个字符，超出时以 `…` 截断。
 
-以下拒绝保持固定文本：外部策略文件的解析与校验、提交输入超限或无法解析、持久配置校验，以及后台其余的 `ApiError::BadRequest(String)`。
+以下拒绝保持固定文本：提交输入超限或无法解析、持久配置校验，以及后台其余的 `ApiError::BadRequest(String)`。
 
 ## 模型请求与执行预算
 
@@ -135,6 +136,6 @@ cause = ProviderError { retryable }
 | reasoning | 2 MiB |
 | 一次尝试总量：正文、reasoning、各调用的参数、工具名与 provider call ID，以及各片段的回放状态之和 | 16 MiB |
 
-参数在流式阶段按收到的原文计量；回复结束、参数解析为规范对象后，规范形式比原文长的部分补入总量。同一元数据重复给出相同的值时不重复计入。超限立即停止消费，记录 `OutputLimit`。写入会话库时按同一算法、同一组常量对完整回复独立核对一次，参数按规范形式计量；这是持久边界上的检查，超限的回复不写入。这些是对话协议与组装器的限制，计量类型在 [`lattice-conversation`](../../../crates/lattice-conversation/src/lib.rs)，不能解释为容量或延迟的测量结论。单 ToolCall 参数上限与 LANCET 单文件工作区写入上限 `MAX_WORKSPACE_WRITE_BYTES`（1 MiB）一致：写入内容随参数传入，超过该大小的调用无法成功执行。
+参数在流式阶段按收到的原文计量；回复结束、参数解析为规范对象后，规范形式比原文长的部分补入总量。同一元数据重复给出相同的值时不重复计入。超限立即停止消费，记录 `OutputLimit`。写入会话库时按同一算法、同一组常量对完整回复独立核对一次，参数按规范形式计量；这是持久边界上的检查，超限的回复不写入。这些是对话协议与组装器的限制，计量类型在 [`lattice-conversation`](../../../crates/lattice-conversation/src/lib.rs)，不能解释为容量或延迟的测量结论。
 
 Turn 的单调时钟 deadline 在接受事务提交后开始，限制后续 provider 请求与 Tool 分发。槽位结果与 Step 关闭等必要写入不受 Turn deadline 约束；后台重启后不继续执行未关闭的 Turn，也不重建剩余执行时间。每次尝试分别保存按[用量换算](../llm/usage.md#用量换算)得出的用量：输入、缓存读、缓存写、输出与其中的推理，各项都可以缺失，缺失表示未报告；失败与重试尝试的已知用量也保留。每次尝试同时保存请求网关给出的 `usage_kind` 与可选 `cost`（`CostEstimate { usd, exact }`，未知为 null），Turn 的 Complete 或 Partial 由保存的尝试判定与汇总溢出派生，见[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)。费用结果的含义见[费用估算](../llm/usage.md#费用估算)。

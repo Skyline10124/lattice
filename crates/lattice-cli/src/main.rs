@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 mod commands;
 #[cfg(test)]
 mod test_support;
-use commands::{audit, lancet as lancet_cmd, models, session as session_cmd};
+use commands::{models, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -59,13 +59,6 @@ enum Commands {
     Session {
         #[command(subcommand)]
         action: session_cmd::SessionAction,
-    },
-    /// Inspect CEP invocation records (registered, started and terminal).
-    Audit(Box<audit::AuditCmd>),
-    /// LANCET inspection and self-check subcommands.
-    Lancet {
-        #[command(subcommand)]
-        action: Option<lancet_cmd::LancetAction>,
     },
     /// Open the terminal UI.
     Tui {
@@ -160,12 +153,6 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         }
         Some(Commands::Session { action }) => {
             return session_cmd::run(action, cli.json, cli.verbose).await;
-        }
-        Some(Commands::Audit(cmd)) => {
-            audit::run(*cmd, cli.json).await?;
-        }
-        Some(Commands::Lancet { action }) => {
-            lancet_cmd::run(action, cli.json).await?;
         }
         Some(Commands::Tui { session_id, agent }) => {
             return lattice_tui::run(lattice_tui::TuiOptions {
@@ -397,5 +384,19 @@ mod tests {
                 agent: None
             })
         ));
+    }
+
+    #[test]
+    fn top_level_subcommands_exclude_removed_audit_and_lancet() {
+        let command = Cli::command();
+        assert_eq!(
+            command
+                .get_subcommands()
+                .map(|c| c.get_name())
+                .collect::<Vec<_>>(),
+            ["run", "daemon", "auth", "models", "session", "tui"]
+        );
+        assert!(Cli::try_parse_from(["lattice", "audit"]).is_err());
+        assert!(Cli::try_parse_from(["lattice", "lancet"]).is_err());
     }
 }

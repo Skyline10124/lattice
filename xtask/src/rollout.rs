@@ -13,8 +13,6 @@
 //!   5. dependency/architecture boundary checks (public xtask contracts)
 //!   6. Direct-Local harness scenarios against the release binary (`LATTICE_BIN`)
 //!   7. offline correctness suites (with an anti-vacuous zero-pass guard)
-//!   8. release operator Component audit matrix (exact-named test)
-//!   9. `lattice --json lancet doctor` (JSON saved as evidence)
 //!
 //! SKIPPED IS NOT PASS: every planned step is seeded `blocked` and only
 //! overwritten by actually running it; the verdict is `pass` iff every
@@ -48,7 +46,6 @@ const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
 /// Direct-Local scenarios have their own 30s/180s budgets; this is the
 /// whole-suite backstop so one hung test binary cannot stall the gate.
 const TEST_TIMEOUT: Duration = Duration::from_secs(1800);
-const DOCTOR_TIMEOUT: Duration = Duration::from_secs(120);
 
 #[derive(Args, Debug)]
 pub struct RolloutArgs {
@@ -155,8 +152,6 @@ struct Ctx {
     root: PathBuf,
     lattice_bin: PathBuf,
     harness_failures: PathBuf,
-    evidence_dir: PathBuf,
-    doctor_home: PathBuf,
 }
 
 struct Planned {
@@ -171,25 +166,17 @@ enum Action {
     ArtifactIdentity,
     Cmd(Command, Duration),
     CargoTest(Command),
-    Doctor(Command),
 }
 
 pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
     let root = repo_root::repo_root()?;
     let rollout_dir = root.join("target/rollout");
-    let evidence_dir = rollout_dir.join("evidence");
     let harness_failures = rollout_dir.join("harness-failures");
-    fs::create_dir_all(&evidence_dir).context("create rollout evidence dir")?;
     fs::create_dir_all(&harness_failures).context("create rollout harness-failure dir")?;
-    // Temp HOME for the doctor step: the gate must be reproducible regardless
-    // of the operator's interactive environment.
-    let doctor_home = tempfile::tempdir().context("create doctor temp HOME")?;
     let ctx = Ctx {
         root: root.clone(),
         lattice_bin: root.join("target/release/lattice"),
         harness_failures,
-        evidence_dir,
-        doctor_home: doctor_home.path().to_path_buf(),
     };
 
     let channel = args.channel.as_str();
@@ -235,9 +222,8 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
             .expect("seeded step exists");
         slot.duration_ms = duration_ms;
         let passed = match outcome {
-            Ok(evidence) => {
+            Ok(()) => {
                 slot.status = StepStatus::Passed;
-                slot.evidence_paths = evidence;
                 println!("\u{1b}[0;32m✓\u{1b}[0m {}", planned.id);
                 true
             }
@@ -285,11 +271,7 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
     std::process::exit(exit_code);
 }
 
-fn execute(
-    planned: &mut Planned,
-    ctx: &Ctx,
-    record: &mut RolloutRecord,
-) -> Result<Vec<String>, String> {
+fn execute(planned: &mut Planned, ctx: &Ctx, record: &mut RolloutRecord) -> Result<(), String> {
     match &mut planned.action {
         Action::CleanWorktree => clean_worktree(&ctx.root),
         Action::Probes => {
@@ -301,7 +283,7 @@ fn execute(
                 .collect();
             record.probes = probes;
             if failed.is_empty() {
-                Ok(vec![])
+                Ok(())
             } else {
                 Err(format!(
                     "gating capability probe(s) failed: {}",
@@ -312,7 +294,7 @@ fn execute(
         Action::ArtifactIdentity => match hash_artifact(&ctx.lattice_bin) {
             Ok(identity) => {
                 record.artifact = Some(identity);
-                Ok(vec![])
+                Ok(())
             }
             Err(e) => Err(e),
         },
@@ -323,13 +305,6 @@ fn execute(
         Action::CargoTest(cmd) => {
             let out = run_timed(cmd, TEST_TIMEOUT).map_err(|e| e.to_string())?;
             cargo_test_passed(&out)
-        }
-        Action::Doctor(cmd) => {
-            let out = run_timed(cmd, DOCTOR_TIMEOUT).map_err(|e| e.to_string())?;
-            let evidence = ctx.evidence_dir.join("doctor.json");
-            fs::write(&evidence, &out.output)
-                .map_err(|e| format!("write {}: {e}", evidence.display()))?;
-            status_check(&out).map(|_| vec![rel_path(&ctx.root, &evidence)])
         }
     }
 }
@@ -373,41 +348,10 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "-p",
         "lancet-authority",
         "-p",
-        "lancet-api",
-        "-p",
         "lattice-api",
         "-p",
         "lattice-session",
     ]);
-    // Exact-named, feature-gated Component audit scenario so a renamed test
-    // fails loudly instead of filtering to zero.
-    let mut release_operator_matrix = Command::new("cargo");
-    release_operator_matrix
-        .current_dir(&ctx.root)
-        .args([
-            "test",
-            "-p",
-            "lattice-system-harness",
-            "--features",
-            "release-operator",
-            "--test",
-            "release_operator",
-            "release_operator_component_matrix",
-            "--",
-            "--exact",
-        ])
-        .env("LATTICE_BIN", &ctx.lattice_bin)
-        .env("LATTICE_HARNESS_FAILURE_DIR", &ctx.harness_failures);
-
-    // Doctor validates the temporary Local Workspace and generated catalog; run
-    // with a cleared environment for reproducibility.
-    let mut doctor = Command::new(&ctx.lattice_bin);
-    doctor
-        .args(["--json", "lancet", "doctor"])
-        .current_dir(&ctx.doctor_home)
-        .env_clear()
-        .env("HOME", &ctx.doctor_home)
-        .env("PATH", env::var("PATH").unwrap_or_default());
 
     vec![
         Planned {
@@ -422,7 +366,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         },
         Planned {
             id: "build_release_locked",
-            display: display_command(&build, false),
+            display: display_command(&build),
             action: Action::Cmd(build, BUILD_TIMEOUT),
         },
         Planned {
@@ -432,33 +376,23 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         },
         Planned {
             id: "harness_boundary",
-            display: display_command(&harness_boundary, false),
+            display: display_command(&harness_boundary),
             action: Action::Cmd(harness_boundary, CMD_TIMEOUT),
         },
         Planned {
             id: "lancet_boundary",
-            display: display_command(&lancet_boundary, false),
+            display: display_command(&lancet_boundary),
             action: Action::Cmd(lancet_boundary, CMD_TIMEOUT),
         },
         Planned {
             id: "direct_local",
-            display: display_command(&direct_local, false),
+            display: display_command(&direct_local),
             action: Action::CargoTest(direct_local),
         },
         Planned {
             id: "offline_correctness",
-            display: display_command(&offline, false),
+            display: display_command(&offline),
             action: Action::CargoTest(offline),
-        },
-        Planned {
-            id: "release_operator_matrix",
-            display: display_command(&release_operator_matrix, false),
-            action: Action::CargoTest(release_operator_matrix),
-        },
-        Planned {
-            id: "doctor",
-            display: display_command(&doctor, true),
-            action: Action::Doctor(doctor),
         },
     ]
 }
@@ -500,12 +434,12 @@ fn seed_record(channel: &str, commit_sha: &str, plan: &[Planned]) -> RolloutReco
 /// scratch (.env, editor files, agent work products) and ignored build output
 /// (target/) must not block a local rollout, or the gate would be unusable on
 /// any real developer machine.
-fn clean_worktree(root: &Path) -> Result<Vec<String>, String> {
+fn clean_worktree(root: &Path) -> Result<(), String> {
     let porcelain = git_output(root, &["status", "--porcelain=v1", "--untracked-files=no"])
         .map_err(|e| format!("git status failed: {e}"))?;
     let dirty = tracked_dirty_paths(&porcelain);
     if dirty.is_empty() {
-        Ok(vec![])
+        Ok(())
     } else {
         Err(format!(
             "rollout requires a clean tracked worktree; {} tracked path(s) differ from HEAD:\n{}",
@@ -665,28 +599,28 @@ struct TimedOutput {
     output: String,
 }
 
-fn status_check(out: &TimedOutput) -> Result<Vec<String>, String> {
+fn status_check(out: &TimedOutput) -> Result<(), String> {
     if out.timed_out {
         return Err("step timed out".to_owned());
     }
     if !out.success {
         return Err(format!("command failed:\n{}", tail(&out.output)));
     }
-    Ok(vec![])
+    Ok(())
 }
 
 /// A `cargo test` step passes only if the exit status is 0 AND the summed
 /// `test result: ok. N passed` counts are > 0. A filter that matches zero
 /// tests exits 0 vacuously (the v1.4 `commit_baseline` failure mode); that is
 /// a gate failure, never a pass.
-fn cargo_test_passed(out: &TimedOutput) -> Result<Vec<String>, String> {
+fn cargo_test_passed(out: &TimedOutput) -> Result<(), String> {
     status_check(out)?;
     if passed_test_count(&out.output) == 0 {
         return Err(
             "cargo test exited 0 but ran 0 tests (vacuous filter is a gate failure)".to_owned(),
         );
     }
-    Ok(vec![])
+    Ok(())
 }
 
 fn passed_test_count(output: &str) -> u64 {
@@ -730,15 +664,10 @@ fn tail(output: &str) -> String {
 /// whole tree (cargo + rustc + test binaries) instead of orphaning them.
 fn run_timed(cmd: &mut Command, timeout: Duration) -> anyhow::Result<TimedOutput> {
     let file = tempfile::NamedTempFile::new().context("create step output temp file")?;
-    // Both streams must share ONE file offset. `reopen()` twice would hand out
-    // two descriptors with independent offsets (tempfile's `reopen` is a plain
-    // `OpenOptions::read().write().open()` — no `O_APPEND`), so interleaved
-    // stdout/stderr writes overwrite each other instead of appending. That
-    // corrupts everything downstream: `passed_test_count` parses `test result:`
-    // out of this text, `tail()` builds the failure detail stored in the record,
-    // and `Action::Doctor` writes it straight out as `evidence/doctor.json`.
-    // `try_clone` duplicates the descriptor, which shares the offset, so writes
-    // from either stream land in order.
+    // 两个输出流共享同一个文件偏移：调两次 `reopen()` 会拿到两个偏移独立的描述符
+    //（`reopen` 只是普通 `open`，不带 `O_APPEND`），交错写入时 stdout 与 stderr 会互相覆盖，
+    // 破坏后续 `passed_test_count` 对 `test result:` 的解析与 `tail()` 截取的失败详情。
+    // `try_clone` 复制同一个底层文件表项，两个流按到达顺序追加。
     let out = file.reopen().context("reopen step output for stdout")?;
     let err = out.try_clone().context("clone step output for stderr")?;
     cmd.stdout(Stdio::from(out))
@@ -811,11 +740,8 @@ fn rel_path(root: &Path, path: &Path) -> String {
 
 /// Records the real argv + explicit env of a `Command` (never executed via a
 /// shell, so no `&&`/`env X=Y` shell syntax is involved).
-fn display_command(cmd: &Command, cleared_env: bool) -> String {
+fn display_command(cmd: &Command) -> String {
     let mut s = String::new();
-    if cleared_env {
-        s.push_str("env -i ");
-    }
     for (k, v) in cmd.get_envs() {
         if let Some(v) = v {
             s.push_str(&k.to_string_lossy());
@@ -906,33 +832,41 @@ mod tests {
     }
 
     #[test]
-    fn release_operator_step_targets_component_matrix() {
+    fn build_plan_runs_production_release_steps_without_test_features() {
         let temp = tempfile::tempdir().expect("tempdir");
         let ctx = Ctx {
             root: temp.path().to_path_buf(),
             lattice_bin: temp.path().join("target/release/lattice"),
             harness_failures: temp.path().join("harness-failures"),
-            evidence_dir: temp.path().join("rollout-evidence"),
-            doctor_home: temp.path().join("doctor-home"),
         };
         let plan = build_plan(&ctx);
-        let step = plan
-            .iter()
-            .find(|step| step.id == "release_operator_matrix")
-            .expect("release operator step");
-
-        assert!(
-            step.display.contains("--features release-operator")
-                && step.display.contains("--test release_operator")
-                && step.display.contains("release_operator_component_matrix"),
-            "release lane must execute its own release-binary matrix: {}",
-            step.display
+        let ids: Vec<&str> = plan.iter().map(|s| s.id).collect();
+        assert_eq!(
+            ids,
+            vec![
+                "clean_worktree",
+                "capability_probes",
+                "build_release_locked",
+                "artifact_identity",
+                "harness_boundary",
+                "lancet_boundary",
+                "direct_local",
+                "offline_correctness",
+            ],
+            "rollout 步骤顺序应只包含现行生产发布验证步骤"
         );
-        assert!(
-            !step.display.contains("--test direct_operator"),
-            "release lane must not rerun the Direct-Local scenario: {}",
-            step.display
-        );
+        for id in [
+            "build_release_locked",
+            "direct_local",
+            "offline_correctness",
+        ] {
+            let step = plan.iter().find(|s| s.id == id).expect("计划步骤存在");
+            assert!(
+                !step.display.contains("--features"),
+                "release 产物及其验证步骤不应启用测试 feature ({id}): {}",
+                step.display
+            );
+        }
     }
 
     fn sample_record() -> RolloutRecord {
@@ -955,7 +889,7 @@ mod tests {
             }],
             steps: vec![
                 step("clean_worktree", StepStatus::Passed),
-                step("doctor", StepStatus::Passed),
+                step("offline_correctness", StepStatus::Passed),
             ],
             failure_artifacts: vec![],
             verdict: Verdict::Pass,
@@ -1042,10 +976,8 @@ mod tests {
         assert!(cargo_test_passed(&out).is_err());
     }
 
-    /// Both child streams must share one file offset. Two independent
-    /// descriptors on the same file (what `reopen()` twice yields) have separate
-    /// offsets and overwrite each other, corrupting the text that
-    /// `passed_test_count`, `tail`, and the doctor evidence file are built from.
+    /// 两个子进程输出流共享同一个文件偏移；若调两次 `reopen()` 拿到独立偏移，输出会互相覆盖，
+    /// 破坏 `passed_test_count` 与 `tail` 读取的捕获文本。
     #[test]
     fn run_timed_interleaves_stdout_and_stderr_without_overwriting() {
         let mut cmd = Command::new("sh");

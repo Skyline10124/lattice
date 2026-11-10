@@ -6,9 +6,8 @@
 
 - `composition.rs`/`catalog.rs`：组成校验与不可变目录、provider 投影；缺失/重复/身份/ABI/import/通道或 capability→Cell 冲突拒绝。
 - `admission.rs`：enabled→deny→boundary 准入、Host scope 解析与逐操作授权；拒绝携带 AdmissionEvidence，未知 deny/enabled 名称在组成时拒绝。
-- `execution.rs`：按 Turn 组合 runtime、上下文、Host、预算、工作区及历史，核对 request/binding 一致性。
 - `runtime.rs`：Component 实例、engine/linker/ticker、参数校验、取消、结果 CellRef 与 schema 校验及 Host 计量；`limits.rs`/`error_map.rs` 维护资源限制与类型化错误。
-- `control.rs`/`host.rs`：当前调用取消、顺序事件和 receipt；`evidence.rs` 的共享记录器提供快照。
+- `control.rs`/`host.rs`：当前调用取消与顺序事件；`evidence.rs` 的共享记录器提供快照。
 - `workspace/`、`host_workspace.rs`、`host_mutate.rs`：具体本地路径解析、观察、编辑准备与安装；`history.rs` 记录和读取私有历史。
 - `host_network.rs`：受控 GET、逐跳地址固定、TLS、响应限制与证据；`bindings.rs` 生成版本化 Tool Host WIT 绑定。
 
@@ -18,7 +17,7 @@
 
 ## 局部约束
 
-- 不依赖 lancet-api 或 LATTICE session/agent/profile；authority 是合法下层。无 `wasmtime-wasi`/`wasi-common`，只链接版本化 Host imports，无 ambient WASI。
+- 不依赖 LATTICE session/agent/profile；authority 是合法下层。无 `wasmtime-wasi`/`wasi-common`，只链接版本化 Host imports，无 ambient WASI。
 - `from_embedded` 只消费 inventory 与生成的 EXPECTED_COMPONENTS，无运行时注册 API。`generated/host_composition.rs` 由 manifest 经 tool-codegen 生成，是生产嵌入的唯一来源；Tool 自己的 registration.rs 不单独编译接入。
 - `generated/noop_fixture.rs` 是手工维护的固定 test-utils fixture，test_helpers 只为负向测试合成身份/注册。生产不启用 test-utils，不使用固定 fixture 或调用者自造目录。
 - `call(&self)` 在阻塞 worker 运行 Wasmtime；async imports 使用有界进程级 Tokio runtime：2 个 async workers，最多 8 个阻塞 DNS task。epoch ticker 首次调用经 OnceLock 启动，需要 Tokio 上下文，组成本身不需要；共享 Arc 跨投影/执行复用；资源限制的测试在 `src/runtime/` 的私有测试模块中直接设置。

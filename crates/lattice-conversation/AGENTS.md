@@ -13,7 +13,8 @@
 | `src/tool_call.rs` | `UnboundToolCall` / `BoundToolCall` typestate、规范 JSON 参数对象、域分离 SHA-256 摘要与 `validate_tool_call_batch` |
 | `src/limits.rs` | 流式增量计量 `AttemptAssembly`、完整回复边界核验 `validate_assistant_bounds` 与字节上限常量 |
 | `src/outcome.rs` | 闭合的调用结局 `ToolResultOutcome` 与 `IndeterminateCause` |
-| `src/result.rs` | 结构化工具结果 `StoredToolResult`、`ResultPayload` 与 64 KiB 正文保存边界 |
+| `src/tool_error.rs` | 工具执行失败载荷 `ToolError { code, message }` |
+| `src/result.rs` | 结构化工具结果 `StoredToolResult`、`ResultPayload`（含 `Failed(ToolError)`）与 64 KiB 正文保存边界 |
 | `src/attempt.rs` | 模型尝试中断与批次拒绝记录（`AttemptInterruption`、`AttemptRejection`） |
 | `src/usage.rs` | 尝试级 `TokenUsage`、`UsageCompleteness`、费用结果数据 `CostEstimate` 与汇总 `UsageSummary` |
 | `src/history.rs` | provider 中立对话历史项 `ConversationItem` |
@@ -23,7 +24,7 @@
 | 修改的内容 | 读取 |
 | --- | --- |
 | 任何改动 | [对话数据与模型投影](../../docs/architecture/session/conversation.md)、[工程规范](../../docs/development/engineering.md) |
-| 工具调用批次、绑定与结果边界 | [LANCET 工具执行](../../docs/architecture/lancet.md#登记与持久边界)、[Step 执行与结果保存](../../docs/architecture/session/steps.md#调用槽位) |
+| 工具调用批次、绑定与结果载荷 | [Step 执行与结果保存](../../docs/architecture/session/steps.md#调用槽位)、[ADR 0009](../../docs/adr/0009-remove-legacy-lancet-tool-executor.md) |
 | 回复字节计量与上限常量 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md#模型请求与执行预算) |
 | 用量、完整性与费用数据结构 | [用量、缓存与费用](../../docs/architecture/llm/usage.md#用量换算)、[关闭 Step 与 Turn](../../docs/architecture/session/steps.md#关闭-step-与-turn) |
 

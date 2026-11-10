@@ -5,12 +5,16 @@
 //! 重试提示是 Step 条目的一部分，实时观察与重新打开会话看到的条目相同。
 mod support;
 
-use lattice_system_harness::{AssertError, SendRecord, SessionSendDriver, SseScript, StepEnd};
+#[cfg(feature = "fake-tools")]
+use lattice_system_harness::StepEnd;
+use lattice_system_harness::{AssertError, SendRecord, SessionSendDriver, SseScript};
 use serde_json::Value;
 use support::{
     Watcher, assert_accepted_and_closed, assert_clean_send, direct_world, driver, evidence,
-    finish_scenario, live_turn, require, same_turn, sequence, tool_call, tool_ok, wire_fake_llm,
+    finish_scenario, require, wire_fake_llm,
 };
+#[cfg(feature = "fake-tools")]
+use support::{live_turn, same_turn, sequence, tool_call, tool_ok};
 
 /// `--json` 只有七种记录，第一条是写明身份的 `submit`。
 fn only_seven_records(outcome: &lattice_system_harness::SendOutcome) -> Result<(), AssertError> {
@@ -42,24 +46,17 @@ fn reopened_entries_match(
     )
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-turn-end-events-completed",
-        "end-events",
-        "[\"observe__workspace\"]",
-        "",
-    );
+    let (world, spec) = direct_world("direct-turn-end-events-completed", "end-events", "");
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let server = wire_fake_llm(
         &world,
         "end-events",
         sequence(vec![
-            tool_call(
-                "observe1",
-                "observe__workspace",
-                r#"{"request":{"mode":"list_directory","path":"."}}"#,
-            ),
+            tool_call("observe1", "read_note", r#"{"action":"read"}"#),
             SseScript::plain("workspace observed"),
         ]),
     );
@@ -85,10 +82,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         assert_accepted_and_closed(&outcome)?;
         require(outcome.command.is_clean_exit(0), "completed Turn exits 0")?;
         require(captures.len() == 2, "exactly two provider requests")?;
-        require(
-            tool_ok(&outcome, "observe__workspace"),
-            "observation succeeds",
-        )?;
+        require(tool_ok(&outcome, "read_note"), "假工具调用成功")?;
         // 第一步以 Continue 关闭后不再带结局；结局只随最后一步给出。
         let entries = outcome.entries();
         let steps: Vec<_> = entries.iter().filter_map(|entry| entry.step()).collect();
@@ -134,7 +128,6 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
     let (world, spec) = direct_world(
         "direct-turn-end-events-exhausted-retries",
         "end-errors",
-        "[]",
         "[llm.retry]\nmax_retries = 2\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     let server = wire_fake_llm(

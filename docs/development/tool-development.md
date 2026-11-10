@@ -74,7 +74,7 @@ lattice audit replay --session "$SESSION_ID" --turn "$TURN_ID" --json
 lattice lancet status --json
 ```
 
-`--since` 是排他的全局 ChangeSeq 游标，`0` 从日志起点读取；续读使用响应的 `next_after`。其他项目的变化也会推进扫描位置，所以过滤后空页仍可能推进游标。查询在一个读事务中完成，不再接受 `--at` 或 ledger OID；Registered、Started 及终态都可读。过滤、分页参数见 [`commands/audit.rs`](../../crates/lattice-cli/src/commands/audit.rs)，语义见[操作员接口](../architecture/lancet.md#操作员接口)。DTO 不含原始参数、结果正文或 schema；这些是 Host-only 操作，不向 Agent 注册为 Tool，也不会重新执行工具。
+`--since` 是排他的全局 ChangeSeq 游标，`0` 从日志起点读取；续读使用响应的 `next_after`。其他项目的变化也会推进扫描位置，所以过滤后空页仍可能推进游标。查询在一个读事务中完成，不再接受 `--at` 或 ledger OID；Registered、Started 及终态都可读。过滤、分页参数见 [`commands/audit.rs`](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/crates/lattice-cli/src/commands/audit.rs)，语义见[操作员接口](../architecture/lancet.md#操作员接口)。DTO 不含原始参数、结果正文或 schema；这些是 Host-only 操作，不向 Agent 注册为 Tool，也不会重新执行工具。
 
 ## Doctor
 

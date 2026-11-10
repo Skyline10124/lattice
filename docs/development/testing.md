@@ -47,7 +47,7 @@ flowchart LR
 | --- | --- |
 | 只经公开入口 | harness 经 `LATTICE_BIN` 取得被测产品，经公开 CLI、Local IPC 与 PTY 驱动；它只依赖通用的系统、序列化、临时目录、PTY 与 Git 库，由 `cargo xtask harness-boundary` 检查 |
 | 产品只有一条路径 | 场景经正式入口与正式配置驱动产品：fake LLM 经场景 HOME 的 `providers.toml` 与 `lattice auth set` 接入；产品代码中测试与用户走同一流程 |
-| 私有状态 | 工作区历史场景用通用 Git 库检查对象与引用；公开接口之外的内部对象关系、引用事务与 fsync 故障，由对应库的测试保护 |
+| 私有状态 | 公开接口之外的内部表编码、引用事务与 fsync 故障，由对应库的测试保护 |
 | fake provider 确定 | 使用与官方 provider 相同的协议与 TLS，对场景保证计数准确、回复确定、失败有界，见 [`fake_llm.rs`](../../crates/lattice-system-harness/src/fake_llm.rs) 的模块文档 |
 | 元数据 | 场景默认写入 `[metadata] auto_refresh = false`，使用内置快照或场景写入的缓存；拉取与写缓存由 `lattice-llm` 的局部测试验证，触发时机由 `lattice-api` 的局部测试验证 |
 | SIWC | `chatgpt` 的 endpoint 由产品固定，harness 场景覆盖其余 provider；SIWC 的验证见[模型接入合同](../architecture/llm/README.md#验证与承接) |
@@ -62,9 +62,10 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 - 被测二进制与验证对象相符：文件存在与路径规范化证明不了二进制是最新的，调用者核对它的来源、构建配置与所测工作区。
 - `xtask ci` 只在 `LATTICE_BIN` 未设置时补入当前仓库的 debug 路径；在 worktree 中显式指向本 worktree 的产物。
 
-### 故障注入
+### 假工具与故障注入
 
-崩溃、调度交错与模拟错误由产品 feature `test-crash-barriers` 插桩，钩子只在这个 feature 下编译；harness 用 `crash-barriers` feature 启用对应场景。
+- 生产二进制不暴露内置工具。需要工具循环的场景配合带 `test-fake-tools` 的被测二进制与 harness 的 `fake-tools` feature，在后台首次启动前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 传入逗号分隔的工具名启用假执行器。
+- 崩溃、调度交错与模拟错误由产品 feature `test-crash-barriers` 插桩，钩子只在这个 feature 下编译；harness 用 `crash-barriers` feature 启用对应场景。
 
 | 插桩 | 作用 |
 | --- | --- |
@@ -89,7 +90,7 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 | 项目中的 `.env` | 产品只从后台启动环境与配置目录取配置；负向场景在场景项目中写入 `.env` 与 `providers.toml`，核对它们不起作用 |
 | 并发与取消 | 用 `ResponseGate` 等可控事件与有界等待同步；每个场景自己完成同步，结果与其他场景的执行顺序无关 |
 | 夹具与断言 | 通用驱动共享；场景专用的夹具与断言留在该场景 |
-| 记录 | 每个场景记录自己的 gate、进程对象与实际命中的窗口；涉及会话库状态的场景记录状态摘要、树形 `log` 与 `audit` 输出，失败时写入 bundle |
+| 记录 | 每个场景记录自己的 gate、进程对象与实际命中的窗口；涉及会话库状态的场景记录状态摘要、树形 `log` 与 `session turn` 输出，失败时写入 bundle |
 
 ### 超时与进程生命周期
 
@@ -101,6 +102,7 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 - 数值由 `ScenarioSpec` 与场景配置维护；修改时写明适用场景与原因，场景停滞时先定位原因。
 - 每次启动命令的上限为 `min(step_timeout, remaining_total)`；命令预算从 spawn 开始计时，provider request、stall、release 与最终 wait 共用剩余预算。
 - 这些是驱动的等待上限。产品内部的 [Turn deadline](../architecture/session/acceptance.md#模型请求与执行预算) 由会话合同维护；驱动超时之后，产品是否已发生效果、是否已持久关闭，从产品状态读取。
+- `direct_failures` 以短 `[llm] timeout_secs` 覆盖产品内部的 Turn deadline：模型流停滞与部分用量后的超时关闭（`direct_failure_profile_deadline_while_stalled_commits_error`、`direct_failure_deadline_after_reported_usage_preserves_cost`），以及 `fake-tools` 下假工具 `block` 在调用期内到达本轮 deadline（`tool_call_deadline_leaves_slot_started_and_stops_turn`：执行器返回 `Deadline`，协调层不补写槽位终态，Step 以 `Stop { Deadline }` 关闭，已进入执行的槽位留在 `Started` 并读出 `Indeterminate(NoResult)`，同一步后续槽位留在 `Registered` 且不执行，Turn 以 `failed` 与提示 `turn deadline exceeded` 结束，随后同一会话的新一轮纯文本提交照常完成）；两次分发之间的 deadline 收尾与崩溃恢复由 `direct_crash_barriers` 的 `dispatch_deadline_tail_is_atomic_and_survives_crash` 覆盖。
 - 前端子进程与产品后台各在独立的 Linux 进程组中运行；超时与受控中断保留已收集的输出，回收子进程并清理进程组。命令结果的判定见 [`CommandOutcome`](../../crates/lattice-system-harness/src/driver.rs)。
 - PTY raw 模式用回车 `\r` 提交；读取输出时按 deadline 等待，阻塞的 read 同样受超时约束。
 - Direct-Local 使用场景自有的后台，经正式入口自动启动或显式启动，与开发者正在运行的后台、虚拟机或容器镜像无关；隔离与清理要求覆盖所有可能自动启动后台的 fast、Direct 与 PTY 场景。已选场景的环境故障按失败报告。
@@ -120,11 +122,13 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 ### 验证集与显式 feature
 
+`xtask ci`、`ci.yml` 与 `full-gate.yml` 均按两轮运行：第一轮构建无测试 feature 的生产二进制，运行全部 crate 默认测试与默认 harness 场景；第二轮先对 `lattice-api`、`lattice-cli`（`test-fake-tools,test-crash-barriers`）及 `lattice-system-harness`（`fake-tools,crash-barriers`）执行 clippy，再用带 `test-fake-tools,test-crash-barriers` 的构建覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 不变），运行 `lattice-api`（`test-fake-tools,test-crash-barriers`）与 `lattice-system-harness`（`fake-tools,crash-barriers`）的全部目标。
+
 | 验证集 | 内容 | 运行 |
 | --- | --- | --- |
-| 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景 | 普通 CI；本地按需 |
-| 崩溃屏障 | `direct_crash_barriers`：需要 harness 的 `crash-barriers` feature 与带 `test-crash-barriers` 的被测二进制 | 普通 CI 在默认测试之后构建该二进制并运行 |
-| release_operator | `release-operator` feature | 按需手动运行，普通 CI 之外 |
+| 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景，配无测试 feature 的 `lattice` 二进制 | 三处 CI 门禁第一轮、`rollout`（release 二进制）；本地按需 |
+| 假工具场景 | `lattice-api` 的假执行器测试，以及标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景（需要带 `test-fake-tools` 的被测二进制、harness 的 `fake-tools` feature 与后台启动前设置的 `LATTICE_TEST_TOOLS`） | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
+| 崩溃屏障 | `direct_crash_barriers`：需要带 `test-fake-tools,test-crash-barriers` 的被测二进制与 harness 的 `fake-tools,crash-barriers` feature | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
 
 报告列明测试目标、feature、构建模式与实际结果；普通套件的结论只覆盖普通套件。
 
@@ -146,11 +150,11 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 | 入口 | 职责 |
 | --- | --- |
-| `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再跑默认测试与崩溃屏障目标；只改 Markdown 的 PR 只运行文档链接检查 |
-| `.github/workflows/full-gate.yml` | 手动或定时的完整验证、release rollout 与 Component 可复现性证据 |
+| `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再执行两轮验证（含测试 feature 的 clippy）与依赖边界检查；只改 Markdown 的 PR 只运行文档链接检查 |
+| `.github/workflows/full-gate.yml` | 手动或定时的完整验证：执行两轮验证（含测试 feature 的 clippy）、alpha release rollout 与 Component 可复现性证据 |
 | `cargo xtask docs-check` | 检查 Git 跟踪的 Markdown 文件中相对链接的目标文件与标题锚点 |
-| `cargo xtask ci` | 本地验证编排，控制编译并发与每个 crate 的测试超时 |
-| `cargo xtask rollout --channel alpha` | 对锁定的 release 构建记录产物身份、验证步骤与发布证据 |
+| `cargo xtask ci` | 本地两轮验证编排（第二轮覆盖 `target/debug/lattice`），控制编译并发与每个 crate 的测试超时 |
+| `cargo xtask rollout --channel alpha` | 对锁定的无测试 feature release 构建记录产物身份、依赖边界与生产形态验证步骤 |
 
 - rollout 在全部必需步骤实际通过时通过：失败、阻塞或跳过都算未通过，测试步骤要有非零的通过数。步骤结果逐步保存，未执行的步骤保持阻塞，失败证据与产物身份关联到对应构建。发布由维护者执行，见[项目宪章](../governance/charter.md)。
 - Component 可复现性检查中，只有产物摘要漂移为警告；guest 构建、Component 编码、验证、imports 或 WIT 不符合要求都是失败。跨机可复现的证据要升级为硬门禁时，另提提案，由维护者决定。

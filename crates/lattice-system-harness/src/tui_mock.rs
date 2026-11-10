@@ -112,10 +112,10 @@ impl TuiMockScenario {
         }
     }
 
-    fn enabled_tools(self) -> &'static str {
+    fn test_tools(self) -> Option<&'static str> {
         match self {
-            Self::ToolCall => r#"["session__todo_write"]"#,
-            _ => "[]",
+            Self::ToolCall => Some("session__todo_write"),
+            _ => None,
         }
     }
 }
@@ -154,6 +154,10 @@ pub enum TuiMockError {
 pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockError> {
     let driver = LatticeDriver::from_env()?;
     let world = ScenarioWorld::new("tui-mock")?;
+    if let Some(tools) = scenario.test_tools() {
+        // `wire_provider` 会经 `lattice auth set` 自动拉起后台，必须在那之前注入假工具名单。
+        world.set_env("LATTICE_TEST_TOOLS", tools);
+    }
     let server = scenario.start_server()?;
     let model = world.wire_provider(
         ProviderFixture::chat_completions(AGENT),
@@ -163,9 +167,7 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
     let profile = format!(
         "schema_version = 1\n\n\
          [agent]\nname = \"{AGENT}\"\nmodel = \"{model}\"\n\n\
-         [prompt]\nsystem = \"Respond according to the deterministic mock script.\"\n\n\
-         [tools]\nenabled = {}\n",
-        scenario.enabled_tools()
+         [prompt]\nsystem = \"Respond according to the deterministic mock script.\"\n"
     );
     world.write_project_file(&format!(".lattice/agents/{AGENT}/agent.toml"), &profile)?;
     world.init_git_project()?;

@@ -21,7 +21,12 @@ async fn model_query_fetches_only_a_missing_signed_in_account_catalog_and_preser
     }}}).to_string()).unwrap();
     std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
     let layout = crate::StateLayout::in_state_root(home.path());
-    let mut backend = Backend::with_tls_roots(layout, Some(home.path().into()), vec![]);
+    let mut backend = Backend::with_tls_roots(
+        layout,
+        Some(home.path().into()),
+        vec![],
+        Arc::new(crate::NoTools),
+    );
     let gateway = backend.gateway.as_ref().unwrap().clone();
     let calls = Arc::new(AtomicUsize::new(0));
     let fail = Arc::new(AtomicBool::new(false));

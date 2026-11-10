@@ -11,7 +11,6 @@ use lattice_system_harness::{
 };
 use serde_json::{Value, json};
 use std::{
-    io::Read,
     path::Path,
     time::{Duration, Instant},
 };
@@ -24,6 +23,7 @@ const THIRD: &str = "00000000-0000-4000-8000-000000000003";
 const SESSION: &str = "5e550000000000000000000000000001";
 const BARRIER: &str = "LATTICE_TEST_TURN_BARRIER";
 const ACK: &str = "LATTICE_TEST_TURN_BARRIER_ACK";
+const TEST_TOOLS: &str = "LATTICE_TEST_TOOLS";
 
 fn timeout(world: &ScenarioWorld, spec: &ScenarioSpec) -> Duration {
     world.budget(spec).cap_timeout(spec.step_timeout())
@@ -143,29 +143,51 @@ fn wait_for_ack(path: &Path, timeout: Duration) -> Value {
         std::thread::sleep(Duration::from_millis(5));
     }
 }
-fn history_tip(world: &ScenarioWorld) -> String {
-    let paths: Vec<_> = std::fs::read_dir(world.session_store_dir().join("projects"))
-        .unwrap()
-        .map(|v| v.unwrap().path().join("workspace-history.git"))
-        .filter(|p| p.is_dir())
-        .collect();
-    assert_eq!(paths.len(), 1);
-    let repo = gix::open_opts(&paths[0], gix::open::Options::isolated()).unwrap();
-    repo.find_reference("refs/lattice/workspace-history/current")
-        .unwrap()
-        .target()
-        .try_id()
-        .unwrap()
-        .to_string()
+/// 等待假工具在进入 `execute` 时写出完整的就绪标记行。
+fn wait_for_ready(path: &Path, timeout: Duration) {
+    let until = Instant::now() + timeout;
+    loop {
+        if std::fs::read_to_string(path).is_ok_and(|content| content.ends_with('\n')) {
+            return;
+        }
+        assert!(
+            Instant::now() < until,
+            "假工具未在预算内写入就绪文件 {}",
+            path.display()
+        );
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+/// 读取假工具追加的标记文件行列表，文件不存在时返回空列表。
+fn marker_lines(path: &Path) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => content.lines().map(str::to_owned).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("读取假工具标记文件 {} 失败：{error}", path.display()),
+    }
 }
 fn chunk(delta: Value) -> Value {
     json!({"choices":[{"index":0,"delta":delta,"finish_reason":null}]})
 }
-fn calls(prefix: &str, path: &str) -> Value {
+fn calls(prefix: &str, write_path: &Path, calls_log: &Path) -> Value {
+    let read_args = |tag: &str| {
+        json!({
+            "action": "read",
+            "marker_path": calls_log,
+            "marker_line": format!("{prefix}-{tag}\n"),
+        })
+        .to_string()
+    };
+    let write_args = json!({
+        "action": "append_marker",
+        "path": write_path,
+        "line": "durable\n",
+    })
+    .to_string();
     json!({"tool_calls":[
-        {"index":0,"id":format!("{prefix}-read"),"type":"function","function":{"name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"seed.txt\"}}"}},
-        {"index":1,"id":format!("{prefix}-write"),"type":"function","function":{"name":"mutate__create","arguments":json!({"path":path,"content":"durable\n","create_parents":false}).to_string()}},
-        {"index":2,"id":format!("{prefix}-tail"),"type":"function","function":{"name":"observe__workspace","arguments":"{\"request\":{\"mode\":\"read_file\",\"path\":\"seed.txt\"}}"}}
+        {"index":0,"id":format!("{prefix}-read"),"type":"function","function":{"name":"read_note","arguments":read_args("read")}},
+        {"index":1,"id":format!("{prefix}-write"),"type":"function","function":{"name":"write_marker","arguments":write_args}},
+        {"index":2,"id":format!("{prefix}-tail"),"type":"function","function":{"name":"read_note","arguments":read_args("tail")}}
     ]})
 }
 fn end() -> Value {
@@ -177,9 +199,9 @@ fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Va
     let test = script["test"].as_str().expect("exact test identity");
     evidence.record_json("provenance", &json!({
         "binary":driver.binary_path(),"binary_blake3":blake3::hash(&bytes).to_hex().to_string(),
-        "features":"test-crash-barriers","harness_features":"crash-barriers","profile":"debug",
+        "features":"test-fake-tools,test-crash-barriers","harness_features":"fake-tools,crash-barriers","profile":"debug",
         "state_root":world.session_store_dir().parent(),"script":script,
-        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features test-crash-barriers && LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
+        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers && LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
     })).unwrap();
 }
 fn stage(
@@ -192,38 +214,15 @@ fn stage(
     read_json(world, spec, evidence, &["--json", "session", "list"]);
     read_json(world, spec, evidence, &["--json", "session", "log", sid]);
     cli(world, spec, evidence, &["session", "log", sid], 0);
-    let turn = read_json(world, spec, evidence, &["--json", "session", "turn", tid]);
-    read_json(
-        world,
-        spec,
-        evidence,
-        &["--json", "audit", "--session", sid, "--turn", tid],
-    );
-    read_json(
-        world,
-        spec,
-        evidence,
-        &["--json", "audit", "--tail", "--since", "0"],
-    );
-    read_json(
-        world,
-        spec,
-        evidence,
-        &["--json", "audit", "replay", "--session", sid, "--turn", tid],
-    );
-    read_json(world, spec, evidence, &["--json", "lancet", "status"]);
-    turn
+    read_json(world, spec, evidence, &["--json", "session", "turn", tid])
 }
+
 #[test]
 fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
     use lattice_system_harness::{RunningCommand, SessionSendDriver};
-    use std::collections::{BTreeMap, BTreeSet};
-    let (world, spec) = support::direct_world(
-        "operator-global-matrix",
-        "operator",
-        "[\"observe__workspace\",\"session__todo_write\",\"fetch__web\"]",
-        "\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
-    );
+    use std::collections::BTreeSet;
+    let (world, spec) = support::direct_world("operator-global-matrix", "operator", "");
+    world.set_env(TEST_TOOLS, "record_item,hold_call");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -234,71 +233,99 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         std::fs::create_dir_all(beta.join(".lattice/agents/operator")).unwrap();
         std::fs::copy(&profile, beta.join(".lattice/agents/operator/agent.toml")).unwrap();
         gix::init(&beta).unwrap();
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let url = format!(
-            "http://localhost:{}/operator-hold",
-            listener.local_addr().unwrap().port()
-        );
-        let bad_tls = lattice_system_harness::FixtureHttpServer::start(
-            lattice_system_harness::HttpFixture::plain("not TLS"),
-        )
-        .unwrap();
+        let alpha_log = world.root().join("alpha-small.marker");
+        let beta_marker = world.root().join("beta.marker");
+        let never_marker = world.root().join("never.marker");
         let mut batch = (0..19)
             .map(|i| {
                 (
                     format!("small-{i}"),
-                    "session__todo_write".into(),
-                    json!({"todos":[{"content":format!("private-small-{i}"),"status":"pending"}]})
-                        .to_string(),
+                    "record_item".into(),
+                    json!({
+                        "action": "read",
+                        "marker_path": alpha_log,
+                        "marker_line": format!("small-{i}\n"),
+                        "note": format!("private-small-{i}"),
+                        "value": {"secret": format!("private-result-{i}")},
+                    })
+                    .to_string(),
                 )
             })
             .collect::<Vec<_>>();
         batch.extend([
             (
                 "large".into(),
-                "session__todo_write".into(),
-                json!({"todos":[{"content":"private-large-".repeat(6000),"status":"pending"}]})
-                    .to_string(),
+                "record_item".into(),
+                json!({
+                    "action": "oversize",
+                    "note": "private-large-".repeat(6000),
+                })
+                .to_string(),
             ),
             (
-                "bad-tls".into(),
-                "fetch__web".into(),
-                json!({"url":bad_tls.url_path("/tls").replacen("http:", "https:", 1)}).to_string(),
+                "transient-fail".into(),
+                "record_item".into(),
+                json!({
+                    "action": "fail",
+                    "code": "execution_failed",
+                    "message": "private-error-detail",
+                })
+                .to_string(),
             ),
             (
-                "missing".into(),
-                "observe__workspace".into(),
-                json!({"request": {"mode":"read_file","path":"absent-private.txt"}}).to_string(),
+                "type-fail".into(),
+                "record_item".into(),
+                json!({
+                    "action": "fail",
+                    "code": "type_error",
+                    "message": "absent-private.txt",
+                })
+                .to_string(),
             ),
         ]);
-        let waiting = SseScript::ToolCalls {
+        let waiting_script = |crash: bool| SseScript::ToolCalls {
             calls: vec![
                 (
-                    "fetch".into(),
-                    "fetch__web".into(),
-                    json!({"url":url}).to_string(),
+                    "hold".into(),
+                    "hold_call".into(),
+                    json!({
+                        "action": "block",
+                        "ready_path": world.root().join(format!("hold-{crash}.ready")),
+                        "marker_path": world.root().join(format!("hold-{crash}.marker")),
+                        "marker_line": format!("hold-{crash}\n"),
+                    })
+                    .to_string(),
                 ),
                 (
                     "tail".into(),
-                    "session__todo_write".into(),
-                    json!({"todos":[{"content":"never-private","status":"pending"}]}).to_string(),
+                    "record_item".into(),
+                    json!({
+                        "action": "append_marker",
+                        "path": never_marker,
+                        "line": "never-private\n",
+                    })
+                    .to_string(),
                 ),
             ],
         };
         let script = support::sequence(vec![
             SseScript::ToolCalls { calls: batch },
             SseScript::plain("matrix complete"),
-            waiting.clone(),
-            waiting,
+            waiting_script(false),
+            waiting_script(true),
         ]);
         provenance(
             &world,
             &mut evidence,
-            json!({"test":"cross_project_operator_lifecycle_cursor_and_payload_isolation",
-            "script":format!("{script:?}"),"projects":2,"first_calls":22,"http":"hold response for cancellation or SIGKILL"}),
+            json!({
+                "test": "cross_project_operator_lifecycle_cursor_and_payload_isolation",
+                "script": format!("{script:?}"),
+                "projects": 2,
+                "first_calls": 22,
+                "sync": "fake tool block + ready_path for cancellation or SIGKILL",
+            }),
         );
-        let provider = support::wire_fake_llm(&world, "operator", script);
+        let mut provider = support::wire_fake_llm(&world, "operator", script);
         let driver = support::driver();
         let mut daemon = Some(support::crash::start(&world, &spec, &budget));
         let send = SessionSendDriver::new(&driver, &world, &spec, "operator");
@@ -311,42 +338,37 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let initial = stage(&world, &spec, &mut evidence, sid, tid);
         let slots = initial["steps"][0]["slots"].as_array().unwrap();
         assert_eq!(slots.len(), 22);
+        for slot in &slots[..19] {
+            assert_eq!(slot["outcome"], "succeeded");
+            assert_eq!(slot["material"]["kind"], "available");
+        }
         assert_eq!(slots[19]["outcome"], "succeeded");
         assert_eq!(slots[19]["material"]["kind"], "output_too_large");
         assert!(slots[19]["material"]["byte_length"].as_u64().unwrap() > 65536);
         assert_eq!(slots[20]["outcome"], "failed");
         assert_eq!(
             slots[20]["reason"],
-            json!({"kind":"failed","value":{"code":"execution_failed","retriability":"transient"}})
+            json!({"kind":"failed","value":{"code":"execution_failed"}})
         );
-        // 网络不可用也包含连接失败；公开 Host 证据必须见证已连接后在 TLS 阶段失败。
-        assert_eq!(slots[20]["evidence"]["kind"], "recorded");
-        let effects = slots[20]["evidence"]["value"]["effects"]["effects"]
-            .as_array()
-            .expect("bad-TLS call must expose recorded effects");
-        assert_eq!(effects.len(), 1);
-        assert_eq!(effects[0]["source"], "operation");
-        let network = &effects[0]["network"];
-        assert_eq!(network["failure_phase"], "tls", "bad-TLS failure phase");
-        assert_eq!(network["transport"]["tls"], json!({"state":"failed"}));
-        assert_eq!(network["policy_verdict"], "allowed");
-        assert_eq!(
-            network["transport"]["connected_peer"],
-            json!({"ip":"127.0.0.1","port":bad_tls.port()})
-        );
-        // 策略或校验拒绝不再是独立结局：它是 Failed 里的错误族，错误码与可重试性原样保留。
+        assert_eq!(slots[20]["material"], json!({"kind":"no_content"}));
         assert_eq!(slots[21]["outcome"], "failed");
         assert_eq!(
             slots[21]["reason"],
-            json!({"kind":"failed","value":{"code":"type_error","retriability":"permanent"}})
+            json!({"kind":"failed","value":{"code":"type_error"}})
         );
-        let before_beta = read_json(&world, &spec, &mut evidence, &["--json", "audit", "--tail"]);
-        let cursor = before_beta["next_after"].as_u64().unwrap().to_string();
-        let beta_provider = FakeLlmServer::start(support::sequence(vec![
+        assert_eq!(slots[21]["material"], json!({"kind":"no_content"}));
+
+        let mut beta_provider = FakeLlmServer::start(support::sequence(vec![
             support::tool_call(
                 "beta",
-                "session__todo_write",
-                r#"{"todos":[{"content":"beta-private","status":"pending"}]}"#,
+                "record_item",
+                &json!({
+                    "action": "append_marker",
+                    "path": beta_marker,
+                    "line": "beta-line\n",
+                    "note": "beta-private",
+                })
+                .to_string(),
             ),
             SseScript::plain("beta complete"),
         ]))
@@ -388,29 +410,29 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             &beta_read(&["--json", "session", "turn", &beta_tid], &mut evidence).stdout,
         )
         .unwrap();
-        let beta_sid = beta_turn["session_id"].as_str().unwrap();
-        let empty = read_json(
+        let beta_sid = beta_turn["session_id"].as_str().unwrap().to_owned();
+        assert_ne!(beta_sid, sid);
+        let sessions = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
+        let keys: BTreeSet<_> = sessions
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["project_store_key"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            keys.len(),
+            2,
+            "两个项目在共享后台中各自绑定独立的 project_store_key"
+        );
+        // 跨项目写操作（在 alpha 工作区 rewind beta 会话）被项目绑定检查拒绝。
+        cli(
             &world,
             &spec,
             &mut evidence,
-            &["--json", "audit", "--tail", "--since", &cursor],
+            &["--json", "session", "rewind", &beta_sid, "0"],
+            2,
         );
-        assert_eq!(empty["rows"], json!([]));
-        assert_eq!(
-            empty["next_after"].as_u64().unwrap(),
-            cursor.parse::<u64>().unwrap() + 3
-        );
-        assert_eq!(empty["done"], true);
-        let beta_tail: Value = serde_json::from_slice(
-            &beta_read(
-                &["--json", "audit", "--tail", "--since", &cursor],
-                &mut evidence,
-            )
-            .stdout,
-        )
-        .unwrap();
-        assert_eq!(beta_tail["rows"].as_array().unwrap().len(), 3);
-        assert_eq!(beta_tail["next_after"], empty["next_after"]);
+
         world
             .wire_provider(
                 lattice_system_harness::ProviderFixture::chat_completions("operator"),
@@ -421,11 +443,13 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let mut turns = vec![tid.to_string()];
         let mut windows = Vec::new();
         for crash in [false, true] {
+            let ready_path = world.root().join(format!("hold-{crash}.ready"));
+            let hold_marker = world.root().join(format!("hold-{crash}.marker"));
             let front = driver
                 .start(
                     &world,
                     &LatticeCommand {
-                        args: ["--json", "session", "send", "wait fetch", "--session", sid]
+                        args: ["--json", "session", "send", "wait hold", "--session", sid]
                             .into_iter()
                             .map(String::from)
                             .collect(),
@@ -433,69 +457,51 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                     },
                 )
                 .unwrap();
-            let deadline = Instant::now() + budget.cap_timeout(spec.step_timeout());
-            let mut http = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(Instant::now() < deadline, "fetch did not arrive");
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(e) => panic!("{e}"),
-                }
-            };
-            http.set_read_timeout(Some(budget.cap_timeout(spec.step_timeout())))
-                .unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                http.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-                assert!(request.len() <= 16384);
-            }
-            assert!(request.starts_with(b"GET /operator-hold HTTP/1.1\r\n"));
+            wait_for_ready(&ready_path, budget.cap_timeout(spec.step_timeout()));
             let turn = unclosed_turn(&world, &spec, &mut evidence, sid);
             let active = read_json(
                 &world,
                 &spec,
                 &mut evidence,
-                &["--json", "audit", "--turn", &turn],
+                &["--json", "session", "turn", &turn],
             );
-            let states: BTreeSet<_> = active["rows"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .map(|r| r["state"]["state"].as_str().unwrap())
-                .collect();
-            assert_eq!(states, BTreeSet::from(["registered", "started"]));
-            let replay = read_json(
-                &world,
-                &spec,
-                &mut evidence,
-                &[
-                    "--json",
-                    "audit",
-                    "replay",
-                    "--session",
-                    sid,
-                    "--turn",
-                    &turn,
-                ],
+            assert_eq!(active["steps"][0]["progress"]["progress"], "executing");
+            assert_eq!(
+                active["steps"][0]["slots"][0]["progress"]["state"],
+                "started"
             );
-            assert_eq!(replay["calls"][0]["state"]["state"], "started");
-            assert_eq!(replay["calls"][1]["state"]["state"], "registered");
+            assert_eq!(active["steps"][0]["slots"][0]["outcome"], "indeterminate");
+            assert_eq!(
+                active["steps"][0]["slots"][0]["reason"],
+                json!({"kind":"indeterminate","value":"no_result"})
+            );
+            assert_eq!(
+                active["steps"][0]["slots"][1]["progress"]["state"],
+                "registered"
+            );
+            assert_eq!(active["steps"][0]["slots"][1]["outcome"], "not_executed");
             let count = provider.captured_requests().len();
             if crash {
                 let owned = daemon.take().unwrap();
                 assert_eq!(world.daemon_pids().unwrap(), vec![owned.pgid()]);
-                evidence.record_json("crash-processes", &json!({"backend_pgid":owned.pgid(),"frontend_pgid":front.pgid(),"cut":"real fetch received, Started durable","state_root":world.session_store_dir().parent()})).unwrap();
+                evidence
+                    .record_json(
+                        "crash-processes",
+                        &json!({
+                            "backend_pgid": owned.pgid(),
+                            "frontend_pgid": front.pgid(),
+                            "cut": "fake block ready_path written, Started durable",
+                            "state_root": world.session_store_dir().parent(),
+                        }),
+                    )
+                    .unwrap();
                 assert_ne!(owned.pgid(), front.pgid());
                 let killed = owned.kill_and_wait().unwrap();
-                evidence.record_command("SIGKILL backend during real fetch", &killed);
+                evidence.record_command("SIGKILL backend during active tool", &killed);
                 support::assert_forced_kill(&killed);
                 assert!(world.daemon_pids().unwrap().is_empty());
                 let out = front.wait(None).unwrap();
-                evidence.record_command("frontend observes fetch crash", &out);
+                evidence.record_command("frontend observes tool crash", &out);
                 assert!(out.is_clean_exit(1));
                 let orphan = stage(&world, &spec, &mut evidence, sid, &turn);
                 assert_eq!(orphan["summary"]["outcome"], "failed");
@@ -521,11 +527,11 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             } else {
                 assert_eq!(cancel(&world, &spec, &turn)["value"]["owned"], true);
                 let out = front.wait(None).unwrap();
-                evidence.record_command("cancelled fetch", &out);
+                evidence.record_command("cancelled tool", &out);
                 assert!(out.is_clean_exit(2));
             }
             let closed = stage(&world, &spec, &mut evidence, sid, &turn);
-            // 已 Started 的调用没有确定结果：崩溃时是未取得结果，取消时是 LANCET 返回的 CallCancelled。
+            // 已 Started 的调用没有确定结果：崩溃时是未取得结果，取消时是执行器返回的 Cancelled。
             assert_eq!(closed["steps"][0]["slots"][0]["outcome"], "indeterminate");
             assert_eq!(
                 closed["steps"][0]["slots"][0]["reason"],
@@ -537,10 +543,14 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             );
             assert!(closed["steps"][0]["slots"][1]["reason"].is_null());
             assert_eq!(closed["steps"][0]["slots"][1]["outcome"], "not_executed");
-            assert_eq!(provider.captured_requests().len(), count);
-            windows.push(
-                json!({"turn":turn,"active":active,"replay":replay,"closed":closed,"crash":crash}),
+            assert_eq!(
+                marker_lines(&hold_marker),
+                vec![format!("hold-{crash}")],
+                "已开始的阻塞调用只进入执行一次，不能在取消、崩溃重开或退回后重放"
             );
+            assert!(!never_marker.exists(), "停在 Registered 的后续槽位从未执行");
+            assert_eq!(provider.captured_requests().len(), count);
+            windows.push(json!({"turn":turn,"active":active,"closed":closed,"crash":crash}));
             turns.push(turn);
         }
         std::fs::remove_file(&profile).unwrap();
@@ -551,24 +561,20 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 None,
             )
             .unwrap();
-        let alpha = read_json(&world, &spec, &mut evidence, &["--json", "audit"]);
-        let alpha_tail = read_json(&world, &spec, &mut evidence, &["--json", "audit", "--tail"]);
-        let beta_query: Value =
-            serde_json::from_slice(&beta_read(&["--json", "audit"], &mut evidence).stdout).unwrap();
-        assert_eq!(alpha["rows"].as_array().unwrap().len(), 26);
-        assert_eq!(beta_query["rows"].as_array().unwrap().len(), 1);
-        for (data, expected) in [(&alpha, sid), (&beta_query, beta_sid)] {
-            assert!(
-                data["rows"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .all(|r| r["binding"]["session_id"] == expected)
-            );
+        let mut alpha_turns = Vec::new();
+        for turn in &turns {
+            alpha_turns.push(stage(&world, &spec, &mut evidence, sid, turn));
         }
-        // audit 保留实际阶段；尚未 Terminal 的结论从 Turn 的槽位详情核对。
-        let outcomes: BTreeSet<_> = std::iter::once(&initial)
-            .chain(windows.iter().map(|window| &window["closed"]))
+        beta_read(&["session", "log", &beta_sid], &mut evidence);
+        beta_read(&["--json", "session", "log", &beta_sid], &mut evidence);
+        let beta_reopened: Value = serde_json::from_slice(
+            &beta_read(&["--json", "session", "turn", &beta_tid], &mut evidence).stdout,
+        )
+        .unwrap();
+        assert_eq!(beta_reopened, beta_turn);
+
+        let outcomes: BTreeSet<_> = alpha_turns
+            .iter()
             .flat_map(|turn| turn["steps"].as_array().unwrap())
             .flat_map(|step| step["slots"].as_array().unwrap())
             .map(|slot| slot["outcome"].as_str().unwrap())
@@ -577,136 +583,75 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             outcomes,
             BTreeSet::from(["succeeded", "failed", "not_executed", "indeterminate"])
         );
-        let changes = alpha_tail["rows"].as_array().unwrap();
-        assert_eq!(
-            changes.len(),
-            22 * 3 + 4 + 3,
-            "closure adds no synthetic slot progress"
-        );
-        let mut latest = BTreeMap::new();
-        let mut previous = 0;
-        for change in changes {
-            let seq = change["sequence"].as_u64().unwrap();
-            assert!(seq > previous);
-            previous = seq;
-            assert_eq!(change["row"]["binding"]["session_id"], sid);
-            latest.insert(change["row"]["invocation_id"].as_str().unwrap(), change);
-        }
-        for row in alpha["rows"].as_array().unwrap() {
-            assert_eq!(&latest[row["invocation_id"].as_str().unwrap()]["row"], row);
-        }
-        let mut newest = latest.values().collect::<Vec<_>>();
-        newest.sort_by_key(|r| std::cmp::Reverse(r["sequence"].as_u64().unwrap()));
-        let status = read_json(
-            &world,
-            &spec,
-            &mut evidence,
-            &["--json", "lancet", "status"],
-        );
-        assert_eq!(
-            status["recent"],
-            json!(
-                newest
-                    .iter()
-                    .take(20)
-                    .map(|r| &r["row"])
-                    .collect::<Vec<_>>()
-            )
-        );
-        assert_eq!(status["latest_change"], alpha_tail["latest_change"]);
-        let beta_status: Value = serde_json::from_slice(
-            &beta_read(&["--json", "lancet", "status"], &mut evidence).stdout,
-        )
-        .unwrap();
-        assert_eq!(beta_status["recent"], beta_query["rows"]);
-        assert_eq!(beta_status["latest_change"], status["latest_change"]);
-        let final_cursor = alpha_tail["next_after"].as_u64().unwrap().to_string();
-        let final_page = read_json(
-            &world,
-            &spec,
-            &mut evidence,
-            &["--json", "audit", "--tail", "--since", &final_cursor],
-        );
-        assert_eq!(final_page["rows"], json!([]));
-        assert_eq!(final_page["next_after"], alpha_tail["next_after"]);
-        let foreign = read_json(
-            &world,
-            &spec,
-            &mut evidence,
-            &["--json", "audit", "--session", beta_sid],
-        );
-        assert_eq!(foreign["rows"], json!([]));
-        cli(
-            &world,
-            &spec,
-            &mut evidence,
-            &[
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                beta_sid,
-                "--turn",
-                &beta_tid,
-            ],
-            2,
-        );
-        for value in [&alpha, &alpha_tail, &beta_query, &status, &beta_status] {
-            let text = value.to_string();
-            // Cell 证据允许项目相对路径；这里仅禁止参数/结果正文与 schema。
-            for private in [
-                "private-small-",
-                "private-large-",
-                "beta-private",
-                "never-private",
-                "input_schema",
-            ] {
-                assert!(!text.contains(private), "operator leaked {private}");
+        for (turn_list, expected_sid) in [
+            (alpha_turns.as_slice(), sid),
+            (std::slice::from_ref(&beta_reopened), beta_sid.as_str()),
+        ] {
+            for detail in turn_list {
+                assert_eq!(detail["session_id"], expected_sid);
+                for step in detail["steps"].as_array().unwrap() {
+                    for slot in step["slots"].as_array().unwrap() {
+                        assert_eq!(slot["binding"]["session_id"], expected_sid);
+                        assert_eq!(slot["binding"]["turn_id"], detail["turn_id"]);
+                    }
+                }
+                let text = detail.to_string();
+                // SlotDetail 只保留绑定摘要、结果摘要与错误机器码，不暴露参数正文、结果正文、错误原文或 schema。
+                for private in [
+                    "private-small-",
+                    "private-result-",
+                    "private-large-",
+                    "private-error-detail",
+                    "absent-private.txt",
+                    "beta-private",
+                    "never-private",
+                    "input_schema",
+                ] {
+                    assert!(!text.contains(private), "turn detail leaked {private}");
+                }
             }
         }
-        for turn in &turns {
-            stage(&world, &spec, &mut evidence, sid, turn);
-        }
-        beta_read(&["session", "log", beta_sid], &mut evidence);
-        beta_read(&["--json", "session", "log", beta_sid], &mut evidence);
-        beta_read(
-            &[
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                beta_sid,
-                "--turn",
-                &beta_tid,
-            ],
-            &mut evidence,
-        );
+        assert_eq!(marker_lines(&alpha_log).len(), 19);
+        assert_eq!(marker_lines(&beta_marker), vec!["beta-line"]);
+        assert!(!never_marker.exists());
         assert_eq!(provider.captured_requests().len(), 4);
         assert_eq!(beta_provider.captured_requests().len(), 2);
-        evidence.record_json("state-summary", &json!({"alpha":alpha,"beta":beta_query,"windows":windows,
-            "empty_project_page":empty,"foreign_changes":beta_tail,"recent":status,"beta_recent":beta_status})).unwrap();
+        evidence
+            .record_json(
+                "state-summary",
+                &json!({
+                    "alpha_turns": alpha_turns,
+                    "beta_turn": beta_reopened,
+                    "windows": windows,
+                }),
+            )
+            .unwrap();
         evidence.record_captures(provider.captured_requests());
         evidence.record_captures(beta_provider.captured_requests());
+        provider
+            .shutdown(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
+        beta_provider
+            .shutdown(budget.cap_timeout(spec.step_timeout()))
+            .unwrap();
     }));
     support::finish_recorded(evidence, result);
 }
 
 #[test]
 fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
-    let (world, spec) = support::direct_world(
-        "r2-s2-vertical",
-        "vertical",
-        "[\"observe__workspace\",\"mutate__create\"]",
-        "",
-    );
-    world.write_project_file("seed.txt", "seed\n").unwrap();
+    let (world, spec) = support::direct_world("r2-s2-vertical", "vertical", "");
+    world.set_env(TEST_TOOLS, "read_note,write_marker");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let created_path = world.project_dir().join("created.txt");
+        let must_not_exist_path = world.project_dir().join("must-not-exist.txt");
+        let calls_log = world.root().join("calls.log");
         let first = vec![
             chunk(json!({"content":"first text"})),
             chunk(json!({"reasoning_content":"first reason"})),
-            chunk(calls("first", "created.txt")),
+            chunk(calls("first", &created_path, &calls_log)),
             end(),
         ];
         let mut second: Vec<_> = (0..70)
@@ -719,7 +664,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             })
             .collect();
         second.push(chunk(json!({"content":"t70;"})));
-        second.push(chunk(calls("second", "must-not-exist.txt")));
+        second.push(chunk(calls("second", &must_not_exist_path, &calls_log)));
         second.push(end());
         provenance(
             &world,
@@ -783,11 +728,8 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         let slots = first_done["steps"][0]["slots"].as_array().unwrap();
         assert_eq!(slots.len(), 3);
         assert!(slots.iter().all(|v| v["outcome"] == "succeeded"));
-        assert_eq!(
-            std::fs::read_to_string(world.project_dir().join("created.txt")).unwrap(),
-            "durable\n"
-        );
-        let tip = history_tip(&world);
+        assert_eq!(marker_lines(&created_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["first-read", "first-tail"]);
         // 第一次观察在第二步生成前断开；之后重新开始的观察不依赖它看到过什么。
         let cut = watch(&world, &spec, &sid);
         assert!(cut.view.head.as_ref().unwrap().owner);
@@ -974,8 +916,12 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             .unwrap();
         drop(fresh);
         assert_eq!(provider.captured_requests().len(), 2);
-        assert!(!world.project_dir().join("must-not-exist.txt").exists());
-        assert_eq!(history_tip(&world), tip);
+        assert!(!must_not_exist_path.exists());
+        assert_eq!(marker_lines(&created_path), vec!["durable"]);
+        assert_eq!(
+            marker_lines(&calls_log),
+            vec!["first-read", "first-tail", "second-read"]
+        );
         let moved = read_json(
             &world,
             &spec,
@@ -984,20 +930,6 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         );
         assert_eq!(moved["current"], 2);
         let closed = stage(&world, &spec, &mut evidence, &sid, &tid);
-        let replay = read_json(
-            &world,
-            &spec,
-            &mut evidence,
-            &[
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                &sid,
-                "--turn",
-                &tid,
-            ],
-        );
         assert_eq!(closed["summary"]["outcome"], "failed");
         assert_eq!(closed["summary"]["notice"]["level"], "error");
         assert_eq!(closed["steps"][0], first_done["steps"][0]);
@@ -1048,23 +980,6 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             ),
             closed
         );
-        assert_eq!(
-            read_json(
-                &world,
-                &spec,
-                &mut evidence,
-                &[
-                    "--json",
-                    "audit",
-                    "replay",
-                    "--session",
-                    &sid,
-                    "--turn",
-                    &tid
-                ]
-            ),
-            replay
-        );
         let log = read_json(
             &world,
             &spec,
@@ -1073,7 +988,12 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         );
         assert_eq!(log["nodes"].as_array().unwrap().len(), 4);
         assert_eq!(log["session"]["current"], 2);
-        assert_eq!(history_tip(&world), tip);
+        assert!(!must_not_exist_path.exists());
+        assert_eq!(marker_lines(&created_path), vec!["durable"]);
+        assert_eq!(
+            marker_lines(&calls_log),
+            vec!["first-read", "first-tail", "second-read"]
+        );
         assert_eq!(provider.captured_requests().len(), 2);
         cli(
             &world,
@@ -1094,18 +1014,24 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                 .to_string()
                 .contains("first text")
         );
+        assert!(!must_not_exist_path.exists());
+        assert_eq!(marker_lines(&created_path), vec!["durable"]);
+        assert_eq!(
+            marker_lines(&calls_log),
+            vec!["first-read", "first-tail", "second-read"]
+        );
         evidence.record_captures(captures);
         provider
             .shutdown(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        evidence.record_json("state-summary",&json!({"turn":closed,"history_current":tip,"file_blake3":blake3::hash(&std::fs::read(world.project_dir().join("created.txt")).unwrap()).to_hex().to_string(),"provider_requests":3,"peer_requests":1})).unwrap();
+        evidence.record_json("state-summary",&json!({"turn":closed,"created_lines":marker_lines(&created_path),"calls_log":marker_lines(&calls_log),"file_blake3":blake3::hash(&std::fs::read(&created_path).unwrap()).to_hex().to_string(),"provider_requests":3,"peer_requests":1})).unwrap();
     }));
     support::finish_recorded(evidence, result);
 }
 
 #[test]
 fn crash_start_cannot_reset_an_expired_scenario_budget() {
-    let (world, spec) = support::direct_world("crash-budget-expired", "budget", "[]", "");
+    let (world, spec) = support::direct_world("crash-budget-expired", "budget", "");
     let budget = lattice_system_harness::ScenarioBudget::new(Some(Duration::ZERO));
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         support::crash::start(&world, &spec, &budget)
@@ -1191,7 +1117,6 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
                 assert_eq!(result["invocation_id"], call["invocation_id"]);
                 assert_eq!(result["name"], call["name"]);
                 assert_eq!(result["payload"]["outcome"], slot["outcome"]);
-                assert_eq!(raw["progress"]["evidence"], slot["evidence"]);
             }
         }
     }
@@ -1222,7 +1147,7 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
 
 #[test]
 fn cli_recovers_accepted_receipt_after_backend_crash() {
-    let (world, spec) = support::direct_world("cli-recovered-acceptance", "recover", "[]", "");
+    let (world, spec) = support::direct_world("cli-recovered-acceptance", "recover", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1375,26 +1300,28 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
         let (world, spec) = support::direct_world(
             &format!("r2-crash-{name}"),
             "matrix",
-            "[\"observe__workspace\",\"mutate__create\",\"session__todo_write\"]",
             "\n[llm.retry]\nmax_retries = 1\n",
         );
-        world.write_project_file("seed.txt", "seed\n").unwrap();
+        world.set_env(TEST_TOOLS, "read_note,write_marker");
         let budget = world.budget(&spec);
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let batch = |prefix, path| SseScript::Chunks {
+            let first_path = world.project_dir().join("first.txt");
+            let kept_path = world.project_dir().join("kept.txt");
+            let calls_log = world.root().join("calls.log");
+            let batch = |prefix: &str, path: &Path| SseScript::Chunks {
                 chunks: vec![
                     chunk(json!({"content":format!("{prefix} text")})),
                     chunk(json!({"reasoning_content":format!("{prefix} reason")})),
-                    chunk(calls(prefix, path)),
+                    chunk(calls(prefix, path, &calls_log)),
                     end(),
                 ],
             };
             let second = match mode {
                 "oversize" => {
-                    let mut delta = calls("second", "kept.txt");
-                    delta["tool_calls"][1]["function"] = json!({"name":"session__todo_write",
-                        "arguments":json!({"todos":[{"content":"x".repeat(70_000),"status":"pending"}]}).to_string()});
+                    let mut delta = calls("second", &kept_path, &calls_log);
+                    delta["tool_calls"][1]["function"] = json!({"name":"write_marker",
+                        "arguments":json!({"action":"oversize","bytes":70_000,"marker_path":calls_log,"marker_line":"second-oversize\n"}).to_string()});
                     SseScript::Chunks {
                         chunks: vec![
                             chunk(json!({"content":"second text"})),
@@ -1419,17 +1346,17 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                         chunks: vec![
                             chunk(json!({"tool_calls":[{
                                 "index":0,"id":"outsider","type":"function",
-                                "function":{"name":"fetch__web",
-                                    "arguments":r#"{"url":"https://example.com"}"#}
+                                "function":{"name":"unlisted_tool",
+                                    "arguments":r#"{"note":"outside frozen catalog"}"#}
                             }]})),
                             rejected_end,
                         ],
                     }
                 }
-                _ => batch("second", "kept.txt"),
+                _ => batch("second", &kept_path),
             };
             let script = support::sequence(vec![
-                batch("first", "first.txt"),
+                batch("first", &first_path),
                 second,
                 SseScript::plain("complete"),
             ]);
@@ -1694,13 +1621,34 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                     json!({"end":"stop","cause":{"cause":"provider_error","retryable":false}})
                 );
             }
-            let installed = world.project_dir().join("kept.txt").exists();
-            assert_eq!(
-                installed,
-                matches!(name, "terminal" | "all-terminal" | "continue" | "finish")
-            );
-            assert_eq!(world.project_dir().join("first.txt").exists(), requests > 0);
-            let tip = (requests > 0).then(|| history_tip(&world));
+            let expected_first: Vec<&str> = if requests > 0 {
+                vec!["durable"]
+            } else {
+                Vec::new()
+            };
+            let expected_kept: Vec<&str> =
+                if matches!(name, "terminal" | "all-terminal" | "continue" | "finish") {
+                    vec!["durable"]
+                } else {
+                    Vec::new()
+                };
+            let expected_calls_log: Vec<&str> = match name {
+                "accepted" | "requesting" => Vec::new(),
+                "requesting-second" | "retry" | "nonretry" | "registered" | "invalid" => {
+                    vec!["first-read", "first-tail"]
+                }
+                "started" | "terminal" => vec!["first-read", "first-tail", "second-read"],
+                "oversize" => {
+                    vec!["first-read", "first-tail", "second-read", "second-oversize"]
+                }
+                "all-terminal" | "continue" | "finish" => {
+                    vec!["first-read", "first-tail", "second-read", "second-tail"]
+                }
+                _ => unreachable!(),
+            };
+            assert_eq!(marker_lines(&first_path), expected_first, "{name}");
+            assert_eq!(marker_lines(&kept_path), expected_kept, "{name}");
+            assert_eq!(marker_lines(&calls_log), expected_calls_log, "{name}");
             // 先完整读取并核验，再进行任何会话写操作；旧节点与阶段不能被补写。
             let old_entries: Vec<Value> = entries.into_iter().cloned().collect();
             read_json(
@@ -1716,7 +1664,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 ],
             );
             assert_eq!(stage(&world, &spec, &mut evidence, sid, tid), before);
-            let next_provider =
+            let mut next_provider =
                 support::wire_fake_llm(&world, "matrix", SseScript::plain("new reply"));
             cli(
                 &world,
@@ -1737,23 +1685,16 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 .map(|entry| entry.raw.clone())
                 .collect();
             assert_eq!(preserved, old_entries);
-            if let Some(tip) = tip {
-                assert_eq!(history_tip(&world), tip);
-                assert_eq!(
-                    std::fs::read_to_string(world.project_dir().join("first.txt")).unwrap(),
-                    "durable\n"
-                );
-            }
-            if installed {
-                assert_eq!(
-                    std::fs::read_to_string(world.project_dir().join("kept.txt")).unwrap(),
-                    "durable\n"
-                );
-            }
-            evidence.record_json("state-summary", &json!({"case":name,"before":before,"watch":observer.received,"old_entries":old_entries,"provider_requests_before":requests,"new_requests":1,"barrier":marker})).unwrap();
+            assert_eq!(marker_lines(&first_path), expected_first, "{name}");
+            assert_eq!(marker_lines(&kept_path), expected_kept, "{name}");
+            assert_eq!(marker_lines(&calls_log), expected_calls_log, "{name}");
+            evidence.record_json("state-summary", &json!({"case":name,"before":before,"watch":observer.received,"old_entries":old_entries,"provider_requests_before":requests,"new_requests":1,"barrier":marker,"first_lines":marker_lines(&first_path),"kept_lines":marker_lines(&kept_path),"calls_log":marker_lines(&calls_log)})).unwrap();
             evidence.record_captures(provider.captured_requests());
             evidence.record_captures(next_provider.captured_requests());
             provider
+                .shutdown(budget.cap_timeout(spec.step_timeout()))
+                .unwrap();
+            next_provider
                 .shutdown(budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
         }));
@@ -1763,22 +1704,20 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
 
 #[test]
 fn persisted_cancel_after_mutation_survives_crash_without_replay() {
-    let (world, spec) = support::direct_world(
-        "r2-crash-cancelled",
-        "cancelled",
-        "[\"observe__workspace\",\"mutate__create\"]",
-        "",
-    );
-    world.write_project_file("seed.txt", "seed\n").unwrap();
+    let (world, spec) = support::direct_world("r2-crash-cancelled", "cancelled", "");
+    world.set_env(TEST_TOOLS, "read_note,write_marker");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let kept_path = world.project_dir().join("kept.txt");
+        let calls_log = world.root().join("calls.log");
+        let first_calls = calls("first", &kept_path, &calls_log);
         let (mut provider, gate) = support::wire_gated_fake_llm(
             &world,
             "cancelled",
             support::sequence(vec![
                 SseScript::Chunks {
-                    chunks: vec![chunk(calls("first", "kept.txt")), end()],
+                    chunks: vec![chunk(first_calls.clone()), end()],
                 },
                 SseScript::plain("must not arrive"),
             ]),
@@ -1786,7 +1725,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
         provenance(
             &world,
             &mut evidence,
-            json!({"test":"persisted_cancel_after_mutation_survives_crash_without_replay","case":"persisted cancellation after mutation","barrier":"attempt_stopped","first":calls("first","kept.txt"),"script":"three calls, then gated plain must not arrive; cancel at request 2"}),
+            json!({"test":"persisted_cancel_after_mutation_survives_crash_without_replay","case":"persisted cancellation after mutation","barrier":"attempt_stopped","first":first_calls,"script":"three calls, then gated plain must not arrive; cancel at request 2"}),
         );
         let ack = world.root().join("marker.json");
         world.set_env(BARRIER, "attempt_stopped");
@@ -1818,7 +1757,8 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
         let (sid, tid) = (sid.as_str(), tid.as_str());
         let before = accepted_detail(&world, &spec, tid);
         assert_eq!(before["steps"][0]["slots"][0]["outcome"], "succeeded");
-        let tip = history_tip(&world);
+        assert_eq!(marker_lines(&kept_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["first-read", "first-tail"]);
         let taken = cancel(&world, &spec, tid);
         assert_eq!(taken["value"]["owned"], true);
         evidence.record_json("cancel", &taken).unwrap();
@@ -1859,16 +1799,13 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
             ),
             closed
         );
-        assert_eq!(history_tip(&world), tip);
-        assert_eq!(
-            std::fs::read_to_string(world.project_dir().join("kept.txt")).unwrap(),
-            "durable\n"
-        );
+        assert_eq!(marker_lines(&kept_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["first-read", "first-tail"]);
         assert_eq!(provider.captured_requests().len(), 2);
         evidence
             .record_json(
                 "state-summary",
-                &json!({"turn":closed,"history_current":tip,"provider_requests":2}),
+                &json!({"turn":closed,"kept_lines":marker_lines(&kept_path),"calls_log":marker_lines(&calls_log),"provider_requests":2}),
             )
             .unwrap();
         evidence.record_captures(provider.captured_requests());
@@ -1882,19 +1819,17 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
 #[test]
 fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
     for target in [2u64, 0] {
-        let (world, spec) = support::direct_world(
-            &format!("r2-rewind-crash-{target}"),
-            "rewind",
-            "[\"observe__workspace\",\"mutate__create\"]",
-            "",
-        );
-        world.write_project_file("seed.txt", "seed\n").unwrap();
+        let (world, spec) =
+            support::direct_world(&format!("r2-rewind-crash-{target}"), "rewind", "");
+        world.set_env(TEST_TOOLS, "read_note,write_marker");
         let budget = world.budget(&spec);
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let kept_path = world.project_dir().join("kept.txt");
+            let calls_log = world.root().join("calls.log");
             let script = support::sequence(vec![
                 SseScript::Chunks {
-                    chunks: vec![chunk(calls("rewind", "kept.txt")), end()],
+                    chunks: vec![chunk(calls("rewind", &kept_path, &calls_log)), end()],
                 },
                 SseScript::plain("original final"),
                 SseScript::plain("fork final"),
@@ -1922,7 +1857,8 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
                 sent.accepted_turn_id().unwrap(),
             );
             let original = stage(&world, &spec, &mut evidence, sid, tid);
-            let tip = history_tip(&world);
+            assert_eq!(marker_lines(&kept_path), vec!["durable"]);
+            assert_eq!(marker_lines(&calls_log), vec!["rewind-read", "rewind-tail"]);
             let target_arg = target.to_string();
             let frontend = support::driver()
                 .start(
@@ -2002,11 +1938,8 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             evidence
                 .record_json("original-paired-entries", &json!(original_reader.received))
                 .unwrap();
-            assert_eq!(history_tip(&world), tip);
-            assert_eq!(
-                std::fs::read_to_string(world.project_dir().join("kept.txt")).unwrap(),
-                "durable\n"
-            );
+            assert_eq!(marker_lines(&kept_path), vec!["durable"]);
+            assert_eq!(marker_lines(&calls_log), vec!["rewind-read", "rewind-tail"]);
             let captures = provider.captured_requests();
             assert_eq!(captures.len(), 3);
             assert!(
@@ -2017,7 +1950,7 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             if target == 0 {
                 assert_eq!(captures[2].raw["messages"].as_array().unwrap().len(), 2);
             }
-            evidence.record_json("state-summary", &json!({"target":target,"turn":original,"tree":fork,"history_current":tip,"provider_requests":3})).unwrap();
+            evidence.record_json("state-summary", &json!({"target":target,"turn":original,"tree":fork,"kept_lines":marker_lines(&kept_path),"calls_log":marker_lines(&calls_log),"provider_requests":3})).unwrap();
             evidence.record_captures(captures);
             provider
                 .shutdown(budget.cap_timeout(spec.step_timeout()))
@@ -2032,13 +1965,14 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
     let (world, spec) = support::direct_world(
         "r2-observation-windows",
         "windows",
-        "[\"observe__workspace\",\"mutate__create\"]",
         "\n[llm.retry]\nmax_retries = 1\n",
     );
-    world.write_project_file("seed.txt", "seed\n").unwrap();
+    world.set_env(TEST_TOOLS, "read_note,write_marker");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let created_path = world.project_dir().join("created.txt");
+        let calls_log = world.root().join("calls.log");
         let mut chunks: Vec<_> = (0..71)
             .map(|i| {
                 chunk(if i % 2 == 0 {
@@ -2056,7 +1990,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         let first = vec![
             chunk(json!({"content":"tools explanation"})),
             chunk(json!({"reasoning_content":"tools reason"})),
-            chunk(calls("first", "created.txt")),
+            chunk(calls("first", &created_path, &calls_log)),
             end(),
         ];
         provenance(
@@ -2342,6 +2276,8 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         evidence
             .record_json("history-reread", &json!(reread))
             .unwrap();
+        assert_eq!(marker_lines(&created_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["first-read", "first-tail"]);
         assert_eq!(provider.captured_requests().len(), 4);
         provider
             .shutdown(budget.cap_timeout(spec.step_timeout()))
@@ -2353,41 +2289,37 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
 #[test]
 fn cancelled_slot_live_and_crash_share_ordered_closure() {
     for crash in [false, true] {
-        let (world, spec) = support::direct_world(
-            &format!("r2-cancel-slot-{crash}"),
-            "slot",
-            "[\"observe__workspace\",\"mutate__create\",\"fetch__web\"]",
-            "\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
-        );
-        world.write_project_file("seed.txt", "seed\n").unwrap();
+        let (world, spec) = support::direct_world(&format!("r2-cancel-slot-{crash}"), "slot", "");
+        world.set_env(TEST_TOOLS, "read_note,write_marker,hold_call");
         let budget = world.budget(&spec);
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            listener.set_nonblocking(true).unwrap();
-            let url = format!(
-                "http://localhost:{}/cancel",
-                listener.local_addr().unwrap().port()
-            );
+            let first_path = world.project_dir().join("first.txt");
+            let kept_path = world.project_dir().join("kept.txt");
+            let never_path = world.project_dir().join("never.txt");
+            let calls_log = world.root().join("calls.log");
+            let hold_ready = world.root().join("hold.ready");
+            let hold_marker = world.root().join("hold.marker");
+            let first_calls = calls("first", &first_path, &calls_log);
             let chunks = vec![
-                chunk(json!({"content":"create then fetch", "tool_calls":[
-                    {"index":0,"id":"keep","type":"function","function":{"name":"mutate__create","arguments":r#"{"path":"kept.txt","content":"kept\n","create_parents":false}"#}},
-                    {"index":1,"id":"fetch","type":"function","function":{"name":"fetch__web","arguments":json!({"url":url}).to_string()}},
-                    {"index":2,"id":"tail","type":"function","function":{"name":"mutate__create","arguments":r#"{"path":"never.txt","content":"never","create_parents":false}"#}}
+                chunk(json!({"content":"create then hold", "tool_calls":[
+                    {"index":0,"id":"keep","type":"function","function":{"name":"write_marker","arguments":json!({"action":"append_marker","path":kept_path,"line":"kept\n"}).to_string()}},
+                    {"index":1,"id":"hold","type":"function","function":{"name":"hold_call","arguments":json!({"action":"block","ready_path":hold_ready,"marker_path":hold_marker,"marker_line":"hold-started\n"}).to_string()}},
+                    {"index":2,"id":"tail","type":"function","function":{"name":"write_marker","arguments":json!({"action":"append_marker","path":never_path,"line":"never\n"}).to_string()}}
                 ]})),
                 end(),
             ];
             provenance(
                 &world,
                 &mut evidence,
-                json!({"test":"cancelled_slot_live_and_crash_share_ordered_closure","crash":crash,"first":calls("first","first.txt"),"chunks":chunks,"http":"GET accepted; no response until cancellation"}),
+                json!({"test":"cancelled_slot_live_and_crash_share_ordered_closure","crash":crash,"first":first_calls,"chunks":chunks,"sync":"hold_call ready_path; block until cancellation"}),
             );
             let mut provider = support::wire_fake_llm(
                 &world,
                 "slot",
                 support::sequence(vec![
                     SseScript::Chunks {
-                        chunks: vec![chunk(calls("first", "first.txt")), end()],
+                        chunks: vec![chunk(first_calls), end()],
                     },
                     SseScript::Chunks { chunks },
                 ]),
@@ -2417,35 +2349,14 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                     },
                 )
                 .unwrap();
-            let deadline = Instant::now() + budget.cap_timeout(spec.step_timeout());
-            let mut http = loop {
-                match listener.accept() {
-                    Ok((stream, _)) => break stream,
-                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
-                        assert!(
-                            Instant::now() < deadline,
-                            "fetch did not reach real HTTP listener"
-                        );
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("HTTP accept: {error}"),
-                }
-            };
-            http.set_read_timeout(Some(budget.cap_timeout(spec.step_timeout())))
-                .unwrap();
-            let mut request = Vec::new();
-            while !request.ends_with(b"\r\n\r\n") {
-                let mut byte = [0];
-                http.read_exact(&mut byte).unwrap();
-                request.push(byte[0]);
-                assert!(request.len() <= 16384);
-            }
-            assert!(request.starts_with(b"GET /cancel HTTP/1.1\r\n"));
+            wait_for_ready(&hold_ready, budget.cap_timeout(spec.step_timeout()));
             let (sid, tid) = running_turn(&world, &spec, &mut evidence);
             let (sid, tid) = (sid.as_str(), tid.as_str());
             let running = accepted_detail(&world, &spec, tid);
-            let tip = history_tip(&world);
             assert_eq!(running["steps"][1]["slots"][0]["outcome"], "succeeded");
+            assert_eq!(marker_lines(&first_path), vec!["durable"]);
+            assert_eq!(marker_lines(&kept_path), vec!["kept"]);
+            assert_eq!(marker_lines(&hold_marker), vec!["hold-started"]);
             let taken = cancel(&world, &spec, tid);
             assert_eq!(taken["value"]["owned"], true);
             evidence.record_json("cancel-taken", &taken).unwrap();
@@ -2525,21 +2436,13 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
             evidence
                 .record_json("paired-entries", &json!(observer.received))
                 .unwrap();
-            assert_eq!(history_tip(&world), tip);
-            assert!(!world.project_dir().join("never.txt").exists());
-            assert_eq!(
-                std::fs::read_to_string(world.project_dir().join("kept.txt")).unwrap(),
-                "kept\n"
-            );
-            assert_eq!(
-                std::fs::read_to_string(world.project_dir().join("first.txt")).unwrap(),
-                "durable\n"
-            );
+            assert!(!never_path.exists());
+            assert_eq!(marker_lines(&kept_path), vec!["kept"]);
+            assert_eq!(marker_lines(&first_path), vec!["durable"]);
+            assert_eq!(marker_lines(&calls_log), vec!["first-read", "first-tail"]);
+            assert_eq!(marker_lines(&hold_marker), vec!["hold-started"]);
             assert_eq!(provider.captured_requests().len(), 2);
-            assert!(
-                matches!(listener.accept(), Err(e) if e.kind() == std::io::ErrorKind::WouldBlock)
-            );
-            evidence.record_json("state-summary", &json!({"turn":closed,"history_current":tip,"http_requests":1,"provider_requests":2,"crash":crash})).unwrap();
+            evidence.record_json("state-summary", &json!({"turn":closed,"first_lines":marker_lines(&first_path),"kept_lines":marker_lines(&kept_path),"hold_lines":marker_lines(&hold_marker),"provider_requests":2,"crash":crash})).unwrap();
             evidence.record_captures(provider.captured_requests());
             provider
                 .shutdown(budget.cap_timeout(spec.step_timeout()))
@@ -2554,31 +2457,35 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
     let (world, spec) = support::direct_world(
         "r2-dispatch-deadline",
         "deadline",
-        "[\"observe__workspace\",\"mutate__create\"]",
         "\n[llm]\ntimeout_secs = 2\n",
     );
-    world.write_project_file("seed.txt", "seed\n").unwrap();
+    world.set_env(TEST_TOOLS, "read_note,write_marker");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let prefix_path = world.project_dir().join("prefix.txt");
+        let first_path = world.project_dir().join("first.txt");
+        let second_path = world.project_dir().join("second.txt");
+        let calls_log = world.root().join("calls.log");
+        let prefix_calls = calls("prefix", &prefix_path, &calls_log);
         let chunks = vec![
             chunk(json!({"tool_calls":[
-                {"index":0,"id":"first","type":"function","function":{"name":"mutate__create","arguments":r#"{"path":"first.txt","content":"first","create_parents":false}"#}},
-                {"index":1,"id":"second","type":"function","function":{"name":"mutate__create","arguments":r#"{"path":"second.txt","content":"second","create_parents":false}"#}}
+                {"index":0,"id":"first","type":"function","function":{"name":"write_marker","arguments":json!({"action":"append_marker","path":first_path,"line":"first\n"}).to_string()}},
+                {"index":1,"id":"second","type":"function","function":{"name":"write_marker","arguments":json!({"action":"append_marker","path":second_path,"line":"second\n"}).to_string()}}
             ]})),
             end(),
         ];
         provenance(
             &world,
             &mut evidence,
-            json!({"test":"dispatch_deadline_tail_is_atomic_and_survives_crash","first":calls("prefix","prefix.txt"),"chunks":chunks,"timeout_secs":2,"pause_after":"calls_registered at step1","barrier":"step_closed:1"}),
+            json!({"test":"dispatch_deadline_tail_is_atomic_and_survives_crash","first":prefix_calls,"chunks":chunks,"timeout_secs":2,"pause_after":"calls_registered at step1","barrier":"step_closed:1"}),
         );
         let (mut provider, gate) = support::wire_gated_fake_llm(
             &world,
             "deadline",
             support::sequence(vec![
                 SseScript::Chunks {
-                    chunks: vec![chunk(calls("prefix", "prefix.txt")), end()],
+                    chunks: vec![chunk(prefix_calls), end()],
                 },
                 SseScript::Chunks { chunks },
             ]),
@@ -2619,7 +2526,8 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
         let (sid, tid) = (sid.as_str(), tid.as_str());
         let first = accepted_detail(&world, &spec, tid);
         assert_eq!(first["steps"][0]["end"], json!({"end":"continue"}));
-        let tip = history_tip(&world);
+        assert_eq!(marker_lines(&prefix_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["prefix-read", "prefix-tail"]);
         std::fs::write(schedule.join("calls_registered.arm"), b"").unwrap();
         gate.release_next(budget.cap_timeout(spec.step_timeout()))
             .unwrap();
@@ -2670,11 +2578,8 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
         evidence
             .record_json("paired-entries", &json!(observer.received))
             .unwrap();
-        assert_eq!(history_tip(&world), tip);
-        assert_eq!(
-            std::fs::read_to_string(world.project_dir().join("prefix.txt")).unwrap(),
-            "durable\n"
-        );
+        assert_eq!(marker_lines(&prefix_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["prefix-read", "prefix-tail"]);
         read_json(
             &world,
             &spec,
@@ -2682,13 +2587,15 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
             &["--json", "session", "rewind", sid, "0"],
         );
         assert_eq!(stage(&world, &spec, &mut evidence, sid, tid), closed);
-        assert!(!world.project_dir().join("first.txt").exists());
-        assert!(!world.project_dir().join("second.txt").exists());
+        assert_eq!(marker_lines(&prefix_path), vec!["durable"]);
+        assert_eq!(marker_lines(&calls_log), vec!["prefix-read", "prefix-tail"]);
+        assert!(!first_path.exists());
+        assert!(!second_path.exists());
         assert_eq!(provider.captured_requests().len(), 2);
         evidence
             .record_json(
                 "state-summary",
-                &json!({"turn":closed,"provider_requests":2,"tail_files_created":false,"history_current":tip}),
+                &json!({"turn":closed,"provider_requests":2,"tail_files_created":false,"prefix_lines":marker_lines(&prefix_path),"calls_log":marker_lines(&calls_log)}),
             )
             .unwrap();
         evidence.record_captures(provider.captured_requests());
@@ -2701,7 +2608,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
 
 #[test]
 fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
-    let (world, spec) = support::direct_world("memory-cancel-crash", "cancel", "[]", "");
+    let (world, spec) = support::direct_world("memory-cancel-crash", "cancel", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -2834,7 +2741,7 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
 /// 暂停这次提交的任务，后台照常服务其他连接。
 #[test]
 fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted() {
-    let (world, spec) = support::direct_world("admission-window", "admission", "[]", "");
+    let (world, spec) = support::direct_world("admission-window", "admission", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -3001,7 +2908,6 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
                 "copy-first-crash"
             },
             "recover",
-            "[]",
             "",
         );
         let budget = world.budget(&spec);

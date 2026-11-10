@@ -3,7 +3,6 @@
 
 use super::local::Selection;
 use super::*;
-use lancet_protocol::{BindingIdentity, InvocationBinding};
 use lattice_conversation::{
     InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey, ModelMessageAddress,
     NativeMessage, ToolCallAddress,
@@ -188,26 +187,6 @@ impl Records {
         Ok((node_id, config, step))
     }
 
-    fn change(&mut self, slot: &InvocationSlot) -> Result<()> {
-        self.last_change = ChangeSeq(next_sequence(self.last_change.0, "change")?);
-        self.index.insert(
-            slot.binding.invocation_id,
-            InvocationIndexEntry {
-                address: slot.binding.identity.address(),
-                last_change: self.last_change,
-            },
-        );
-        self.changes.insert(
-            self.last_change,
-            StoredInvocationChange {
-                sequence: self.last_change,
-                invocation_id: slot.binding.invocation_id,
-                stage: validate::stage(&slot.progress),
-            },
-        );
-        Ok(())
-    }
-
     fn closed_step(
         &self,
         s: SessionId,
@@ -363,7 +342,6 @@ impl SessionStore {
                     turn_id: input.turn_id,
                 });
             }
-            input.profile_copy.validate()?;
             if !input.profile_copy.matches_config(&input.config) {
                 return Err(invalid(
                     "profile",
@@ -640,7 +618,7 @@ impl SessionStore {
                                 model_step_ordinal: reply.key.model_step_ordinal,
                                 part_ordinal,
                                 method: bound.name.clone(),
-                                descriptor_identity: entry.descriptor_identity.clone(),
+                                tool_identity: entry.tool_identity.clone(),
                                 arguments_digest: bound.arguments_digest,
                             },
                         });
@@ -662,7 +640,12 @@ impl SessionStore {
                 })
                 .collect();
             for slot in &new_slots {
-                r.change(slot)?;
+                r.index.insert(
+                    slot.binding.invocation_id,
+                    InvocationIndexEntry {
+                        address: slot.binding.identity.address(),
+                    },
+                );
             }
             let Node::Step {
                 progress,
@@ -719,7 +702,7 @@ impl SessionStore {
             if slots[..position].iter().any(|s| {
                 matches!(
                     &s.progress,
-                    SlotProgress::Terminal { result, .. } if close::stops_batch(&result.payload)
+                    SlotProgress::Terminal { result } if close::stops_batch(&result.payload)
                 )
             }) || slots[position].binding != *binding
                 || !matches!(slots[position].progress, SlotProgress::Registered)
@@ -727,7 +710,6 @@ impl SessionStore {
                 return Err(transition(key.turn_id, "invocation cannot start"));
             }
             slots[position].progress = SlotProgress::Started;
-            r.change(&slots[position])?;
             *updated_at = now;
             r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)?;
@@ -765,7 +747,6 @@ impl SessionStore {
                 .find(|s| s.binding.invocation_id == input.invocation_id)
                 .ok_or_else(|| transition(key.turn_id, "invocation not in step"))?;
             if !matches!(slot.progress, SlotProgress::Started)
-                || !matches!(input.terminal.evidence, InvocationEvidence::Recorded(_))
                 || matches!(
                     input.terminal.result.payload,
                     ResultPayload::NotExecuted
@@ -774,25 +755,13 @@ impl SessionStore {
             {
                 return Err(transition(
                     key.turn_id,
-                    "receipt requires a started invocation",
+                    "terminal requires a started invocation",
                 ));
             }
-            // 错误码到结局的映射在写入入口检查，读取直接使用已保存的结局。
-            if matches!(&input.terminal.result.payload, ResultPayload::Failed(e)
-                if matches!(e.code, lancet_protocol::CepErrorCode::CallCancelled | lancet_protocol::CepErrorCode::OutcomeIndeterminate))
-            {
-                return Err(invalid("terminal", "error belongs to a different outcome"));
-            }
-            validate::terminal(
-                &slot.binding,
-                &input.terminal.result,
-                &input.terminal.evidence,
-            )?;
+            validate::terminal(&slot.binding, &input.terminal.result)?;
             slot.progress = SlotProgress::Terminal {
                 result: input.terminal.result,
-                evidence: input.terminal.evidence,
             };
-            r.change(slot)?;
             *updated_at = now;
             r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)
@@ -884,7 +853,7 @@ impl SessionStore {
                 if close::first_stopping_cause(slots)?.is_some()
                     || slots
                         .iter()
-                        .any(|s| close::stops_batch(&close::resolve_slot(s).0.payload))
+                        .any(|s| close::stops_batch(&close::resolve_slot(s).payload))
                 {
                     return Err(transition(key.turn_id, "cannot continue stopping calls"));
                 }

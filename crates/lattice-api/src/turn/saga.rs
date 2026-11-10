@@ -94,8 +94,7 @@ impl ModelExecution {
 
 pub(crate) struct LiveExecution {
     pub model: ModelExecution,
-    pub runtime: Arc<lancet_api::LancetRuntime>,
-    pub events: tokio::sync::mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
+    pub tools: Arc<dyn super::tools::TurnTools>,
     pub observer: Arc<ObserverSink>,
     pub cancel: Arc<AtomicBool>,
     /// 库代故障，不是用户取消。退出时不向失败代写入内存结果。
@@ -135,25 +134,11 @@ impl LiveExecution {
             }
             tokio::select! {
                 result = &mut worker => {
-                    self.drain_events();
                     self.healthy()?;
                     return Ok(result?);
                 }
-                Some(event) = self.events.recv() => self.emit_tool(event),
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
-        }
-    }
-
-    fn emit_tool(&self, event: lancet_protocol::ToolEvent) {
-        if let Some(event) = super::cep::map_cep_tool_event(event) {
-            self.observer.emit(event);
-        }
-    }
-
-    fn drain_events(&mut self) {
-        while let Ok(event) = self.events.try_recv() {
-            self.emit_tool(event);
         }
     }
 
@@ -519,46 +504,60 @@ pub(crate) async fn run_coordinator_saga(
             )
             .await?;
             live.healthy()?;
-            let runtime = live.runtime.clone();
+            let turn_tools = live.tools.clone();
             let method = call.name.clone();
             let params = call.arguments.clone();
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
             let call_cancel = cancellation.clone();
+            let call_deadline = live.deadline;
             let worker = coordinator
                 .io
                 .start_execution(
                     async move {
-                        runtime
-                            .dispatch(started, method, params, Some(call_cancel))
+                        turn_tools
+                            .execute(started, &method, params, call_cancel, call_deadline)
                             .await
                     },
                     live.cancel.clone(),
                     live.deadline,
                 )
                 .await?;
-            let worker = match worker {
-                Ok(worker) => worker,
-                Err(cause) => {
+            let reply = match worker {
+                Ok(worker) => {
+                    live.observer.emit(TurnEvent::ToolCallStarted {
+                        id: binding.invocation_id,
+                        name: call.name.clone(),
+                    });
+                    match live.join(worker, cancellation).await? {
+                        super::tools::ToolOutcome::Succeeded(value) => {
+                            Ok(ToolReply::Succeeded(value))
+                        }
+                        super::tools::ToolOutcome::Failed(error) => Ok(ToolReply::Failed(error)),
+                        super::tools::ToolOutcome::Cancelled => Ok(ToolReply::Cancelled),
+                        super::tools::ToolOutcome::Indeterminate => Ok(ToolReply::Indeterminate),
+                        super::tools::ToolOutcome::Deadline => Err(DispatchStop::Deadline),
+                    }
+                }
+                Err(cause) => Err(if cause == StopCause::Cancelled {
+                    DispatchStop::Cancelled
+                } else {
+                    DispatchStop::Deadline
+                }),
+            };
+            let reply = match reply {
+                Ok(reply) => reply,
+                Err(stop) => {
                     let closed = coordinator
                         .io
                         .close_step(CloseStep::StopExecuting {
                             key: registered.key,
-                            stop: if cause == StopCause::Cancelled {
-                                DispatchStop::Cancelled
-                            } else {
-                                DispatchStop::Deadline
-                            },
+                            stop,
                         })
                         .await?;
                     return publish_closed(coordinator, &live.observer, closed).await;
                 }
             };
-            live.observer.emit(TurnEvent::ToolCallStarted {
-                id: binding.invocation_id,
-                name: call.name.clone(),
-            });
-            let receipt = live.join(worker, cancellation).await?;
-            let terminal = prepare_terminal(binding, receipt.result, receipt.evidence)?;
+            let terminal = prepare_terminal(binding, reply);
             let outcome = terminal.result().payload.outcome();
             let error_summary = match &terminal.result().payload {
                 ResultPayload::Failed(error) => Some(bound_provider_diagnostic(&error.message)),

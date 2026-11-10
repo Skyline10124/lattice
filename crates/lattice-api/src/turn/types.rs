@@ -19,6 +19,8 @@ pub struct RunTurnRequest {
     pub effort: Option<lattice_conversation::Effort>,
     pub loaded_profile: Option<LoadedAgentProfile>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
+    /// 注入本轮工具执行器；未指定时使用默认生产实现（或 `test-fake-tools` 环境变量选择）。
+    pub tools: Option<Arc<dyn super::tools::ToolExecutor>>,
     /// 注入客户端、协议及最终模型的可用档位，由测试提供能力来源。
     #[cfg(any(test, feature = "test-utils"))]
     pub test_llm: Option<(
@@ -26,8 +28,6 @@ pub struct RunTurnRequest {
         lattice_session::store::AttemptProtocol,
         Vec<lattice_conversation::Effort>,
     )>,
-    #[cfg(any(test, feature = "test-utils"))]
-    pub test_project_root: Option<String>,
 }
 
 impl RunTurnRequest {
@@ -97,7 +97,7 @@ pub enum TurnEvent {
     },
     CallsRegistered {
         key: lattice_session::store::StepKey,
-        calls: Vec<lancet_protocol::InvocationBinding>,
+        calls: Vec<lattice_session::store::InvocationBinding>,
     },
     ToolCallStarted {
         id: lattice_conversation::InvocationId,
@@ -109,20 +109,6 @@ pub enum TurnEvent {
         outcome: lattice_conversation::ToolResultOutcome,
         material: lattice_session::store::MaterialSummary,
         error_summary: Option<String>,
-    },
-    CepCallStarted {
-        invocation_id: lattice_conversation::InvocationId,
-        method: String,
-        semantic_stage: String,
-        guard_stage: String,
-    },
-    CepCallFinished {
-        invocation_id: lattice_conversation::InvocationId,
-        method: String,
-        ok: bool,
-        semantic_stage: String,
-        guard_stage: String,
-        error_code: Option<String>,
     },
     StepClosed {
         step: lattice_session::store::StepDetail,

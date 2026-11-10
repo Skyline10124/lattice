@@ -715,28 +715,6 @@ async fn connect_candidates(
 const NO_TLS_ROOTS: &str =
     "no usable TLS root certificates: https requests are refused, http requests are allowed";
 
-/// 空集合返回 `None`：没有信任根时不构造 TLS 配置，https 请求由 Host 直接拒绝，
-/// 不回退后台的系统根。
-pub(crate) fn tls_config(roots_der: &[Vec<u8>]) -> Result<Option<Arc<ClientConfig>>, String> {
-    if roots_der.is_empty() {
-        return Ok(None);
-    }
-    let mut roots = rustls::RootCertStore::empty();
-    for der in roots_der {
-        roots
-            .add(der.as_slice().into())
-            .map_err(|_| "invalid Tool TLS root certificate".to_string())?;
-    }
-    let mut config =
-        ClientConfig::builder_with_provider(rustls::crypto::aws_lc_rs::default_provider().into())
-            .with_safe_default_protocol_versions()
-            .map_err(|_| "cannot configure Tool TLS protocol versions".to_string())?
-            .with_root_certificates(roots)
-            .with_no_client_auth();
-    config.alpn_protocols = vec![b"http/1.1".to_vec()];
-    Ok(Some(Arc::new(config)))
-}
-
 async fn send_request<I>(
     io: I,
     request: Request<Empty<Bytes>>,
@@ -1141,7 +1119,7 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
         Arc::new(|_| panic!("preflight refusal must not charge")),
         Arc::new(|| 0),
         "external-host",
-        tls_config(&[]).unwrap(),
+        None,
     );
     let preflight_error = preflight_host
         .fetch(
@@ -1175,7 +1153,7 @@ async fn budget_refusals_distinguish_pre_and_post_io() {
         }),
         Arc::new(|| usize::MAX),
         "external-host",
-        tls_config(&[]).unwrap(),
+        None,
     );
 
     let error = host
@@ -1248,7 +1226,7 @@ mod request_chain {
             Arc::new(|_| Ok(())),
             Arc::new(|| usize::MAX),
             "external-host",
-            tls_config(&[]).unwrap(),
+            None,
         )
     }
 
@@ -1378,11 +1356,6 @@ mod request_chain {
     #[tokio::test]
     async fn without_tls_roots_https_is_refused_before_connect_and_http_is_allowed() {
         let (tls_addr, peers) = connection_listener().await;
-        assert!(
-            tls_config(&[]).unwrap().is_none(),
-            "empty roots build no TLS config"
-        );
-
         let (ctx, _cancel) = call_ctx(Duration::from_secs(5));
         let https_host = host(&["127.0.0.1"], false);
         let error = https_host

@@ -228,11 +228,14 @@ impl ObserverSink {
             TurnEvent::ModelFinished { .. }
             | TurnEvent::ToolCallStarted { .. }
             | TurnEvent::ToolCallFinished { .. } => nodes.extend(state.current),
-            TurnEvent::CepCallStarted { .. } | TurnEvent::CepCallFinished { .. } => {}
         }
         Self::mark(&mut state, &nodes, false);
         #[cfg(test)]
         state.events.push(event);
+        self.changed.send_replace(());
+    }
+    #[cfg(test)]
+    pub(crate) fn notify_without_marking(&self) {
         self.changed.send_replace(());
     }
     /// 锁内只复制尚未发送的文字，再开启读事务，避免阻塞模型回调。

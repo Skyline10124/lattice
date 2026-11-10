@@ -14,7 +14,7 @@ status: active
 
 本合同说明一次任务如何被接受、执行和保存，会话历史如何组织成树，会话如何持有配置，以及用户中途离开、取消任务或后台重启后如何继续处理。模型请求怎样发出、发到哪里、带什么凭据，由[模型接入合同](../llm/README.md)维护。
 
-以下以“读取工作区文件并解释内容”为贯穿场景：用户提出问题，模型选择 `observe__workspace` 读取文件，然后依据返回内容给出解释。工具的具体能力由 [LANCET 合同](../lancet.md)和[工作区观察接口](../workspace.md#观察接口与边界)说明。
+以下以生产默认的纯对话流程为贯穿场景：用户提出问题，协调层经默认的 `NoTools` 冻结空工具目录、不向模型暴露工具，模型直接给出完整回答并关闭这一轮。测试构建开启 `test-fake-tools` 并设置 `LATTICE_TEST_TOOLS` 时注入假工具执行器，驱动登记、执行与续跑的多步工具循环，槽位推进与结果保存见[调用槽位](steps.md#调用槽位)。
 
 ## 模型与职责
 
@@ -22,7 +22,7 @@ status: active
 
 Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，永久绑定用户工作的项目。Session 记录只保存身份、项目绑定、当前位置与时间；会话的配置是另一条记录，即 profile 副本，见[会话的 profile 副本](settings.md#会话的-profile-副本)。
 
-后台接受一次用户任务后，形成一个 Turn。本文场景中的用户问题、读取文件的工具调用和最终解释都属于同一 Turn。客户端在提交前生成 `TurnId`（UUID v4）；向新会话提交时，`SessionId` 也由客户端生成。接受结果不明时，按 TurnId 查询找回这一次请求。
+后台接受一次用户任务后，形成一个 Turn：纯对话场景包含用户问题与模型的完整回答；启用工具的多步循环中，中间的工具调用步骤与最终回答也属于同一 Turn。客户端在提交前生成 `TurnId`（UUID v4）；向新会话提交时，`SessionId` 也由客户端生成。接受结果不明时，按 TurnId 查询找回这一次请求。
 
 会话历史是一棵树。一个会话里发生过什么，以树上的节点为唯一权威：后台为这个会话提交的每一件事都写在节点上，其他表是节点的一部分、指针，或从节点得出的索引。节点有两种：
 
@@ -50,7 +50,7 @@ Step、尝试和调用槽位都会经历几个阶段。节点为它们各保存�
 | 尝试 | `Ended { end, diagnostic }` | `end`：完成，或停止及实际原因 |
 | 调用槽位 | `Registered` | NotExecuted |
 | 调用槽位 | `Started` | Indeterminate，没有取得结果 |
-| 调用槽位 | `Terminal { result, evidence }` | `result`：LANCET 给出的结局与载荷 |
+| 调用槽位 | `Terminal { result }` | `result`：工具执行器给出的结局与载荷 |
 
 这张表是结论的唯一来源。会话库读取时按它给出每个对象的结论，所有读者经同一处取得。所以树上没有空缺：任何时刻，每个调用槽位都有结果，每次尝试都有终态，每个 Step 都有结束方式。执行者在任何时刻消失，树上已有的内容就是这一轮的结局，不需要事后补写。各阶段的事务和推导规则见 [Step 执行与结果保存](steps.md#step-执行与结果保存)。
 
@@ -72,9 +72,8 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | Session 记录 | `SessionId` | 身份、项目绑定、创建与更新时间；当前位置这个指针 | 建立时写入；当前位置随节点写入和 `rewind` 移动 |
 | profile 副本 | `SessionId` | 会话的有效 profile、当前的 provider `id`、模型 `id` 与推理档位，见[会话的 profile 副本](settings.md#会话的-profile-副本) | 首次接受时写入；之后由接受事务按提交的选择改写；`rewind` 不改 |
 | InvocationId 索引 | `InvocationId` | 调用所在的 Step 与片段位置 | 登记调用时写入 |
-| 调用变更日志 | 全局单调变更序号 | 每次槽位 `progress` 前进后的一行，只记 InvocationId 与到达的阶段，不复制槽位内容。`audit --tail` 按序读取，`Terminal` 的内容经 InvocationId 索引从节点读取 | 只追加 |
 
-一轮的结局、notice、usage 汇总和结束时间都从它的 Step 节点得出，见[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)。配置表以内容摘要为键，键由内容算出，不会与引用它的节点不一致。TurnId 索引、InvocationId 索引与调用变更日志是派生记录，与节点在同一事务中更新。
+一轮的结局、notice、usage 汇总和结束时间都从它的 Step 节点得出，见[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)。配置表以内容摘要为键，键由内容算出，不会与引用它的节点不一致。TurnId 索引与 InvocationId 索引是派生记录，与节点在同一事务中更新。
 
 模型上下文与视图读取的对话只有一种范围：从根到 Session 当前位置的路径。发给模型的上下文取这条路径上的 UserMessage 和已有回复的 Step；没有回复的 Step 不发给 provider，对话条目照常给出。根节点 `0` 不含内容，不发给 provider。要让模型上下文与当前视图换到其他分叉上的对话，先 `rewind` 到那里；历史查询按 `before` 的父链读取，不受当前位置限制，见[观察与重连](recovery.md#观察与重连)。
 
@@ -84,7 +83,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 ### 组件与接口
 
-后台 API 分为三类：命令改变会话或执行（`submit`、`cancel`、`rewind`），视图推送会话现在的样子（`watch`），查询读取已写入的事实（`head`、`history`、`turn`、`list`、`log`、`usage`、`audit`）。LocalClient 把它们交给前端。一次提交经 `LocalTurn` 进行：它是这次提交的具体句柄，保留原请求身份，处理接受回执、取消意图与退出交接；它不是第二个持久 Turn，也不拥有后台执行。前端持有句柄、消费视图，后台的 Owner 与 TurnCoordinator 分别监督操作和推进持久执行。
+后台 API 分为三类：命令改变会话或执行（`submit`、`cancel`、`rewind`），视图推送会话现在的样子（`watch`），查询读取已写入的事实（`head`、`history`、`turn`、`list`、`log`、`usage`）。LocalClient 把它们交给前端。一次提交经 `LocalTurn` 进行：它是这次提交的具体句柄，保留原请求身份，处理接受回执、取消意图与退出交接；它不是第二个持久 Turn，也不拥有后台执行。前端持有句柄、消费视图，后台的 Owner 与 TurnCoordinator 分别监督操作和推进持久执行。
 
 | 场景中的角色 | 负责的工作与交接 |
 | --- | --- |
@@ -94,7 +93,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | 后台任务管理 Backend / Owner | Backend 管理准入、视图、查询及本进程诊断，为每个观察者保存视图的推送状态；准入时读取配置与凭据，见[执行配置冻结](acceptance.md#执行配置冻结)。Owner 监督已接管操作，并为正在执行的 Turn 保留当前尝试的段列表。提交从准备起持有同一取消载体，直至执行核心独立收尾或给出明确诊断，前端退出不改变其责任 |
 | 执行协调 TurnCoordinator | 推进一次 Turn：请求模型、组织工具调用、把每一步进度写入会话库，最后关闭 Step 与 Turn |
 | 模型驱动 ModelStepDriver / LLM | 接收对话和本次配置，请求模型，将响应交回 TurnCoordinator |
-| 工具执行 LANCET | 接收已登记的工具调用，按权限执行，向 TurnCoordinator 返回执行结果、返回内容及证据 |
+| 工具执行 ToolExecutor | 接收已登记的工具调用，执行后向 TurnCoordinator 返回执行结局与载荷 |
 | 会话库 `lattice-session` | 保存 Session 记录、会话树、配置表、TurnId 索引与 InvocationId 索引；每次推进是一个事务 |
 
 前端负责用户交互，LocalClient 负责操作交付与连接，后台负责任务生命周期与视图，TurnCoordinator 负责持久执行流程，会话库负责事实的保存与一致性。[实现模块与公开操作](operations.md#实现模块与公开操作)进一步说明各 crate 和操作接口。

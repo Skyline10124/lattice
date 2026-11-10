@@ -4,6 +4,7 @@
 //! 全局同步会话库。事务调用由组合层置于阻塞执行边界。
 //! 句柄独占文件；提交错误后停止所有写入，调用方必须释放读视图并关闭重开。
 
+mod binding;
 mod close;
 mod codec;
 mod config;
@@ -15,6 +16,7 @@ mod read;
 mod types;
 mod validate;
 mod write;
+pub use binding::{BindingIdentity, InvocationBinding};
 pub use close::{
     bound_provider_diagnostic, first_stopping_cause, prepare_terminal, resolve_attempt,
     resolve_slot, resolve_step, retry_notices, step_stop_cause, stops_batch,

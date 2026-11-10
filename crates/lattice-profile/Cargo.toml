@@ -4,10 +4,9 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Strict single-agent profile schema, loading, discovery, defaults, and pure lowering"
+description = "Strict single-agent profile schema, loading, discovery, and defaults"
 
 [dependencies]
-lancet-protocol = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-session = { workspace = true }
 serde = { workspace = true }

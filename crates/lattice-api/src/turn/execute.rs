@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    cep::{ProductionTurnDepsInput, build_production_turn_deps},
     coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
     observer::ObserverSink,
+    tools::{TurnTools, default_tool_executor},
     types::*,
 };
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
 };
 use futures::FutureExt;
 use lattice_conversation::{Effort, SessionId, TurnId};
-use lattice_session::{StateLayout, store::*};
+use lattice_session::store::*;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -24,7 +24,6 @@ pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
 
 pub(crate) struct ExecutionInput {
     pub session: SessionApi,
-    pub layout: StateLayout,
     pub turn_id: TurnId,
     pub workspace: LocalWorkspaceRoot,
     pub request: RunTurnRequest,
@@ -40,7 +39,6 @@ pub(crate) struct ExecutionInput {
 pub(crate) struct PreparedModel {
     target: lattice_llm::ModelTarget,
     execution: super::saga::ModelExecution,
-    gateway: Arc<lattice_llm::RequestGateway>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -69,7 +67,6 @@ impl PreparedModel {
         Ok(Self {
             target: resolved.target().clone(),
             execution: super::saga::ModelExecution::gateway(turn, &resolved),
-            gateway: gateway.clone(),
         })
     }
 }
@@ -166,7 +163,6 @@ fn select_model_and_policy(
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
 pub fn start_turn(
     session: SessionApi,
-    layout: StateLayout,
     turn_id: TurnId,
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
@@ -177,7 +173,6 @@ pub fn start_turn(
         .then(crate::local::new_session_id);
     start_execution(ExecutionInput {
         session,
-        layout,
         turn_id,
         workspace,
         request,
@@ -242,10 +237,9 @@ async fn execute_owned(
 ) -> Result<TurnCompletion> {
     let ExecutionInput {
         session,
-        layout,
         turn_id,
         workspace,
-        request,
+        mut request,
         prepared_model,
         prepared_profile,
         io,
@@ -253,6 +247,7 @@ async fn execute_owned(
         observer,
         new_session,
     } = input;
+    let tools = request.tools.take().unwrap_or_else(default_tool_executor);
     let project = workspace.store_key();
     if session
         .read(move |read| read.turn_node(turn_id))
@@ -310,7 +305,7 @@ async fn execute_owned(
                     .as_ref()
                     .ok_or_else(|| ApiError::BadRequest("frozen configuration required".into()))?;
                 (
-                    crate::profile::TurnProfile::from_loaded(loaded, &workspace)?,
+                    crate::profile::TurnProfile::from_loaded(loaded),
                     Some(loaded.path.clone()),
                 )
             };
@@ -336,12 +331,8 @@ async fn execute_owned(
             "loaded agent differs from selection".into(),
         ));
     }
-    let (target, model, gateway) = match prepared_model {
-        Some(PreparedModel {
-            target,
-            execution,
-            gateway,
-        }) => (target, execution, Some(gateway)),
+    let (target, model) = match prepared_model {
+        Some(PreparedModel { target, execution }) => (target, execution),
         None => match request.injected_llm() {
             Some((client, protocol, supported)) => {
                 let (chosen_model, policy, source) = select_model_and_policy(
@@ -372,7 +363,6 @@ async fn execute_owned(
                         driver: Arc::new(lattice_agent::ModelStepDriver::new(client)),
                         origin,
                     },
-                    None,
                 )
             }
             None => {
@@ -383,33 +373,8 @@ async fn execute_owned(
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
-    if request.session_id.is_none() {
-        let layout = layout.clone();
-        tokio::task::spawn_blocking(move || {
-            lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
-                layout, project,
-            ))
-            .map_err(|_| ApiError::StoreUnavailable("workspace history creation failed".into()))
-        })
-        .await
-        .map_err(|_| ApiError::WorkerFailed)??;
-    }
-    let root = workspace
-        .canonical_path()
-        .to_str()
-        .ok_or_else(|| ApiError::BadRequest("runtime workspace requires UTF-8".into()))?;
-    let lancet = profile.configuration.lancet();
-    let deps = build_production_turn_deps(ProductionTurnDepsInput {
-        capability_admission: profile.configuration.capability_admission(),
-        project_root: root,
-        project_store_key: project,
-        state_layout: layout,
-        enabled_tools: &profile.configuration.effective.enabled_tools,
-        gateway: gateway.clone(),
-        lancet: Some(&lancet),
-    })
-    .await?;
-    let config = super::live::freeze_config(&profile.configuration, &target, &deps.tool_catalog)?;
+    let turn_tools: Arc<dyn TurnTools> = Arc::from(tools.open_turn(session_id, &workspace).await?);
+    let config = super::live::freeze_config(&profile.configuration, &target, turn_tools.specs())?;
     let expected_profile_digest = profile
         .previous
         .as_ref()
@@ -535,8 +500,7 @@ async fn execute_owned(
         turn_id,
         super::saga::LiveExecution {
             model,
-            runtime: Arc::new(deps.runtime),
-            events: deps.events,
+            tools: turn_tools,
             observer,
             cancel: request.cancel_flag.expect("cancel carrier initialized"),
             shutdown,
@@ -551,20 +515,11 @@ async fn execute_owned(
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn run_turn(
     session: SessionApi,
-    layout: StateLayout,
+    workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
 ) -> Result<RunTurnResult> {
-    let root = request
-        .test_project_root
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("explicit test workspace required".into()))?;
-    let workspace = tokio::task::spawn_blocking(move || {
-        LocalWorkspaceRoot::from_path(std::path::Path::new(&root))
-    })
-    .await
-    .map_err(|_| ApiError::WorkerFailed)??;
     let id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("UUID v4");
-    let execution = start_turn(session, layout, id, workspace, request);
+    let execution = start_turn(session, id, workspace, request);
     execution
         .acceptance
         .await
@@ -598,7 +553,7 @@ mod tests {
             model: crate::ModelId::parse("default").unwrap(),
             effort: Some(Low),
             system_prompt: None,
-            catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
+            catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
             limits: TurnExecutionLimits {
                 timeout_secs: crate::TurnTimeout::default(),
                 max_model_steps: 32,

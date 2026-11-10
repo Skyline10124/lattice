@@ -1388,17 +1388,11 @@ fn structured_steps_require_exact_pairing() {
 
 #[test]
 fn structured_result_outcomes_and_large_success() {
-    use lattice_conversation::{CepError, CepErrorCode, CepErrorData, Retriability};
-    let mut rejected = CepError::new(
-        CepErrorCode::ExecutionFailed,
-        "界".repeat(2000),
-        serde_json::from_value::<CepErrorData>(
-            serde_json::json!({"kind":"execution","operation":"internal","detail":null}),
-        )
-        .unwrap(),
-        Retriability::Transient,
-    );
-    rejected.code = CepErrorCode::CapabilityNotGranted;
+    use lattice_conversation::ToolError;
+    let rejected = ToolError {
+        code: "capability_not_granted".into(),
+        message: "界".repeat(2000),
+    };
     let variants = [
         success(
             invocation(0),
@@ -1406,16 +1400,11 @@ fn structured_result_outcomes_and_large_success() {
             serde_json::json!({"z":1,"a":2}),
         )
         .payload,
-        ResultPayload::Failed(Box::new(CepError::new(
-            CepErrorCode::ExecutionFailed,
-            "failed",
-            serde_json::from_value::<CepErrorData>(
-                serde_json::json!({"kind":"execution","operation":"get_weather","detail":null}),
-            )
-            .unwrap(),
-            Retriability::Permanent,
-        ))),
-        ResultPayload::Failed(Box::new(rejected.clone())),
+        ResultPayload::Failed(ToolError {
+            code: "execution_failed".into(),
+            message: "failed".into(),
+        }),
+        ResultPayload::Failed(rejected),
         ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
         ResultPayload::NotExecuted,
         ResultPayload::Indeterminate(IndeterminateCause::NoResult),
@@ -1477,11 +1466,11 @@ fn structured_result_outcomes_and_large_success() {
                 0 => assert_eq!(json, serde_json::json!({"a":2,"z":1})),
                 1 => assert_eq!(
                     json,
-                    serde_json::json!({"error":{"code":CepErrorCode::ExecutionFailed.as_i32(),"message":"failed"}})
+                    serde_json::json!({"error":{"code":"execution_failed","message":"failed"}})
                 ),
                 2 => assert_eq!(
                     json,
-                    serde_json::json!({"error":{"code":CepErrorCode::CapabilityNotGranted.as_i32(),"message":"界".repeat(1365)}})
+                    serde_json::json!({"error":{"code":"capability_not_granted","message":"界".repeat(1365)}})
                 ),
                 3 => assert_eq!(
                     json,
@@ -1542,7 +1531,10 @@ fn structured_result_fixtures_and_missing_ids() {
             });
         }
         if origin == Protocol::Messages {
-            results[0].payload = ResultPayload::Failed(Box::new(serde_json::from_value(serde_json::json!({"code":"execution_failed","message":"permission denied by policy","data":{"kind":"execution","operation":"get_weather","detail":null},"retriability":"permanent"})).unwrap()));
+            results[0].payload = ResultPayload::Failed(lattice_conversation::ToolError {
+                code: "execution_failed".into(),
+                message: "permission denied by policy".into(),
+            });
         }
         let encoded = tool_results_to_wire(origin, &bound, &results).unwrap();
         assert_eq!(

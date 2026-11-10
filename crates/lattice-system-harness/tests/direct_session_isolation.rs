@@ -9,7 +9,7 @@ use support::*;
 #[test]
 fn direct_session_tree_rewind_and_context_isolation() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-tree-isolation", "isolation", "[]", "");
+    let (world, spec) = direct_world("direct-tree-isolation", "isolation", "");
     let server = wire_fake_llm(&world, "isolation", SseScript::plain("answer"));
     let mut evidence = evidence(&world, &spec);
     let a = SessionSendDriver::new(&driver, &world, &spec, "isolation");

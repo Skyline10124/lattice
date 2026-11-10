@@ -12,7 +12,7 @@ status: active
 
 ## 操作
 
-1. 执行 `session send`、`session list` 与 `audit`。
+1. 执行 `session send` 与 `session list`。
 
 ## 断言
 

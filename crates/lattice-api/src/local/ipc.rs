@@ -20,7 +20,14 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-pub(super) const MAGIC: &[u8; 8] = b"LTLOCAL=";
+pub(super) const PROTOCOL_VERSION: u8 = 62;
+pub(super) const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
+/// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
+pub(super) const fn magic_for_version(version: u8) -> [u8; 8] {
+    let mut magic = *b"LTLOCAL\0";
+    magic[7] = version;
+    magic
+}
 pub(super) const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -41,18 +48,16 @@ fn protocol() -> LocalError {
     )
 }
 
-/// 魔数格式固定为 `LTLOCAL` 加一个版本字节，按字节值比较；`9` 之后继续用 `:`、`;` 等更大的字节，
-/// 不改帧长度。
+/// 前缀相符时取出版本字节；新旧由 `check_magic` 按版本数值比较。
 fn magic_version(magic: &[u8; 8]) -> Option<u8> {
-    let (prefix, _) = MAGIC.split_at(MAGIC.len() - 1);
-    magic.starts_with(prefix).then_some(magic[prefix.len()])
+    let version = magic[7];
+    (*magic == magic_for_version(version)).then_some(version)
 }
 
 fn check_magic(magic: &[u8; 8]) -> Result<()> {
-    let current = MAGIC[MAGIC.len() - 1];
     match magic_version(magic) {
-        Some(version) if version == current => Ok(()),
-        Some(version) if version < current => Err(LocalError::new(
+        Some(version) if version == PROTOCOL_VERSION => Ok(()),
+        Some(version) if version < PROTOCOL_VERSION => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
             INCOMPATIBLE_BACKEND,
         )),
@@ -581,81 +586,68 @@ mod frame_tests {
 
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
-        for (magic, length, payload, expected) in [
-            (*b"LTLOCAL=", 4_u32, b"null".as_slice(), None),
+        check_magic(MAGIC).expect("当前协议版本魔数必须通过");
+        for version in 0..PROTOCOL_VERSION {
+            let error = check_magic(&magic_for_version(version)).unwrap_err();
+            assert_eq!(
+                (error.kind, error.message.as_str()),
+                (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND),
+                "version={version}"
+            );
+        }
+        for version in (PROTOCOL_VERSION + 1)..=u8::MAX {
+            let error = check_magic(&magic_for_version(version)).unwrap_err();
+            assert_eq!(
+                (error.kind, error.message.as_str()),
+                (LocalErrorKind::IncompatibleBackend, NEWER_BACKEND),
+                "version={version}"
+            );
+        }
+        // 版本 61 必须固定判为较旧协议。
+        let error = check_magic(&magic_for_version(61)).unwrap_err();
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+        );
+
+        let cases = [
+            (*MAGIC, 4, b"null".as_slice(), None),
             (
-                *b"LTLOCAL<",
-                4_u32,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL;",
-                4_u32,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL:",
+                magic_for_version(PROTOCOL_VERSION - 1),
                 4,
                 b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
+                Some((
+                    LocalErrorKind::IncompatibleBackend,
+                    Some(INCOMPATIBLE_BACKEND),
+                )),
             ),
             (
-                *b"LTLOCAL9",
+                magic_for_version(PROTOCOL_VERSION + 1),
                 4,
                 b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL8",
-                4,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL7",
-                4,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL6",
-                4,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL2",
-                4,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
-            ),
-            (
-                *b"LTLOCAL>",
-                4,
-                b"null".as_slice(),
-                Some(LocalErrorKind::IncompatibleBackend),
+                Some((LocalErrorKind::IncompatibleBackend, Some(NEWER_BACKEND))),
             ),
             (
                 *b"XXLOCAL9",
                 4,
                 b"null".as_slice(),
-                Some(LocalErrorKind::Protocol),
+                Some((LocalErrorKind::Protocol, None)),
             ),
             (
-                *b"LTLOCAL=",
+                *MAGIC,
                 0,
                 b"".as_slice(),
-                Some(LocalErrorKind::Protocol),
+                Some((LocalErrorKind::Protocol, None)),
             ),
             (
-                *b"LTLOCAL=",
+                *MAGIC,
                 (MAX_FRAME + 1) as u32,
                 b"".as_slice(),
-                Some(LocalErrorKind::Protocol),
+                Some((LocalErrorKind::Protocol, None)),
             ),
-        ] {
+        ];
+
+        for (magic, length, payload, expected) in cases {
             tokio::time::timeout(Duration::from_secs(1), async {
                 let (mut sender, mut receiver) = UnixStream::pair().unwrap();
                 sender.write_all(&magic).await.unwrap();
@@ -664,16 +656,11 @@ mod frame_tests {
                 let result = read::<serde_json::Value>(&mut receiver).await;
                 match expected {
                     None => assert_eq!(result.unwrap(), serde_json::Value::Null),
-                    Some(kind) => {
+                    Some((kind, expected_message)) => {
                         let error = result.unwrap_err();
-                        assert_eq!(error.kind, kind, "{}", String::from_utf8_lossy(&magic));
-                        if kind == LocalErrorKind::IncompatibleBackend {
-                            let expected = if magic > *MAGIC {
-                                NEWER_BACKEND
-                            } else {
-                                INCOMPATIBLE_BACKEND
-                            };
-                            assert_eq!(error.message, expected);
+                        assert_eq!(error.kind, kind, "{magic:?}");
+                        if let Some(expected_message) = expected_message {
+                            assert_eq!(error.message, expected_message, "{magic:?}");
                         }
                     }
                 }
@@ -685,55 +672,56 @@ mod frame_tests {
 
     #[tokio::test]
     async fn backend_answers_a_foreign_magic_with_its_own_before_closing() {
-        for magic in [b"LTLOCAL<", b"LTLOCAL>"] {
+        for magic in [
+            magic_for_version(PROTOCOL_VERSION - 1),
+            magic_for_version(PROTOCOL_VERSION + 1),
+        ] {
             tokio::time::timeout(Duration::from_secs(1), async {
-            let (mut client, mut backend) = UnixStream::pair().unwrap();
-            // 字面量覆盖上一版和下一版客户端，不能从当前魔数推导。
-            client.write_all(magic).await.unwrap();
-            client.write_u32(4).await.unwrap();
-            client.write_all(b"null").await.unwrap();
-            let error = read_request::<serde_json::Value>(&mut backend)
-                .await
-                .unwrap_err();
-            assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
-            drop(backend);
-            let mut reply = [0; 8];
-            client.read_exact(&mut reply).await.unwrap();
-            assert_eq!(&reply, MAGIC, "backend must announce its own magic");
-            let len = client.read_u32().await.unwrap() as usize;
-            client.read_exact(&mut vec![0; len]).await.unwrap();
-            // 后台没读完的请求留在它的接收队列里，Linux 让这一端读到 ECONNRESET；两者都表示已关闭。
-            let closed = client.read(&mut [0; 1]).await;
-            assert!(
-                matches!(&closed, Ok(0))
-                    || matches!(&closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
-                "connection must close after the announcement: {closed:?}"
-            );
-        })
-        .await
-        .expect("foreign IPC magic case timed out");
+                let (mut client, mut backend) = UnixStream::pair().unwrap();
+                client.write_all(&magic).await.unwrap();
+                client.write_u32(4).await.unwrap();
+                client.write_all(b"null").await.unwrap();
+                let error = read_request::<serde_json::Value>(&mut backend)
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
+                drop(backend);
+                let mut reply = [0; 8];
+                client.read_exact(&mut reply).await.unwrap();
+                assert_eq!(&reply, MAGIC, "backend must announce its own magic");
+                let len = client.read_u32().await.unwrap() as usize;
+                client.read_exact(&mut vec![0; len]).await.unwrap();
+                // 后台没读完的请求留在它的接收队列里，Linux 让这一端读到 ECONNRESET；两者都表示已关闭。
+                let closed = client.read(&mut [0; 1]).await;
+                assert!(
+                    matches!(&closed, Ok(0))
+                        || matches!(&closed, Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset),
+                    "connection must close after the announcement: {closed:?}"
+                );
+            })
+            .await
+            .expect("foreign IPC magic case timed out");
         }
     }
 
-    /// harness 不能依赖产品 crate，只能写死魔数；升级时在这里失败并指出要改哪个文件。
+    /// harness 不能依赖产品 crate，只能记录同一协议版本号；升级时在这里失败并指出要改哪个文件。
     #[test]
     fn harness_frame_magic_tracks_the_current_magic() {
         let harness = include_str!("../../../lattice-system-harness/tests/support/mod.rs");
-        let current = std::str::from_utf8(MAGIC).unwrap();
         assert!(
-            harness.contains(&format!("const FRAME_MAGIC: &[u8; 8] = b\"{current}\";")),
-            "update FRAME_MAGIC in crates/lattice-system-harness/tests/support/mod.rs to {current}"
+            harness.contains(&format!("const PROTOCOL_VERSION: u8 = {PROTOCOL_VERSION};")),
+            "update PROTOCOL_VERSION in crates/lattice-system-harness/tests/support/mod.rs to {PROTOCOL_VERSION}"
         );
     }
 
     /// 远大于套接字缓冲区的请求，对端只读魔数就关闭。
-    async fn oversized_request_against(reply: Option<&'static [u8; 8]>) -> LocalError {
+    async fn oversized_request_against(reply: Option<[u8; 8]>) -> LocalError {
         let (mut client, mut backend) = UnixStream::pair().unwrap();
         let backend = tokio::spawn(async move {
             let mut magic = [0; 8];
             backend.read_exact(&mut magic).await.unwrap();
             if let Some(reply) = reply {
-                backend.write_all(reply).await.unwrap();
+                backend.write_all(&reply).await.unwrap();
                 backend.write_u32(4).await.unwrap();
                 backend.write_all(b"null").await.unwrap();
             }
@@ -755,11 +743,15 @@ mod frame_tests {
 
     #[tokio::test]
     async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
-        // 字面量模拟旧后台，不能从当前魔数推导。
-        let error = oversized_request_against(Some(b"LTLOCAL5")).await;
+        let older = oversized_request_against(Some(magic_for_version(PROTOCOL_VERSION - 1))).await;
         assert_eq!(
-            (error.kind, error.message.as_str()),
+            (older.kind, older.message.as_str()),
             (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+        );
+        let newer = oversized_request_against(Some(magic_for_version(PROTOCOL_VERSION + 1))).await;
+        assert_eq!(
+            (newer.kind, newer.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, NEWER_BACKEND)
         );
     }
 

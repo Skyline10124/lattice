@@ -1,8 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 接受事务使用的非秘密冻结事实。运行时目录与后台配置只有这一个转换入口。
+//! 接受事务使用的非秘密冻结事实。执行器工具规格与后台配置只有这一个转换入口。
 
+use super::tools::ToolSpec;
 use crate::profile::TurnProfile;
 use crate::session::{ApiError, Result};
 use lattice_session::store::{
@@ -12,7 +13,7 @@ use lattice_session::store::{
 pub(crate) fn freeze_config(
     profile: &TurnProfile,
     target: &lattice_llm::ModelTarget,
-    catalog: &[lancet_api::ToolDefinition],
+    catalog: &[ToolSpec],
 ) -> Result<FrozenTurnConfig> {
     let config = FrozenTurnConfig {
         agent_name: profile.effective.agent_name.clone(),
@@ -21,14 +22,13 @@ pub(crate) fn freeze_config(
         effort: target.effort,
         system_prompt: profile.system_prompt.clone(),
         catalog: ToolCatalogSnapshot::new(
-            env!("CARGO_PKG_VERSION").into(),
             catalog
                 .iter()
                 .map(|tool| ToolCatalogEntry {
                     name: tool.name.clone(),
-                    descriptor_identity: tool.descriptor_identity.clone(),
+                    tool_identity: tool.tool_identity.clone(),
                     description: tool.description.clone(),
-                    input_schema: tool.parameters.clone(),
+                    input_schema: tool.input_schema.clone(),
                 })
                 .collect(),
         )

@@ -79,42 +79,34 @@ impl TurnExecutionLimits {
     }
 }
 
-/// One enabled Tool in the frozen catalog snapshot.
+/// 冻结工具目录中的单个启用工具条目。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCatalogEntry {
-    /// Tool method name.
+    /// 工具方法名。
     pub name: String,
-    /// Descriptor identity (digest hex) of the embedded component.
-    pub descriptor_identity: String,
-    /// Provider-facing description.
+    /// 不透明工具身份字符串。
+    pub tool_identity: String,
+    /// 面向模型 provider 的工具说明。
     pub description: String,
-    /// Canonical JSON input schema.
+    /// 规范 JSON 输入 schema。
     pub input_schema: Value,
 }
 
-/// Content-addressed provider-neutral snapshot of the enabled Tool catalog
-/// (ADR 0005 §8): ordered names, descriptor identities, descriptions,
-/// canonical input schemas, and the runtime build identity, plus its digest.
-/// Provider wire projection is not stored.
+/// 启用工具目录的内容寻址快照：按工具名排序的条目列表及其摘要，不存 provider 线格式投影。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolCatalogSnapshot {
-    /// Runtime build identity of the closed Tool catalog.
-    pub runtime_build_id: String,
-    /// Ordered entries.
+    /// 按工具名排序的条目列表。
     pub entries: Vec<ToolCatalogEntry>,
-    /// SHA-256 over the domain separator, explicit byte length, and the
-    /// canonical JSON bytes of the entry list.
+    /// 域分离前缀、显式字节长度与条目列表规范 JSON 字节的 SHA-256 摘要。
     #[serde(with = "super::hex_digest")]
     pub digest: [u8; 32],
 }
 
 impl ToolCatalogSnapshot {
-    /// Build and validate a snapshot: names must be non-empty and unique,
-    /// and the canonical bytes must fit the 1 MiB protocol limit (exact
-    /// boundary legal, plus one rejected).
-    pub fn new(runtime_build_id: String, mut entries: Vec<ToolCatalogEntry>) -> Result<Self> {
+    /// 构造并校验目录快照：工具名非空且唯一，规范 JSON 字节不超过 1 MiB 协议上限（恰好等于上限合法，超出 1 字节拒绝）。
+    pub fn new(mut entries: Vec<ToolCatalogEntry>) -> Result<Self> {
         for entry in &entries {
             if entry.name.is_empty() {
                 return Err(invalid("catalog", "catalog entry name must not be empty"));
@@ -124,7 +116,7 @@ impl ToolCatalogSnapshot {
         if entries.windows(2).any(|pair| pair[0].name == pair[1].name) {
             return Err(invalid("catalog", "catalog entry names must be unique"));
         }
-        let (canonical, digest) = Self::canonicalize(&runtime_build_id, &entries)?;
+        let (canonical, digest) = Self::canonicalize(&entries)?;
         if canonical.len() > MAX_CATALOG_SNAPSHOT_BYTES {
             return Err(invalid(
                 "catalog",
@@ -135,17 +127,13 @@ impl ToolCatalogSnapshot {
                 ),
             ));
         }
-        Ok(Self {
-            runtime_build_id,
-            entries,
-            digest,
-        })
+        Ok(Self { entries, digest })
     }
 
     /// Validate a deserialized snapshot: the recorded digest must describe
     /// the recorded entries and the byte limit must hold.
     pub fn validate(&self) -> Result<()> {
-        let (canonical, digest) = Self::canonicalize(&self.runtime_build_id, &self.entries)?;
+        let (canonical, digest) = Self::canonicalize(&self.entries)?;
         if canonical.len() > MAX_CATALOG_SNAPSHOT_BYTES {
             return Err(invalid(
                 "catalog",
@@ -161,12 +149,9 @@ impl ToolCatalogSnapshot {
         Ok(())
     }
 
-    fn canonicalize(
-        runtime_build_id: &str,
-        entries: &[ToolCatalogEntry],
-    ) -> Result<(String, [u8; 32])> {
-        let value = serde_json::to_value((runtime_build_id, entries))
-            .map_err(|_| invalid("catalog", "cannot serialize catalog"))?;
+    fn canonicalize(entries: &[ToolCatalogEntry]) -> Result<(String, [u8; 32])> {
+        let value =
+            serde_json::to_value(entries).map_err(|_| invalid("catalog", "无法序列化工具目录"))?;
         let canonical = lattice_conversation::canonical_json(&value);
         let digest = digest_with_domain(CATALOG_DOMAIN, canonical.as_bytes());
         Ok((canonical, digest))
@@ -248,16 +233,13 @@ mod tests {
     use super::*;
 
     fn catalog() -> ToolCatalogSnapshot {
-        ToolCatalogSnapshot::new(
-            "build-1".to_string(),
-            vec![ToolCatalogEntry {
-                name: "observe__workspace".to_string(),
-                descriptor_identity: "a".repeat(64),
-                description: "observe".to_string(),
-                input_schema: serde_json::json!({"type": "object"}),
-            }],
-        )
-        .expect("catalog")
+        ToolCatalogSnapshot::new(vec![ToolCatalogEntry {
+            name: "observe__workspace".to_string(),
+            tool_identity: "lancet:observe@v1".to_string(),
+            description: "observe".to_string(),
+            input_schema: serde_json::json!({"type": "object"}),
+        }])
+        .expect("构造目录快照")
     }
 
     fn limits() -> TurnExecutionLimits {

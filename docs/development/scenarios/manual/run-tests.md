@@ -15,13 +15,12 @@ status: active
 ### 常规与 harness 测试
 
 ```sh
-cargo test -p lancet-authority
+cargo test -p lattice-session
 cargo test -p lattice-api
 cargo test -p lattice-agent --features test-utils
 
 cargo test -p lattice-system-harness --test direct_tree_session
 cargo test -p lattice-system-harness --test direct_local_turn
-cargo test -p lattice-system-harness --test direct_operator
 cargo test -p lattice-system-harness --test direct_background -- --list
 cargo test -p lattice-system-harness --test direct_background
 cargo test -p lattice-system-harness --test pty_tui_smoke
@@ -34,12 +33,14 @@ cargo test --workspace --release
 ### 显式 feature 目标
 
 ```sh
-cargo test -p lattice-system-harness --features release-operator \
-  --test release_operator release_operator_component_matrix -- --exact
-
-cargo build -p lattice-cli --bin lattice --features test-crash-barriers
+cargo build -p lattice-cli --bin lattice --features test-fake-tools
 LATTICE_BIN="$(pwd)/target/debug/lattice" \
-  cargo test -p lattice-system-harness --features crash-barriers \
+  cargo test -p lattice-system-harness --features fake-tools \
+  --test direct_tree_session --test direct_failures --test pty_tui_smoke
+
+cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers
+LATTICE_BIN="$(pwd)/target/debug/lattice" \
+  cargo test -p lattice-system-harness --features fake-tools,crash-barriers \
   --test direct_crash_barriers
 ```
 
@@ -56,5 +57,5 @@ LATTICE_BIN="$(pwd)/target/debug/lattice" \
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `release_operator_component_matrix` | 输出 `1 passed`（默认 `--workspace` 与 `xtask ci` 不含） |
+| `--features fake-tools` | 场景在后台启动前通过 `LATTICE_TEST_TOOLS` 注册假工具并运行通过；已覆盖 `target/debug/lattice`，普通验证前重跑无 feature 的宿主构建 |
 | `direct_crash_barriers` | 通过；已覆盖 `target/debug/lattice`，恢复前重跑无 feature 的宿主构建 |

@@ -91,26 +91,6 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
     )
 }
 
-/// 带 Tool 调用的步骤都在完成结局的最后一步之前，结局来自 Step 条目而不是瞬时事件。
-pub(crate) fn assert_completed_after_tools(outcome: &SendOutcome) -> Result<(), AssertError> {
-    let entries = outcome.entries();
-    let last_tool = entries
-        .iter()
-        .rposition(|entry| entry.step().is_some_and(|step| !step.slots.is_empty()));
-    let completed = entries.iter().rposition(|entry| {
-        entry.step().is_some_and(|step| {
-            step.summary
-                .as_ref()
-                .is_some_and(|summary| summary.outcome.as_str() == "completed")
-        })
-    });
-    require(
-        last_tool.is_some() && completed.is_some_and(|completed| last_tool < Some(completed)),
-        "completed step must follow the last step with Tool calls",
-    )?;
-    require(outcome.has_completed(), "durable completed summary")
-}
-
 /// CLI 输出中这一轮的 `TurnSummary` 与各 Step 详情（按 `node` 覆盖后的最新值），
 /// 与 `session turn` 详情中同名字段同形，用于核验实时观察与重新打开看到的相同。
 pub(crate) fn live_turn(outcome: &SendOutcome) -> Value {
@@ -175,7 +155,7 @@ pub(crate) fn finish_scenario(
         .unwrap_or_else(|report| panic!("{report}"));
 }
 
-/// 复用 PTY 的公开读取采集，保留整棵树及其中每个 Turn 的操作员投影。
+/// 复用 PTY 的公开读取采集，保留整棵树及其中每个 Turn 的详情。
 pub(crate) fn record_session(
     session: &lattice_system_harness::SessionSendDriver<'_>,
     evidence: &mut ScenarioEvidence,
@@ -191,8 +171,6 @@ pub(crate) fn record_session(
     for args in [
         vec!["session", "log", sid],
         vec!["--json", "session", "list"],
-        vec!["--json", "audit", "--tail"],
-        vec!["--json", "lancet", "status"],
     ] {
         let out = session.run_command(&args).unwrap();
         evidence.record_command(args.join(" "), &out);
@@ -200,14 +178,10 @@ pub(crate) fn record_session(
     }
     for node in tree["nodes"].as_array().unwrap() {
         if let Some(tid) = node["turn_start"]["turn_id"].as_str() {
-            for args in [
-                vec!["--json", "session", "turn", tid],
-                vec!["--json", "audit", "replay", "--session", sid, "--turn", tid],
-            ] {
-                let out = session.run_command(&args).unwrap();
-                evidence.record_command(args.join(" "), &out);
-                assert!(out.is_clean_exit(0));
-            }
+            let args = ["--json", "session", "turn", tid];
+            let out = session.run_command(&args).unwrap();
+            evidence.record_command(args.join(" "), &out);
+            assert!(out.is_clean_exit(0));
         }
     }
     evidence.record_json("state-summary", &tree).unwrap();
@@ -262,7 +236,6 @@ pub(crate) fn wire_gated_fake_llm(
 pub(crate) fn direct_world(
     prefix: &str,
     agent: &str,
-    tools: &str,
     extra_profile: &str,
 ) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(prefix);
@@ -273,8 +246,7 @@ pub(crate) fn direct_world(
     let toml = format!(
         "schema_version = 1\n\n\
          [agent]\nname = \"{agent}\"\nmodel = \"{model}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n{extra_profile}"
+         [prompt]\nsystem = \"You are a concise test agent.\"\n{extra_profile}"
     );
     world
         .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
@@ -307,50 +279,11 @@ pub(crate) fn tool_result_value(capture: &CapturedRequest) -> Option<Value> {
     }
 }
 
-/// 这一轮有名为 `name` 的调用且结论不是 Succeeded。
-pub(crate) fn tool_failed(outcome: &SendOutcome, name: &str) -> bool {
-    outcome
-        .slots()
-        .iter()
-        .any(|slot| slot.method == name && slot.outcome != SlotOutcome::Succeeded)
-}
-
 pub(crate) fn tool_ok(outcome: &SendOutcome, name: &str) -> bool {
     outcome
         .slots()
         .iter()
         .any(|slot| slot.method == name && slot.outcome == SlotOutcome::Succeeded)
-}
-
-/// `method` 的某次调用以 Failed 结束，原因中的 CEP 错误码为 `code`（snake_case）。
-pub(crate) fn finished_with_code(outcome: &SendOutcome, method: &str, code: &str) -> bool {
-    outcome.slots().iter().any(|slot| {
-        slot.method == method
-            && slot.outcome == SlotOutcome::Failed
-            && slot.error_code.as_deref() == Some(code)
-    })
-}
-
-/// 公开会话条目中同一失败调用的原始槽位和完整 CEP 错误。
-pub(crate) fn tool_failure<'a>(
-    outcome: &'a SendOutcome,
-    method: &str,
-) -> Option<(&'a Value, &'a Value)> {
-    outcome.entries().into_iter().find_map(|entry| {
-        entry
-            .raw
-            .pointer("/content/slots")?
-            .as_array()?
-            .iter()
-            .find_map(|slot| {
-                let result = slot.pointer("/progress/result")?;
-                (slot.pointer("/binding/identity/method")?.as_str()? == method
-                    && result["name"] == method
-                    && slot["progress"]["progress"] == "terminal"
-                    && result["payload"]["outcome"] == "failed")
-                    .then(|| (slot, &result["payload"]["payload"]))
-            })
-    })
 }
 
 pub(crate) fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
@@ -377,9 +310,9 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
         .expect("drive lattice")
 }
 
-/// 与 `lattice_api::local::test_support::FRAME_MAGIC`（`LTLOCAL=`）相同。
-/// harness 不能依赖产品 crate，所以外部观察者只在这里保留字面量。
-const FRAME_MAGIC: &[u8; 8] = b"LTLOCAL=";
+/// 与 `lattice_api::local::test_support::FRAME_MAGIC` 相同；harness 不能依赖产品 crate，用同一版本号拼出帧魔数。
+const PROTOCOL_VERSION: u8 = 62;
+const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
 
 /// 公开 Local IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
 pub(crate) struct Wire {
