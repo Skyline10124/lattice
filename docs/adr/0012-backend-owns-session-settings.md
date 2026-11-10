@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # ADR 0012：会话设置由后台持有，会话显式创建
@@ -44,7 +44,7 @@ status: proposed
 - 一轮都没有接受过的会话（草稿）照常出现在 `list` 中；24 小时没有改动、也没有观察者时，由后台删除。用过的会话保留，需要时以后再做归档。
 - 实施顺序：ADR 0009（从 LATTICE 剥离 LANCET）在前，本 ADR 其次，ADR 0011（#333）随后按本 ADR 修订。
 
-2026-11-10，#387 的讨论中确定：
+2026-11-10，#387 的讨论中确定并批准：
 
 - 会话保存规范项目路径的原始字节，项目绑定按路径核对，取代 `ProjectStoreKey` 哈希；随本 ADR 的会话库格式升级一起实施。
 
@@ -191,7 +191,7 @@ stateDiagram-v2
 
 | 前端 | 开始 | 修改设置 | 提交 |
 | --- | --- | --- | --- |
-| TUI | `lattice tui --agent A`：`configure(New(S), A)`，失败时退出并显示原因。`lattice tui S --agent A`：`configure(Existing(S), A)`，Busy 或失败时退出并显示原因。随后 `watch` | `/model`、`/effort` 选定后发 `configure`；回复到达之前按 Enter，输入进入排队；Busy 显示为 Warn，档位调整显示为 Info | 带 `expected_settings` |
+| TUI | `lattice tui --agent A`：`configure(New(S), A)`，失败时退出并显示原因。`lattice tui S --agent A`：`resolve_session` 后 `configure(Existing(S), A)`，Busy 或失败时退出并显示原因。`lattice tui S`：`resolve_session` 后把返回的规范项目路径与当前工作区比对，不一致或失败时退出并显示原因，不调用 `configure`。随后 `watch` | `/model`、`/effort` 选定后发 `configure`；回复到达之前按 Enter，输入进入排队；Busy 显示为 Warn，档位调整显示为 Info | 带 `expected_settings` |
 | CLI | `session send` 不带 `--session`：先 `configure(New)`，再提交 | 带 `--session` 且给了 `--agent`、`--model` 或 `--effort`：先 `configure(Existing)`，再提交 | `--json` 新增 `configure` 记录 |
 | IM | `/new` 之后的下一条消息：先 `configure(New)`，agent 取 IM 配置中的值，再提交 | v1 不修改设置 | 台账与会话绑定的时机随之修订 |
 
@@ -233,7 +233,7 @@ sequenceDiagram
 
 1. ADR 0009：从 LATTICE 剥离 LANCET，已实施。工作区历史库、Component 工具目录与 profile 中的 LANCET 策略已经移出，configure 只处理 agent、系统提示、模型与档位等字段。
 2. 本 ADR，会话库格式从 8 升到 9。
-3. ADR 0011（#333）按本 ADR 修订 IM 的会话创建、台账与工具检查。
+3. ADR 0011（#333）按本 ADR 修订 IM 的会话创建、台账相位与会话映射。
 
 ### 10. 沿用的规则
 
@@ -248,7 +248,7 @@ sequenceDiagram
 | --- | --- | --- | --- |
 | 会话设置 | 会话库的会话设置表 | 后台的 `configure`，含档位规则 | 准入、会话头与视图、TUI、CLI、IM |
 | 会话的创建 | 会话库的 Session 记录 | `configure(New)` | 提交与各项查询 |
-| 会话的项目绑定 | 会话库 Session 记录中的规范项目路径 | 后台在 configure、提交与 `rewind` 时核对；会话库写入时再核对 | `list`、`log`、`rewind` 的结果 |
+| 会话的项目绑定 | 会话库 Session 记录中的规范项目路径 | 后台在 configure、提交与 `rewind` 时核对；会话库写入时再核对 | `list`、`log`、`rewind`、`resolve_session` 的结果 |
 | 草稿的清理 | 会话库 | 后台在 `configure(New)` 回复之后执行的清理 | `list`、`head` 与视图 |
 | 一轮实际使用的配置 | UserMessage 节点与配置表 | 接受事务 | `log`、视图、用量 |
 | 档位能力 | 模型元数据与 provider features | lattice-llm 的档位能力查询 | `configure`、`/effort` 面板 |
@@ -282,7 +282,7 @@ sequenceDiagram
 | lattice-session | 会话设置表取代 profile 副本表；允许只有根节点的会话；校验改为会话设置自身有效；新增创建会话、修改设置与删除草稿的事务；Session 记录与列表行改存规范项目路径，写入时按路径核对绑定；格式版本 9 |
 | lattice-api | 新增 `configure`，按 `rewind` 的方式占 Owner 槽与执行锁；`configure(New)` 回复之后清理草稿；准入只读会话设置；会话头字段与推送；`expected_settings` 的核对与独立冲突原因；工作区解析不再派生项目键，configure、提交与 `rewind` 按路径核对绑定；IPC 中的路径改用原始字节数组，魔数升级 |
 | lattice-llm | 新增不需要凭据、返回 `Result` 的档位能力查询；档位规则由 `configure` 调用 |
-| lattice-tui | 删除随提交生效的选择状态（`selection.rs`、待生效的 agent）、`preview_effort`、新会话的 `New`/`Existing` 切换与“会话已存在”找回、首次接受后才观察的特例；启动时调用 `configure`；`/model`、`/effort` 改为 `configure` |
+| lattice-tui | 删除随提交生效的选择状态（`selection.rs`、待生效的 agent）、`preview_effort`、新会话的 `New`/`Existing` 切换与“会话已存在”找回、首次接受后才观察的特例；新建或带 `--agent` 启动时调用 `configure`，只读打开已有会话时按 `resolve_session` 返回的路径比对项目绑定；`/model`、`/effort` 改为 `configure` |
 | lattice-cli | `session send` 先 `configure` 再提交；`--json` 新增 `configure` 记录；`session list` 显示项目路径 |
 | lattice-system-harness | 新会话与选择相关的场景改经 `configure`；共享后台的多项目场景改为断言项目路径 |
 
@@ -331,4 +331,4 @@ sequenceDiagram
 | [ADR 0008 第 7 节](0008-backend-api-commands-view-queries.md#7-submit-只接受新请求找回改为查询)、[第 9 节](0008-backend-api-commands-view-queries.md#9-cli) | 补充：`configure` 幂等，结果不明时以同一参数重发；CLI 在身份记录之后先输出 `configure` 记录 |
 | [ADR 0009 第 4 节](0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[归属](0009-remove-legacy-lancet-tool-executor.md#归属) | 部分取代：ADR 0009 为项目绑定保留的 `ProjectStoreKey` 改为规范项目路径 |
 | [ADR 0010 第 13 节](0010-protocol-adapters-and-configured-providers.md#13-会话持有-profile-副本)、[第 14 节](0010-protocol-adapters-and-configured-providers.md#14-tui-的-model-与-effort) | 部分取代：profile 副本改为会话设置，选择经 `configure` 立即生效。ADR 0010 否决“选择后立即写回副本”的两条理由：新增后台命令，正是本 ADR 让后台成为设置唯一权威的方式；副本与最后一轮不同，是会话设置表示下一轮配置的应有结果，最后一轮实际使用的配置记在它的 UserMessage 节点上 |
-| ADR 0011 草案（PR #333） | 按本 ADR 修订第 4、7、10、12 节：IM 的会话创建、台账相位、工具检查与会话映射 |
+| ADR 0011 草案（PR #333） | 按本 ADR 修订第 4、7、12 节：IM 的会话创建、台账相位与会话映射 |
