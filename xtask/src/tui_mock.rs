@@ -17,7 +17,8 @@ pub struct TuiMockArgs {
     scenario: String,
 }
 
-fn build_args() -> [&'static str; 7] {
+/// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，被测二进制须带 `test-fake-tools`。
+fn build_args() -> [&'static str; 9] {
     [
         "build",
         "--profile",
@@ -26,6 +27,8 @@ fn build_args() -> [&'static str; 7] {
         "lattice-cli",
         "--bin",
         "lattice",
+        "--features",
+        "test-fake-tools",
     ]
 }
 
@@ -52,7 +55,7 @@ pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
         .status()
         .context("build lattice binary")?;
     if !build.success() {
-        bail!("cargo build --profile {TUI_MOCK_PROFILE} -p lattice-cli --bin lattice failed");
+        bail!("`cargo {}` 失败", build_args().join(" "));
     }
 
     let status = Command::new("cargo")
