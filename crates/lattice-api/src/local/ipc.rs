@@ -20,22 +20,14 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-const MAGIC_PREFIX: &[u8; 7] = b"LTLOCAL";
 pub(super) const PROTOCOL_VERSION: u8 = 62;
+pub(super) const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
+/// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
 pub(super) const fn magic_for_version(version: u8) -> [u8; 8] {
-    [
-        MAGIC_PREFIX[0],
-        MAGIC_PREFIX[1],
-        MAGIC_PREFIX[2],
-        MAGIC_PREFIX[3],
-        MAGIC_PREFIX[4],
-        MAGIC_PREFIX[5],
-        MAGIC_PREFIX[6],
-        version,
-    ]
+    let mut magic = *b"LTLOCAL\0";
+    magic[7] = version;
+    magic
 }
-const CURRENT_MAGIC: [u8; 8] = magic_for_version(PROTOCOL_VERSION);
-pub(super) const MAGIC: &[u8; 8] = &CURRENT_MAGIC;
 pub(super) const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 pub(super) const MAX_FRAME: usize = 16 * 1024 * 1024;
 pub(super) const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -56,11 +48,10 @@ fn protocol() -> LocalError {
     )
 }
 
-/// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），按版本数值比较，帧长度不变。
+/// 前缀相符时取出版本字节；新旧由 `check_magic` 按版本数值比较。
 fn magic_version(magic: &[u8; 8]) -> Option<u8> {
-    magic
-        .starts_with(MAGIC_PREFIX)
-        .then_some(magic[MAGIC_PREFIX.len()])
+    let version = magic[7];
+    (*magic == magic_for_version(version)).then_some(version)
 }
 
 fn check_magic(magic: &[u8; 8]) -> Result<()> {
