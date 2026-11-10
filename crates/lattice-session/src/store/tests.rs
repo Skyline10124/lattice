@@ -5056,14 +5056,6 @@ fn non_hex_tool_identity_catalog_digest_and_binding_mismatch() {
         registered.bindings[0].identity.tool_identity,
         "mcp:filesystem/read_file@v2#非十六进制"
     );
-    assert!(
-        registered.bindings[0]
-            .matches_request("observe__workspace", &json!({"path": "private-input"}))
-    );
-    assert!(
-        !registered.bindings[0].matches_request("observe__workspace", &json!({"path": "OTHER.md"})),
-        "参数摘要失配时 matches_request 必须返回 false"
-    );
 
     let started = db
         .start_invocation(&lock, &registered.bindings[0], now())

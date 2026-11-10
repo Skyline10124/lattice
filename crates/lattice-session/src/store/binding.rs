@@ -3,11 +3,8 @@
 
 //! 调用槽位的持久绑定事实。
 
-use lattice_conversation::{
-    InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId, arguments_digest,
-};
+use lattice_conversation::{InvocationId, ModelMessageAddress, SessionId, ToolCallAddress, TurnId};
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
 
 /// 已登记工具调用槽位的不可变非秘密绑定身份。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -51,17 +48,10 @@ pub struct InvocationBinding {
     pub identity: BindingIdentity,
 }
 
-impl InvocationBinding {
-    /// 核对调用方法名与规范参数摘要是否匹配本绑定。
-    pub fn matches_request(&self, method: &str, arguments: &Value) -> bool {
-        self.identity.method == method
-            && self.identity.arguments_digest == arguments_digest(arguments)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_conversation::arguments_digest;
     use serde_json::json;
 
     fn binding() -> InvocationBinding {
@@ -84,7 +74,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_round_trips_and_validates_request() {
+    fn binding_round_trips_and_rejects_unknown_fields() {
         let binding = binding();
         let encoded = serde_json::to_string(&binding).expect("序列化 InvocationBinding");
         let decoded: InvocationBinding =
@@ -101,9 +91,6 @@ mod tests {
                 part_ordinal: 1,
             }
         );
-        assert!(binding.matches_request("observe__workspace", &json!({"path": "a.txt"})));
-        assert!(!binding.matches_request("observe__workspace", &json!({"path": "b.txt"})));
-        assert!(!binding.matches_request("mutate__create", &json!({"path": "a.txt"})));
 
         let mut with_unknown = serde_json::to_value(&binding).expect("转成 Value");
         with_unknown["extra"] = json!(true);

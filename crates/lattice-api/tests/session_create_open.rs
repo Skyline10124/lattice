@@ -60,13 +60,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     };
     let root = lattice_api::LocalWorkspaceRoot::from_path(project.path()).unwrap();
     let id = new_turn_id();
-    let execution = lattice_api::start_turn(
-        api.clone(),
-        layout.clone(),
-        id,
-        root.clone(),
-        request.clone(),
-    );
+    let execution = lattice_api::start_turn(api.clone(), id, root.clone(), request.clone());
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
     };
@@ -87,7 +81,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     retry.loaded_profile = None;
     retry.agent = None;
     retry.test_llm = None;
-    let execution = lattice_api::start_turn(api, layout, id, root, retry);
+    let execution = lattice_api::start_turn(api, id, root, retry);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
         Err(lattice_api::ApiError::Conflict(

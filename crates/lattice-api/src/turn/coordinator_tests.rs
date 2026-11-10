@@ -598,13 +598,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         )),
     };
     let workspace = crate::root::LocalWorkspaceRoot::from_path(project.path()).unwrap();
-    let execution = start_turn(
-        api.clone(),
-        layout.clone(),
-        tid(9),
-        workspace.clone(),
-        request.clone(),
-    );
+    let execution = start_turn(api.clone(), tid(9), workspace.clone(), request.clone());
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
     };
@@ -615,7 +609,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     retry.loaded_profile = None;
     retry.agent = None;
     retry.test_llm = None;
-    let execution = start_turn(api, layout, tid(9), workspace, retry);
+    let execution = start_turn(api, tid(9), workspace, retry);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
         Err(crate::ApiError::Conflict(

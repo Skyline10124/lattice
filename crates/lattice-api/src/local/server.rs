@@ -551,7 +551,6 @@ impl Backend {
             session: api,
             turn_id: request.turn_id,
             workspace,
-            tools: self.tools.clone(),
             shutdown,
             observer: owner.observer.clone(),
             new_session: request.session.is_new().then_some(sid),
@@ -1119,16 +1118,8 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
-    serve_with_tools(layout, home, crate::turn::default_tool_executor()).await
-}
-
-/// 显式注入 [`crate::ToolExecutor`] 的本地后台入口。
-pub async fn serve_with_tools(
-    layout: crate::StateLayout,
-    home: Option<std::path::PathBuf>,
-    tools: Arc<dyn crate::ToolExecutor>,
-) -> Result<()> {
     let backend_layout = layout.clone();
+    let tools = crate::turn::default_tool_executor();
     serve_with_backend(layout, move || {
         Backend::with_tools(backend_layout, home, tools)
     })
@@ -1141,17 +1132,8 @@ pub async fn serve_for_test(
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
 ) -> Result<()> {
-    serve_for_test_with_tools(layout, home, crate::turn::default_tool_executor()).await
-}
-
-/// 显式注入 [`crate::ToolExecutor`] 的测试后台入口。
-#[cfg(any(test, feature = "test-utils"))]
-pub async fn serve_for_test_with_tools(
-    layout: crate::StateLayout,
-    home: Option<std::path::PathBuf>,
-    tools: Arc<dyn crate::ToolExecutor>,
-) -> Result<()> {
     let backend_layout = layout.clone();
+    let tools = crate::turn::default_tool_executor();
     serve_with_backend(layout, move || {
         let mut backend = Backend::with_tools(backend_layout, home, tools);
         Arc::get_mut(&mut backend)

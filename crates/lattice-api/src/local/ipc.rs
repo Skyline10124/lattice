@@ -586,47 +586,66 @@ mod frame_tests {
 
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
-        type ExpectedFrameError = (LocalErrorKind, Option<&'static str>);
-        type FrameCase = ([u8; 8], u32, &'static [u8], Option<ExpectedFrameError>);
-        let mut cases: Vec<FrameCase> = Vec::new();
-        cases.push((*MAGIC, 4, b"null".as_slice(), None));
+        check_magic(MAGIC).expect("当前协议版本魔数必须通过");
         for version in 0..PROTOCOL_VERSION {
-            cases.push((
-                magic_for_version(version),
+            let error = check_magic(&magic_for_version(version)).unwrap_err();
+            assert_eq!(
+                (error.kind, error.message.as_str()),
+                (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND),
+                "version={version}"
+            );
+        }
+        for version in (PROTOCOL_VERSION + 1)..=u8::MAX {
+            let error = check_magic(&magic_for_version(version)).unwrap_err();
+            assert_eq!(
+                (error.kind, error.message.as_str()),
+                (LocalErrorKind::IncompatibleBackend, NEWER_BACKEND),
+                "version={version}"
+            );
+        }
+        // 版本 61 必须固定判为较旧协议。
+        let error = check_magic(&magic_for_version(61)).unwrap_err();
+        assert_eq!(
+            (error.kind, error.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+        );
+
+        let cases = [
+            (*MAGIC, 4, b"null".as_slice(), None),
+            (
+                magic_for_version(PROTOCOL_VERSION - 1),
                 4,
                 b"null".as_slice(),
                 Some((
                     LocalErrorKind::IncompatibleBackend,
                     Some(INCOMPATIBLE_BACKEND),
                 )),
-            ));
-        }
-        for version in (PROTOCOL_VERSION + 1)..=u8::MAX {
-            cases.push((
-                magic_for_version(version),
+            ),
+            (
+                magic_for_version(PROTOCOL_VERSION + 1),
                 4,
                 b"null".as_slice(),
                 Some((LocalErrorKind::IncompatibleBackend, Some(NEWER_BACKEND))),
-            ));
-        }
-        cases.push((
-            *b"XXLOCAL9",
-            4,
-            b"null".as_slice(),
-            Some((LocalErrorKind::Protocol, None)),
-        ));
-        cases.push((
-            *MAGIC,
-            0,
-            b"".as_slice(),
-            Some((LocalErrorKind::Protocol, None)),
-        ));
-        cases.push((
-            *MAGIC,
-            (MAX_FRAME + 1) as u32,
-            b"".as_slice(),
-            Some((LocalErrorKind::Protocol, None)),
-        ));
+            ),
+            (
+                *b"XXLOCAL9",
+                4,
+                b"null".as_slice(),
+                Some((LocalErrorKind::Protocol, None)),
+            ),
+            (
+                *MAGIC,
+                0,
+                b"".as_slice(),
+                Some((LocalErrorKind::Protocol, None)),
+            ),
+            (
+                *MAGIC,
+                (MAX_FRAME + 1) as u32,
+                b"".as_slice(),
+                Some((LocalErrorKind::Protocol, None)),
+            ),
+        ];
 
         for (magic, length, payload, expected) in cases {
             tokio::time::timeout(Duration::from_secs(1), async {
@@ -649,13 +668,6 @@ mod frame_tests {
             .await
             .expect("IPC frame case timed out");
         }
-
-        // 版本 61 必须固定判为较旧协议。
-        let error = check_magic(&magic_for_version(61)).unwrap_err();
-        assert_eq!(
-            (error.kind, error.message.as_str()),
-            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
-        );
     }
 
     #[tokio::test]

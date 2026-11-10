@@ -4,7 +4,7 @@
 use super::{
     coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
     observer::ObserverSink,
-    tools::{ToolExecutor, TurnTools, default_tool_executor},
+    tools::{TurnTools, default_tool_executor},
     types::*,
 };
 use crate::{
@@ -13,7 +13,7 @@ use crate::{
 };
 use futures::FutureExt;
 use lattice_conversation::{Effort, SessionId, TurnId};
-use lattice_session::{StateLayout, store::*};
+use lattice_session::store::*;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -26,7 +26,6 @@ pub(crate) struct ExecutionInput {
     pub session: SessionApi,
     pub turn_id: TurnId,
     pub workspace: LocalWorkspaceRoot,
-    pub tools: Arc<dyn ToolExecutor>,
     pub request: RunTurnRequest,
     pub prepared_model: Option<PreparedModel>,
     pub prepared_profile: Option<crate::profile::PreparedProfile>,
@@ -164,7 +163,6 @@ fn select_model_and_policy(
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
 pub fn start_turn(
     session: SessionApi,
-    _layout: StateLayout,
     turn_id: TurnId,
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
@@ -173,12 +171,10 @@ pub fn start_turn(
         .session_id
         .is_none()
         .then(crate::local::new_session_id);
-    let tools = request.tools.clone().unwrap_or_else(default_tool_executor);
     start_execution(ExecutionInput {
         session,
         turn_id,
         workspace,
-        tools,
         request,
         prepared_model: None,
         prepared_profile: None,
@@ -243,8 +239,7 @@ async fn execute_owned(
         session,
         turn_id,
         workspace,
-        tools,
-        request,
+        mut request,
         prepared_model,
         prepared_profile,
         io,
@@ -252,6 +247,7 @@ async fn execute_owned(
         observer,
         new_session,
     } = input;
+    let tools = request.tools.take().unwrap_or_else(default_tool_executor);
     let project = workspace.store_key();
     if session
         .read(move |read| read.turn_node(turn_id))
@@ -519,12 +515,11 @@ async fn execute_owned(
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn run_turn(
     session: SessionApi,
-    layout: StateLayout,
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
 ) -> Result<RunTurnResult> {
     let id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("UUID v4");
-    let execution = start_turn(session, layout, id, workspace, request);
+    let execution = start_turn(session, id, workspace, request);
     execution
         .acceptance
         .await

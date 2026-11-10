@@ -163,7 +163,6 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
     request.session_id = Some(sid);
     let execution = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         id(),
         crate::LocalWorkspaceRoot::from_path(elsewhere.path()).unwrap(),
         request,
@@ -268,7 +267,6 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     retry.test_llm = None;
     let execution = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         first.turn_id,
         fixture.root.clone(),
         retry.clone(),
@@ -283,7 +281,6 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     retry.input.push(' ');
     let conflict = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         first.turn_id,
         fixture.root.clone(),
         retry,
@@ -320,11 +317,8 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
     );
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 0);
-    let other = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(other.path());
     let execution = start_turn(
         fixture.api.clone(),
-        layout.clone(),
         id(),
         fixture.root.clone(),
         fixture.request.clone(),
@@ -343,13 +337,6 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
             .nodes
             .len(),
         3
-    );
-    assert!(
-        matches!(
-            SessionStore::open(&layout),
-            Err(StoreError::NotInitialized { .. })
-        ),
-        "the execution must not silently reopen a layout-default SessionStore"
     );
     assert_eq!(llm.call_count(), 1);
 }
@@ -454,7 +441,6 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
         session: fixture.api.clone(),
         turn_id,
         workspace: fixture.root.clone(),
-        tools: Arc::new(crate::NoTools),
         request: fixture.request.clone(),
         prepared_model: None,
         prepared_profile: None,
@@ -470,7 +456,6 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
     // 另一个 Session 的提交在前置查重之后获胜；输家 Session 尚未创建，读回必定失败。
     let winner = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         turn_id,
         fixture.root.clone(),
         fixture.request.clone(),
