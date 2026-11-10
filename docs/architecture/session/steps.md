@@ -134,7 +134,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 - 整体 `kind` 仅在 `partial_attempts=0` 且所有指标均未溢出时为 `complete`，否则为 `partial`；某项计数或费用未报告本身不决定 `kind`。整数小计溢出饱和到 `u64::MAX`，金额小计溢出饱和到有限的 `f64::MAX`，同时设置该项溢出标记；原始尝试不变。
 - 费用合计规则见[费用估算](../llm/usage.md#费用估算)。
 
-关闭 Step 只写会话库；会话的建立、推进与关闭均不创建或读写工作区历史库。
+关闭 Step 只写会话库。
 
 会话库事务提供本库的原子提交；已发生的工作区外部效果不在会话库事务内回滚。
 

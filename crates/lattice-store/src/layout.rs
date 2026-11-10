@@ -10,7 +10,6 @@
 //! ```text
 //! $XDG_STATE_HOME/lattice/
 //! ├── lattice.redb                              (owned by lattice-session)
-//! ├── projects/<ProjectStoreKey>/workspace-history.git  (legacy; retained untouched)
 //! └── locks/
 //!     └── sessions/<SessionId>.lock
 //! ```

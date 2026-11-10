@@ -119,7 +119,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | 流解析的到达顺序与 provider 投影 | `cargo test -p lattice-llm` |
 | 回复累积、流中断与资源计量 | `cargo test -p lattice-llm` |
 | 单次尝试结果的映射 | `cargo test -p lattice-agent --features test-utils` |
-| 会话库表编码、值版本、旧库拒绝、阶段给出的结论与读取校验 | `cargo test -p lattice-session` |
+| 会话库表编码、值版本、存在 `sessions.git` 或 `invocations.git` 时的拒绝、阶段给出的结论与读取校验 | `cargo test -p lattice-session` |
 | 提交、多步 Turn、取消、退回分叉、进程退出后的结局与观察 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../../development/scenarios/README.md#自动场景)选择 |
 | 配置读取与 profile 副本 | 局部测试覆盖模型与档位的取值顺序及副本的写入条件；E2E 场景见[测试工程合同](../../development/scenarios/harness/config-and-profile-copy.md) |
 

@@ -31,7 +31,7 @@
 - 跨进程互斥由 Linux `flock` 保证；`acquire_flock` 提供独立操作锁（会话执行锁使用），`acquire_flock_strict` 提供同进程票号 FIFO 严格锁（会话库首次创建锁使用），排队期间的 `NonBlocking` 获取直接返回忙碌，锁序规则见[锁与并发语义](../../docs/architecture/storage.md#锁与并发语义)。
 - `fsync_file` 与 `fsync_dir` 同步失败返回 `StoreError::Durability`（打开失败返回 `StoreError::Io`），供会话库首次创建与位置探测使用，见[首次创建](../../docs/architecture/storage.md#首次创建)。
 - `lattice-store-probe` 仅在明确指定的目标状态目录运行，验证同挂载点临时目录、`fsync`、`renameat2(RENAME_NOREPLACE)` 与本地 `flock`，见[能力探测](../../docs/architecture/storage.md#能力探测)与[验证入口与承接](../../docs/architecture/storage.md#验证入口与承接)。
-- 本 crate 之外：全局会话库 `lattice.redb`、redb 表与领域事务及调用槽位持久化由 `lattice-session` 负责；旧版本留下的 `projects/<ProjectStoreKey>/workspace-history.git` 原样保留，不再创建、读取或清理，见[保留、索引与演化](../../docs/architecture/storage.md#保留索引与演化)。
+- 本 crate 之外：全局会话库 `lattice.redb`、redb 表与领域事务及调用槽位持久化由 `lattice-session` 负责。
 
 ## 验证
 

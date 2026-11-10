@@ -115,12 +115,6 @@ _Avoid_: snapshot, event window, subscription cursor, Gap
 见[观察与重连](../architecture/session/recovery.md#观察与重连)。
 _Avoid_: TurnEvent, HistoryEntry, per-call item
 
-**Workspace History**:
-旧版本用于记录工作区文件变更历史的私有 bare Git 库路径 `projects/<ProjectStoreKey>/workspace-history.git`。本版本不再创建、读取或清理该仓库，旧版本留下的目录原样保留。
-见[私有状态根](../architecture/storage.md#私有状态根)。
-_Avoid_: whole-project snapshot, execution workspace, projection, checkpoint,
-receipt store
-
 **Rewind**:
 把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不恢复工作区文件。
 见[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)。

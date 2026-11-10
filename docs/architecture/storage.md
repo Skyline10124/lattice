@@ -10,12 +10,9 @@ status: active
 
 ## 目的与范围
 
-本合同规定私有状态寻址、会话库的使用条件、旧版工作区历史目录的保留规则、创建与打开、锁和持久性验证边界。`lattice-store` 提供 ProjectStoreKey 推导、状态布局、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
+本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供 ProjectStoreKey 推导、状态布局、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
 
-私有状态目录下的存储与遗留路径：
-
-- **会话库** `lattice.redb`：全局一份，保存 Session、会话树（Step 节点内含调用槽位）、配置表与各索引，由 `lattice-session` 维护。
-- **工作区历史库** `workspace-history.git`：本版本不再创建、读取或清理；旧版本留下的 `projects/<ProjectStoreKey>/workspace-history.git` 原样保留。
+私有状态目录下的存储是会话库 `lattice.redb`：全局一份，保存 Session、会话树（Step 节点内含调用槽位）、配置表与各索引，由 `lattice-session` 维护。
 
 会话记录与事务序列见[会话合同](session/README.md)，调用槽位推进与结果载荷见[调用槽位](session/steps.md#调用槽位)。
 
@@ -28,13 +25,11 @@ status: active
 | 相对 `<state-root>/lattice/` 的位置 | 归属与作用 |
 | --- | --- |
 | `lattice.redb` | `lattice-session`，全局会话库 |
-| `projects/<ProjectStoreKey>/workspace-history.git` | 本版本不再创建、读取或清理；旧版本留下的目录原样保留 |
 | `locks/sessions/<SessionId>.lock` | 会话操作锁 |
-| `locks/projects/<ProjectStoreKey>/workspace.lock` | 本版本不再使用；旧版本留下的锁文件原样保留 |
 
-旧版的 `sessions.git` 与 `projects/<ProjectStoreKey>/invocations.git` 不迁移，也不只读保留。打开会话库时发现它们，打开失败并在错误中列出路径，由人删除或存档；旧 raw OID 输入一律无效。
+打开会话库时，若 `lattice/` 下存在 `sessions.git` 或 `projects/*/invocations.git`，打开失败并在错误中列出这些路径，由人删除或存档。
 
-各存储位于 Local Workspace 外部。删除工作区或退回会话位置不级联删除其他领域的私有状态。配置私有状态位置时应核对其与工作区的实际关系，XDG 路径解析本身不提供包含关系隔离。
+私有状态位于 Local Workspace 外部。删除工作区或退回会话位置不级联删除其他领域的私有状态。配置私有状态位置时应核对其与工作区的实际关系，XDG 路径解析本身不提供包含关系隔离。
 
 ### 本地后台与访问边界
 
@@ -112,7 +107,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 | 打开时的状态 | 处理 |
 | --- | --- |
-| 发现旧版 `sessions.git` 或 `invocations.git` | 拒绝打开，错误列出路径 |
+| 存在 `sessions.git` 或 `projects/*/invocations.git` | 拒绝打开，错误列出路径 |
 | 库文件不存在 | 返回未初始化；是否创建由调用路径决定，见[首次创建](#首次创建) |
 | 不是 redb 库、元信息缺失或格式版本不符 | 拒绝打开并报告损坏或版本不兼容 |
 | 记录无法解码或违反业务不变量 | 领域返回类型化损坏，停止受影响路径 |
@@ -121,7 +116,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 首次创建
 
-会话库只在创建新 Session 的提交路径上首次创建，创建后再执行接受事务；该路径不创建或读取工作区历史库。其他操作遇到库文件不存在时返回未初始化，不创建。
+会话库只在创建新 Session 的提交路径上首次创建，创建后再执行接受事务。其他操作遇到库文件不存在时返回未初始化，不创建。
 
 创建按以下顺序执行：
 
@@ -161,8 +156,6 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 会话库中的 TurnId 索引与 InvocationId 索引是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
 
-旧版本留下的 `projects/<ProjectStoreKey>/workspace-history.git` 原样保留，不再创建、读取或清理。
-
 会话库格式与各领域 schema 分别演化。格式、目录拓扑、事务序列或屏障变化须核验既有数据的打开、可达性及各领域写入接口，破坏性处理须先说明影响并获授权。历史性能与故障证据按[测试工程的证据保留要求](../development/testing.md#脱敏与完整性)处理。
 
 ## 位置能力与验证
@@ -181,12 +174,12 @@ SIGKILL 后重开证明相应进程崩溃场景。文件系统探测、进程崩
 
 | 检查对象 | 入口 |
 | --- | --- |
-| 会话库打开、创建、版本与旧库拒绝 | `cargo test -p lattice-session` |
+| 会话库打开、创建、格式版本，以及存在 `sessions.git` 或 `invocations.git` 时的拒绝 | `cargo test -p lattice-session` |
 | 会话库的崩溃与重开 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../development/testing.md)选择 |
 | 寻址、状态布局、锁、`fsync` 与能力探测 | `cargo test -p lattice-store` |
 | 内核静态检查 | `cargo clippy -p lattice-store --all-targets -- -D warnings` |
 | 依赖边界 | `cargo tree -p lattice-store --edges normal`、`cargo xtask harness-boundary` |
-| 会话不创建或读取工作区历史库、遗留目录原样保留 | `cargo test -p lattice-api --test session_without_workspace_history` |
+| 会话的新建与续写不在 `projects/` 下创建或改动内容 | `cargo test -p lattice-api --test session_without_workspace_history` |
 | 实际存储位置能力 | 在获准目录运行预构建的 `lattice-store-probe` |
 
 纯文档修订核对接口责任、锁范围、来源、状态及图示。修改内核或会话库接线时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。
