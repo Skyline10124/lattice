@@ -27,8 +27,21 @@ pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 1024 * 1024;
 /// bytes of the user message's text parts.
 pub const MAX_USER_INPUT_BYTES: usize = 2 * 1024 * 1024;
 
+/// 系统提示 UTF-8 字节上限（2 MiB）；会话设置与单轮持久配置共用同一边界。
+const MAX_SYSTEM_PROMPT_BYTES: usize = 2 * 1024 * 1024;
+
 const CATALOG_DOMAIN: &[u8] = b"lattice-tool-catalog-snapshot-v1\0";
 const CONFIG_DOMAIN: &[u8] = b"lattice-frozen-config-digest-v1\0";
+
+pub(super) fn validate_system_prompt(
+    field: &'static str,
+    system_prompt: Option<&str>,
+) -> Result<()> {
+    if system_prompt.is_some_and(|s| s.len() > MAX_SYSTEM_PROMPT_BYTES) {
+        return Err(invalid(field, "system prompt exceeds 2 MiB bound"));
+    }
+    Ok(())
+}
 
 fn digest_with_domain(domain: &[u8], canonical_bytes: &[u8]) -> [u8; 32] {
     let mut hasher = Sha256::new();
@@ -175,13 +188,7 @@ impl StoredTurnConfig {
     }
 
     pub fn validate(&self) -> Result<()> {
-        if self
-            .system_prompt
-            .as_ref()
-            .is_some_and(|s| s.len() > 2 * 1024 * 1024)
-        {
-            return Err(invalid("config", "system prompt exceeds 2 MiB bound"));
-        }
+        validate_system_prompt("config", self.system_prompt.as_deref())?;
         self.catalog.validate()
     }
 }

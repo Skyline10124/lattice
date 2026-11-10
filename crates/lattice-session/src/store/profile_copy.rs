@@ -3,9 +3,8 @@
 
 //! 会话持有的有效 profile；源文件与请求网关的全局状态不进入这份记录。
 
-use super::{FrozenTurnConfig, Result, hex_digest};
-use crate::model::{AgentName, RetryPolicy, TurnTimeout};
-use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
+use super::{EffectiveProfile, FrozenTurnConfig, Result, hex_digest};
+use lattice_conversation::{Effort, ModelId, ProviderId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -23,17 +22,6 @@ pub struct SessionProfileCopy {
     #[serde(with = "hex_digest")]
     pub prompt_config_digest: [u8; 32],
     pub current: SessionModelChoice,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct EffectiveProfile {
-    pub agent_name: AgentName,
-    pub description: Option<String>,
-    pub default_model: Option<ModelRef>,
-    pub default_effort: Option<Effort>,
-    pub timeout_secs: TurnTimeout,
-    pub retry: RetryPolicy,
 }
 
 impl SessionProfileCopy {
@@ -60,6 +48,9 @@ impl SessionProfileCopy {
     /// 隔离测试的有效副本夹具；生产只能从已校验的源配置或持久副本准备输入。
     #[cfg(any(test, feature = "test-utils"))]
     pub fn for_test(config: &FrozenTurnConfig) -> Self {
+        use crate::model::RetryPolicy;
+        use lattice_conversation::ModelRef;
+
         Self {
             profile: EffectiveProfile {
                 agent_name: config.agent_name.clone(),

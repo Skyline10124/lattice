@@ -13,6 +13,7 @@ mod local;
 mod open;
 mod profile_copy;
 mod read;
+mod settings;
 mod types;
 mod validate;
 mod write;
@@ -28,6 +29,7 @@ pub use open::detect_legacy_stores;
 #[cfg(feature = "test-utils")]
 pub use open::with_test_creation_sync_probe;
 pub use profile_copy::*;
+pub use settings::*;
 use std::{path::PathBuf, sync::Mutex};
 pub use types::*;
 
