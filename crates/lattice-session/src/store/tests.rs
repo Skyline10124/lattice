@@ -535,7 +535,7 @@ fn creation_and_legacy() {
     fs::create_dir_all(layout.project_dir(&project(9))).unwrap();
     let old = layout.lattice_root().join("sessions.git");
     fs::write(&old, b"old").unwrap();
-    let inv = layout.project_store(&project(9), "invocations.git");
+    let inv = layout.project_dir(&project(9)).join("invocations.git");
     symlink("missing", &inv).unwrap();
     for create in [false, true] {
         let result = if create {
@@ -1092,10 +1092,9 @@ fn schema_and_legacy_rejection_matrix() {
             let path = if location == 0 {
                 layout.lattice_root().join("sessions.git")
             } else {
-                layout.project_store(
-                    &project(if location == 1 { 1 } else { 9 }),
-                    "invocations.git",
-                )
+                layout
+                    .project_dir(&project(if location == 1 { 1 } else { 9 }))
+                    .join("invocations.git")
             };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             match old_kind {

@@ -1,44 +1,26 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lattice-store`: the domain-neutral private-Git/Linux durability kernel
-//! (ADR 0005 §4).
+//! `lattice-store`：Linux 私有状态与持久性基础原语。
 //!
-//! The kernel owns only reusable mechanics:
+//! 本 crate 负责：
 //!
-//! - [`ProjectStoreKey`] derivation and the XDG state-root layout
-//!   ([`StateLayout`]);
-//! - typed create/open with repository identity validation
-//!   ([`StoreRepo`], [`StoreMeta`], `refs/lattice/meta`);
-//! - canonical bytes ([`canon`]) and immutable object/commit creation;
-//! - 单个仓库内的引用 compare-and-set；
-//! - per-repository Linux `flock` ([`StoreRepo::write_lock`]) and the shared
-//!   [`acquire_flock`] primitive the domain operation locks build on;
-//! - file, ref, and directory durability barriers ([`durability`]);
-//! - atomic first-create publication (`renameat2(RENAME_NOREPLACE)`);
-//! - capability probes per actual publication location ([`probe`]);
-//! - typed corruption/durability errors ([`StoreError`]).
+//! - XDG 状态根布局（[`StateLayout`]、[`xdg_state_root`]）与 [`ProjectStoreKey`] 推导；
+//! - Linux `flock` 操作锁（[`acquire_flock`]）与同进程票号 FIFO 严格锁（[`lock::acquire_flock_strict`]）；
+//! - 文件与目录 [`durability::fsync_file`]、[`durability::fsync_dir`] 同步屏障；
+//! - 按实际发布位置的文件系统能力探测（[`probe`]）；
+//! - 类型化存储与持久性错误（[`StoreError`]）。
 //!
-//! It does **not** own a catalog of domain schemas, a generic
-//! `put(key, value)` API, a raw `gix::Repository` getter, an all-stores
-//! handle, a pluggable backend, or cross-store transactions. Domain wrappers
-//! own their repository names, refs, record schemas, invariants, and
-//! migrations. Layer 0: no workspace-internal dependencies.
+//! 零工作区内部依赖。
 
-pub mod canon;
 pub mod durability;
 mod error;
-pub mod fault;
 pub mod key;
 pub mod layout;
 pub mod lock;
-pub mod meta;
 pub mod probe;
-pub mod repo;
 
 pub use error::StoreError;
 pub use key::ProjectStoreKey;
 pub use layout::{LATTICE_STATE_DIR, StateLayout, xdg_state_root};
 pub use lock::{Blocking, FlockGuard, LockMode, acquire_flock};
-pub use meta::{ExpectedMeta, META_REF, REPOSITORY_FORMAT_VERSION, StoreMeta, StoreScope};
-pub use repo::{LATTICE_REF_PREFIX, REPO_LOCK_FILE, RefExpectation, StoreRepo, TreeSpec};

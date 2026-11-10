@@ -255,7 +255,12 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     std::fs::write(&history, "损坏历史，不准访问").unwrap();
     let _workspace = lattice_store::acquire_flock(
-        &layout.project_lock(&key, "workspace.lock"),
+        &layout
+            .lattice_root()
+            .join("locks")
+            .join("projects")
+            .join(key.to_string())
+            .join("workspace.lock"),
         lattice_store::LockMode::Exclusive,
         lattice_store::Blocking::NonBlocking,
     )

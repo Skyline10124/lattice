@@ -19,8 +19,7 @@ required-features = ["crash-barriers", "fake-tools"]
 [dependencies]
 # 通用哈希库（非产品 crate）：场景中二进制身份与工作区文件摘要核对使用。
 blake3 = "1"
-# Default features off: they would re-enable gix's defaults for the whole
-# workspace through feature unification (see root `Cargo.toml`).
+# 只启用 `sha1` 与 `tree-editor`，关闭默认特性以控制依赖体积。
 gix = { version = "0.85", default-features = false, features = ["sha1", "tree-editor"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

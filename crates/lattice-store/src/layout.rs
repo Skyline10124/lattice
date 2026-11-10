@@ -12,12 +12,10 @@
 //! ├── lattice.redb                              (owned by lattice-session)
 //! ├── projects/<ProjectStoreKey>/workspace-history.git  (legacy; retained untouched)
 //! └── locks/
-//!     ├── sessions/<SessionId>.lock
-//!     └── projects/<ProjectStoreKey>/workspace.lock
+//!     └── sessions/<SessionId>.lock
 //! ```
 //!
-//! The kernel owns the topology; domain wrappers own their repository file
-//! names, lock file names, kinds, and schema versions.
+//! 本模块维护状态根目录拓扑；会话库文件名、会话锁文件名与表结构由 `lattice-session` 定义。
 
 use std::path::{Path, PathBuf};
 
@@ -88,12 +86,6 @@ impl StateLayout {
         self.projects_dir().join(key.to_string())
     }
 
-    /// `<state>/lattice/projects/<ProjectStoreKey>/<store>` — the domain
-    /// supplies its own repository file name.
-    pub fn project_store(&self, key: &ProjectStoreKey, store_name: &str) -> PathBuf {
-        self.project_dir(key).join(store_name)
-    }
-
     /// `<state>/lattice/locks/sessions` — session lock files live one per
     /// SessionId under this directory.
     pub fn session_locks_dir(&self) -> PathBuf {
@@ -104,20 +96,6 @@ impl StateLayout {
     /// supplies the SessionId-derived file name.
     pub fn session_lock(&self, name: &str) -> PathBuf {
         self.session_locks_dir().join(name)
-    }
-
-    /// `<state>/lattice/locks/projects/<ProjectStoreKey>`
-    pub fn project_locks_dir(&self, key: &ProjectStoreKey) -> PathBuf {
-        self.lattice_root
-            .join("locks")
-            .join("projects")
-            .join(key.to_string())
-    }
-
-    /// `<state>/lattice/locks/projects/<ProjectStoreKey>/<name>` — the domain
-    /// supplies the lock file name (e.g. `workspace.lock`).
-    pub fn project_lock(&self, key: &ProjectStoreKey, name: &str) -> PathBuf {
-        self.project_locks_dir(key).join(name)
     }
 }
 
@@ -141,20 +119,8 @@ mod tests {
             PathBuf::from(format!("/state/lattice/projects/{hex}"))
         );
         assert_eq!(
-            layout.project_store(&key, "workspace-history.git"),
-            PathBuf::from(format!(
-                "/state/lattice/projects/{hex}/workspace-history.git"
-            ))
-        );
-        assert_eq!(
             layout.session_lock("abc.lock"),
             Path::new("/state/lattice/locks/sessions/abc.lock")
-        );
-        assert_eq!(
-            layout.project_lock(&key, "workspace.lock"),
-            PathBuf::from(format!(
-                "/state/lattice/locks/projects/{hex}/workspace.lock"
-            ))
         );
     }
 }

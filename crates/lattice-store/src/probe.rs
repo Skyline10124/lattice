@@ -174,49 +174,6 @@ pub fn probe_location_report(location: &Path) -> ProbeReport {
         Ok(())
     });
 
-    // Minimal repository create, publish, reopen, and identity validation.
-    record("minimal repository round-trip", &mut || {
-        let staging = scratch.join("mini-staging.git");
-        let published = scratch.join("mini.git");
-        let repo = gix::ThreadSafeRepository::init_opts(
-            &staging,
-            gix::create::Kind::Bare,
-            gix::create::Options::default(),
-            gix::open::Options::isolated(),
-        )
-        .map_err(|e| format!("init: {e}"))?
-        .to_thread_local();
-        let blob = repo
-            .write_blob(b"probe")
-            .map(|id| id.detach())
-            .map_err(|e| format!("write blob: {e}"))?;
-        repo.reference(
-            "refs/lattice/probe",
-            blob,
-            gix::refs::transaction::PreviousValue::MustNotExist,
-            "probe",
-        )
-        .map_err(|e| format!("write ref: {e}"))?;
-        crate::durability::fsync_tree(&staging).map_err(|e| e.to_string())?;
-        rename_noreplace_probe(&staging, &published).map_err(|e| format!("publish: {e}"))?;
-        crate::durability::fsync_dir(&scratch).map_err(|e| e.to_string())?;
-        let reopened = gix::open_opts(&published, gix::open::Options::isolated())
-            .map_err(|e| format!("reopen: {e}"))?;
-        let reference = reopened
-            .try_find_reference("refs/lattice/probe")
-            .map_err(|e| format!("read ref: {e}"))?
-            .ok_or("ref missing after reopen")?;
-        let target = reference
-            .target()
-            .try_id()
-            .ok_or("ref has no oid target")?
-            .to_owned();
-        if target != blob {
-            return Err("ref target changed across publish".to_string());
-        }
-        Ok(())
-    });
-
     let _ = std::fs::remove_dir_all(&scratch);
 
     ProbeReport {
