@@ -8,8 +8,6 @@ mod output;
 mod path_norm;
 mod repo_root;
 mod rollout;
-mod tool_build;
-mod tool_codegen;
 mod tui_mock;
 
 use clap::{Parser, Subcommand};
@@ -32,10 +30,6 @@ enum Commands {
     /// Generate the built-in model metadata snapshot from models.dev.
     #[cfg(feature = "model-metadata")]
     ModelMetadata,
-    /// Generate (or check) Source Tool artifacts from manifests.
-    ToolCodegen(tool_codegen::ToolCodegenArgs),
-    /// Build a Source Tool's WASM Component and pin its artifact hash.
-    ToolBuild(tool_build::ToolBuildArgs),
     /// Launch the real TUI against a deterministic local fake provider.
     TuiMock(tui_mock::TuiMockArgs),
     /// Alpha rollout gate: clean-worktree check, locked release build,
@@ -51,8 +45,6 @@ fn main() -> anyhow::Result<()> {
         Commands::HarnessBoundary => harness_boundary::run(),
         #[cfg(feature = "model-metadata")]
         Commands::ModelMetadata => model_metadata::run(),
-        Commands::ToolCodegen(args) => tool_codegen::run(args),
-        Commands::ToolBuild(args) => tool_build::run(args),
         Commands::TuiMock(args) => tui_mock::run(args),
         Commands::Rollout(args) => rollout::run(args),
     }

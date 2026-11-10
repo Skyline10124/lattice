@@ -13,12 +13,12 @@ jobs:
     # expanding the host contract requires a separate architecture decision.
     runs-on: ubuntu-latest
     # Drop debuginfo for every step in this job. Debug test binaries here are
-    # ~430 MB each (wasmtime, aws-lc-sys, gix, rusqlite all link in) across ~68
-    # test targets, which overruns the hosted runner's ~14 GB of free disk. lld
-    # mmaps its output, so writing past a full disk raises SIGBUS rather than
-    # ENOSPC — surfacing as `ld terminated with signal 7 [Bus error]` on three
-    # consecutive runs. Measured effect on one crate: 24.4 MB -> 2.0 MB.
-    # Backtraces keep function names; only line numbers are lost.
+    # ~430 MB each across ~68 test targets, which overruns the hosted runner's
+    # ~14 GB of free disk. lld mmaps its output, so writing past a full disk
+    # raises SIGBUS rather than ENOSPC — surfacing as `ld terminated with
+    # signal 7 [Bus error]` on three consecutive runs. Measured effect on one
+    # crate: 24.4 MB -> 2.0 MB. Backtraces keep function names; only line
+    # numbers are lost.
     #
     # Job-level (not per-step) so clippy/build/test share one profile: a debug
     # setting that differs between steps invalidates the cache and forces a full
@@ -84,8 +84,6 @@ jobs:
       # Dependency / architecture boundary checks (same contracts `cargo
       # xtask ci` runs locally).
       - run: cargo xtask harness-boundary
-        if: steps.changes.outputs.code != 'false'
-      - run: cargo xtask tool-codegen --check
         if: steps.changes.outputs.code != 'false'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()

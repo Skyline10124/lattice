@@ -16,7 +16,7 @@
 
 ## 架构
 
-- [宿主平台](architecture/platform.md)：Linux 宿主支持范围与 WASM guest 边界。
+- [宿主平台](architecture/platform.md)：Linux 宿主支持范围。
 - [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、每项目 Git 工作区历史、后台单例、锁序与持久性边界。
 - [会话与 Turn](architecture/session/README.md)：会话树、Step/Turn 与调用槽位、首次提交、配置来源与 profile 副本、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [模型接入](architecture/llm/README.md)：协议适配器、provider 配置与 features、模型引用与元数据、推理档位、用量与费用估算、凭据与 Sign in with ChatGPT。
