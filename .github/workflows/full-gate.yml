@@ -59,7 +59,6 @@ jobs:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       - run: cargo xtask harness-boundary
-      - run: cargo xtask lancet-boundary
       - run: cargo xtask tool-codegen --check
       - name: alpha rollout (locked release binary, JSON record)
         run: cargo xtask rollout --channel alpha

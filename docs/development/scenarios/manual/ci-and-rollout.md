@@ -48,6 +48,6 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `verdict: "pass"` | 8 步（`clean_worktree` 至 `offline_correctness`）全 `passed`（测试步骤 `passed > 0`，release 产物不启用测试 feature） |
+| `verdict: "pass"` | 7 步（`clean_worktree` 至 `offline_correctness`）全 `passed`（测试步骤 `passed > 0`，release 产物不启用测试 feature） |
 | `verdict: "fail"`（退出 `1`） | 某步 `failed`，后续 `blocked`；查记录中的 `detail` 与 `failure_artifacts` |
 | `verdict: "fail"`（退出 `2`） | 工作树脏、Git 失败或参数错误；查 `rejection` |

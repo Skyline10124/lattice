@@ -2,7 +2,6 @@ mod boundary_report;
 mod ci;
 mod docs_check;
 mod harness_boundary;
-mod lancet_boundary;
 #[cfg(feature = "model-metadata")]
 mod model_metadata;
 mod output;
@@ -28,10 +27,8 @@ enum Commands {
     Ci(ci::CiArgs),
     /// 检查 Markdown 相对链接的目标文件与锚点。
     DocsCheck,
-    /// Verify lattice-system-harness has no product-crate dependencies.
+    /// 检查 lattice-system-harness 不依赖产品 crate，且测试专用 feature 不进入生产依赖图。
     HarnessBoundary,
-    /// LANCET architecture boundary gate.
-    LancetBoundary,
     /// Generate the built-in model metadata snapshot from models.dev.
     #[cfg(feature = "model-metadata")]
     ModelMetadata,
@@ -52,7 +49,6 @@ fn main() -> anyhow::Result<()> {
         Commands::Ci(args) => ci::run(args),
         Commands::DocsCheck => docs_check::run(),
         Commands::HarnessBoundary => harness_boundary::run(),
-        Commands::LancetBoundary => lancet_boundary::run(),
         #[cfg(feature = "model-metadata")]
         Commands::ModelMetadata => model_metadata::run(),
         Commands::ToolCodegen(args) => tool_codegen::run(args),

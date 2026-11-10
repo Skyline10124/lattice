@@ -85,8 +85,6 @@ jobs:
       # xtask ci` runs locally).
       - run: cargo xtask harness-boundary
         if: steps.changes.outputs.code != 'false'
-      - run: cargo xtask lancet-boundary
-        if: steps.changes.outputs.code != 'false'
       - run: cargo xtask tool-codegen --check
         if: steps.changes.outputs.code != 'false'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -10,7 +10,7 @@
 //!   2. capability probes (rustc pin, wasm32 target, informational host facts)
 //!   3. `cargo build --locked --release -p lattice-cli --bin lattice`
 //!   4. artifact identity (sha256 + size)
-//!   5. dependency/architecture boundary checks (public xtask contracts)
+//!   5. `cargo xtask harness-boundary` (dependency/architecture boundary check)
 //!   6. Direct-Local harness scenarios against the release binary (`LATTICE_BIN`)
 //!   7. offline correctness suites (with an anti-vacuous zero-pass guard)
 //!
@@ -326,11 +326,6 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         .current_dir(&ctx.root)
         .args(["xtask", "harness-boundary"]);
 
-    let mut lancet_boundary = Command::new("cargo");
-    lancet_boundary
-        .current_dir(&ctx.root)
-        .args(["xtask", "lancet-boundary"]);
-
     let mut direct_local = Command::new("cargo");
     direct_local
         .current_dir(&ctx.root)
@@ -378,11 +373,6 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
             id: "harness_boundary",
             display: display_command(&harness_boundary),
             action: Action::Cmd(harness_boundary, CMD_TIMEOUT),
-        },
-        Planned {
-            id: "lancet_boundary",
-            display: display_command(&lancet_boundary),
-            action: Action::Cmd(lancet_boundary, CMD_TIMEOUT),
         },
         Planned {
             id: "direct_local",
@@ -849,7 +839,6 @@ mod tests {
                 "build_release_locked",
                 "artifact_identity",
                 "harness_boundary",
-                "lancet_boundary",
                 "direct_local",
                 "offline_correctness",
             ],

@@ -299,7 +299,7 @@ SIGKILL 后重开证明相应进程崩溃场景；注入屏障失败验证调用
 | 会话库的崩溃与重开 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../development/testing.md)选择 |
 | 寻址、Git 仓库身份、严格打开、首次创建、锁及屏障 | `cargo test -p lattice-store` |
 | 内核静态检查 | `cargo clippy -p lattice-store --all-targets -- -D warnings` |
-| 依赖边界 | `cargo tree -p lattice-store --edges normal`、`cargo xtask lancet-boundary` |
+| 依赖边界 | `cargo tree -p lattice-store --edges normal`、`cargo xtask harness-boundary` |
 | 会话不创建或读取工作区历史库、遗留目录原样保留 | `cargo test -p lattice-api --test session_without_workspace_history` |
 | 实际存储位置能力 | 在获准目录运行预构建的 `lattice-store-probe` |
 

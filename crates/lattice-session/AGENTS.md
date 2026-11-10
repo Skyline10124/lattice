@@ -42,6 +42,6 @@
 | 改动 | 运行 |
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-session` |
-| 修改依赖或 `test-utils` 特性边界 | `cargo xtask lancet-boundary` |
+| 修改依赖或 `test-utils` 特性边界 | `cargo xtask harness-boundary` |
 | 修改记录编码、会话树、事务或读取投影 | `cargo test -p lattice-api`、`cargo test -p lattice-cli`，并用当前构建的 `lattice` 二进制运行 `cargo test -p lattice-system-harness --test direct_tree_session` |
 | 修改提交阶段或崩溃后结论推导 | 构建带 `--features test-fake-tools,test-crash-barriers` 的 `lattice` 二进制并运行 `cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers` 验证真实提交窗口 |
