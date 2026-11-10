@@ -375,7 +375,7 @@ impl Backend {
                     .await
                     .map_err(crate::ApiError::from)?;
                 let record = TurnCoordinator::new(io, Arc::new(RandomIdSource))
-                    .rewind(target)
+                    .rewind(target, root.project_path())
                     .await
                     .map_err(crate::ApiError::from)?;
                 #[cfg(test)]

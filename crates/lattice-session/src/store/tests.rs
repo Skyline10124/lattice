@@ -1625,14 +1625,24 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     assert!(
         matches!(
             accept_prepared(&db, &lock, wrong_project),
-            Err(StoreError::InvalidInput {
-                field: "project",
-                ..
-            })
+            Err(StoreError::BindingMismatch { .. })
         ),
         "向已有会话写入新 Turn 时项目路径不一致必须被拒绝"
     );
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    let current = db.begin_read().unwrap().session(sid(1)).unwrap().current;
+    assert!(
+        matches!(
+            db.rewind(&lock, NodeId(0), &project(2), now()),
+            Err(StoreError::BindingMismatch { .. })
+        ),
+        "rewind 的项目路径不一致必须在会话库写入时被拒绝"
+    );
+    assert_eq!(
+        db.begin_read().unwrap().session(sid(1)).unwrap().current,
+        current,
+        "被拒绝的 rewind 不能移动当前位置"
+    );
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let mut next = accept(sid(1), tid(3));
     next.session = AcceptSession::Existing { id: sid(1) };
     next.agent_selection = AgentSelection::Inherited;
@@ -2056,7 +2066,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
         assert!(before == records(&db), "read changed cut {cut}");
         drop(read);
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.rewind(&lock, NodeId(0), now()).unwrap();
+        db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
         let mut next = accept(sid(1), tid(2));
         next.session = AcceptSession::Existing { id: sid(1) };
         accept_prepared(&db, &lock, next).unwrap();
@@ -2618,7 +2628,7 @@ fn entry_nodes(entries: &[ConversationEntry]) -> Vec<u64> {
 fn last_accepted_agent_survives_rewind() {
     let (_dir, layout, db, lock) = conversation_tree();
     for target in [NodeId(2), NodeId(1), NodeId(0)] {
-        db.rewind(&lock, target, now()).unwrap();
+        db.rewind(&lock, target, &project(1), now()).unwrap();
         let read = db.begin_read().unwrap();
         assert_eq!(read.current_agent(sid(1)).unwrap(), Some(agent("beta")));
         assert_eq!(
@@ -2669,14 +2679,14 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     );
     drop(read);
     assert!(matches!(
-        db.rewind(&lock, NodeId(99), now()),
+        db.rewind(&lock, NodeId(99), &project(1), now()),
         Err(StoreError::NotFound { kind: "node", .. })
     ));
     assert_eq!(
         db.begin_read().unwrap().session(sid(1)).unwrap().current,
         NodeId(7)
     );
-    db.rewind(&lock, NodeId(2), now()).unwrap();
+    db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
     let mut branch = accept(sid(1), tid(4));
     branch.session = AcceptSession::Existing { id: sid(1) };
     accept_prepared(&db, &lock, branch).unwrap();
@@ -2694,11 +2704,11 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
         vec![2]
     );
     drop(read);
-    db.rewind(&lock, NodeId(1), now()).unwrap();
+    db.rewind(&lock, NodeId(1), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1]);
     assert_eq!(view.current_agent, Some(agent("alpha")));
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
@@ -2720,7 +2730,7 @@ fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
     assert_eq!(read.history(sid(1), NodeId(6), u32::MAX).unwrap(), both);
     assert!(read.history(sid(1), NodeId(1), 1).unwrap().is_empty());
     drop(read);
-    db.rewind(&lock, NodeId(2), now()).unwrap();
+    db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
     let mut branch = accept(sid(1), tid(4));
     branch.session = AcceptSession::Existing { id: sid(1) };
     accept_prepared(&db, &lock, branch).unwrap();
@@ -3177,7 +3187,7 @@ fn usage_projection_skips_conversation_and_execution_material() {
             .unwrap();
         db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
             .unwrap();
-        db.rewind(&lock, position, now()).unwrap();
+        db.rewind(&lock, position, &project(1), now()).unwrap();
         let expected = db.begin_read().unwrap().usage(sid(1)).unwrap();
         assert_eq!(
             expected.path_total.attempts,
@@ -3927,7 +3937,7 @@ fn transaction_failure_matrix() {
                     next.session = AcceptSession::Existing { id: sid(1) };
                     accept_prepared(&db, &lock, next).map(|_| ())
                 }
-                7 => db.rewind(&lock, NodeId(0), now()).map(|_| ()),
+                7 => db.rewind(&lock, NodeId(0), &project(1), now()).map(|_| ()),
                 8 => db
                     .register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
                     .map(|_| ()),
@@ -4071,7 +4081,7 @@ fn ordinary_operations_load_only_referenced_turns() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let mut next = accept(sid(1), tid(2));
     next.session = AcceptSession::Existing { id: sid(1) };
     accept_prepared(&db, &lock, next).unwrap();
@@ -4714,7 +4724,7 @@ fn local_reads_reject_broken_references() {
         );
         assert!(
             matches!(
-                db.rewind(&lock, NodeId(0), now()),
+                db.rewind(&lock, NodeId(0), &project(1), now()),
                 Err(StoreError::Corruption { .. })
             ),
             "rewind accepted {case}"
@@ -4786,13 +4796,13 @@ fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
     );
     let unchanged = next.profile_copy.clone();
     // 从根分叉后，相邻轮次不再替副本带入旧 catalog 的提示配置。
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     db.accept_turn(&lock, next).unwrap();
     assert_eq!(
         db.begin_read().unwrap().session(sid(1)).unwrap().current,
         NodeId(6)
     );
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     assert_eq!(
         db.begin_read()
             .unwrap()

@@ -369,6 +369,11 @@ impl From<crate::ApiError> for LocalError {
                         result.conflict = Some(ConflictReason::SessionExists);
                         None
                     }
+                    StoreError::BindingMismatch { .. } => {
+                        result.kind = Conflict;
+                        result.conflict = Some(ConflictReason::BindingMismatch);
+                        None
+                    }
                     StoreError::Busy { .. } => {
                         result.kind = Busy;
                         None

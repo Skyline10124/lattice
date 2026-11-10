@@ -260,10 +260,14 @@ impl TurnCoordinator {
         }
     }
 
-    pub(crate) async fn rewind(&self, target: NodeId) -> Result<SessionRecord> {
+    pub(crate) async fn rewind(
+        &self,
+        target: NodeId,
+        project_path: lattice_session::ProjectPath,
+    ) -> Result<SessionRecord> {
         let session = self
             .io
-            .write(move |store, lock| store.rewind(lock, target, chrono::Utc::now()))
+            .write(move |store, lock| store.rewind(lock, target, &project_path, chrono::Utc::now()))
             .await?;
         #[cfg(feature = "test-crash-barriers")]
         super::crash_barrier::rewind_hit(&session).await?;

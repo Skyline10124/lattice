@@ -647,6 +647,8 @@ pub enum StoreError {
     InvocationCollision { ids: Vec<InvocationId> },
     #[error("session already exists: {session_id}")]
     SessionCollision { session_id: SessionId },
+    #[error("session project binding mismatch: {session_id}")]
+    BindingMismatch { session_id: SessionId },
     #[error("sequence exhausted: {kind}")]
     SequenceExhausted { kind: &'static str },
     #[error("writes disabled; close and reopen the database")]

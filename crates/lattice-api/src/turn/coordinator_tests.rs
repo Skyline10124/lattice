@@ -279,7 +279,10 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     assert_eq!(before.summary.outcome, PublicTurnOutcome::Failed);
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        coordinator.rewind(NodeId(0)),
+        coordinator.rewind(
+            NodeId(0),
+            ProjectPath::from_bytes(b"/coordinator-test".as_slice()).unwrap(),
+        ),
     )
     .await
     .unwrap()

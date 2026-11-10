@@ -332,9 +332,7 @@ impl SessionStore {
                 r.nodes.insert((s, NodeId(0)), Node::Root);
             }
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
-            if session.project_path != input.project_path {
-                return Err(invalid("project", "session binding mismatch"));
-            }
+            check_binding(session, &input.project_path)?;
             let previous = r.profile_copies.get(&s);
             let actual_digest = previous.map(SessionProfileCopy::digest).transpose()?;
             if actual_digest != input.expected_profile_digest {
@@ -936,6 +934,7 @@ impl SessionStore {
         &self,
         lock: &SessionExecutionLock,
         target: NodeId,
+        project_path: &ProjectPath,
         now: Timestamp,
     ) -> Result<SessionRecord> {
         self.write(lock, Selection::Node(target), |r, _| {
@@ -943,6 +942,7 @@ impl SessionStore {
                 .sessions
                 .get_mut(&lock.session_id)
                 .ok_or_else(|| missing("session", lock.session_id))?;
+            check_binding(s, project_path)?;
             if !r.nodes.contains_key(&(lock.session_id, target)) {
                 return Err(missing("node", target.0));
             }
@@ -951,6 +951,17 @@ impl SessionStore {
                 s.updated_at = now;
             }
             Ok(s.clone())
+        })
+    }
+}
+
+/// 会话库写入时再核对一次项目绑定（ADR 0012 第 8 节）；后台在写入之前已按同一规则核对过。
+fn check_binding(session: &SessionRecord, project_path: &ProjectPath) -> Result<()> {
+    if session.project_path == *project_path {
+        Ok(())
+    } else {
+        Err(StoreError::BindingMismatch {
+            session_id: session.session_id,
         })
     }
 }
