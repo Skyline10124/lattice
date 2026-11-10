@@ -4,6 +4,8 @@ status: accepted
 
 # ADR 0009：从 LATTICE 剥离旧 LANCET，工具执行收窄为 `ToolExecutor`
 
+- 部分被取代：ADR 0012（第 4 节与归属中为项目绑定保留的 `ProjectStoreKey` 改为规范项目路径；范围见 ADR 0012 的[与其他 ADR 的关系](0012-backend-owns-session-settings.md#与其他-adr-的关系)）
+
 ## 背景
 
 ### 现状
@@ -226,4 +228,4 @@ ToolOutcome = Succeeded(Value)
 | [ADR 0007](0007-session-tree-as-single-authority.md) | 沿用：[第 4 节](0007-session-tree-as-single-authority.md#4-progress-给出结论)槽位 `progress` 结论表去掉 `evidence` 字段，其余不变 |
 | [ADR 0008](0008-backend-api-commands-view-queries.md) | 部分取代：[第 1 节](0008-backend-api-commands-view-queries.md#1-api-分为命令视图与查询)查询表删除 `audit`，[第 9 节](0008-backend-api-commands-view-queries.md#9-cli)删除 `audit` 的 `--json` 说明 |
 | [ADR 0010](0010-protocol-adapters-and-configured-providers.md) | 部分取代：[第 13 节](0010-protocol-adapters-and-configured-providers.md#13-会话持有-profile-副本)与[后果](0010-protocol-adapters-and-configured-providers.md#后果)中解析外部策略文件及收紧 `[lancet]` 策略的表述随 `[lancet]` 删除而失效，其余不受影响 |
-| ADR 0012 草案（PR `#387`）与 ADR 0011 草案（PR `#333`） | 在本 ADR 实施之后落地：ADR 0012 的 `configure` 不再处理工具目录与工作区历史库；ADR 0011 删除 `gix` 特性门禁、`lancet-protocol` 豁免与 `LancetDoctor` IPC |
+| [ADR 0012](0012-backend-owns-session-settings.md) 与 ADR 0011 草案（PR `#333`） | 在本 ADR 实施之后落地：ADR 0012 的 `configure` 不再处理工具目录与工作区历史库，并把第 4 节与归属中保留的 `ProjectStoreKey` 改为规范项目路径；ADR 0011 删除 `gix` 特性门禁、`lancet-protocol` 豁免与 `LancetDoctor` IPC |
