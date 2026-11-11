@@ -73,7 +73,7 @@ flowchart TD
 
 - 后台是 `lattice-daemon` 进程，由 systemd user service `lattice.service` 启停。`lattice` 二进制只含 CLI 与 TUI，连接已经在运行的后台。
 - IM 网关是后台进程内的可选组件，经后台的进程内服务 API 访问会话，随后台启动与停机，运行期间可以重新挂载（第 6 节）。会话可以在 IM、TUI 与 CLI 之间接续。
-- `lattice-daemon` 提供构造 IM 的入口；`lattice-server` 调用它挂载组件，并汇报组件的状态。
+- `lattice-daemon` 提供构造 IM 的入口，并监视 IM 的配置文件；`lattice-server` 调用构造入口挂载组件，并汇报组件的状态。
 
 ### 2. 后台的停机
 
@@ -193,31 +193,38 @@ stopping()                       -> 停机通知
 ```
 
 - IPC 处理代码调用同一套函数，进程内与 IPC 只有一套语义。轮次句柄只用于观察，丢弃它不取消这一轮。
-- **挂载。** `lattice-server` 的 `serve` 接受一组组件的构造入口，每个入口有名字，由 `lattice-daemon` 提供。挂载就是调用构造入口，结果有三种：
+- **挂载。** `lattice-server` 的 `serve` 接受一组组件的构造入口，每个入口有名字，由 `lattice-daemon` 提供。构造入口只读取文件，不访问网络，也不启动任务。挂载就是调用构造入口，再按结果处理：
   - 返回组件：后台把它作为独立任务启动，列为已挂载；
-  - 返回失败：列为未挂载及原因；
+  - 返回不可用（例如缺凭据）或配置无效：列为未挂载及原因；
   - 返回未启用：`components` 中没有这一项。
 
   后台就绪后挂载一次。组件收到停止通知后收尾（第 2 节第 1、3 步）。
 - **重新挂载。** 后台运行期间可以重新挂载一个组件：
-  1. 通知当前实例停止，等它收尾，至多 10 秒，到时中止它的任务；
-  2. 它的任务全部结束之后，再调用构造入口。
+  1. 调用构造入口；
+  2. 结果为配置无效、且当前有实例在运行时，保留当前实例，`components` 中这一项附上“仍按上一份配置运行”及原因，到此结束；
+  3. 否则通知当前实例停止，等它收尾，至多 10 秒，到时中止它的任务；
+  4. 它的任务全部结束之后，按第 1 步的结果处理，与挂载相同。
 
-  所以一个组件任何时刻只有一个实例在运行。同一个组件的重新挂载逐个进行；后台停机期间返回 Stopping。重新挂载只影响这个组件：已接受的轮次由后台的 Owner 执行，照常进行。
-- `DaemonStatus` 增加 `components`，按名字排序列出每个组件已挂载，或未挂载及原因；`lattice daemon status` 显示这一项。组件起不来的原因由此直接可见，不必翻 journal。
+  所以一个组件任何时刻只有一个实例在运行，配置写错也不会停下正在运行的实例。不可用与未启用是有意的状态，照常停下当前实例。同一个组件的重新挂载逐个进行，进行期间又收到的请求合并为它结束之后的一次，回执都取那一次的结果；后台停机期间返回 Stopping。重新挂载只影响这个组件：已接受的轮次由后台的 Owner 执行，照常进行。
+- `DaemonStatus` 增加 `components`，按名字排序列出每个组件已挂载（重新挂载被拒绝时附原因），或未挂载及原因；`lattice daemon status` 显示这一项。组件起不来的原因由此直接可见，不必翻 journal。
 - **故障隔离。** 组件内部的错误（网络、限流、token 无效）由组件记录并退避重试。组件 panic 时，后台在等待它的任务处捕获，把它标为未挂载（原因为 panic），后台其余部分照常服务。后台不自动再启动它，由用户重新挂载。
 
 ### 7. IM 网关
 
 - **启用。** 默认关闭。挂载 IM 时，`lattice-daemon` 的构造入口读取配置目录下的 `im/config.toml`：
-  - 有 `[telegram]` 表：读取凭据、规范化 `workspace`，都成功后返回 IM；任何一项失败（包括还没有 token）时 IM 列为未挂载及原因，后台照常运行。
-  - 没有这张表：返回未启用，`components` 中没有 IM 一项。
-- **生效。** 配置与凭据在挂载时读取一次，修改之后重新挂载 IM 生效，不需要重启后台：
-  - 修改 `im/config.toml` 之后执行 `lattice im reload`，它经 IPC 让后台重新挂载 IM；
-  - `lattice im auth set|remove` 写入成功后，后台随即重新挂载 IM；
-  - 两者的回执都带挂载结果：已挂载、未挂载及原因，或未启用。`lattice im reload` 在结果为未挂载时退出 `1`。
+  - 没有这个文件，或没有 `[telegram]` 表：返回未启用，`components` 中没有 IM 一项；
+  - 有 `[telegram]` 表，但 `im/auth.json` 中没有 Telegram 的 token：返回不可用；
+  - 文件读不出、解析失败、键缺失或类型不对、`workspace` 规范化失败，或 `im/auth.json` 损坏：返回配置无效；
+  - 都成功：返回 IM。
 
-  启用、停用、改配置、换 token 与 panic 之后的恢复都走这一条路径。
+  不可用与配置无效时后台照常运行。
+- **生效。** 配置与凭据在构造时读取，修改之后重新挂载 IM 生效，不需要重启后台：
+  - `lattice-daemon` 用 inotify 监视配置目录下的 `im/`；`im/` 还不存在时先监视配置目录，`im/` 出现后改为监视它。`config.toml` 写完关闭（`IN_CLOSE_WRITE`）或改名到位（`IN_MOVED_TO`，即编辑器的原子保存）时请求重新挂载，结果写进日志与 `components`。在这两个事件之前文件还没写完，不读取。监视目录而不是文件，因为原子保存会换掉文件的 inode。删除 `config.toml` 不触发，因为有的编辑器保存时先把原文件移走、再写新文件；
+  - `lattice im reload` 经 IPC 请求重新挂载，用于删除文件之后，或想当场看到结果时；
+  - `lattice im auth set|remove` 写入成功后，后台随即重新挂载 IM；
+  - 后两者的回执带结果：已挂载、仍按上一份配置运行及原因、未挂载及原因，或未启用。`lattice im reload` 在结果不是已挂载或未启用时退出 `1`。
+
+  启用、停用、改配置、换 token 与 panic 之后的恢复都走这一条路径。用户存了盘但还没改完时，只要内容能通过检查就按它生效，下一次存盘时纠正。
 - **重新挂载对进行中轮次的影响。** 轮次照常执行。旧实例内存中的句柄与 `draft_id` 随它消失：这些轮次的草稿停止刷新，草稿上的停止按钮不再对得上，取消用 `/cancel`（第 12 节）。新实例按第 9 节的恢复规则接手台账，这些轮次结束后照常发出最终回复。offset 从头开始，重投的更新由台账识别（第 10 节）。
 - **配置。** `im/config.toml` 位于配置目录（后台环境中的 `$HOME/.lattice`），由后台读取；项目目录中的同名文件不读取。`[telegram]` 表的键：`allowed_senders`（数值发送者 id 的数组）、`workspace`（绝对路径）、`agent`（agent 名）。
 - **凭据。** IM 平台的密钥集中在配置目录下的 `im/auth.json`，按平台名分段（Telegram 为 `telegram`），由 `lattice-server` 的 `im_auth` 模块按“平台名 → 不透明密钥”读写，`lattice-im` 经它取得 token。`lattice im auth set telegram` 从终端或标准输入读入 token 并关闭回显，经 IPC 交给后台写入；另有 `lattice im auth remove telegram` 与 `lattice im auth status`。token 只存在于 `im/auth.json` 与后台内存中。Telegram 把 token 放在 URL 路径里，所以传输错误先去掉 URL，再按已知值替换 token，然后才进入日志、诊断或回复。
@@ -342,7 +349,7 @@ IM 发起的轮次与其他前端的轮次一样，由后台注入的 `ToolExecu
 | 停机 | `lattice daemon serve` 处理 SIGTERM 与 SIGINT，按第 2 节停机，带 `--drain-timeout`、停写、各段上限与退出码 `4`；harness 能向后台发 SIGTERM，并按选项识别后台的参数 | `daemon serve` 的新参数与退出码 `4`；排空超时时 `daemon stop` 退出 `1` |
 | 拆分 | `lattice-ipc`、`lattice-local`、`lattice-server` 取代 `lattice-api`，线上形状快照与拆分前的基线逐字相同；依赖边界合同与对应的检查；清理无用依赖与只供测试的公开入口；IPC 的系统调用统一改用 rustix（`crates/lattice-api/src/local/ipc.rs:72-74` 的注释把它留给了这次拆分） | 无；命令的输出、退出码与线上格式都不变，可以单独回滚 |
 | 托管 | `lattice-daemon` 及其退出码，就绪与停机时向 systemd 发 `READY=1`、`STOPPING=1`，`lattice daemon install`；`daemon serve` 与 `ensure_running` 删除；harness 的每个场景显式启动后台 | 后台改由 systemd 托管；不提供降级 |
-| IM | 进程内服务 API、组件的挂载与重新挂载、`components`，`im_auth`、`lattice im auth` 与 `lattice im reload`，私有文件模块下沉，`lattice-im` 与 IM 合同；协议版本加一 | 默认关闭，配置后启用 |
+| IM | 进程内服务 API、组件的挂载与重新挂载、`components`，IM 配置监视，`im_auth`、`lattice im auth` 与 `lattice im reload`，私有文件模块下沉，`lattice-im` 与 IM 合同；协议版本加一 | 默认关闭，配置后启用 |
 
 停机、拆分与托管三个阶段不改线上形状，协议版本只在 IM 阶段加一。
 
@@ -392,7 +399,9 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 | 加 `SuccessExitStatus=4` | 排空超时丢弃了在途 turn，unit 进入 failed 才会被用户看到 |
 | 组件 panic 后在同一次运行内自动重启 | panic 是缺陷，自动重启可能反复崩溃、反复处理同一批更新；由用户执行 `lattice im reload` 重新挂载，已接受而未回复的轮由台账补发 |
 | IM 的配置与凭据只在后台启动时读取，修改后重启后台 | 重启后台要排空在途 turn，排不完的成为执行者消失；改一项 IM 配置不该打断正在执行的轮。维护者 2026-11-11 确定 |
-| 监视 `im/config.toml`，文件一变就重新挂载 | 会读到编辑到一半的文件；挂载失败的原因也没有地方当面告诉用户。`lattice im reload` 的回执直接给出结果 |
+| 修改 `im/config.toml` 之后只能执行 `lattice im reload` 生效，不监视文件 | 改完配置还要记得再执行一条命令。写到一半的文件由 `IN_CLOSE_WRITE` 与 `IN_MOVED_TO` 避开，内容有误的配置由“先构造、配置无效时保留当前实例”挡住。维护者 2026-11-11 确定 |
+| 重新挂载时先停当前实例，再读取新配置 | 新配置有误时 IM 停下，直到改对为止，存一份半成品就会停掉 IM。构造入口不访问网络、不启动任务，可以先构造，确认无误再停当前实例 |
+| 按编辑器的锁文件（`.swp`、`.#config.toml`）判断用户是否还在编辑 | 每个编辑器各不相同，远程编辑或 `scp` 上传时也没有；存了盘但还没改完，只有用户自己知道 |
 | 换 token 时在运行中的 IM 实例里就地替换 | 启用、停用与改配置还要各做一条路径；重新挂载一条路径覆盖全部，接手台账的规则与后台重启之后相同 |
 | 拆分阶段预建进程内服务 API 与组件挂载 | 只有 IM 使用；随 IM 阶段直接写在 `lattice-server` 中 |
 | 拆分与托管合为一个阶段 | 一次变更过大；拆分不改行为与线上格式，本身是可发布、可回滚的完整状态 |
@@ -428,7 +437,7 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 | --- | --- | --- |
 | `lattice-api` | 停机顺序、排空上限、停写与各段上限；之后由三个新 crate 取代 | 停机、拆分 |
 | `lattice-ipc`、`lattice-local`、`lattice-server`（新） | 见第 5 节；`lattice-local` 删除 `ensure_running`；`lattice-server` 加进程内服务 API、组件的挂载与重新挂载、`components` 与 `im_auth` | 拆分、托管、IM |
-| `lattice-daemon`（新） | 参数、显式构建的 runtime、信号与退出码；提供 IM 的构造入口 | 托管、IM |
+| `lattice-daemon`（新） | 参数、显式构建的 runtime、信号与退出码；提供 IM 的构造入口，监视 `im/config.toml` | 托管、IM |
 | `lattice-im`（新） | 第 7 至 13 节 | IM |
 | `lattice-session` | 会话库的停写入口 | 停机 |
 | `lattice-store` | 私有文件模块 | IM |
@@ -465,7 +474,7 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 | `architecture/storage.md` | 本地后台由 systemd 托管、一个用户一个后台；私有状态根加 `im/ledger`；`lattice-store` 的职责加私有文件模块 | 托管、IM |
 | `architecture/session/acceptance.md` | 配置来源与后台启动：后台环境来自 unit；配置目录的内容加 `im/` | 托管、IM |
 | `architecture/platform.md` | 宿主需要 systemd user session | 托管 |
-| `architecture/im.md`（新建） | IM 的启用、配置与凭据、重新挂载、台账、消息处理、命令、回复与故障隔离，登记进架构索引 | IM |
+| `architecture/im.md`（新建） | IM 的启用、配置与凭据、配置监视与重新挂载、台账、消息处理、命令、回复与故障隔离，登记进架构索引 | IM |
 | `architecture/llm/credentials.md` | 凭据文件的权限与原子替换由 `lattice-store` 提供 | IM |
 | `development/testing.md`、`development/validation-guide.md`、`development/scenarios/` | 被测产物、后台的启动与停止、退出码与升级 | 各阶段 |
 | `reference/glossary.md` | 新增“IM 网关”与“台账”，“IM 网关”与 `lattice-llm` 的“请求网关”区分 | IM |
