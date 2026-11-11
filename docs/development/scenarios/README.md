@@ -31,9 +31,9 @@ status: active
 | [旧库拒绝](harness/legacy-store-rejection.md) | 存在旧版存储时会话库打开失败并指出路径 |
 | [取消接管后退出](harness/cancel-then-exit.md) | 后台接管的取消在前端退出后仍被处理 |
 | [停止后台与排空](harness/stop-and-drain.md) | stop 关闭新准入，等已接管的工作收尾 |
-| [后台崩溃与执行者消失](harness/crash-and-vanished-executor.md) | 任一提交点崩溃后，重开不经写入即可读到结局 |
-| [配置来源与 profile 副本](harness/config-and-profile-copy.md) | 后台按启动时的配置目录读取配置，已有会话按副本执行 |
-| [会话设置与草稿](harness/session-settings-and-drafts.md) | 草稿跨重启保留、`SettingsVersion` 与项目绑定字节生效、执行中禁改设置与档位调整可见 |
+| [后台崩溃与执行者消失](harness/crash-and-vanished-executor.md) | Turn 推进的各提交点崩溃后，重开不经写入即可读到结局 |
+| [配置来源与运行时重读](harness/configuration-sources.md) | 后台按启动时的配置目录与 TLS 根读取配置，显式指定 agent 时刷新 profile 快照 |
+| [会话设置与草稿会话](harness/session-settings-and-drafts.md) | 选择经 `configure` 持久保存，草稿会话跨重启保留，`SettingsVersion`、项目绑定与档位调整生效 |
 
 ## 手动操作
 

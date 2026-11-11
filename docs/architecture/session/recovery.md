@@ -46,7 +46,7 @@ status: active
   - 重发得到其他拒绝时，结果为 `rejected`；
   - 重发用完，或收到 SIGINT 时，结果为 `unknown`。
 
-TUI 不自动重发 `configure`：结果不明时显示 Warn，实际生效的设置以 `watch` 推送的会话头为准，见 [TUI 合同](../tui/README.md)。
+TUI 不自动重发 `configure`：结果不明时显示 Warn，实际生效的设置以 `watch` 推送的会话头为准，见 [TUI 合同](../tui/README.md#configure-结果不明与设置同步)。
 
 ## 观察与重连
 
