@@ -39,7 +39,7 @@ status: proposed
 | 配置、凭据与 profile 由后台读取，项目目录与环境变量不提供 endpoint 或 key | [ADR 0010 第 4 节](0010-protocol-adapters-and-configured-providers.md#4-全局配置与凭据) |
 | 一个状态根上只有一个后台，所有权由 `owner.lock` 的 flock 决定；不按 PID 抢占，也不终止已有后台 | [本地后台与访问边界](../architecture/storage.md#本地后台与访问边界) |
 | 生产后台不执行工具；接回新 LANCET 另立 ADR | [ADR 0009 第 7 节](0009-remove-legacy-lancet-tool-executor.md#7-新-lancet-的接回边界) |
-| Telegram Bot API（10.4，2026-11-11 核对）：`getUpdates` 长轮询与 webhook 互斥，以大于 `update_id` 的 offset 确认，未取走的更新最多保留 24 小时；`sendMessage` 正文 1–4096 字符，单个 chat 每秒不宜超过一条；`sendMessageDraft` 只用于私聊，推送约 30 秒有效的临时草稿，正文 0–4096 字符，`draft_id` 非零；带 `can_stop` 时草稿显示停止按钮，用户按下后 bot 收到 `stopped_message_generation`，其中只有 `chat`、`message_thread_id` 与 `draft_id`，没有发送者 | <https://core.telegram.org/bots/api>、<https://core.telegram.org/bots/faq> |
+| Telegram Bot API（10.4，2026-11-11 核对）：`getUpdates` 长轮询与 webhook 互斥，以大于 `update_id` 的 offset 确认，未取走的更新最多保留 24 小时；`sendMessage` 正文 1–4096 字符，单个 chat 每秒不宜超过一条；`sendMessageDraft` 只用于私聊，推送约 30 秒有效的临时草稿，正文 0–4096 字符，`draft_id` 非零；带 `can_stop` 时草稿显示停止按钮，用户按下后 bot 收到 `stopped_message_generation`，其中只有 `chat`、`message_thread_id` 与 `draft_id`，没有发送者；`/start` 是要求所有 bot 支持的开场命令，用户第一次打开 bot 时由客户端发出，经深链接打开时后面带参数 | <https://core.telegram.org/bots/api>、<https://core.telegram.org/bots/faq>、<https://core.telegram.org/bots/features> |
 
 ### 维护者已确定的事项
 
@@ -275,8 +275,10 @@ stateDiagram-v2
 | `/cancel` | 对当前绑定会话中进行中的一轮调用 `cancel(turn_id)`。接管时回复“已取消，等待这一轮结束”；未接管时回复“这一轮已结束或不在执行中”；服务 API 报错时回复“取消结果未知，可发 /status 查看”；没有进行中的轮时回复“没有进行中的轮”。取消不回滚已经发生的效果 |
 | `/status` | 绑定的会话（没有绑定或会话已不存在时报告没有会话），会话头的 `owner` 与 `turn_id` 给出的执行状态，以及会话设置中的 agent、模型与推理档位 |
 | `/usage` | 绑定会话的用量摘要 |
+| `/help`、`/start` | 回复命令列表：`/new`、`/cancel`、`/status`、`/usage` 与 `/help` 各一行，另有一行说明直接发送文字就是向当前会话提交一轮。两个命令的回复相同，都不建会话，也不读写绑定。`/start` 后面带的参数忽略 |
 
-- 命令只对白名单内的发送者生效，执行中也可以使用。`/new` 记下自己的 InboundId，重投时只确认，所以不会清掉之后才建立的绑定；`/cancel`、`/status` 与 `/usage` 不写台账，重投时再回复一次。
+- 命令只对白名单内的发送者生效，执行中也可以使用。`/new` 记下自己的 InboundId，重投时只确认，所以不会清掉之后才建立的绑定；`/cancel`、`/status`、`/usage`、`/help` 与 `/start` 不写台账，重投时再回复一次。
+- 表中命令之外的文本都是普通消息，按第 9 节处理，包括以 `/` 开头的其他文本；TUI 对不认识的 `/` 输入也是照常提交。
 - 网关在内存中按 TurnId 持有每个进行中轮次的句柄与 `draft_id`，这一轮结束时只删除它自己的句柄。`/new` 之后，同一个 chat 可能同时有旧会话与当前会话各一轮在执行：`/cancel` 只取当前绑定会话的那一轮，旧会话的那一轮用它草稿上的停止按钮取消。句柄只用来选定目标，能否提交仍以后台准入为准。
 - `/usage` 取后台的会话用量查询，与 `lattice session usage` 同源，回复四行：SessionId 与当前路径的轮数；当前路径上用过的 `<provider>/<model>`，按首次出现的顺序去重，只列名称；当前路径合计 `path_total`；全会话合计 `session_total`，含 `rewind` 后不在当前路径上的分支。合计取会话库从原始尝试算出的值，IM 不把各轮相加。
 - 两个合计行列出输入、缓存写入、缓存读取、输出、缓存命中率与费用：
