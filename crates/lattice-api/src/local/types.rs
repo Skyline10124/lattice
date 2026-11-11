@@ -19,8 +19,8 @@ pub use lattice_llm::{
 pub use lattice_session::store::{
     AttemptProgress, ConversationEntry, MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice,
     NoticeLevel, Page, PublicTurnOutcome, RetryNotice, SessionLog, SessionRecord, SessionUsage,
-    SlotProgress, SlotReason, SlotState, StepDetail, StepEnd, StepKey, StepProgress, TurnDetail,
-    TurnSummary, TurnUsageRow, UsageSummary,
+    SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail, StepEnd, StepKey,
+    StepProgress, TurnDetail, TurnSummary, TurnUsageRow, UsageSummary,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -83,10 +83,10 @@ pub struct SessionHead {
     pub session_id: SessionId,
     pub position: NodeId,
     pub agent: String,
-    pub model: String,
-    pub provider: String,
+    pub model: Option<ModelId>,
+    pub provider: Option<ProviderId>,
     pub effort: Option<lattice_conversation::Effort>,
-    pub profile_default_effort: Option<lattice_conversation::Effort>,
+    pub settings_version: SettingsVersion,
     pub turn_id: Option<TurnId>,
     pub owner: bool,
     pub diagnostic: Option<LocalError>,
@@ -164,9 +164,22 @@ pub enum SubmissionUpdate {
     Sending {
         turn_id: TurnId,
         session_id: SessionId,
-        new: bool,
     },
     Receipt(SubmissionReceipt),
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "result", rename_all = "snake_case")]
+pub enum ConfigureResult {
+    Configured {
+        head: SessionHead,
+        adjustment: Option<EffortAdjustment>,
+    },
+    Rejected {
+        error: LocalError,
+    },
+    Unknown {
+        error: Option<LocalError>,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -174,6 +187,11 @@ pub enum LocalUpdate {
     Submit {
         #[serde(flatten)]
         update: SubmissionUpdate,
+    },
+    Configure {
+        session_id: SessionId,
+        #[serde(flatten)]
+        result: ConfigureResult,
     },
     Cancel {
         turn_id: TurnId,
@@ -369,6 +387,17 @@ impl From<crate::ApiError> for LocalError {
                         result.conflict = Some(ConflictReason::SessionExists);
                         None
                     }
+                    StoreError::BindingMismatch { .. } => {
+                        result.kind = Conflict;
+                        result.conflict = Some(ConflictReason::BindingMismatch);
+                        None
+                    }
+                    StoreError::SettingsChanged { .. } => {
+                        result.kind = Conflict;
+                        result.conflict = Some(ConflictReason::SettingsChanged);
+                        result.message = ConflictReason::SettingsChanged.to_string();
+                        None
+                    }
                     StoreError::Busy { .. } => {
                         result.kind = Busy;
                         None
@@ -402,47 +431,34 @@ impl From<std::io::Error> for LocalError {
     }
 }
 
-/// 私有请求不实现正文 Debug；两种身份均在发送之前确定。
-#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TurnRequest {
-    pub turn_id: TurnId,
-    pub session: SubmitSession,
-    pub workspace: PathBuf,
-    pub input: String,
-    pub agent: Option<AgentName>,
-    pub model: Option<ModelRef>,
-    pub effort: Option<lattice_conversation::Effort>,
-}
-impl TurnRequest {
-    /// 解析已有会话后再生成身份，sending 始终含完整 SessionId。
-    pub fn new(
-        session_id: Option<SessionId>,
-        workspace: PathBuf,
-        input: String,
-        agent: Option<AgentName>,
-    ) -> Self {
-        Self {
-            turn_id: super::new_turn_id(),
-            session: session_id.map_or_else(
-                || SubmitSession::New(super::new_session_id()),
-                SubmitSession::Existing,
-            ),
-            workspace,
-            input,
-            agent,
-            model: None,
-            effort: None,
-        }
+mod path_bytes {
+    use std::{
+        ffi::OsString,
+        os::unix::ffi::{OsStrExt, OsStringExt},
+        path::{Path, PathBuf},
+    };
+
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    pub(super) fn serialize<S: Serializer>(path: &Path, serializer: S) -> Result<S::Ok, S::Error> {
+        path.as_os_str().as_bytes().serialize(serializer)
+    }
+
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PathBuf, D::Error> {
+        let bytes = Vec::<u8>::deserialize(deserializer)?;
+        Ok(PathBuf::from(OsString::from_vec(bytes)))
     }
 }
+
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum SubmitSession {
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ConfigureSession {
     New(SessionId),
     Existing(SessionId),
 }
-impl SubmitSession {
+impl ConfigureSession {
     pub fn id(self) -> SessionId {
         match self {
             Self::New(id) | Self::Existing(id) => id,
@@ -451,6 +467,46 @@ impl SubmitSession {
     pub fn is_new(self) -> bool {
         matches!(self, Self::New(_))
     }
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureRequest {
+    pub session: ConfigureSession,
+    #[serde(with = "path_bytes")]
+    pub workspace: PathBuf,
+    pub agent: Option<AgentName>,
+    pub model: Option<ModelRef>,
+    pub effort: Option<Effort>,
+}
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct EffortAdjustment {
+    pub from: Option<Effort>,
+    pub to: Option<Effort>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct ConfigureReply {
+    pub head: SessionHead,
+    pub adjustment: Option<EffortAdjustment>,
+}
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigureOutcome {
+    Configured(ConfigureReply),
+    Rejected(LocalError),
+    Unknown(LocalError),
+}
+
+/// 私有请求不实现正文 Debug；两种身份均在发送之前确定。
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TurnRequest {
+    pub turn_id: TurnId,
+    pub session: SessionId,
+    #[serde(with = "path_bytes")]
+    pub workspace: PathBuf,
+    pub input: String,
+    pub expected_settings: Option<SettingsVersion>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "acceptance", rename_all = "snake_case")]
@@ -521,7 +577,11 @@ pub(super) enum Request {
     Rewind {
         session_id: SessionId,
         target: NodeId,
+        #[serde(with = "path_bytes")]
         workspace: PathBuf,
+    },
+    Configure {
+        request: ConfigureRequest,
     },
     Submit {
         request: TurnRequest,
@@ -551,6 +611,7 @@ pub(super) enum Response {
     Head(SessionHead),
     History(LocalHistory),
     Rewind(SessionRecord),
+    Configure(ConfigureReply),
     Acceptance(Acceptance),
     View(ViewUpdate),
     Cancelled { owned: bool },
@@ -559,33 +620,81 @@ pub(super) enum Response {
 
 #[cfg(test)]
 mod tests {
+    use std::{ffi::OsStr, os::unix::ffi::OsStrExt};
+
     use super::*;
     #[test]
-    fn request_shapes_preserve_selections_and_explicit_session_identity() {
+    fn request_shapes_preserve_configure_and_submit_identities() {
         let sid = super::super::new_session_id();
         let tid = super::super::new_turn_id();
-        for (session, model, effort) in [
-            (SubmitSession::New(sid), None, None),
+        let raw_workspace = b"/tmp/proj-\xff\xfe/work";
+        let non_utf8_ws = PathBuf::from(OsStr::from_bytes(raw_workspace));
+        let version: SettingsVersion =
+            serde_json::from_value(serde_json::json!("ab".repeat(32))).unwrap();
+        for (session, agent, model, effort) in [
             (
-                SubmitSession::Existing(sid),
+                ConfigureSession::New(sid),
+                Some(AgentName::parse("local-test").unwrap()),
+                None,
+                None,
+            ),
+            (
+                ConfigureSession::Existing(sid),
+                None,
                 Some(ModelRef::parse("local/org/model").unwrap()),
                 Some(Effort::High),
             ),
         ] {
-            let request = TurnRequest {
+            let configure_req = ConfigureRequest {
+                session,
+                workspace: non_utf8_ws.clone(),
+                agent,
                 model,
                 effort,
-                turn_id: tid,
-                session,
-                workspace: "/tmp/project".into(),
-                input: "original".into(),
-                agent: Some(AgentName::parse("local-test").unwrap()),
             };
-            let wire = serde_json::to_value(&request).unwrap();
+            let wire = serde_json::to_value(&configure_req).unwrap();
+            assert_eq!(
+                wire["workspace"],
+                serde_json::to_value(raw_workspace.as_slice()).unwrap(),
+                "configure 请求的 workspace 线上表示应为原始字节数组"
+            );
             assert_eq!(
                 wire["session"][if session.is_new() { "new" } else { "existing" }],
                 sid.to_string()
             );
+            let wrapped = serde_json::json!({"operation":"configure","request":wire});
+            assert!(
+                matches!(serde_json::from_value::<Request>(wrapped.clone()).unwrap(), Request::Configure { request: decoded } if decoded == configure_req)
+            );
+            assert_eq!(
+                serde_json::to_value(Request::Configure {
+                    request: configure_req
+                })
+                .unwrap(),
+                wrapped
+            );
+            let mut extra = wrapped;
+            extra["request"]["extra_field"] = serde_json::json!(true);
+            assert!(
+                serde_json::from_value::<Request>(extra).is_err(),
+                "ConfigureRequest 必须拒绝未知字段"
+            );
+        }
+        for expected_settings in [None, Some(version)] {
+            let request = TurnRequest {
+                turn_id: tid,
+                session: sid,
+                workspace: non_utf8_ws.clone(),
+                input: "original".into(),
+                expected_settings,
+            };
+            let wire = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                wire["workspace"],
+                serde_json::to_value(raw_workspace.as_slice()).unwrap(),
+                "submit 请求的 workspace 线上表示应为原始字节数组"
+            );
+            assert_eq!(wire["session"], sid.to_string());
             let submit = serde_json::json!({"operation":"submit","request":wire});
             assert!(
                 matches!(serde_json::from_value::<Request>(submit.clone()).unwrap(), Request::Submit { request: decoded } if decoded == request)
@@ -598,6 +707,22 @@ mod tests {
             extra["configuration"] = serde_json::json!({"profile_toml":"untrusted"});
             assert!(serde_json::from_value::<Request>(extra).is_err());
         }
+        let rewind_wire = serde_json::to_value(Request::Rewind {
+            session_id: sid,
+            target: NodeId(0),
+            workspace: non_utf8_ws.clone(),
+        })
+        .unwrap();
+        assert_eq!(
+            rewind_wire["workspace"],
+            serde_json::to_value(raw_workspace.as_slice()).unwrap(),
+            "rewind 请求的 workspace 线上表示应为原始字节数组"
+        );
+        assert!(matches!(
+            serde_json::from_value::<Request>(rewind_wire).unwrap(),
+            Request::Rewind { session_id, target: NodeId(0), workspace }
+                if session_id == sid && workspace == non_utf8_ws
+        ));
         for (query, expected_wire) in [
             (
                 ModelCandidateQuery::List {
@@ -653,26 +778,38 @@ mod tests {
             )
             .is_err()
         );
+        let head = SessionHead {
+            model: Some(ModelId::parse("test").unwrap()),
+            provider: Some(ProviderId::parse("openai-compatible").unwrap()),
+            effort: None,
+            settings_version: version,
+            session_id: sid,
+            position: NodeId(0),
+            agent: "local-test".into(),
+            turn_id: None,
+            owner: false,
+            diagnostic: None,
+            path_replaced: false,
+        };
         assert_eq!(
-            serde_json::to_value(Response::Head(SessionHead {
-                model: "test".into(),
-                provider: "openai-compatible".into(),
-                effort: None,
-                profile_default_effort: None,
-                session_id: sid,
-                position: NodeId(0),
-                agent: "local-test".into(),
-                turn_id: None,
-                owner: false,
-                diagnostic: None,
-                path_replaced: false,
-            }))
-            .unwrap(),
+            serde_json::to_value(Response::Head(head.clone())).unwrap(),
             serde_json::json!({"response":"head", "value":{
                 "session_id":sid, "position":0, "agent":"local-test", "turn_id":null,
-                "model":"test", "provider":"openai-compatible", "effort":null, "profile_default_effort":null,
+                "model":"test", "provider":"openai-compatible", "effort":null,
+                "settings_version":version,
                 "owner":false, "diagnostic":null, "path_replaced":false,
             }})
+        );
+        assert_eq!(
+            serde_json::to_value(Response::Configure(ConfigureReply {
+                head,
+                adjustment: Some(EffortAdjustment {
+                    from: Some(Effort::High),
+                    to: None,
+                }),
+            }))
+            .unwrap()["value"]["adjustment"],
+            serde_json::json!({"from":"high","to":null}),
         );
         let error = LocalError::new(LocalErrorKind::Busy, "busy");
         assert!(
@@ -681,6 +818,19 @@ mod tests {
                 .get("conflict")
                 .is_none()
         );
+        let settings_conflict = LocalError::from(crate::ApiError::from(
+            lattice_session::store::StoreError::SettingsChanged { session_id: sid },
+        ));
+        assert_eq!(settings_conflict.kind, LocalErrorKind::Conflict);
+        assert_eq!(
+            settings_conflict.conflict,
+            Some(ConflictReason::SettingsChanged),
+            "StoreError::SettingsChanged 必须独立映射为 ConflictReason::SettingsChanged"
+        );
+        let turn_conflict = LocalError::from(crate::ApiError::from(
+            lattice_session::store::StoreError::Conflict { turn_id: tid },
+        ));
+        assert_eq!(turn_conflict.conflict, Some(ConflictReason::TurnIdUsed));
         assert_eq!(
             serde_json::to_value(TurnLookup::InFlight).unwrap(),
             serde_json::json!({"status":"in_flight"})

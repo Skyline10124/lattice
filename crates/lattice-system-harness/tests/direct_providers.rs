@@ -234,7 +234,10 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         assert_eq!(reopened[9]["content"][0]["text"], "continue after restart");
         let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
         let view = watcher.initial();
-        assert_eq!(view.head.as_ref().unwrap().provider, "interactions-fixture");
+        assert_eq!(
+            view.head.as_ref().unwrap().provider.as_deref(),
+            Some("interactions-fixture")
+        );
         let user = *view
             .entries
             .iter()
@@ -657,7 +660,10 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         assert_eq!(captures[2].raw["reasoning"], json!({"summary":"auto"}));
         let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
         let view = watcher.initial();
-        assert_eq!(view.head.as_ref().unwrap().provider, "responses-fixture");
+        assert_eq!(
+            view.head.as_ref().unwrap().provider.as_deref(),
+            Some("responses-fixture")
+        );
         let current_user = *view
             .entries
             .iter()
@@ -1906,9 +1912,19 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         let sid = send.session_id().unwrap();
         let choose = |evidence: &mut ScenarioEvidence, id: &str, input: &str, model: &str| {
             let wait = world.budget(&spec).cap_timeout(spec.step_timeout());
-            let mut request =
-                support::submit_request(&world, id, json!({"existing":sid}), input, None);
-            request["request"]["model"] = json!(model);
+            let configured = support::ipc(
+                &world,
+                wait,
+                support::configure_request(
+                    &world,
+                    json!({"existing":sid}),
+                    None,
+                    Some(model),
+                    None,
+                ),
+            );
+            assert_eq!(configured["response"], "configure", "{configured}");
+            let request = support::submit_request(&world, id, sid, input);
             let accepted = support::ipc(&world, wait, request);
             assert_eq!(accepted["response"], "acceptance", "{accepted}");
             assert_eq!(accepted["value"]["turn"]["turn_id"], id);
@@ -1923,8 +1939,8 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             );
             let head = watcher.view.head.as_ref().unwrap();
             let (provider, model) = model.split_once('/').unwrap();
-            assert_eq!(head.provider, provider);
-            assert_eq!(head.model, model);
+            assert_eq!(head.provider.as_deref(), Some(provider));
+            assert_eq!(head.model.as_deref(), Some(model));
             let turn = support::turn_lookup(&world, wait, id);
             assert_eq!(turn["value"]["turn"]["summary"]["outcome"], "completed");
             evidence

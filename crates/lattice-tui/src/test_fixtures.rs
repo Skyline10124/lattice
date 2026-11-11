@@ -45,12 +45,16 @@ pub(super) fn sid() -> SessionId {
     SessionId::parse(SESSION).unwrap()
 }
 
-pub(super) fn test_app(existing: bool) -> App {
+pub(super) fn settings_version(byte: u8) -> lattice_api::local::SettingsVersion {
+    serde_json::from_value(json!(format!("{byte:02x}").repeat(32))).unwrap()
+}
+
+pub(super) fn test_app(_existing: bool) -> App {
     App::new(
         SessionContext {
-            startup_agent: Some(lattice_api::AgentName::parse("unused").unwrap()),
-            session_id: existing.then(sid),
-            active_agent: "unused".into(),
+            session_id: sid(),
+            initial_head: head(0, None, false),
+            initial_adjustment: None,
         },
         false,
         Path::new("/nonexistent-tui-test-history"),
@@ -59,10 +63,10 @@ pub(super) fn test_app(existing: bool) -> App {
 
 pub(super) fn head(position: u64, turn_id: Option<TurnId>, owner: bool) -> SessionHead {
     SessionHead {
-        model: "model-a".into(),
-        provider: "openai".into(),
+        model: Some(ModelId::parse("model-a").unwrap()),
+        provider: Some(ProviderId::parse("openai").unwrap()),
         effort: None,
-        profile_default_effort: None,
+        settings_version: settings_version(0x11),
         session_id: sid(),
         position: NodeId(position),
         agent: "unused".into(),

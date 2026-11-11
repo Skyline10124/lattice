@@ -307,10 +307,16 @@ impl Records {
         if !self.sessions.contains_key(&s) {
             return Err(missing("session", s));
         }
-        self.profile_copies
+        self.session_settings
             .get(&s)
-            .map(|copy| Some(copy.profile.agent_name.clone()))
-            .ok_or_else(|| corrupt("profile_copies", &s.to_string(), "profile copy missing"))
+            .map(|settings| Some(settings.profile.agent_name.clone()))
+            .ok_or_else(|| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "session settings missing",
+                )
+            })
     }
 
     pub(super) fn turn_detail(&self, s: SessionId, t: TurnId) -> Result<TurnDetail> {
@@ -540,18 +546,21 @@ impl SessionRead {
         Ok(stored)
     }
 
-    /// 读取会话的当前配置；完整副本只供后台组成，不直接发到 IPC。
-    pub fn profile_copy(&self, session: SessionId) -> Result<SessionProfileCopy> {
+    /// 读取会话的当前设置；完整设置只供后台组成，不直接发到 IPC。
+    pub fn session_settings(&self, session: SessionId) -> Result<SessionSettings> {
         self.find_session(session)?
             .ok_or_else(|| missing("session", session))?;
         let key = session.to_string();
-        let table = self.tx.open_table(PROFILE_COPIES).map_err(table_error)?;
+        let table = self.tx.open_table(SESSION_SETTINGS).map_err(table_error)?;
         let value = table
             .get(key.as_str())?
-            .ok_or_else(|| corrupt("profile_copies", &key, "profile copy missing"))?;
-        let copy: SessionProfileCopy =
-            attach_path(&self.path, decode_profile_copy(&key, value.value()))?;
-        Ok(copy)
+            .ok_or_else(|| corrupt("session_settings", &key, "session settings missing"))?;
+        let settings: SessionSettings =
+            attach_path(&self.path, decode_session_settings(&key, value.value()))?;
+        settings
+            .validate()
+            .map_err(|_| corrupt("session_settings", &key, "invalid session settings"))?;
+        Ok(settings)
     }
 
     pub fn current_agent(&self, session: SessionId) -> Result<Option<AgentName>> {
@@ -582,6 +591,39 @@ impl SessionRead {
             );
         }
         Ok(items)
+    }
+
+    /// 只读扫描所有会话，返回只有根节点且 `updated_at < cutoff` 的草稿候选。
+    pub fn expired_drafts(&self, cutoff: Timestamp) -> Result<Vec<SessionId>> {
+        let sessions = self.tx.open_table(SESSIONS).map_err(table_error)?;
+        let nodes = self.tx.open_table(NODES).map_err(table_error)?;
+        let mut drafts = Vec::new();
+        for entry in sessions.range::<&str>(..)? {
+            let (key, value) = entry?;
+            let id = SessionId::parse(key.value())
+                .map_err(|_| corrupt("sessions", "key", "invalid id"))?;
+            let session: SessionRecord = self.decode("sessions", key.value(), value.value())?;
+            if session.session_id != id {
+                return Err(corrupt("sessions", key.value(), "key/value mismatch"));
+            }
+            if session.updated_at >= cutoff {
+                continue;
+            }
+            let tip = nodes
+                .range(
+                    node_key(id, NodeId(0)).as_slice()..=node_key(id, NodeId(u64::MAX)).as_slice(),
+                )?
+                .next_back()
+                .transpose()?
+                .map(|(k, _)| attach_path(&self.path, decode_node_key(k.value())))
+                .transpose()?
+                .map(|(_, node)| node)
+                .ok_or_else(|| corrupt("nodes", &format!("{id}/0"), "missing root node"))?;
+            if tip == NodeId(0) {
+                drafts.push(id);
+            }
+        }
+        Ok(drafts)
     }
 
     pub fn list(
@@ -617,7 +659,7 @@ impl SessionRead {
                 })?;
             items.push(SessionListRow {
                 session_id: id,
-                project_store_key: s.project_store_key,
+                project_path: s.project_path.clone(),
                 current: s.current,
                 node_count,
                 unclosed_turn,
@@ -699,7 +741,7 @@ impl SessionRead {
             .find_session(session)?
             .ok_or_else(|| missing("session", session))?;
         let (path, earlier_turns) = self.conversation_window(session, record.current, turns)?;
-        let current_agent = Some(self.profile_copy(session)?.profile.agent_name);
+        let current_agent = Some(self.session_settings(session)?.profile.agent_name);
         Ok(SessionView {
             session: record,
             current_agent,

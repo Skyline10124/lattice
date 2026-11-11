@@ -87,6 +87,13 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         )
         .unwrap();
 
+    // `lattice tui --agent` 启动即经 `configure(New)` 建立草稿会话。
+    world
+        .write_project_file(".lattice/agents/tui-smoke/agent.toml", &agent_toml())
+        .unwrap();
+    let session =
+        lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
+
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         budget.check(&spec.name);
@@ -97,21 +104,26 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         // display bytes itself (RFC #41 decision three).
         tui.wait_for_ready(Duration::from_secs(30))
             .expect("tui entered alternate screen");
-        // session 与 agent 只在状态行显示，启动横幅不重复；提交前状态行的 session 是“未接受”。
+        // session 与 agent 只在状态行显示，启动横幅不重复；启动起就显示会话短标识。
         tui.wait_for(Duration::from_secs(30), |s| s.contains("显示命令"))
             .expect("startup banner appeared");
+        let listed = session
+            .run_command(&["--json", "session", "list"])
+            .expect("list sessions");
+        assert!(listed.is_clean_exit(0), "{}", listed.summary());
+        let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        let sid = list[0]["session_id"].as_str().unwrap();
         let start = tui
             .redraw_text(Duration::from_secs(10))
             .expect("startup frame");
+        let status_prefix = format!("{} · tui-smoke · tui-smoke · local", &sid[..8]);
         assert!(
-            start.matches("未接受").count() == 1 && start.matches("tui-smoke").count() == 1,
+            start.matches(&sid[..8]).count() == 1
+                && start.matches("tui-smoke").count() == 2
+                && start.contains(&status_prefix)
+                && !start.contains("未接受"),
             "session and agent must appear only in the status line: {start}"
         );
-
-        // 启动时没有 profile，首次发送前创建，由后台在接受前读取。
-        world
-            .write_project_file(".lattice/agents/tui-smoke/agent.toml", &agent_toml())
-            .unwrap();
 
         // Send a prompt. The Turn runs a Tool Step and then a three-line text Step.
         budget.check(&spec.name);
@@ -979,7 +991,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
     let step = || budget.cap_timeout(spec.step_timeout());
-    let profile = "schema_version=1\n[agent]\nname='model-panel'\nmodel='local/base'\neffort='low'\n[prompt]\nsystem='Read panel note using read_panel_note.'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n";
+    let profile = "schema_version=1\n[agent]\nname='model-panel'\neffort='low'\n[prompt]\nsystem='Read panel note using read_panel_note.'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n";
     world
         .write_project_file(".lattice/agents/model-panel/agent.toml", profile)
         .unwrap();
@@ -1056,6 +1068,10 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         wait_pty_frame(&mut tui, step(), |text| {
             text.contains("EFFORT") && text.contains("off") && text.contains("low")
         });
+        tui.send_keys(b"off").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("EFFORT") && !text.contains("low · 当前")
+        });
         tui.send_keys(b"\r").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
             !text.contains("EFFORT") && text.contains("off")
@@ -1071,7 +1087,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         assert_eq!(head["value"]["model"], "gpt-6-luna");
         assert_eq!(head["value"]["provider"], "openai-chat");
         assert_eq!(head["value"]["effort"], "off");
-        assert_eq!(head["value"]["profile_default_effort"], "low");
+        assert!(head["value"]["settings_version"].as_str().is_some());
         let first = head["value"]["turn_id"].as_str().unwrap();
         evidence.record_json("selected-head", &head).unwrap();
         tui.send_line("/model").unwrap();
@@ -1091,9 +1107,18 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             text.contains("MODEL") && text.matches("local/preview").count() == 2
         });
         assert!(!restored.contains("ignored"));
-        tui.send_keys(b"\x1b").unwrap();
+        // 一轮执行中用 `/model` 选定新模型：屏幕上出现 Warn 说明执行中不能修改设置，会话头不变。
+        tui.send_keys(b"\r").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
-            !text.contains("MODEL") && text.contains("gpt-6-luna") && text.contains("off")
+            !text.contains("MODEL")
+                && text.contains("WARN")
+                && text.contains("这一轮执行中不能修改设置")
+        });
+        let busy_head = support::ipc(&world, step(), json!({"operation":"head","session_id":sid}));
+        assert_eq!(busy_head, head);
+        tui.send_keys(b" ").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("WARN") && text.contains("gpt-6-luna") && text.contains("off")
         });
         gate.release_next(step()).unwrap();
         gate.wait_until_stalled(3, step()).unwrap();
@@ -1146,6 +1171,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             text.contains("gpt-6-luna") && text.contains("off") && text.contains("idle")
         });
         assert_eq!(server.captured_requests().len(), 4);
+        // 轮次结束后切换到不支持当前档位 `off` 的模型：出现档位调整 Info，statusline 显示新模型与档位。
         tui.send_line("/model").unwrap();
         wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
         tui.send_keys(b"local/preview").unwrap();
@@ -1154,42 +1180,74 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         });
         tui.send_keys(b"\r").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
-            !text.contains("MODEL") && text.contains("preview") && text.contains("low")
+            !text.contains("MODEL")
+                && text.contains("换模型后推理档位由 off 改为 low")
+                && text.contains("preview · local · low")
         });
+        let preview_head =
+            support::ipc(&world, step(), json!({"operation":"head","session_id":sid}));
+        assert_eq!(preview_head["value"]["model"], "preview");
+        assert_eq!(preview_head["value"]["provider"], "local");
+        assert_eq!(preview_head["value"]["effort"], "low");
+        assert_ne!(
+            preview_head["value"]["settings_version"],
+            before["value"]["settings_version"]
+        );
+        let after_configure_log =
+            query(&session, &mut evidence, &["--json", "session", "log", sid]);
+        let mut expected_log = before_log.clone();
+        expected_log["session"]["updated_at"] =
+            after_configure_log["session"]["updated_at"].clone();
+        assert_eq!(after_configure_log, expected_log);
         tui.send_line("/effort").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
             text.contains("EFFORT") && text.contains("low · 当前")
         });
-        tui.send_keys(b"\r").unwrap();
+        tui.send_keys(b"\x1b").unwrap();
         wait_pty_frame(&mut tui, step(), |text| !text.contains("EFFORT"));
-        assert_eq!(
-            support::ipc(&world, step(), json!({"operation":"head","session_id":sid})),
-            before
-        );
-        assert_eq!(
-            query(&session, &mut evidence, &["--json", "session", "log", sid]),
-            before_log
-        );
         tui.send_line("/quit").unwrap();
         tui.wait_for_exit(step()).unwrap();
         evidence.record_pty(tui.output());
         assert_eq!(server.captured_requests().len(), 4);
         assert_eq!(
             support::ipc(&world, step(), json!({"operation":"head","session_id":sid})),
-            before
+            preview_head
         );
         assert_eq!(
             query(&session, &mut evidence, &["--json", "session", "log", sid]),
-            before_log
+            after_configure_log
         );
         tui = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         tui.wait_for_ready(step()).unwrap();
         tui.wait_for(step(), |text| text.contains("panel inherited complete"))
             .unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
-            text.contains("gpt-6-luna") && text.contains("off")
+            text.contains("preview") && text.contains("low")
         });
-        tui.send_line("after discarding unsent selection").unwrap();
+        // 切回 `openai-chat/gpt-6-luna` 与 `off` 后再发第三轮。
+        tui.send_line("/model").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
+        tui.send_keys(b"openai-chat/gpt-6-luna").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.matches("openai-chat/gpt-6-luna").count() == 2
+        });
+        tui.send_keys(b"\r").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("MODEL") && text.contains("gpt-6-luna") && text.contains("low")
+        });
+        tui.send_line("/effort").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("EFFORT") && text.contains("off")
+        });
+        tui.send_keys(b"off").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            text.contains("EFFORT") && !text.contains("low · 当前")
+        });
+        tui.send_keys(b"\r").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("EFFORT") && text.contains("gpt-6-luna") && text.contains("off")
+        });
+        tui.send_line("after reconfiguring back").unwrap();
         gate.wait_until_stalled(5, step()).unwrap();
         gate.release_next(step()).unwrap();
         wait_pty_frame(&mut tui, step(), |text| {

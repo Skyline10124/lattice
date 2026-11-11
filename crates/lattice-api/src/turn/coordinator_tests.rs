@@ -5,7 +5,7 @@ use super::*;
 use lattice_conversation::{
     MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, TurnId, UnboundToolCall,
 };
-use lattice_session::{ProjectStoreKey, StateLayout};
+use lattice_session::{ProjectPath, StateLayout};
 use serde_json::json;
 
 fn sid() -> SessionId {
@@ -37,17 +37,24 @@ fn input() -> AcceptTurn {
             max_model_attempts: 3,
         },
     };
+    let settings = lattice_session::store::SessionSettings::for_test(&config);
     AcceptTurn {
-        profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
-        expected_profile_digest: None,
-        session: AcceptSession::New { id: sid() },
+        settings_version: settings.version().unwrap(),
+        session_id: sid(),
         turn_id: tid(1),
-        project_store_key: ProjectStoreKey::from_canonical_path_bytes(b"/coordinator-test"),
+        project_path: ProjectPath::from_bytes(b"/coordinator-test".as_slice()).unwrap(),
         input: "原始输入\n".into(),
         accepted_at: chrono::Utc::now(),
-        agent_selection: AgentSelection::Explicit,
         config,
     }
+}
+async fn seed_and_accept(io: &CoordinatorStoreIo, mut accepted: AcceptTurn) -> AcceptedTurn {
+    let settings = lattice_session::store::SessionSettings::for_test(&accepted.config);
+    accepted.settings_version = settings.version().unwrap();
+    io.create_session(accepted.project_path.clone(), settings)
+        .await
+        .unwrap();
+    io.accept(accepted).await.unwrap()
 }
 fn origin() -> AttemptOrigin {
     AttemptOrigin {
@@ -199,7 +206,7 @@ async fn started_commit_precedes_execution_and_repeated_start_is_rejected() {
         .await
         .unwrap();
     assert!(matches!(
-        io.accept(input()).await.unwrap(),
+        seed_and_accept(&io, input()).await,
         AcceptedTurn::Accepted(_)
     ));
     let reply = reply(tid(1));
@@ -247,10 +254,9 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     let tmp = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(tmp.path());
     let input = input();
-    let key = input.project_store_key;
     let history = layout
         .projects_dir()
-        .join(key.to_string())
+        .join("legacy-project")
         .join("workspace-history.git");
     std::fs::create_dir_all(history.parent().unwrap()).unwrap();
     std::fs::write(&history, "损坏历史，不准访问").unwrap();
@@ -259,7 +265,7 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
             .lattice_root()
             .join("locks")
             .join("projects")
-            .join(key.to_string())
+            .join("legacy-project")
             .join("workspace.lock"),
         lattice_store::LockMode::Exclusive,
         lattice_store::Blocking::NonBlocking,
@@ -269,7 +275,7 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     let io = CoordinatorStoreIo::acquire(store.clone(), sid())
         .await
         .unwrap();
-    io.accept(input).await.unwrap();
+    seed_and_accept(&io, input).await;
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     let before = store
         .begin_read()
@@ -280,7 +286,10 @@ async fn orphaned_turn_rewinds_without_reading_or_locking_workspace_history() {
     assert_eq!(before.summary.outcome, PublicTurnOutcome::Failed);
     tokio::time::timeout(
         std::time::Duration::from_secs(3),
-        coordinator.rewind(NodeId(0)),
+        coordinator.rewind(
+            NodeId(0),
+            ProjectPath::from_bytes(b"/coordinator-test".as_slice()).unwrap(),
+        ),
     )
     .await
     .unwrap()
@@ -309,7 +318,7 @@ async fn collision_retries_only_registration_and_preserves_reply() {
     let io = CoordinatorStoreIo::acquire(store.clone(), sid())
         .await
         .unwrap();
-    io.accept(input()).await.unwrap();
+    seed_and_accept(&io, input()).await;
     let first = reply(tid(1));
     io.start_request(first.key, first.origin.clone())
         .await
@@ -318,9 +327,7 @@ async fn collision_retries_only_registration_and_preserves_reply() {
     let coordinator =
         TurnCoordinator::new(io, Arc::new(Sequence(std::sync::atomic::AtomicU64::new(1))));
     let mut second = input();
-    second.session = AcceptSession::Existing { id: sid() };
     second.turn_id = tid(2);
-    second.expected_profile_digest = Some(input().profile_copy.digest().unwrap());
     coordinator.io.accept(second).await.unwrap();
     let reply = reply(tid(2));
     coordinator
@@ -404,7 +411,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     let state = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
     let root = workspace.path().canonicalize().unwrap();
-    let key = ProjectStoreKey::derive(&root).unwrap();
+    let key = ProjectPath::from_path(&root).unwrap();
     let tools = CallbackTools::single("observe__workspace", |_, _, args, _, _| {
         if args.get("path").and_then(|v| v.as_str()) == Some("visible.txt") {
             crate::ToolOutcome::Succeeded(json!({"content": "实际文件"}))
@@ -420,7 +427,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         .await
         .unwrap();
     let mut accepted = input();
-    accepted.project_store_key = key;
+    accepted.project_path = key;
     accepted.config.provider = crate::ProviderId::parse("openai-compatible").unwrap();
     accepted.config.system_prompt = Some("冻结提示".into());
     accepted.config.catalog = ToolCatalogSnapshot::new(
@@ -437,8 +444,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
     )
     .unwrap();
     accepted.config.effort = Some(lattice_conversation::Effort::High);
-    accepted.profile_copy = SessionProfileCopy::for_test(&accepted.config);
-    io.accept(accepted).await.unwrap();
+    seed_and_accept(&io, accepted).await;
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
     let llm = Arc::new(Model(std::sync::Mutex::new(Vec::new())));
     let observer = Arc::new(ObserverSink::default());
@@ -514,7 +520,7 @@ async fn mixed_unknown_batch_closes_invalid_without_allocating_invocations() {
     let io = CoordinatorStoreIo::acquire(store.clone(), sid())
         .await
         .unwrap();
-    io.accept(input()).await.unwrap();
+    seed_and_accept(&io, input()).await;
     let mut reply = reply(tid(1));
     reply
         .message
@@ -587,13 +593,27 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     let alpha = crate::AgentName::parse("alpha").unwrap();
     let loaded_profile =
         lattice_profile::load_agent_profile(&alpha, &paths, crate::local::ipc::uid()).unwrap();
+    let workspace = crate::root::LocalWorkspaceRoot::from_path(project.path()).unwrap();
+    let session_id = sid();
+    let turn_profile = crate::profile::TurnProfile::from_loaded(&loaded_profile);
+    let settings = lattice_session::store::SessionSettings {
+        profile: turn_profile.effective,
+        system_prompt: turn_profile.system_prompt,
+        model: loaded_profile.profile.agent.model,
+        effort: loaded_profile.profile.agent.effort,
+    };
+    store
+        .create_session(
+            &store.try_lock_session(session_id).unwrap(),
+            workspace.project_path(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .unwrap();
     let request = RunTurnRequest {
-        model: None,
-        effort: None,
         input: " original \n".into(),
-        session_id: None,
-        agent: Some(alpha),
-        loaded_profile: Some(loaded_profile),
+        session_id,
+        expected_settings: None,
         cancel_flag: None,
         tools: None,
         test_llm: Some((
@@ -602,7 +622,6 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
             vec![],
         )),
     };
-    let workspace = crate::root::LocalWorkspaceRoot::from_path(project.path()).unwrap();
     let execution = start_turn(api.clone(), tid(9), workspace.clone(), request.clone());
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
@@ -611,8 +630,6 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     assert_eq!(turn.user_node, NodeId(1));
     execution.completion.await.unwrap().unwrap();
     let mut retry = request;
-    retry.loaded_profile = None;
-    retry.agent = None;
     retry.test_llm = None;
     let execution = start_turn(api, tid(9), workspace, retry);
     assert!(matches!(
@@ -654,7 +671,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     let state = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
     let root = workspace.path().canonicalize().unwrap();
-    let project = ProjectStoreKey::derive(&root).unwrap();
+    let project = ProjectPath::from_path(&root).unwrap();
     let tools = CallbackTools::single("observe__workspace", |_, _, _, _, _| {
         crate::ToolOutcome::Succeeded(json!({"ok": true}))
     });
@@ -663,7 +680,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
         .await
         .unwrap();
     let mut accepted = input();
-    accepted.project_store_key = project;
+    accepted.project_path = project;
     accepted.config.catalog = ToolCatalogSnapshot::new(
         tools
             .specs
@@ -678,8 +695,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     )
     .unwrap();
     accepted.config.effort = Some(lattice_conversation::Effort::High);
-    accepted.profile_copy = SessionProfileCopy::for_test(&accepted.config);
-    io.accept(accepted).await.unwrap();
+    seed_and_accept(&io, accepted).await;
     let mut message = reply(tid(1)).message;
     message.parts.push(message.parts[1].clone());
     if let MessageSemantic::ToolCall { call } = &mut message.parts[2].semantic {
@@ -1326,15 +1342,10 @@ mod fake_tools_tests {
                 ]))
                 .build(),
         );
-        let mut fixture_dl = setup_fixture(llm_deadline, &[]);
-        fixture_dl
-            .request
-            .loaded_profile
-            .as_mut()
-            .unwrap()
-            .profile
-            .llm
-            .timeout_secs = crate::TurnTimeout::new(1).unwrap();
+        let fixture_dl = setup_fixture(llm_deadline, &[]);
+        fixture_dl.update_settings(|s| {
+            s.profile.timeout_secs = crate::TurnTimeout::new(1).unwrap();
+        });
         let mut req_dl = fixture_dl.request.clone();
         req_dl.tools = Some(executor);
         let (dl_detail, _) = fixture_dl.run(req_dl).await;

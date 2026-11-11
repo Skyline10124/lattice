@@ -38,12 +38,8 @@ impl LocalClient {
         self.submission(request, true)
     }
     fn submission(&self, request: TurnRequest, own_view: bool) -> LocalTurn {
-        let (mut handle, mut worker) = LocalTurn::prepare(
-            self.clone(),
-            request.session.id(),
-            Some(request.turn_id),
-            true,
-        );
+        let (mut handle, mut worker) =
+            LocalTurn::prepare(self.clone(), request.session, Some(request.turn_id), true);
         worker.own_view = own_view;
         worker.awaiting_user_message = true;
         if !own_view {
@@ -54,8 +50,7 @@ impl LocalClient {
         worker.pending.push_back(LocalUpdate::Submit {
             update: SubmissionUpdate::Sending {
                 turn_id: request.turn_id,
-                session_id: request.session.id(),
-                new: request.session.is_new(),
+                session_id: request.session,
             },
         });
         worker.input = Some(request);

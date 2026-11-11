@@ -908,11 +908,26 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     pub(super) fn test_app() -> App {
+        let session_id =
+            lattice_api::local::SessionId::parse("11111111111141118111111111111111").unwrap();
         App::new(
             SessionContext {
-                startup_agent: Some(lattice_api::AgentName::parse("test").unwrap()),
-                session_id: None,
-                active_agent: "agent".into(),
+                session_id,
+                initial_head: lattice_api::local::SessionHead {
+                    session_id,
+                    position: lattice_api::local::NodeId(0),
+                    agent: "unused".into(),
+                    model: None,
+                    provider: None,
+                    effort: None,
+                    settings_version: serde_json::from_value(serde_json::json!("11".repeat(32)))
+                        .unwrap(),
+                    turn_id: None,
+                    owner: false,
+                    diagnostic: None,
+                    path_replaced: false,
+                },
+                initial_adjustment: None,
             },
             false,
             std::path::Path::new("/nonexistent-tui-test-history"),

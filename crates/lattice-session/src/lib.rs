@@ -3,14 +3,15 @@
 
 //! 全局事务会话库：Session、会话树、Step/Turn、调用槽位与只读投影。
 
-pub use lattice_store::{ProjectStoreKey, StateLayout};
+pub use lattice_store::StateLayout;
 
 pub mod model;
 pub mod store;
 
 pub use model::{
     AgentName, AgentNameError, MAX_AGENT_NAME_BYTES, MAX_MODEL_ATTEMPTS, MAX_RETRY_DELAY_MS,
-    MAX_TURN_TIMEOUT_SECS, RetryPolicy, RetryPolicyError, TurnTimeout, TurnTimeoutError,
+    MAX_TURN_TIMEOUT_SECS, ProjectPath, ProjectPathError, RetryPolicy, RetryPolicyError,
+    TurnTimeout, TurnTimeoutError,
 };
 
 /// Shared typed transcript helpers for tests.

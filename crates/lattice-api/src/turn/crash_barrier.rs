@@ -83,6 +83,24 @@ pub(crate) async fn rewind_hit(
     .await
 }
 
+pub(crate) async fn configure_hit(
+    session: &lattice_session::store::SessionRecord,
+) -> Result<(), CoordinatorIoError> {
+    if std::env::var("LATTICE_TEST_TURN_BARRIER").as_deref() != Ok("configure_committed") {
+        return Ok(());
+    }
+    stop(Marker {
+        barrier: "configure_committed",
+        session_id: session.session_id,
+        turn_id: None,
+        current: Some(session.current),
+        step: None,
+        part: None,
+        invocation_id: None,
+    })
+    .await
+}
+
 async fn stop(marker: Marker) -> Result<(), CoordinatorIoError> {
     tokio::task::spawn_blocking(move || {
         let path = PathBuf::from(

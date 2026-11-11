@@ -16,7 +16,7 @@ use support::{
 #[cfg(feature = "fake-tools")]
 use support::{live_turn, same_turn, sequence, tool_call, tool_ok};
 
-/// `--json` 只有七种记录，第一条是写明身份的 `submit`。
+/// `--json` 只输出已知记录类型（含 `configure`），第一条是写明身份的 `submit`。
 fn only_seven_records(outcome: &lattice_system_harness::SendOutcome) -> Result<(), AssertError> {
     require(
         !outcome

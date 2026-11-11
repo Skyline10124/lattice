@@ -8,6 +8,10 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Deserializer, Serialize};
 use thiserror::Error;
 
+mod project_path;
+
+pub use project_path::{ProjectPath, ProjectPathError};
+
 /// Agent 名称的最大 UTF-8 字节数。
 pub const MAX_AGENT_NAME_BYTES: usize = 128;
 

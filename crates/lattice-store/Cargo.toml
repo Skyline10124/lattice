@@ -4,15 +4,13 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Linux 私有状态布局、ProjectStoreKey、文件锁、fsync 与位置能力探测"
+description = "Linux 私有状态布局、文件锁、fsync 与位置能力探测"
 
 [features]
 default = []
 
 [dependencies]
 libc = { workspace = true }
-serde = { workspace = true }
-sha2 = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]

@@ -14,7 +14,10 @@ use std::{
     path::Path,
     time::{Duration, Instant},
 };
-use support::{Watcher, Wire, ipc, parse_send_stdout, submit_request, turn_closed, turn_lookup};
+use support::{
+    Watcher, Wire, configure_request, ipc, parse_send_stdout, submit_request, turn_closed,
+    turn_lookup,
+};
 
 /// 直接经 IPC 提交时由测试充当客户端生成的身份。
 const TURN: &str = "00000000-0000-4000-8000-000000000001";
@@ -413,16 +416,26 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let beta_sid = beta_turn["session_id"].as_str().unwrap().to_owned();
         assert_ne!(beta_sid, sid);
         let sessions = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
-        let keys: BTreeSet<_> = sessions
+        let paths: BTreeSet<Vec<u8>> = sessions
             .as_array()
             .unwrap()
             .iter()
-            .map(|row| row["project_store_key"].as_str().unwrap())
+            .map(|row| {
+                row["project_path"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|byte| u8::try_from(byte.as_u64().unwrap()).unwrap())
+                    .collect()
+            })
             .collect();
+        let expected_paths = BTreeSet::from([
+            support::path_bytes(&world.project_dir().canonicalize().unwrap()).to_vec(),
+            support::path_bytes(&beta.canonicalize().unwrap()).to_vec(),
+        ]);
         assert_eq!(
-            keys.len(),
-            2,
-            "两个项目在共享后台中各自绑定独立的 project_store_key"
+            paths, expected_paths,
+            "两个项目在共享后台中各自绑定各自的规范项目路径"
         );
         // 跨项目写操作（在 alpha 工作区 rewind beta 会话）被项目绑定检查拒绝。
         cli(
@@ -795,8 +808,9 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         expected.push(segment(SegmentKind::Text, "t70;"));
         drop(resumed);
         for (index, request) in [
-            submit_request(&world, OTHER, json!({"existing":sid}), "must be busy", Some("vertical")),
-            json!({"operation":"rewind","session_id":sid,"target":2,"workspace":world.project_dir()}),
+            submit_request(&world, OTHER, &sid, "must be busy"),
+            configure_request(&world, json!({"existing":sid}), Some("vertical"), None, None),
+            json!({"operation":"rewind","session_id":sid,"target":2,"workspace":support::path_bytes(world.project_dir())}),
         ]
         .into_iter()
         .enumerate()
@@ -807,17 +821,11 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                 .record_json(&format!("busy-{index}"), &rejected)
                 .unwrap();
         }
-        // 同一 TurnId 再次提交不找回原请求，而是冲突；新会话不会因此建立。
+        // 同一 TurnId 再次提交不找回原请求，而是先于会话存在性返回冲突；不会建立额外会话。
         let reused = ipc(
             &world,
             timeout(&world, &spec),
-            submit_request(
-                &world,
-                &tid,
-                json!({"new":SESSION}),
-                "original input",
-                Some("vertical"),
-            ),
+            submit_request(&world, &tid, SESSION, "original input"),
         );
         assert_eq!(reused["response"], "error", "{reused}");
         assert_eq!(reused["value"]["kind"], "conflict");
@@ -1238,7 +1246,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             "{:?}",
             parsed.malformed_lines
         );
-        assert_eq!(parsed.sending(), Some((tid, sid, true)));
+        assert_eq!(parsed.sending(), Some((tid, sid)));
         let receipt = parsed.receipt().expect("one receipt");
         assert!(receipt.recovered);
         assert_eq!(parsed.accepted_turn_id(), Some(tid));
@@ -2758,20 +2766,26 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
         std::fs::write(schedule.join("admission_registered.arm"), b"").unwrap();
         world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
         let daemon = support::crash::start(&world, &spec, &budget);
-        // 先用只读的 `status` 确认后台说同一协议；协议不符时在这里直接失败。
+        // 先用只读的 `status` 确认后台说同一协议，再建立草稿会话。
         let status = ipc(
             &world,
             timeout(&world, &spec),
             json!({"operation":"status"}),
         );
         assert_eq!(status["response"], "status", "{status}");
-        let request = submit_request(
+        let configured = ipc(
             &world,
-            TURN,
-            json!({"new":SESSION}),
-            "admission window",
-            Some("admission"),
+            timeout(&world, &spec),
+            configure_request(
+                &world,
+                json!({"new":SESSION}),
+                Some("admission"),
+                None,
+                None,
+            ),
         );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let request = submit_request(&world, TURN, SESSION, "admission window");
         let mut pending = Wire::connect(&world, timeout(&world, &spec), &request);
         // 标记出现之前这次提交不能已有回执：已回复说明后台没有在准入前暂停。
         let ready = schedule.join("admission_registered.ready");
@@ -2809,26 +2823,20 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
             serde_json::from_slice::<Value>(&shown.stdout).unwrap(),
             json!({"status":"in_flight","turn_id":TURN})
         );
-        // 同一 TurnId 再提交是冲突；另一 TurnId 以 New(S) 提交同一个 S 是 Busy。
+        // 同一 TurnId 再提交是冲突；另一 TurnId 或 configure 访问同一个 S 是 Busy。
         let reused = ipc(&world, timeout(&world, &spec), request.clone());
         assert_eq!(reused["value"]["kind"], "conflict", "{reused}");
         assert_eq!(reused["value"]["conflict"], "turn_id_used", "{reused}");
         let racing = ipc(
             &world,
             timeout(&world, &spec),
-            submit_request(
-                &world,
-                OTHER,
-                json!({"new":SESSION}),
-                "racing",
-                Some("admission"),
-            ),
+            submit_request(&world, OTHER, SESSION, "racing"),
         );
         assert_eq!(racing["value"]["kind"], "busy", "{racing}");
         evidence
             .record_json("window-replies", &json!({"reused":reused,"racing":racing}))
             .unwrap();
-        // 提交端断开后放行：后台确认连接已不在，不准入；在途登记随之结束。
+        // 提交端断开后放行：后台确认连接已不在，不准入；在途登记随之结束，草稿停在根节点。
         drop(pending);
         std::fs::write(schedule.join("admission_registered.release"), b"").unwrap();
         let until = deadline(&world, &spec);
@@ -2845,24 +2853,19 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
         };
         assert_eq!(settled["response"], "error", "{settled}");
         assert_eq!(settled["value"]["kind"], "not_found", "{settled}");
-        let absent = ipc(
+        let draft_head = ipc(
             &world,
             timeout(&world, &spec),
-            json!({"operation":"watch","session_id":SESSION}),
+            json!({"operation":"head","session_id":SESSION}),
         );
-        assert_eq!(absent["value"]["kind"], "not_found", "{absent}");
+        assert_eq!(draft_head["value"]["position"], 0, "{draft_head}");
+        assert_eq!(draft_head["value"]["turn_id"], Value::Null, "{draft_head}");
         assert!(provider.captured_requests().is_empty());
-        // 之后用新的 TurnId 以 New(S) 提交，正常准入并执行。
+        // 之后用新的 TurnId 提交同一个草稿会话，正常准入并执行。
         let admitted = ipc(
             &world,
             timeout(&world, &spec),
-            submit_request(
-                &world,
-                THIRD,
-                json!({"new":SESSION}),
-                "admitted",
-                Some("admission"),
-            ),
+            submit_request(&world, THIRD, SESSION, "admitted"),
         );
         assert_eq!(admitted["value"]["acceptance"], "accepted", "{admitted}");
         assert_eq!(admitted["value"]["turn"]["session_id"], SESSION);
@@ -2876,7 +2879,7 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
         evidence
             .record_json(
                 "after-release",
-                &json!({"lookup":settled,"absent":absent,"admitted":admitted,"watch":watcher.received}),
+                &json!({"lookup":settled,"draft_head":draft_head,"admitted":admitted,"watch":watcher.received}),
             )
             .unwrap();
         stage(&world, &spec, &mut evidence, SESSION, THIRD);
@@ -2899,7 +2902,7 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
 }
 
 #[test]
-fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
+fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
     for replacement in [false, true] {
         let (world, spec) = support::direct_world(
             if replacement {
@@ -2916,16 +2919,16 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
             let provider =
                 support::wire_fake_llm(&world, "recover", SseScript::plain("copy restart reply"));
             if replacement {
+                let configured = ipc(
+                    &world,
+                    timeout(&world, &spec),
+                    configure_request(&world, json!({"new":SESSION}), Some("recover"), None, None),
+                );
+                assert_eq!(configured["response"], "configure", "{configured}");
                 let reply = ipc(
                     &world,
                     timeout(&world, &spec),
-                    submit_request(
-                        &world,
-                        TURN,
-                        json!({"new":SESSION}),
-                        "before replacement",
-                        Some("recover"),
-                    ),
+                    submit_request(&world, TURN, SESSION, "before replacement"),
                 );
                 assert_eq!(reply["response"], "acceptance");
                 let deadline = deadline(&world, &spec);
@@ -2955,16 +2958,16 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
             } else {
                 json!({"new":SESSION})
             };
+            let configured = ipc(
+                &world,
+                timeout(&world, &spec),
+                configure_request(&world, session, Some("recover"), None, None),
+            );
+            assert_eq!(configured["response"], "configure", "{configured}");
             let wire = Wire::connect(
                 &world,
                 timeout(&world, &spec),
-                &submit_request(
-                    &world,
-                    OTHER,
-                    session,
-                    "accepted replacement",
-                    Some("recover"),
-                ),
+                &submit_request(&world, OTHER, SESSION, "accepted replacement"),
             );
             let marker = wait_for_ack(&ack, timeout(&world, &spec));
             assert_eq!(marker["turn_id"], OTHER);
@@ -2981,7 +2984,7 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
             );
             assert_eq!(head["value"]["model"], "replacement");
             assert_eq!(head["value"]["effort"], "off");
-            assert_eq!(head["value"]["profile_default_effort"], "off");
+            assert!(head["value"]["settings_version"].as_str().is_some());
             let mut watcher = Watcher::open(&world, timeout(&world, &spec), SESSION);
             let view = watcher.initial();
             let node = if replacement { 3 } else { 1 };
@@ -2992,13 +2995,7 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
             let duplicate = ipc(
                 &world,
                 timeout(&world, &spec),
-                submit_request(
-                    &world,
-                    OTHER,
-                    json!({"existing":SESSION}),
-                    "accepted replacement",
-                    None,
-                ),
+                submit_request(&world, OTHER, SESSION, "accepted replacement"),
             );
             assert_eq!(duplicate["value"]["conflict"], "turn_id_used");
             std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/recover")).unwrap();
@@ -3049,4 +3046,176 @@ fn accepted_profile_copy_and_choice_reopen_together_before_receipt() {
         }));
         support::finish_recorded(evidence, result);
     }
+}
+
+#[test]
+fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
+    use lattice_system_harness::{
+        ConfigureRecord, ConfigureResult, Receipt, ReceiptResult, SendRecord, Submit,
+    };
+
+    let driver = support::driver();
+    let (world, spec) = support::direct_world("configure-committed-crash", "recover", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let provider =
+            support::wire_fake_llm(&world, "recover", SseScript::plain("after configure crash"));
+        let ack = world.root().join("configure-committed.json");
+        world.set_env(BARRIER, "configure_committed");
+        world.set_env(ACK, ack.display().to_string());
+        let daemon = support::crash::start(&world, &spec, &budget);
+
+        // CLI 对新会话先写明 submit(sending)，随后 configure(New) 在持久创建提交后、回复前停在屏障。
+        let frontend = driver
+            .start(
+                &world,
+                &LatticeCommand {
+                    args: [
+                        "--json",
+                        "session",
+                        "send",
+                        "first draft turn",
+                        "--agent",
+                        "recover",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                    timeout: Some(timeout(&world, &spec)),
+                },
+            )
+            .unwrap();
+        let marker = wait_for_ack(&ack, timeout(&world, &spec));
+        assert_eq!(marker["barrier"], "configure_committed", "{marker}");
+        assert_eq!(marker["turn_id"], Value::Null, "{marker}");
+        assert_eq!(marker["current"], 0, "{marker}");
+        let sid = marker["session_id"].as_str().unwrap().to_owned();
+        assert!(provider.captured_requests().is_empty());
+
+        evidence
+            .record_json(
+                "crash-processes",
+                &json!({
+                    "backend_pid": daemon.pgid(),
+                    "backend_pgid": daemon.pgid(),
+                    "frontend_pgid": frontend.pgid(),
+                    "binary": driver.binary_path(),
+                    "state_root": world.session_store_dir().parent(),
+                }),
+            )
+            .unwrap();
+        assert_ne!(daemon.pgid(), frontend.pgid());
+        support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+        let disconnected = frontend.wait(None).unwrap();
+        evidence.record_command("frontend observes configure crash", &disconnected);
+        assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
+
+        // `configure_once` 直接连接 socket 而不自动拉起后台；原后台被杀后两次重试均得到 `not_running`，
+        // 因此 CLI 输出 `configure(unknown)` 与 `submit(not_accepted)`，以退出码 1 结束。
+        let parsed = parse_send_stdout(&disconnected.stdout, disconnected.exit_code());
+        assert!(
+            parsed.malformed_lines.is_empty(),
+            "{:?}",
+            parsed.malformed_lines
+        );
+        assert_eq!(parsed.records.len(), 3, "{:?}", parsed.records);
+        let (tid, sent_sid) = match &parsed.records[0] {
+            SendRecord::Submit(Submit::Sending {
+                turn_id,
+                session_id,
+            }) => (turn_id.clone(), session_id.clone()),
+            other => panic!("第一条 JSONL 必须是写明身份的 submit(sending)：{other:?}"),
+        };
+        assert_eq!(sent_sid, sid);
+        match &parsed.records[1] {
+            SendRecord::Configure(ConfigureRecord {
+                session_id,
+                result: ConfigureResult::Unknown(Some(error)),
+            }) => {
+                assert_eq!(session_id, &sid);
+                assert_eq!(error.kind, "not_running", "{error:?}");
+            }
+            other => panic!("第二条 JSONL 必须是 configure(unknown)：{other:?}"),
+        }
+        assert_eq!(
+            parsed.records[2],
+            SendRecord::Submit(Submit::Receipt(Receipt {
+                turn_id: tid.clone(),
+                result: ReceiptResult::NotAccepted,
+                recovered: false,
+            }))
+        );
+
+        // 重启后台后：状态根中只有这一个草稿会话 S，原 Turn 未写入，后续在同一会话发送只执行一轮。
+        world.unset_env(BARRIER);
+        world.unset_env(ACK);
+        let restarted = support::crash::start(&world, &spec, &budget);
+        let list = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
+        assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
+        assert_eq!(list[0]["session_id"], sid);
+        assert_eq!(list[0]["node_count"], 1);
+        assert_eq!(list[0]["current"], 0);
+        assert_eq!(list[0]["unclosed_turn"], Value::Null);
+        let lookup = turn_lookup(&world, timeout(&world, &spec), &tid);
+        assert_eq!(lookup["response"], "error", "{lookup}");
+        assert_eq!(lookup["value"]["kind"], "not_found", "{lookup}");
+        let head = ipc(
+            &world,
+            timeout(&world, &spec),
+            json!({"operation":"head", "session_id":&sid}),
+        );
+        assert_eq!(head["response"], "head", "{head}");
+        assert_eq!(head["value"]["position"], 0);
+        assert_eq!(head["value"]["agent"], "recover");
+        assert_eq!(head["value"]["turn_id"], Value::Null);
+        let duplicate_new = ipc(
+            &world,
+            timeout(&world, &spec),
+            configure_request(&world, json!({"new":&sid}), Some("recover"), None, None),
+        );
+        assert_eq!(duplicate_new["value"]["conflict"], "session_exists");
+
+        let resumed = cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &[
+                "--json",
+                "session",
+                "send",
+                "continue after configure crash",
+                "--session",
+                &sid,
+            ],
+            0,
+        );
+        let resumed_parsed = parse_send_stdout(&resumed.stdout, resumed.exit_code());
+        support::assert_accepted_and_closed(&resumed_parsed).unwrap();
+        let resumed_tid = resumed_parsed.accepted_turn_id().unwrap().to_owned();
+        assert_eq!(provider.captured_requests().len(), 1);
+        let after_list = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
+        assert_eq!(after_list.as_array().unwrap().len(), 1, "{after_list}");
+        assert_eq!(after_list[0]["session_id"], sid);
+        assert_eq!(after_list[0]["node_count"], 3);
+        let tree = read_json(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "log", &sid],
+        );
+        assert_eq!(tree["nodes"].as_array().unwrap().len(), 3);
+        stage(&world, &spec, &mut evidence, &sid, &resumed_tid);
+        evidence.record_captures(provider.captured_requests());
+        cli(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "daemon", "stop"],
+            0,
+        );
+        world.daemon_departed().unwrap();
+        assert!(restarted.wait(None).unwrap().is_clean_exit(0));
+    }));
+    support::finish_recorded(evidence, result);
 }

@@ -231,7 +231,7 @@ impl SessionStore {
     ) -> Result<T> {
         self.check_lock(lock, lock.session_id)?;
         // 必须在 begin_write 前取得健康锁；commit 释放 redb 写者后仍不能让等待者抢跑。
-        let mut disabled = self.execution_health()?;
+        let disabled = self.execution_health()?;
         let mut tx = self.db.begin_write()?;
         tx.set_durability(redb::Durability::Immediate)?;
         let (before, scope) =
@@ -243,6 +243,15 @@ impl SessionStore {
             return Ok(value);
         }
         codec::attach_path(&self.path, codec::persist(&tx, &before, &after))?;
+        self.commit_write(disabled, tx, value)
+    }
+
+    fn commit_write<T>(
+        &self,
+        mut disabled: std::sync::MutexGuard<'_, bool>,
+        tx: redb::WriteTransaction,
+        value: T,
+    ) -> Result<T> {
         #[cfg(test)]
         write_probe(WriteStage::BeforeCommit);
         #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
@@ -283,12 +292,89 @@ impl SessionStore {
         }
     }
 
+    pub fn create_session(
+        &self,
+        lock: &SessionExecutionLock,
+        project_path: ProjectPath,
+        settings: SessionSettings,
+        now: Timestamp,
+    ) -> Result<SessionRecord> {
+        self.check_lock(lock, lock.session_id)?;
+        settings.validate()?;
+        self.write(lock, Selection::Session, |r, _| {
+            let s = lock.session_id;
+            if r.sessions.contains_key(&s) {
+                return Err(StoreError::SessionCollision { session_id: s });
+            }
+            let record = SessionRecord {
+                session_id: s,
+                project_path,
+                current: NodeId(0),
+                created_at: now,
+                updated_at: now,
+            };
+            r.sessions.insert(s, record.clone());
+            r.nodes.insert((s, NodeId(0)), Node::Root);
+            r.session_settings.insert(s, settings);
+            Ok(record)
+        })
+    }
+
+    pub fn update_settings(
+        &self,
+        lock: &SessionExecutionLock,
+        project_path: &ProjectPath,
+        settings: SessionSettings,
+        now: Timestamp,
+    ) -> Result<SessionRecord> {
+        self.check_lock(lock, lock.session_id)?;
+        settings.validate()?;
+        self.write(lock, Selection::Session, |r, _| {
+            let s = lock.session_id;
+            let session = r
+                .sessions
+                .get_mut(&s)
+                .ok_or_else(|| missing("session", s))?;
+            check_binding(session, project_path)?;
+            session.updated_at = now;
+            let record = session.clone();
+            r.session_settings.insert(s, settings);
+            Ok(record)
+        })
+    }
+
+    pub fn delete_draft(&self, lock: &SessionExecutionLock, cutoff: Timestamp) -> Result<bool> {
+        let s = lock.session_id;
+        self.check_lock(lock, s)?;
+        let disabled = self.execution_health()?;
+        let mut tx = self.db.begin_write()?;
+        tx.set_durability(redb::Durability::Immediate)?;
+        let (before, scope) =
+            codec::attach_path(&self.path, local::write(&tx, s, Selection::Session))?;
+        validate::local(&before, &scope)?;
+        let Some(session) = before.sessions.get(&s) else {
+            return Ok(false);
+        };
+        // 按节点范围的最大键判断整棵树只有根节点，不看局部加载条数或 current == 0。
+        if before.node_tip != Some(NodeId(0)) || session.updated_at >= cutoff {
+            return Ok(false);
+        }
+        let mut after = before;
+        after.sessions.remove(&s);
+        after.nodes.remove(&(s, NodeId(0)));
+        after.session_settings.remove(&s);
+        after.node_tip = None;
+        validate::local(&after, &scope)?;
+        codec::attach_path(&self.path, codec::delete_draft(&tx, s))?;
+        self.commit_write(disabled, tx, true)
+    }
+
     pub fn accept_turn(
         &self,
         lock: &SessionExecutionLock,
         input: AcceptTurn,
     ) -> Result<AcceptedTurn> {
-        self.check_lock(lock, input.session.id())?;
+        self.check_lock(lock, input.session_id)?;
         self.write(lock, Selection::Accept(input.turn_id), |r, _| {
             if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
                 let s = node_ref.session_id;
@@ -297,9 +383,9 @@ impl SessionStore {
                     .get(&s)
                     .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
                 let existing_input = r.turn_input(s, input.turn_id)?;
-                if existing_input != input.input
-                    || existing_session.project_store_key != input.project_store_key
-                    || matches!(input.session, AcceptSession::Existing { id } if id != s)
+                if s != input.session_id
+                    || existing_input != input.input
+                    || existing_session.project_path != input.project_path
                 {
                     return Err(StoreError::Conflict {
                         turn_id: input.turn_id,
@@ -311,51 +397,25 @@ impl SessionStore {
                 return Err(invalid("input", "user input exceeds byte bound"));
             }
             validate::config(&input.config)?;
-            let s = input.session.id();
-            if matches!(input.session, AcceptSession::New { .. }) {
-                if r.sessions.contains_key(&s) {
-                    return Err(StoreError::SessionCollision { session_id: s });
-                }
-                if input.agent_selection != AgentSelection::Explicit {
-                    return Err(invalid("agent", "new session requires explicit agent"));
-                }
-                r.sessions.insert(
-                    s,
-                    SessionRecord {
-                        session_id: s,
-                        project_store_key: input.project_store_key,
-                        current: NodeId(0),
-                        created_at: input.accepted_at,
-                        updated_at: input.accepted_at,
-                    },
-                );
-                r.nodes.insert((s, NodeId(0)), Node::Root);
-            }
+            let s = input.session_id;
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
-            if session.project_store_key != input.project_store_key {
-                return Err(invalid("project", "session binding mismatch"));
-            }
-            let previous = r.profile_copies.get(&s);
-            let actual_digest = previous.map(SessionProfileCopy::digest).transpose()?;
-            if actual_digest != input.expected_profile_digest {
-                return Err(StoreError::Conflict {
-                    turn_id: input.turn_id,
-                });
-            }
-            if !input.profile_copy.matches_config(&input.config) {
-                return Err(invalid(
-                    "profile",
-                    "profile copy differs from frozen configuration",
-                ));
-            }
-            if input.agent_selection == AgentSelection::Inherited {
-                let previous =
-                    previous.ok_or_else(|| invalid("profile", "inherited profile copy missing"))?;
-                if previous.profile != input.profile_copy.profile
-                    || previous.prompt_config_digest != input.profile_copy.prompt_config_digest
-                {
-                    return Err(invalid("profile", "inherited profile data changed"));
-                }
+            check_binding(session, &input.project_path)?;
+            let current_settings = r.session_settings.get(&s).ok_or_else(|| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "missing session settings",
+                )
+            })?;
+            current_settings.validate().map_err(|_| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "invalid session settings",
+                )
+            })?;
+            if current_settings.version()? != input.settings_version {
+                return Err(StoreError::SettingsChanged { session_id: s });
             }
             let parent = session.current;
             let user_node = r.next_node(s)?;
@@ -365,23 +425,6 @@ impl SessionStore {
                 .digest()
                 .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
             r.configs.entry(config_digest).or_insert(stored);
-            let prompt = r
-                .configs
-                .get(&input.profile_copy.prompt_config_digest)
-                .ok_or_else(|| invalid("profile", "profile prompt reference missing"))?;
-            if prompt.system_prompt != input.config.system_prompt {
-                return Err(invalid(
-                    "profile",
-                    "profile prompt differs from frozen configuration",
-                ));
-            }
-            if input.agent_selection == AgentSelection::Explicit
-                || r.profile_copies
-                    .get(&s)
-                    .is_none_or(|copy| copy.current != input.profile_copy.current)
-            {
-                r.profile_copies.insert(s, input.profile_copy);
-            }
             r.nodes.insert(
                 (s, user_node),
                 Node::UserMessage {
@@ -936,6 +979,7 @@ impl SessionStore {
         &self,
         lock: &SessionExecutionLock,
         target: NodeId,
+        project_path: &ProjectPath,
         now: Timestamp,
     ) -> Result<SessionRecord> {
         self.write(lock, Selection::Node(target), |r, _| {
@@ -943,6 +987,7 @@ impl SessionStore {
                 .sessions
                 .get_mut(&lock.session_id)
                 .ok_or_else(|| missing("session", lock.session_id))?;
+            check_binding(s, project_path)?;
             if !r.nodes.contains_key(&(lock.session_id, target)) {
                 return Err(missing("node", target.0));
             }
@@ -951,6 +996,17 @@ impl SessionStore {
                 s.updated_at = now;
             }
             Ok(s.clone())
+        })
+    }
+}
+
+/// 会话库写入时再核对一次项目绑定（ADR 0012 第 8 节）；后台在写入之前已按同一规则核对过。
+fn check_binding(session: &SessionRecord, project_path: &ProjectPath) -> Result<()> {
+    if session.project_path == *project_path {
+        Ok(())
+    } else {
+        Err(StoreError::BindingMismatch {
+            session_id: session.session_id,
         })
     }
 }

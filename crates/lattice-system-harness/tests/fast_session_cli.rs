@@ -257,10 +257,16 @@ fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
                 "20000000-0000-4000-8000-000000000002",
             ),
         ] {
+            let configured = support::ipc(
+                &world,
+                budget.cap_timeout(spec.step_timeout()),
+                support::configure_request(&world, json!({"new":sid}), Some("plain"), None, None),
+            );
+            assert_eq!(configured["response"], "configure", "{configured}");
             let accepted = support::ipc(
                 &world,
                 budget.cap_timeout(spec.step_timeout()),
-                support::submit_request(&world, tid, json!({"new":sid}), "seed", Some("plain")),
+                support::submit_request(&world, tid, sid, "seed"),
             );
             evidence.record_json("acceptance", &accepted).unwrap();
             assert_eq!(accepted["value"]["acceptance"], "accepted");
@@ -504,6 +510,20 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
             if matches!(case, "toml" | "known-key") {
+                // `lattice tui --agent` 在启动时执行 `configure(New)`，profile 错误在进入主屏幕前退出。
+                let out = cli(&world, &spec, &["tui", "--agent", agent]);
+                evidence.record_command("tui startup configuration rejection", &out);
+                assert!(out.is_clean_exit(2), "{}", out.summary());
+                assert_no_secret(&out, SENTINEL).unwrap();
+                assert_no_secret(&out, FAKE_API_KEY).unwrap();
+                assert_no_secret(&out, ORDINARY_KEY).unwrap();
+                assert_no_secret(&out, &long_key).unwrap();
+                assert_no_secret(&out, LONG_FRAGMENT).unwrap();
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(stderr.contains(&messages[0]), "{case}: {stderr}");
+            }
+            if case == "missing-key" {
+                // 凭据不在启动 `configure(New)` 时核对，而在提交准入时拒绝并归还输入。
                 let budget = world.budget(&spec);
                 let mut tui = PtyTuiDriver::spawn(&driver(), &world, agent).unwrap();
                 let pty_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -576,10 +596,25 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             if world.session_store_dir().join("lattice.redb").exists() {
                 let sessions = cli(&world, &spec, &["--json", "session", "list"]);
-                evidence.record_command("no Session before acceptance", &sessions);
+                evidence.record_command("session state after rejection", &sessions);
                 assert!(sessions.is_clean_exit(0));
                 let sessions: serde_json::Value = serde_json::from_slice(&sessions.stdout).unwrap();
-                assert!(sessions.as_array().unwrap().is_empty());
+                if matches!(case, "missing-key" | "invalid-auth" | "oauth-chatgpt") {
+                    // 凭据在 `submit` 阶段核对：`configure(New)` 已创建只有根节点的草稿，但未接受任何轮次。
+                    assert!(
+                        sessions
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|session| session["node_count"] == 1),
+                        "{case}: {sessions}"
+                    );
+                } else {
+                    assert!(
+                        sessions.as_array().unwrap().is_empty(),
+                        "{case}: {sessions}"
+                    );
+                }
             }
             evidence
                 .record_json(
@@ -593,4 +628,182 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         evidence.record_captures(server.captured_requests());
         support::finish_recorded(evidence, result);
     }
+}
+
+#[test]
+fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
+    use lattice_system_harness::RunningCommand;
+    use std::ffi::OsString;
+    use std::os::unix::ffi::{OsStrExt, OsStringExt};
+
+    let (world, spec) = direct_world("session-non-utf8-project-path", "plain", "");
+    let server = wire_fake_llm(
+        &world,
+        "plain",
+        support::sequence(vec![
+            SseScript::plain("first non-utf8 reply"),
+            SseScript::plain("second non-utf8 reply"),
+            SseScript::plain("must not run"),
+        ]),
+    );
+    let driver = driver();
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let non_utf8_dir = world
+            .root()
+            .join(OsString::from_vec(b"project-\xff-workspace".to_vec()));
+        std::fs::create_dir_all(non_utf8_dir.join(".lattice/agents/plain")).unwrap();
+        std::fs::copy(
+            world.project_dir().join(".lattice/agents/plain/agent.toml"),
+            non_utf8_dir.join(".lattice/agents/plain/agent.toml"),
+        )
+        .unwrap();
+        let canonical = non_utf8_dir.canonicalize().unwrap();
+        let expected_bytes: Vec<Value> = canonical
+            .as_os_str()
+            .as_bytes()
+            .iter()
+            .map(|byte| Value::from(*byte))
+            .collect();
+        let expected_lossy = canonical.to_string_lossy().into_owned();
+        assert!(expected_lossy.contains('\u{fffd}'));
+
+        let run_in =
+            |dir: &std::path::Path,
+             label: &str,
+             args: &[&str],
+             evidence: &mut lattice_system_harness::ScenarioEvidence| {
+                let mut cmd = world.command(driver.binary_path());
+                cmd.current_dir(dir).args(args);
+                let out = RunningCommand::spawn(cmd)
+                    .unwrap()
+                    .wait(Some(budget.cap_timeout(spec.step_timeout())))
+                    .unwrap();
+                evidence.record_command(format!("{label}: {}", args.join(" ")), &out);
+                out
+            };
+
+        // 在含 0xff 字节的项目目录中新建会话并完成首轮发送。
+        let first = run_in(
+            &non_utf8_dir,
+            "non-utf8 first send",
+            &[
+                "--json",
+                "session",
+                "send",
+                "first from non-utf8",
+                "--agent",
+                "plain",
+            ],
+            &mut evidence,
+        );
+        assert!(first.is_clean_exit(0), "{}", first.summary());
+        let first_parsed = parse_send_stdout(&first.stdout, first.exit_code());
+        assert!(first_parsed.malformed_lines.is_empty());
+        support::assert_accepted_and_closed(&first_parsed).unwrap();
+        let sid = first_parsed.accepted_session_id().unwrap().to_owned();
+
+        // `session list` 文本输出以替换字符显示路径；`--json` 保留与规范路径完全一致的原始字节数组。
+        let list_text_out = run_in(
+            &non_utf8_dir,
+            "non-utf8 text list",
+            &["session", "list"],
+            &mut evidence,
+        );
+        assert!(
+            list_text_out.is_clean_exit(0),
+            "{}",
+            list_text_out.summary()
+        );
+        let list_text = String::from_utf8(list_text_out.stdout).unwrap();
+        assert!(list_text.contains('\u{fffd}'), "{list_text}");
+        assert!(
+            list_text.contains(&format!("project={expected_lossy}")),
+            "{list_text}"
+        );
+
+        let list_json_out = run_in(
+            &non_utf8_dir,
+            "non-utf8 json list",
+            &["--json", "session", "list"],
+            &mut evidence,
+        );
+        assert!(
+            list_json_out.is_clean_exit(0),
+            "{}",
+            list_json_out.summary()
+        );
+        let list_json: Value = serde_json::from_slice(&list_json_out.stdout).unwrap();
+        assert_eq!(list_json.as_array().unwrap().len(), 1, "{list_json}");
+        assert_eq!(list_json[0]["session_id"], sid);
+        assert_eq!(
+            list_json[0]["project_path"],
+            Value::Array(expected_bytes.clone())
+        );
+
+        // 在同一非 UTF-8 目录继续 `--session S` 发送成功。
+        let second = run_in(
+            &non_utf8_dir,
+            "non-utf8 second send",
+            &[
+                "--json",
+                "session",
+                "send",
+                "second from non-utf8",
+                "--session",
+                &sid,
+            ],
+            &mut evidence,
+        );
+        assert!(second.is_clean_exit(0), "{}", second.summary());
+        let second_parsed = parse_send_stdout(&second.stdout, second.exit_code());
+        assert!(second_parsed.malformed_lines.is_empty());
+        support::assert_accepted_and_closed(&second_parsed).unwrap();
+        assert_eq!(server.captured_requests().len(), 2);
+
+        // 切到另一个目录对同一会话发送：返回项目绑定不一致冲突，退出码 2，且不写新节点。
+        let mismatch = run_in(
+            world.project_dir(),
+            "other-dir send mismatch",
+            &[
+                "--json",
+                "session",
+                "send",
+                "wrong directory",
+                "--session",
+                &sid,
+            ],
+            &mut evidence,
+        );
+        assert!(mismatch.is_clean_exit(2), "{}", mismatch.summary());
+        let mismatch_parsed = parse_send_stdout(&mismatch.stdout, mismatch.exit_code());
+        assert!(mismatch_parsed.malformed_lines.is_empty());
+        let rejection = mismatch_parsed
+            .rejection()
+            .expect("跨项目目录发送应以冲突拒绝");
+        assert_eq!(rejection.kind, "conflict", "{rejection:?}");
+        assert_eq!(
+            rejection.conflict.as_deref(),
+            Some("binding_mismatch"),
+            "{rejection:?}"
+        );
+        assert_eq!(server.captured_requests().len(), 2);
+
+        let log_out = run_in(
+            &non_utf8_dir,
+            "non-utf8 json log",
+            &["--json", "session", "log", &sid],
+            &mut evidence,
+        );
+        assert!(log_out.is_clean_exit(0), "{}", log_out.summary());
+        let log_json: Value = serde_json::from_slice(&log_out.stdout).unwrap();
+        assert_eq!(
+            log_json["session"]["project_path"],
+            Value::Array(expected_bytes)
+        );
+        assert_eq!(log_json["nodes"].as_array().unwrap().len(), 5);
+    }));
+    evidence.record_captures(server.captured_requests());
+    support::finish_recorded(evidence, result);
 }

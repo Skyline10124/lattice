@@ -94,6 +94,11 @@ impl ObserverSink {
         state.watchers.push(Arc::downgrade(&cursor));
         cursor
     }
+    pub(crate) fn has_watchers(&self) -> bool {
+        let mut state = self.state.lock().expect("observation lock");
+        state.watchers.retain(|watcher| watcher.strong_count() != 0);
+        !state.watchers.is_empty()
+    }
     fn mark(state: &mut ObservationState, nodes: &[NodeId], replace: bool) {
         state.watchers.retain(|watcher| {
             let Some(watcher) = watcher.upgrade() else {
@@ -382,15 +387,23 @@ fn head_from_node(
     position: NodeId,
     current: &Node,
 ) -> lattice_session::store::Result<SessionHead> {
-    let copy = read.profile_copy(session_id)?;
+    let settings = read.session_settings(session_id)?;
+    let settings_version = settings.version()?;
+    let (provider, model) = match &settings.model {
+        Some(target) => (
+            Some(target.provider().clone()),
+            Some(target.model().clone()),
+        ),
+        None => (None, None),
+    };
     Ok(SessionHead {
         session_id,
         position,
-        agent: copy.profile.agent_name.as_str().to_owned(),
-        model: copy.current.model.as_str().to_owned(),
-        provider: copy.current.provider.as_str().to_owned(),
-        effort: copy.current.effort,
-        profile_default_effort: copy.profile.default_effort,
+        agent: settings.profile.agent_name.as_str().to_owned(),
+        model,
+        provider,
+        effort: settings.effort,
+        settings_version,
         turn_id: current.turn_id(),
         owner: false,
         diagnostic: None,

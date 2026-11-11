@@ -12,6 +12,7 @@ pub enum RequestConflict {
     TurnIdUsed,
     SessionExists,
     BindingMismatch,
+    SettingsChanged,
 }
 
 impl std::fmt::Display for RequestConflict {
@@ -20,6 +21,7 @@ impl std::fmt::Display for RequestConflict {
             Self::TurnIdUsed => "TurnId is already in use",
             Self::SessionExists => "session already exists",
             Self::BindingMismatch => "session is bound to another workspace",
+            Self::SettingsChanged => "session settings changed",
         })
     }
 }
@@ -225,6 +227,7 @@ mod tests {
                 RequestConflict::BindingMismatch,
                 "session is bound to another workspace",
             ),
+            (RequestConflict::SettingsChanged, "session settings changed"),
         ] {
             assert_eq!(
                 ApiError::Conflict(reason).to_string(),

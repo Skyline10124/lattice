@@ -17,35 +17,40 @@ fn seed(layout: &StateLayout, root: &std::path::Path) {
 }
 fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, tid: TurnId) {
     let guard = store.try_lock_session(sid).unwrap();
+    let project_path = lattice_api::LocalWorkspaceRoot::from_path(root)
+        .unwrap()
+        .project_path();
+    let config = FrozenTurnConfig {
+        effort: None,
+        agent_name: AgentName::parse("alpha").unwrap(),
+        model: ModelId::parse("test").unwrap(),
+        provider: ProviderId::parse("openai-compatible").unwrap(),
+        system_prompt: None,
+        catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
+        limits: TurnExecutionLimits {
+            timeout_secs: lattice_api::TurnTimeout::default(),
+            max_model_steps: 32,
+            max_model_attempts: 2,
+        },
+    };
+    let settings = SessionSettings::for_test(&config);
+    let settings_version = settings.version().unwrap();
     store
-        .accept_turn(&guard, {
-            let config = FrozenTurnConfig {
-                effort: None,
-                agent_name: AgentName::parse("alpha").unwrap(),
-                model: ModelId::parse("test").unwrap(),
-                provider: ProviderId::parse("openai-compatible").unwrap(),
-                system_prompt: None,
-                catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
-                limits: TurnExecutionLimits {
-                    timeout_secs: lattice_api::TurnTimeout::default(),
-                    max_model_steps: 32,
-                    max_model_attempts: 2,
-                },
-            };
+        .create_session(&guard, project_path.clone(), settings, chrono::Utc::now())
+        .unwrap();
+    store
+        .accept_turn(
+            &guard,
             AcceptTurn {
-                profile_copy: lattice_session::store::SessionProfileCopy::for_test(&config),
-                expected_profile_digest: None,
-                session: AcceptSession::New { id: sid },
+                session_id: sid,
                 turn_id: tid,
-                project_store_key: lattice_api::LocalWorkspaceRoot::from_path(root)
-                    .unwrap()
-                    .store_key(),
+                project_path,
                 input: "原始输入".into(),
                 accepted_at: chrono::Utc::now(),
-                agent_selection: AgentSelection::Explicit,
                 config,
-            }
-        })
+                settings_version,
+            },
+        )
         .unwrap();
 }
 

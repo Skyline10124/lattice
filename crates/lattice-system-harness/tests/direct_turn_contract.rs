@@ -184,24 +184,26 @@ fn direct_turn_registered_model_with_missing_credentials_rejects_before_acceptan
                 && send.session_id().is_none(),
             "reject before Session acceptance",
         )?;
-        // 身份先于提交输出；后台在接受前拒绝缺少凭据，这次提交以 `rejected` 回执结束，
-        // 之后没有会话头、条目或文字。
+        // 身份先于提交输出；`configure(New)` 不检查凭据并创建只有根节点的草稿会话，
+        // 随后 `submit` 在准入时因缺少凭据被拒绝，不接受任何 Turn。
         require(
             matches!(
                 outcome.records.first(),
-                Some(SendRecord::Submit(Submit::Sending { new: true, .. }))
-            ) && outcome.rejection().is_some(),
+                Some(SendRecord::Submit(Submit::Sending { .. }))
+            ) && outcome.configures().count() == 1
+                && outcome.rejection().is_some(),
             format!(
-                "identity first, then only the rejected receipt: {:?}",
+                "identity first, then configured draft and rejected receipt: {:?}",
                 outcome.type_sequence()
             ),
         )?;
-        let error: Value = serde_json::from_slice(&list.stdout).unwrap();
+        let sessions: Value = serde_json::from_slice(&list.stdout).unwrap();
         require(
-            list.is_clean_exit(1)
-                && error["kind"] == "store_unavailable"
-                && !world.session_store_dir().join("lattice.redb").exists(),
-            "no empty store or Session after rejection",
+            list.is_clean_exit(0)
+                && sessions
+                    .as_array()
+                    .is_some_and(|items| items.len() == 1 && items[0]["node_count"] == 1),
+            format!("only unaccepted draft Session at root after credential rejection: {sessions}"),
         )
     })();
     finish_scenario(

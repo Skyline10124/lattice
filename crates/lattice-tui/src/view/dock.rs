@@ -404,7 +404,7 @@ impl<'a> Dock<'a> {
             (None, None) => Module::Input(InputModule {
                 input: &app.input,
                 focused: matches!(app.focus, Focus::Dock),
-                running: app.phase != TurnPhase::Idle,
+                running: app.phase != TurnPhase::Idle || !app.configure_in_flight.is_empty(),
                 queue_full: app.queue.is_full(),
                 comments: app.queue.draft_count(),
             }),

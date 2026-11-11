@@ -14,19 +14,6 @@ pub enum StoreError {
     #[error("Linux XDG state directory unavailable")]
     MissingStateRoot,
 
-    /// A `ProjectStoreKey` display string was not 64 lowercase hex chars.
-    #[error("invalid project store key: '{0}'")]
-    InvalidKey(String),
-
-    /// The workspace root could not be canonicalized for key derivation.
-    #[error("cannot canonicalize workspace root '{}': {source}", .path.display())]
-    CanonicalizeRoot {
-        /// The path that failed to canonicalize.
-        path: PathBuf,
-        /// The underlying I/O error.
-        source: std::io::Error,
-    },
-
     /// Plain I/O failure with operation context.
     #[error("io error while {operation} '{}': {source}", .path.display())]
     Io {

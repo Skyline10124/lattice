@@ -1,24 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! The single Local Workspace root resolver (ADR 0005 §3, GitHub #143).
+//! 本地工作区根目录的唯一解析入口（ADR 0005 §3、ADR 0012 §8）。
 //!
-//! CLI 与 TUI 统一通过本解析器获取当前本地工作区根目录，不存在第二套绑定启发式或惰性首轮绑定路径；
-//! 会话归属键直接由规范化工作区根目录派生。
+//! CLI 与 TUI 统一通过本解析器获取当前本地工作区规范根目录，不存在第二套绑定启发式或惰性首轮绑定路径；
+//! 会话绑定的项目路径直接取规范化工作区根目录的原始字节。
 
-use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 
-use lattice_session::ProjectStoreKey;
+use lattice_session::ProjectPath;
 
 use crate::session::{ApiError, Result};
 
-/// One explicitly resolved Local Workspace root: the canonical full root and
-/// its derived `ProjectStoreKey` storage address.
+/// 已显式解析并规范化的本地工作区根目录。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LocalWorkspaceRoot {
     canonical: PathBuf,
-    store_key: ProjectStoreKey,
 }
 
 impl LocalWorkspaceRoot {
@@ -39,12 +36,9 @@ impl LocalWorkspaceRoot {
                 path.display()
             ))
         })?;
-        let store_key =
-            ProjectStoreKey::from_canonical_path_bytes(canonical.as_os_str().as_bytes());
-        Ok(Self {
-            canonical,
-            store_key,
-        })
+        ProjectPath::from_path(&canonical)
+            .map_err(|err| ApiError::Internal(format!("规范化工作区路径非法: {err}")))?;
+        Ok(Self { canonical })
     }
 
     /// The canonical root path.
@@ -52,9 +46,9 @@ impl LocalWorkspaceRoot {
         &self.canonical
     }
 
-    /// The derived storage address.
-    pub fn store_key(&self) -> ProjectStoreKey {
-        self.store_key
+    /// 会话绑定使用的规范项目路径原始字节。
+    pub fn project_path(&self) -> ProjectPath {
+        ProjectPath::from_path(&self.canonical).expect("已校验的规范项目路径")
     }
 }
 

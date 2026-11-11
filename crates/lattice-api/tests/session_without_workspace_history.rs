@@ -132,46 +132,51 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
 
     let layout = StateLayout::in_state_root(state.path());
     let workspace = LocalWorkspaceRoot::from_path(workspace_dir.path()).unwrap();
-    let history_path = layout
-        .project_dir(&workspace.store_key())
-        .join("workspace-history.git");
+    let projects_dir = layout.projects_dir();
 
     let serving = tokio::spawn(serve_for_test(layout.clone(), Some(home.path().into())));
     let client = LocalClient::new(layout);
     wait_backend_ready(&client).await;
 
     let session_id = new_session_id();
-    let first_turn = new_turn_id();
-    let accepted = client
-        .submit(TurnRequest {
-            turn_id: first_turn,
-            session: SubmitSession::New(session_id),
+    client
+        .configure(ConfigureRequest {
+            session: ConfigureSession::New(session_id),
             workspace: workspace.canonical_path().to_path_buf(),
-            input: "第一轮对话".into(),
             agent: Some(AgentName::parse("alpha").unwrap()),
             model: None,
             effort: None,
         })
         .await
         .unwrap();
+    assert!(
+        !projects_dir.exists(),
+        "configure 新建会话不应创建 projects/ 目录"
+    );
+    let first_turn = new_turn_id();
+    let accepted = client
+        .submit(TurnRequest {
+            turn_id: first_turn,
+            session: session_id,
+            workspace: workspace.canonical_path().to_path_buf(),
+            input: "第一轮对话".into(),
+            expected_settings: None,
+        })
+        .await
+        .unwrap();
     assert!(matches!(accepted, Acceptance::Accepted { .. }));
     let first_detail = wait_turn_closed(&client, first_turn).await;
     assert_eq!(first_detail.summary.outcome, PublicTurnOutcome::Completed);
-    assert!(
-        !history_path.exists(),
-        "新建会话不应创建 workspace-history.git"
-    );
+    assert!(!projects_dir.exists(), "新建会话不应创建 projects/ 目录");
 
     let second_turn = new_turn_id();
     let accepted = client
         .submit(TurnRequest {
             turn_id: second_turn,
-            session: SubmitSession::Existing(session_id),
+            session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
             input: "第二轮续写".into(),
-            agent: None,
-            model: None,
-            effort: None,
+            expected_settings: None,
         })
         .await
         .unwrap();
@@ -179,8 +184,8 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
     let second_detail = wait_turn_closed(&client, second_turn).await;
     assert_eq!(second_detail.summary.outcome, PublicTurnOutcome::Completed);
     assert!(
-        !history_path.exists(),
-        "续写会话不应创建或要求 workspace-history.git"
+        !projects_dir.exists(),
+        "续写会话不应创建或要求 projects/ 目录"
     );
 
     client.stop().await.unwrap();
@@ -199,7 +204,8 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
     let layout = StateLayout::in_state_root(state.path());
     let workspace = LocalWorkspaceRoot::from_path(workspace_dir.path()).unwrap();
     let history_dir = layout
-        .project_dir(&workspace.store_key())
+        .projects_dir()
+        .join("legacy-project")
         .join("workspace-history.git");
     std::fs::create_dir_all(history_dir.join("refs/heads")).unwrap();
     let head_sentinel = history_dir.join("HEAD");
@@ -212,16 +218,24 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
     wait_backend_ready(&client).await;
 
     let session_id = new_session_id();
+    client
+        .configure(ConfigureRequest {
+            session: ConfigureSession::New(session_id),
+            workspace: workspace.canonical_path().to_path_buf(),
+            agent: Some(AgentName::parse("alpha").unwrap()),
+            model: None,
+            effort: None,
+        })
+        .await
+        .unwrap();
     let first_turn = new_turn_id();
     client
         .submit(TurnRequest {
             turn_id: first_turn,
-            session: SubmitSession::New(session_id),
+            session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
             input: "新建会话".into(),
-            agent: Some(AgentName::parse("alpha").unwrap()),
-            model: None,
-            effort: None,
+            expected_settings: None,
         })
         .await
         .unwrap();
@@ -232,12 +246,10 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
     client
         .submit(TurnRequest {
             turn_id: second_turn,
-            session: SubmitSession::Existing(session_id),
+            session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
             input: "续写会话".into(),
-            agent: None,
-            model: None,
-            effort: None,
+            expected_settings: None,
         })
         .await
         .unwrap();

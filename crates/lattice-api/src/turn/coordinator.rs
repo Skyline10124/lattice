@@ -124,6 +124,33 @@ impl CoordinatorStoreIo {
             .await
     }
 
+    pub(crate) async fn create_session(
+        &self,
+        project_path: lattice_session::ProjectPath,
+        settings: SessionSettings,
+    ) -> Result<SessionRecord> {
+        self.write(move |store, lock| {
+            store.create_session(lock, project_path, settings, chrono::Utc::now())
+        })
+        .await
+    }
+
+    pub(crate) async fn update_settings(
+        &self,
+        project_path: lattice_session::ProjectPath,
+        settings: SessionSettings,
+    ) -> Result<SessionRecord> {
+        self.write(move |store, lock| {
+            store.update_settings(lock, &project_path, settings, chrono::Utc::now())
+        })
+        .await
+    }
+
+    pub(crate) async fn delete_draft(&self, cutoff: Timestamp) -> Result<bool> {
+        self.write(move |store, lock| store.delete_draft(lock, cutoff))
+            .await
+    }
+
     pub(crate) async fn accept(&self, input: AcceptTurn) -> Result<AcceptedTurn> {
         self.write(move |store, lock| store.accept_turn(lock, input))
             .await
@@ -260,10 +287,14 @@ impl TurnCoordinator {
         }
     }
 
-    pub(crate) async fn rewind(&self, target: NodeId) -> Result<SessionRecord> {
+    pub(crate) async fn rewind(
+        &self,
+        target: NodeId,
+        project_path: lattice_session::ProjectPath,
+    ) -> Result<SessionRecord> {
         let session = self
             .io
-            .write(move |store, lock| store.rewind(lock, target, chrono::Utc::now()))
+            .write(move |store, lock| store.rewind(lock, target, &project_path, chrono::Utc::now()))
             .await?;
         #[cfg(feature = "test-crash-barriers")]
         super::crash_barrier::rewind_hit(&session).await?;
