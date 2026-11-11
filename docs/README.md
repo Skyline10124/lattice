@@ -41,12 +41,13 @@
 - [ADR 0002](adr/0002-turn-scoped-msb-workspace.md)：回合级 Microsandbox 工作区镜像的历史设计，已取代。
 - [ADR 0003](adr/0003-lancet-operates-directly-on-local-workspace.md)：LANCET 直接操作本地工作区的理由与取舍，已由 ADR 0009 取代。
 - [ADR 0004](adr/0004-build-closed-wasm-tool-catalog.md)：构建期封闭的 WASM 工具目录，已由 ADR 0009 取代。
-- [ADR 0005](adr/0005-durable-turn-invocation-and-private-git-stores.md)：持久化 Turn、Invocation 身份与私有 Git 存储；会话/调用存储与文件 Rewind 等部分由 ADR 0006 取代，Git 内核、工作区历史库与工作区锁等部分由 ADR 0009 取代，不透明回放材料的来源粒度由 ADR 0010 修订，项目键哈希绑定由 ADR 0012 改为规范项目路径。
+- [ADR 0005](adr/0005-durable-turn-invocation-and-private-git-stores.md)：持久化 Turn、Invocation 身份与私有 Git 存储；会话/调用存储与文件 Rewind 等部分由 ADR 0006 取代，Git 内核、工作区历史库与工作区锁等部分由 ADR 0009 取代，不透明回放材料的来源粒度由 ADR 0010 修订，项目键哈希绑定由 ADR 0012 改为规范项目路径，crate 依赖图由 ADR 0011 改由依赖边界合同维护。
 - [ADR 0006](adr/0006-tree-session-and-global-redb-store.md)：tree-session、全局 redb 会话库、调用槽位与快照观察，取消文件 Rewind 和 Turn checkpoint；三层记录与自动关闭等部分由 ADR 0007 取代，观察与订阅、按 `--turn-id` 找回等部分由 ADR 0008 取代，工作区历史库、Cell 证据与操作员查询等部分由 ADR 0009 取代，当前 agent 的判定由 ADR 0010 取代，首次提交创建会话由 ADR 0012 取代。
 - [ADR 0007](adr/0007-session-tree-as-single-authority.md)：会话树作为会话事实的唯一权威，Step 预留、由 `progress` 给出结论，取消自动关闭；读取时的交付方式由 ADR 0008 取代，槽位结论的 `evidence` 字段由 ADR 0009 移除，草稿会话允许删除由 ADR 0012 修订。
-- [ADR 0008](adr/0008-backend-api-commands-view-queries.md)：本地后台 API 分为命令、视图与查询，按会话推送以节点为单位的对话条目，按轮分页，请求身份由客户端生成，`submit` 只接受新请求；`audit` 查询由 ADR 0009 移除，由客户端读取配置与凭据的规则由 ADR 0010 取代，`submit` 区分 `New`/`Existing` 由 ADR 0012 移入 `configure`。
+- [ADR 0008](adr/0008-backend-api-commands-view-queries.md)：本地后台 API 分为命令、视图与查询，按会话推送以节点为单位的对话条目，按轮分页，请求身份由客户端生成，`submit` 只接受新请求；`audit` 查询由 ADR 0009 移除，由客户端读取配置与凭据的规则由 ADR 0010 取代，`submit` 区分 `New`/`Existing` 由 ADR 0012 移入 `configure`，前端启动后台由 ADR 0011 取消。
 - [ADR 0009](adr/0009-remove-legacy-lancet-tool-executor.md)：从本仓库整体剥离旧 LANCET、WASM 工具链、工作区历史库与审计/操作员接口，工具执行收窄为单一窄接口 `ToolExecutor`（进行中调用的 `deadline` 由执行器负责），身份与规范 JSON 原语归入 `lattice-conversation`；保留的 `ProjectStoreKey` 由 ADR 0012 改为规范项目路径。
-- [ADR 0010](adr/0010-protocol-adapters-and-configured-providers.md)：模型接入按协议适配，provider 改为配置，厂商差异用 features 表达；模型写作 `<provider>/<model>`，元数据取自 models.dev，新增推理强度、用量细分与缓存、Responses、Interactions、Sign in with ChatGPT，配置与凭据由后台读取、key 保存在 `auth.json`，会话持有 profile 副本（其中 `[lancet]` 外部策略部分由 ADR 0009 移除），以及 TUI 的 `/model` 与 `/effort`；profile 副本与选择随提交生效的规则由 ADR 0012 取代。
+- [ADR 0010](adr/0010-protocol-adapters-and-configured-providers.md)：模型接入按协议适配，provider 改为配置，厂商差异用 features 表达；模型写作 `<provider>/<model>`，元数据取自 models.dev，新增推理强度、用量细分与缓存、Responses、Interactions、Sign in with ChatGPT，配置与凭据由后台读取、key 保存在 `auth.json`，会话持有 profile 副本（其中 `[lancet]` 外部策略部分由 ADR 0009 移除），以及 TUI 的 `/model` 与 `/effort`；profile 副本与选择随提交生效的规则由 ADR 0012 取代，后台继承前端环境由 ADR 0011 改为由 systemd unit 提供。
+- [ADR 0011](adr/0011-im-gateway-inside-backend.md)：IM 网关作为本地后台进程内的可选组件，首个平台为 Telegram 私聊；后台改为 systemd user service 托管的 `lattice-daemon`，前端不再启动后台，`lattice-api` 拆为 `lattice-ipc`、`lattice-local` 与 `lattice-server`，停机有排空上限与各段上限；IM 的配置与凭据修改后重新挂载生效，不重启后台。
 - [ADR 0012](adr/0012-backend-owns-session-settings.md)：会话设置由后台持有并取代 profile 副本，`configure` 成为显式创建会话与修改设置的唯一命令，`submit` 只面向已有会话并支持核对 `expected_settings`；草稿会话逾 24 小时且无观察者时由后台清理，Session 项目绑定与 IPC 路径改存规范路径原始字节数组。
 - [InvocationStore 历史诊断指南](development/invocation-store-diagnostics.md)：仅解释旧 Git ledger 的测量工具、参数与保留证据，不用于 redb 资格化或当前产品验收。
 
