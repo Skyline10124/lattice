@@ -17,17 +17,18 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
     }
     let below = app.viewport.hidden_below();
     let session = session_field(app.ctx.session_id);
-    let effort = app.next_effort().map(|effort| effort.to_string());
-    let chosen = app.selection.model();
+    let head = app.current_head();
+    let effort = head
+        .and_then(|head| head.effort)
+        .map(|effort| effort.to_string());
     let mut left = [
         Some(session.as_str()),
-        Some(app.ctx.active_agent.as_str()),
-        chosen
-            .map(|model| model.model().as_str())
-            .or(app.model.as_deref()),
-        chosen
-            .map(|model| model.provider().as_str())
-            .or(app.provider.as_deref()),
+        head.map(|head| head.agent.as_str())
+            .filter(|agent| !agent.is_empty()),
+        head.and_then(|head| head.model.as_ref())
+            .map(|model| model.as_str()),
+        head.and_then(|head| head.provider.as_ref())
+            .map(|provider| provider.as_str()),
         effort.as_deref(),
     ];
     let mut right = [
@@ -131,12 +132,9 @@ const TIE_ORDER: [Slot; 9] = [
     Slot::Right(5),
 ];
 
-/// SessionId 只显示前 8 个字符；新会话在首个请求被接受前没有身份。
-fn session_field(id: Option<lattice_api::local::SessionId>) -> String {
-    id.map_or_else(
-        || "未接受".into(),
-        |id| id.to_string().chars().take(8).collect(),
-    )
+/// SessionId 只显示前 8 个字符，从启动起就显示。
+fn session_field(id: lattice_api::local::SessionId) -> String {
+    id.to_string().chars().take(8).collect()
 }
 
 fn fits(left: &[Option<&str>], right: &[Option<String>], room: usize) -> bool {
@@ -235,20 +233,49 @@ mod tests {
         );
     }
 
+    fn test_head(
+        agent: &str,
+        model: Option<&str>,
+        provider: Option<&str>,
+        effort: Option<lattice_api::Effort>,
+    ) -> lattice_api::local::SessionHead {
+        lattice_api::local::SessionHead {
+            session_id: lattice_api::local::SessionId::parse("11111111111141118111111111111111")
+                .unwrap(),
+            position: lattice_api::local::NodeId(0),
+            agent: agent.into(),
+            model: model.map(|m| lattice_api::ModelId::parse(m).unwrap()),
+            provider: provider.map(|p| lattice_api::ProviderId::parse(p).unwrap()),
+            effort,
+            settings_version: serde_json::from_value(json!("11".repeat(32))).unwrap(),
+            turn_id: None,
+            owner: false,
+            diagnostic: None,
+            path_replaced: false,
+        }
+    }
+
     #[test]
     fn effort_is_hidden_when_absent_and_omitted_before_equal_width_provider() {
         let mut app = super::super::tests::test_app();
-        app.ctx.active_agent = "a".into();
-        app.model = Some("mmm".into());
-        app.provider = Some("ppp".into());
-        app.selection.choose_effort(lattice_api::Effort::Low);
+        app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+            "a",
+            Some("mmm"),
+            Some("ppp"),
+            Some(lattice_api::Effort::Low),
+        )));
         assert!(line(&app, 200).to_string().contains("low"));
         let narrow = line(&app, 20).to_string();
         assert!(
             narrow.contains("ppp") && narrow.contains("mmm") && !narrow.contains("low"),
             "{narrow}"
         );
-        app.selection = Default::default();
+        app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+            "a",
+            Some("mmm"),
+            Some("ppp"),
+            None,
+        )));
         assert!(!line(&app, 200).to_string().contains("low"));
     }
 
@@ -430,8 +457,12 @@ mod tests {
     async fn narrow_statusline_omits_whole_usage_and_uses_display_width() {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut app = super::super::tests::test_app();
-            app.model = Some("m".into());
-            app.provider = Some("p".into());
+            app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+                "agent",
+                Some("m"),
+                Some("p"),
+                None,
+            )));
             app.context_tokens = Some(1);
             app.turn_usage = Some(summary([(
                 json!({"cache_write":1}),
@@ -442,9 +473,13 @@ mod tests {
             assert!(equal_width.contains("≈$123.45"), "{equal_width}");
             assert!(!equal_width.contains("上下文"), "{equal_width}");
 
-            app.ctx.active_agent = "中文 agent".into();
-            app.model = Some("模型很长很长很长 e\u{301}".into());
-            app.provider = Some("provider".into());
+            app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+                "中文 agent",
+                Some("模型很长很长很长 e\u{301}"),
+                Some("provider"),
+                None,
+            )));
+            app.context_tokens = Some(1);
             app.turn_usage = Some(summary([(
                 json!({"input":12300,"output":1200,"cache_read":9840}),
                 Complete,

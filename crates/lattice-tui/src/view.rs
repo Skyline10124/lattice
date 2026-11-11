@@ -910,9 +910,12 @@ mod tests {
     pub(super) fn test_app() -> App {
         App::new(
             SessionContext {
-                startup_agent: Some(lattice_api::AgentName::parse("test").unwrap()),
-                session_id: None,
-                active_agent: "agent".into(),
+                session_id: lattice_api::local::SessionId::parse(
+                    "11111111111141118111111111111111",
+                )
+                .unwrap(),
+                initial_head: None,
+                initial_adjustment: None,
             },
             false,
             std::path::Path::new("/nonexistent-tui-test-history"),

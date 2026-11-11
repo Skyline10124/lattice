@@ -13,7 +13,7 @@
 | `src/store/codec.rs`、`src/store/open.rs`、`src/store/validate.rs` | redb 表与格式版本 `9` 编解码、首次创建与严格打开、存在 `sessions.git` 或 `invocations.git` 时的拒绝及全库跨记录一致性校验 |
 | `src/store/write.rs`、`src/store/close.rs` | 单步 `Durability::Immediate` 领域写事务，`ToolReply` 终态准备（`prepare_terminal`），以及从持久 `progress` 推导尝试、槽位与 Step 结论的纯函数 |
 | `src/store/read.rs`、`src/store/local.rs` | 会话树、当前路径对话条目、轮次序号、按轮分页、轮次详情与用量只读投影，以及按会话或 Turn 范围加载记录 |
-| `src/store/profile_copy.rs`、`src/store/config.rs`、`src/store/hex_digest.rs` | 会话 profile 副本、系统提示与工具目录（`tool_identity`）的内容摘要配置表及十六进制摘要编码 |
+| `src/store/settings.rs`、`src/store/config.rs`、`src/store/hex_digest.rs` | 会话设置（`SessionSettings`、`SettingsVersion`、`EffectiveProfile`）、系统提示与工具目录（`tool_identity`）的内容摘要配置表及十六进制摘要编码 |
 | `src/store/tests.rs` | 会话库编码、校验、事务推进与读取投影单元测试 |
 
 ## 先读

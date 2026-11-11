@@ -4,23 +4,23 @@
 //! 接受事务使用的非秘密冻结事实。执行器工具规格与后台配置只有这一个转换入口。
 
 use super::tools::ToolSpec;
-use crate::profile::TurnProfile;
 use crate::session::{ApiError, Result};
 use lattice_session::store::{
-    FrozenTurnConfig, MAX_MODEL_STEPS, ToolCatalogEntry, ToolCatalogSnapshot, TurnExecutionLimits,
+    FrozenTurnConfig, MAX_MODEL_STEPS, SessionSettings, ToolCatalogEntry, ToolCatalogSnapshot,
+    TurnExecutionLimits,
 };
 
 pub(crate) fn freeze_config(
-    profile: &TurnProfile,
+    settings: &SessionSettings,
     target: &lattice_llm::ModelTarget,
     catalog: &[ToolSpec],
 ) -> Result<FrozenTurnConfig> {
     let config = FrozenTurnConfig {
-        agent_name: profile.effective.agent_name.clone(),
+        agent_name: settings.profile.agent_name.clone(),
         model: target.model.model().clone(),
         provider: target.model.provider().clone(),
         effort: target.effort,
-        system_prompt: profile.system_prompt.clone(),
+        system_prompt: settings.system_prompt.clone(),
         catalog: ToolCatalogSnapshot::new(
             catalog
                 .iter()
@@ -34,9 +34,9 @@ pub(crate) fn freeze_config(
         )
         .map_err(|_| ApiError::BadRequest("invalid frozen catalog".into()))?,
         limits: TurnExecutionLimits {
-            timeout_secs: profile.effective.timeout_secs,
+            timeout_secs: settings.profile.timeout_secs,
             max_model_steps: MAX_MODEL_STEPS,
-            max_model_attempts: profile.effective.retry.max_attempts(),
+            max_model_attempts: settings.profile.retry.max_attempts(),
         },
     };
     Ok(config)

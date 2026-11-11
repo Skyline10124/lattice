@@ -6,18 +6,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use lattice_conversation::SessionId;
-use lattice_profile::LoadedAgentProfile;
-use lattice_session::store::{TurnDetail, TurnSummary, UsageSummary};
+use lattice_session::store::{SettingsVersion, TurnDetail, TurnSummary, UsageSummary};
 
-/// 执行核心的冻结输入；请求配置与凭据由后台网关读取。
+/// 执行核心的冻结输入；会话设置由会话库持有，请求配置与凭据由后台网关读取。
 #[derive(Clone)]
 pub struct RunTurnRequest {
     pub input: String,
-    pub session_id: Option<SessionId>,
-    pub agent: Option<crate::AgentName>,
-    pub model: Option<crate::ModelRef>,
-    pub effort: Option<lattice_conversation::Effort>,
-    pub loaded_profile: Option<LoadedAgentProfile>,
+    pub session_id: SessionId,
+    pub expected_settings: Option<SettingsVersion>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// 注入本轮工具执行器；未指定时使用默认生产实现（或 `test-fake-tools` 环境变量选择）。
     pub tools: Option<Arc<dyn super::tools::ToolExecutor>>,

@@ -228,11 +228,36 @@ fn render_update(
                 writeln!(err, "observation error: {}", error.message)?
             }
         },
+        LocalUpdate::Configure { session_id, result } => match result {
+            ConfigureResult::Configured {
+                adjustment: Some(adjustment),
+                ..
+            } => writeln!(
+                err,
+                "session {session_id}: reasoning effort adjusted from {} to {}",
+                effort_label(adjustment.from),
+                effort_label(adjustment.to),
+            )?,
+            ConfigureResult::Unknown { error } => writeln!(
+                err,
+                "session {session_id}: configuration outcome unknown{}",
+                error
+                    .as_ref()
+                    .map_or_else(String::new, |e| format!(": {}", e.message))
+            )?,
+            ConfigureResult::Configured {
+                adjustment: None, ..
+            }
+            | ConfigureResult::Rejected { .. } => {}
+        },
         LocalUpdate::Error { error } => writeln!(err, "error: {}", error.message)?,
     }
     out.flush()?;
     err.flush()?;
     Ok(())
+}
+fn effort_label(effort: Option<lattice_api::Effort>) -> &'static str {
+    effort.map_or("none", lattice_api::Effort::as_str)
 }
 pub async fn run_session_prompt(
     api: &LocalClient,
@@ -240,9 +265,29 @@ pub async fn run_session_prompt(
     verbose: bool,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    let session = match &args.session_id {
-        Some(prefix) => SubmitSession::Existing(api.resolve_session(prefix).await?.session_id),
-        None => SubmitSession::New(lattice_api::local::new_session_id()),
+    run_session_prompt_with_io(
+        api,
+        args,
+        verbose,
+        json,
+        None,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+    .await
+}
+pub(super) async fn run_session_prompt_with_io(
+    api: &LocalClient,
+    args: super::session::SendArgs,
+    verbose: bool,
+    json: bool,
+    workspace_override: Option<std::path::PathBuf>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<std::process::ExitCode> {
+    let session_id = match &args.session_id {
+        Some(prefix) => api.resolve_session(prefix).await?.session_id,
+        None => lattice_api::local::new_session_id(),
     };
     let id = lattice_api::local::new_turn_id();
     let mut state = RunRenderState::default();
@@ -250,18 +295,20 @@ pub async fn run_session_prompt(
         &LocalUpdate::Submit {
             update: SubmissionUpdate::Sending {
                 turn_id: id,
-                session_id: session.id(),
-                new: session.is_new(),
+                session_id,
             },
         },
         &mut state,
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
+        out,
+        err,
         verbose,
         json,
     )?;
     let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
     let prepare = async {
+        if let Some(path) = workspace_override {
+            return Ok::<_, LocalError>(path);
+        }
         let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root)
             .await
             .map_err(|_| local_error("workspace worker failed"))?
@@ -286,35 +333,167 @@ pub async fn run_session_prompt(
                     }),
                 },
                 &mut state,
-                &mut std::io::stdout(),
-                &mut std::io::stderr(),
+                out,
+                err,
                 verbose,
                 json,
             )?;
             return Ok(code);
         }
     };
+    let configure_session = if args.session_id.is_none() {
+        Some(ConfigureSession::New(session_id))
+    } else if args.agent.is_some() || args.model.is_some() || args.effort.is_some() {
+        Some(ConfigureSession::Existing(session_id))
+    } else {
+        None
+    };
+    if let Some(session) = configure_session {
+        let configure_req = ConfigureRequest {
+            session,
+            workspace: workspace.clone(),
+            agent: args.agent,
+            model: args.model,
+            effort: args.effort,
+        };
+        let configure_result =
+            configure_with_retry(api, session_id, configure_req, &mut signal).await;
+        render_update(
+            &LocalUpdate::Configure {
+                session_id,
+                result: configure_result.clone(),
+            },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        )?;
+        match configure_result {
+            ConfigureResult::Configured { .. } => {}
+            ConfigureResult::Rejected { error } => {
+                let result = SubmissionResult::Rejected { error };
+                let code = receipt_exit(&result);
+                render_update(
+                    &LocalUpdate::Submit {
+                        update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                            turn_id: id,
+                            result,
+                            recovered: false,
+                        }),
+                    },
+                    &mut state,
+                    out,
+                    err,
+                    verbose,
+                    json,
+                )?;
+                return Ok(code);
+            }
+            ConfigureResult::Unknown { .. } => {
+                render_update(
+                    &LocalUpdate::Submit {
+                        update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                            turn_id: id,
+                            result: SubmissionResult::NotAccepted,
+                            recovered: false,
+                        }),
+                    },
+                    &mut state,
+                    out,
+                    err,
+                    verbose,
+                    json,
+                )?;
+                return Ok(std::process::ExitCode::from(1));
+            }
+        }
+    }
     let request = TurnRequest {
-        model: args.model,
-        effort: args.effort,
         turn_id: id,
-        session,
+        session: session_id,
         workspace,
         input: args.prompt,
-        agent: args.agent,
+        expected_settings: None,
     };
     let turn = api.start_turn(request);
-    consume(
-        turn,
-        None,
-        state,
-        verbose,
-        json,
-        signal,
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
-    )
-    .await
+    consume(turn, None, state, verbose, json, signal, out, err).await
+}
+async fn configure_with_retry(
+    api: &LocalClient,
+    session_id: SessionId,
+    request: ConfigureRequest,
+    signal: &mut tokio::signal::unix::Signal,
+) -> ConfigureResult {
+    let first = tokio::select! {
+        biased;
+        _ = signal.recv() => return ConfigureResult::Unknown { error: None },
+        outcome = api.configure_once(request.clone()) => outcome,
+    };
+    let mut last_error = match first {
+        ConfigureOutcome::Configured(reply) => {
+            return ConfigureResult::Configured {
+                head: reply.head,
+                adjustment: reply.adjustment,
+            };
+        }
+        ConfigureOutcome::Rejected(error) => return ConfigureResult::Rejected { error },
+        ConfigureOutcome::Unknown(error) => error,
+    };
+    for attempt in 0..2 {
+        let outcome = tokio::select! {
+            biased;
+            _ = signal.recv() => break,
+            outcome = api.configure_once(request.clone()) => outcome,
+        };
+        match outcome {
+            ConfigureOutcome::Configured(reply) => {
+                return ConfigureResult::Configured {
+                    head: reply.head,
+                    adjustment: reply.adjustment,
+                };
+            }
+            ConfigureOutcome::Rejected(error)
+                if matches!(request.session, ConfigureSession::New(_))
+                    && error.conflict == Some(ConflictReason::SessionExists) =>
+            {
+                let head = tokio::select! {
+                    biased;
+                    _ = signal.recv() => break,
+                    head = api.session_head(session_id) => head,
+                };
+                match head {
+                    Ok(head) => {
+                        return ConfigureResult::Configured {
+                            head,
+                            adjustment: None,
+                        };
+                    }
+                    Err(err) => last_error = err,
+                }
+            }
+            ConfigureOutcome::Rejected(error) if error.kind == LocalErrorKind::Busy => {
+                last_error = error;
+                if attempt == 0 {
+                    tokio::select! {
+                        biased;
+                        _ = signal.recv() => break,
+                        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
+                    }
+                }
+            }
+            ConfigureOutcome::Rejected(error) if error.kind == LocalErrorKind::NotRunning => {
+                last_error = error;
+            }
+            ConfigureOutcome::Rejected(error) => return ConfigureResult::Rejected { error },
+            ConfigureOutcome::Unknown(error) => {
+                last_error = error;
+            }
+        }
+    }
+    ConfigureResult::Unknown {
+        error: Some(last_error),
+    }
 }
 pub(super) async fn follow_with_output(
     api: &LocalClient,

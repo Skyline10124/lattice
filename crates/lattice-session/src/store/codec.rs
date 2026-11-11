@@ -9,8 +9,8 @@ use std::collections::BTreeMap;
 
 pub(super) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 pub(super) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
-pub(super) const PROFILE_COPIES: TableDefinition<&str, &[u8]> =
-    TableDefinition::new("profile_copies");
+pub(super) const SESSION_SETTINGS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("session_settings");
 pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("nodes");
 pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
@@ -84,12 +84,16 @@ pub(super) fn decode<T: DeserializeOwned + Serialize>(
     Ok(record)
 }
 
-pub(super) fn decode_profile_copy(key: &str, bytes: &[u8]) -> Result<SessionProfileCopy> {
-    let copy: SessionProfileCopy = decode("profile_copies", key, bytes)?;
-    if canonical(&copy)? != payload("profile_copies", key, bytes)? {
-        return Err(corrupt("profile_copies", key, "noncanonical profile copy"));
+pub(super) fn decode_session_settings(key: &str, bytes: &[u8]) -> Result<SessionSettings> {
+    let settings: SessionSettings = decode("session_settings", key, bytes)?;
+    if canonical(&settings)? != payload("session_settings", key, bytes)? {
+        return Err(corrupt(
+            "session_settings",
+            key,
+            "noncanonical session settings",
+        ));
     }
-    Ok(copy)
+    Ok(settings)
 }
 
 // 复用类型的 Deserialize 不一定 deny_unknown_fields（包括内部 tag 缓冲后的结构）。
@@ -155,7 +159,7 @@ pub(super) struct Records {
     // 局部工作集只保留节点范围末键，不为分配序号装载历史正文。
     pub node_tip: Option<NodeId>,
     pub sessions: BTreeMap<SessionId, SessionRecord>,
-    pub profile_copies: BTreeMap<SessionId, SessionProfileCopy>,
+    pub session_settings: BTreeMap<SessionId, SessionSettings>,
     pub nodes: BTreeMap<(SessionId, NodeId), Node>,
     pub configs: BTreeMap<[u8; 32], StoredTurnConfig>,
     pub turn_index: BTreeMap<TurnId, NodeRef>,
@@ -200,15 +204,15 @@ macro_rules! load_records {
                 .insert(id, decode("sessions", k.value(), v.value())?);
         }
         for entry in $tx
-            .open_table(PROFILE_COPIES)
+            .open_table(SESSION_SETTINGS)
             .map_err(table_error)?
             .iter()?
         {
             let (key, value) = entry?;
             let id = SessionId::parse(key.value())
-                .map_err(|_| corrupt("profile_copies", "key", "invalid session id"))?;
-            r.profile_copies
-                .insert(id, decode_profile_copy(key.value(), value.value())?);
+                .map_err(|_| corrupt("session_settings", "key", "invalid session id"))?;
+            r.session_settings
+                .insert(id, decode_session_settings(key.value(), value.value())?);
         }
         for entry in $tx.open_table(NODES).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
@@ -259,7 +263,7 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
         meta.insert("store_format_version", encode(&VERSION)?.as_slice())?;
     }
     tx.open_table(SESSIONS).map_err(table_error)?;
-    tx.open_table(PROFILE_COPIES).map_err(table_error)?;
+    tx.open_table(SESSION_SETTINGS).map_err(table_error)?;
     tx.open_table(NODES).map_err(table_error)?;
     tx.open_table(CONFIGS).map_err(table_error)?;
     tx.open_table(TURN_INDEX).map_err(table_error)?;
@@ -282,9 +286,9 @@ pub(super) fn persist(
         }
     }
     {
-        let mut table = tx.open_table(PROFILE_COPIES).map_err(table_error)?;
-        for (key, value) in &after.profile_copies {
-            if before.profile_copies.get(key) != Some(value) {
+        let mut table = tx.open_table(SESSION_SETTINGS).map_err(table_error)?;
+        for (key, value) in &after.session_settings {
+            if before.session_settings.get(key) != Some(value) {
                 table.insert(key.to_string().as_str(), encode(value)?.as_slice())?;
             }
         }
@@ -331,7 +335,7 @@ pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> 
     tx.open_table(SESSIONS)
         .map_err(table_error)?
         .retain(|_, _| false)?;
-    tx.open_table(PROFILE_COPIES)
+    tx.open_table(SESSION_SETTINGS)
         .map_err(table_error)?
         .retain(|_, _| false)?;
     tx.open_table(NODES)

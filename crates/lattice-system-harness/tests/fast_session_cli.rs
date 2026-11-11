@@ -257,10 +257,16 @@ fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
                 "20000000-0000-4000-8000-000000000002",
             ),
         ] {
+            let configured = support::ipc(
+                &world,
+                budget.cap_timeout(spec.step_timeout()),
+                support::configure_request(&world, json!({"new":sid}), Some("plain"), None, None),
+            );
+            assert_eq!(configured["response"], "configure", "{configured}");
             let accepted = support::ipc(
                 &world,
                 budget.cap_timeout(spec.step_timeout()),
-                support::submit_request(&world, tid, json!({"new":sid}), "seed", Some("plain")),
+                support::submit_request(&world, tid, sid, "seed"),
             );
             evidence.record_json("acceptance", &accepted).unwrap();
             assert_eq!(accepted["value"]["acceptance"], "accepted");
@@ -504,6 +510,20 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
             if matches!(case, "toml" | "known-key") {
+                // `lattice tui --agent` 在启动时执行 `configure(New)`，profile 错误在进入主屏幕前退出。
+                let out = cli(&world, &spec, &["tui", "--agent", agent]);
+                evidence.record_command("tui startup configuration rejection", &out);
+                assert!(out.is_clean_exit(2), "{}", out.summary());
+                assert_no_secret(&out, SENTINEL).unwrap();
+                assert_no_secret(&out, FAKE_API_KEY).unwrap();
+                assert_no_secret(&out, ORDINARY_KEY).unwrap();
+                assert_no_secret(&out, &long_key).unwrap();
+                assert_no_secret(&out, LONG_FRAGMENT).unwrap();
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(stderr.contains(&messages[0]), "{case}: {stderr}");
+            }
+            if case == "missing-key" {
+                // 凭据不在启动 `configure(New)` 时核对，而在提交准入时拒绝并归还输入。
                 let budget = world.budget(&spec);
                 let mut tui = PtyTuiDriver::spawn(&driver(), &world, agent).unwrap();
                 let pty_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -576,10 +596,25 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             if world.session_store_dir().join("lattice.redb").exists() {
                 let sessions = cli(&world, &spec, &["--json", "session", "list"]);
-                evidence.record_command("no Session before acceptance", &sessions);
+                evidence.record_command("session state after rejection", &sessions);
                 assert!(sessions.is_clean_exit(0));
                 let sessions: serde_json::Value = serde_json::from_slice(&sessions.stdout).unwrap();
-                assert!(sessions.as_array().unwrap().is_empty());
+                if matches!(case, "missing-key" | "invalid-auth" | "oauth-chatgpt") {
+                    // 凭据在 `submit` 阶段核对：`configure(New)` 已创建只有根节点的草稿，但未接受任何轮次。
+                    assert!(
+                        sessions
+                            .as_array()
+                            .unwrap()
+                            .iter()
+                            .all(|session| session["node_count"] == 1),
+                        "{case}: {sessions}"
+                    );
+                } else {
+                    assert!(
+                        sessions.as_array().unwrap().is_empty(),
+                        "{case}: {sessions}"
+                    );
+                }
             }
             evidence
                 .record_json(

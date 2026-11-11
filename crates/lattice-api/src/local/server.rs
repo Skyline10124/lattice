@@ -22,6 +22,9 @@ use tokio::{
 };
 
 #[cfg(test)]
+#[path = "server_configure_tests.rs"]
+mod configure_tests;
+#[cfg(test)]
 #[path = "server_models_tests.rs"]
 mod models_tests;
 
@@ -107,7 +110,13 @@ fn busy() -> LocalError {
 fn conflict(reason: ConflictReason) -> LocalError {
     LocalError {
         conflict: Some(reason),
-        ..LocalError::new(LocalErrorKind::Conflict, "request identity conflicts")
+        ..LocalError::new(
+            LocalErrorKind::Conflict,
+            match reason {
+                ConflictReason::SettingsChanged => "session settings changed",
+                _ => "request identity conflicts",
+            },
+        )
     }
 }
 fn not_found() -> LocalError {
@@ -233,8 +242,9 @@ impl Backend {
         submitter: Option<UnixStream>,
     ) -> Result<Arc<Owner>> {
         let (identity, session) = match &operation {
-            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session.id())),
+            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session)),
             Request::Rewind { session_id, .. } => (None, Some(*session_id)),
+            Request::Configure { request } => (None, Some(request.session.id())),
             _ => return Err(internal()),
         };
         let owner = {
@@ -293,7 +303,7 @@ impl Backend {
                 {
                     Response::Acceptance(Acceptance::ConfirmationUnknown {
                         turn_id: request.turn_id,
-                        session_id: request.session.id(),
+                        session_id: request.session,
                     })
                 } else {
                     Response::Error(result.clone().err().unwrap_or_else(internal))
@@ -319,10 +329,8 @@ impl Backend {
                         error.kind,
                         LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
                     )
-                    // 提交的只读准入检查失败时尚无执行收尾；建库提交不确定仍计入。
-                    && (task_owner.identity.is_none()
-                        || task_owner.started.load(Ordering::Acquire)
-                        || error.recovery.is_some())
+                    // 只读准入检查失败时尚未写入会话库；已进入写入或带恢复需求的操作仍计入。
+                    && (task_owner.started.load(Ordering::Acquire) || error.recovery.is_some())
                 {
                     state.unconfirmed_operations += 1;
                     if let Some(request) = &task_owner.identity {
@@ -359,6 +367,7 @@ impl Backend {
     ) -> Result<()> {
         match operation {
             Request::Submit { request } => self.submit(request, owner, submitter).await,
+            Request::Configure { request } => self.configure(request, owner).await,
             Request::Rewind {
                 session_id,
                 target,
@@ -374,6 +383,7 @@ impl Backend {
                 let io = CoordinatorStoreIo::acquire_api(api, session_id)
                     .await
                     .map_err(crate::ApiError::from)?;
+                owner.started.store(true, Ordering::Release);
                 let record = TurnCoordinator::new(io, Arc::new(RandomIdSource))
                     .rewind(target, root.project_path())
                     .await
@@ -387,6 +397,147 @@ impl Backend {
             _ => Err(internal()),
         }
     }
+    async fn configure(
+        self: &Arc<Self>,
+        request: ConfigureRequest,
+        owner: &Arc<Owner>,
+    ) -> Result<()> {
+        if !request.workspace.is_absolute() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "invalid Configure request",
+            ));
+        }
+        let workspace = canonical_workspace(request.workspace).await?;
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        let sid = request.session.id();
+        let is_new = matches!(request.session, ConfigureSession::New(_));
+
+        if is_new {
+            if let Some(api) = &api
+                && api.read(move |r| r.find_session(sid)).await?.is_some()
+            {
+                return Err(conflict(ConflictReason::SessionExists));
+            }
+            if request.agent.is_none() {
+                return Err(LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "new Session requires explicit agent",
+                ));
+            }
+        } else {
+            let api = api.as_ref().ok_or_else(not_found)?;
+            let record = match api.read(move |r| r.session(sid)).await {
+                Ok(record) => record,
+                Err(crate::ApiError::Store(error))
+                    if matches!(
+                        error.as_ref(),
+                        lattice_session::store::StoreError::NotFound { .. }
+                    ) =>
+                {
+                    return Err(not_found());
+                }
+                Err(error) => return Err(error.into()),
+            };
+            if record.project_path != workspace.project_path() {
+                return Err(conflict(ConflictReason::BindingMismatch));
+            }
+        }
+
+        let mut io = if let Some(api) = &api {
+            Some(
+                CoordinatorStoreIo::acquire_api(api.clone(), sid)
+                    .await
+                    .map_err(crate::ApiError::from)?,
+            )
+        } else {
+            None
+        };
+
+        let current = if is_new {
+            None
+        } else {
+            let io_ref = io.as_ref().expect("Existing session opened store");
+            Some(
+                io_ref
+                    .read(move |read| {
+                        read.session(sid)?;
+                        read.session_settings(sid)
+                    })
+                    .await
+                    .map_err(crate::ApiError::from)?,
+            )
+        };
+
+        let directory = super::auth::directory(self.home.as_deref())?;
+        let workspace_for_load = workspace.clone();
+        let agent_name = request.agent;
+        let cmd_model = request.model;
+        let cmd_effort = request.effort;
+        let (settings, adjustment) = blocking(move || {
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            let loaded_agent = if let Some(name) = agent_name {
+                let loaded = crate::profile::load_for_turn(&name, &workspace_for_load, &directory)?;
+                Some(crate::configure::LoadedAgent {
+                    profile: crate::profile::TurnProfile::from_loaded(&loaded),
+                    source_path: loaded.path,
+                })
+            } else {
+                None
+            };
+            let (settings, adjustment) = crate::configure::resolve_settings(
+                current.as_ref(),
+                loaded_agent,
+                cmd_model,
+                cmd_effort,
+                |target| lattice_llm::model_supported_efforts(&directory, target),
+            )
+            .map_err(|rejection| {
+                crate::ApiError::Configuration(crate::ConfigRejection::new(
+                    &rejection.to_string(),
+                    Some(&auth),
+                ))
+            })?;
+            settings.validate().map_err(crate::ApiError::from)?;
+            Ok((settings, adjustment))
+        })
+        .await?;
+
+        let io = match io.take() {
+            Some(io) => io,
+            None => {
+                let api = self.stores.acquire(true).await?;
+                *lock(&owner.store) = Some(api.clone());
+                CoordinatorStoreIo::acquire_api(api, sid)
+                    .await
+                    .map_err(crate::ApiError::from)?
+            }
+        };
+
+        owner.started.store(true, Ordering::Release);
+        if is_new {
+            io.create_session(workspace.project_path(), settings)
+                .await
+                .map_err(crate::ApiError::from)?;
+        } else {
+            io.update_settings(workspace.project_path(), settings)
+                .await
+                .map_err(crate::ApiError::from)?;
+        }
+
+        let mut head = io
+            .read(move |read| crate::turn::observer::session_head(read, sid))
+            .await
+            .map_err(crate::ApiError::from)?;
+        {
+            let state = lock(&self.admission);
+            (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
+        }
+        owner.observer.owner_changed();
+        owner.reply(Response::Configure(ConfigureReply { head, adjustment }));
+        Ok(())
+    }
     async fn submit(
         self: &Arc<Self>,
         request: TurnRequest,
@@ -395,61 +546,46 @@ impl Backend {
     ) -> Result<()> {
         let api = self.optional_store().await?;
         *lock(&owner.store) = api.clone();
-        // 身份优先于工作区、配置和同会话 Busy；重发不承担找回职责。
+        // 身份优先于工作区、会话存在性、绑定和同会话 Busy；重发不承担找回职责。
         if let Some(api) = &api {
             let turn_id = request.turn_id;
             if api.read(move |r| r.turn_node(turn_id)).await?.is_some() {
                 return Err(conflict(ConflictReason::TurnIdUsed));
             }
         }
+        if !request.workspace.is_absolute() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "invalid Turn request",
+            ));
+        }
         let workspace = canonical_workspace(request.workspace.clone()).await?;
-        let sid = request.session.id();
-        let record = if let Some(api) = &api {
-            match api.read(move |r| r.session(sid)).await {
-                Ok(record) => Some(record),
-                Err(crate::ApiError::Store(error))
-                    if matches!(
-                        error.as_ref(),
-                        lattice_session::store::StoreError::NotFound { .. }
-                    ) =>
-                {
-                    None
-                }
-                Err(error) => return Err(error.into()),
+        let sid = request.session;
+        let api = api.ok_or_else(not_found)?;
+        let record = match api.read(move |r| r.session(sid)).await {
+            Ok(record) => record,
+            Err(crate::ApiError::Store(error))
+                if matches!(
+                    error.as_ref(),
+                    lattice_session::store::StoreError::NotFound { .. }
+                ) =>
+            {
+                return Err(not_found());
             }
-        } else {
-            None
+            Err(error) => return Err(error.into()),
         };
-        match request.session {
-            SubmitSession::New(_) if record.is_some() => {
-                return Err(conflict(ConflictReason::SessionExists));
-            }
-            SubmitSession::Existing(_) => {
-                let record = record.as_ref().ok_or_else(not_found)?;
-                if record.project_path != workspace.project_path() {
-                    return Err(conflict(ConflictReason::BindingMismatch));
-                }
-            }
-            _ => {}
+        if record.project_path != workspace.project_path() {
+            return Err(conflict(ConflictReason::BindingMismatch));
         }
         {
             let mut state = lock(&self.admission);
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            // 身份、绑定与 Busy 的优先级不变；廉价拒绝不能占住新会话身份。
-            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES
-                || !request.workspace.is_absolute()
-            {
+            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES {
                 return Err(LocalError::new(
                     LocalErrorKind::BadRequest,
                     "invalid Turn request",
-                ));
-            }
-            if request.agent.is_none() && request.session.is_new() {
-                return Err(LocalError::new(
-                    LocalErrorKind::BadRequest,
-                    "new Session requires explicit agent",
                 ));
             }
             state.sessions.insert(sid, owner.clone());
@@ -464,82 +600,31 @@ impl Backend {
         #[cfg(test)]
         tests::pause(&self.gates.registered).await;
         check_submitter(submitter.as_ref())?;
-        let io = if request.session.is_new() {
-            None
-        } else {
-            Some(
-                CoordinatorStoreIo::acquire_api(
-                    api.as_ref().expect("existing Session store").clone(),
-                    sid,
-                )
-                .await
-                .map_err(crate::ApiError::from)?,
-            )
-        };
-        let snapshot = if let Some(io) = &io {
-            Some(
-                io.read(move |read| {
-                    read.session(sid)?;
-                    let copy = read.profile_copy(sid)?;
-                    let prompt = read
-                        .stored_config(&copy.prompt_config_digest)?
-                        .system_prompt;
-                    Ok((copy, prompt))
-                })
-                .await
-                .map_err(crate::ApiError::from)?,
-            )
-        } else {
-            None
-        };
-        let (previous, prompt) =
-            snapshot.map_or((None, None), |(copy, prompt)| (Some(copy), prompt));
+        let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
+            .await
+            .map_err(crate::ApiError::from)?;
+        let (settings, settings_version) = io
+            .read(move |read| {
+                read.session(sid)?;
+                let settings = read.session_settings(sid)?;
+                let version = settings.version()?;
+                Ok((settings, version))
+            })
+            .await
+            .map_err(crate::ApiError::from)?;
+        if let Some(expected) = &request.expected_settings
+            && *expected != settings_version
+        {
+            return Err(conflict(ConflictReason::SettingsChanged));
+        }
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
-        let inherited = request.agent.is_none() && previous.is_some();
-        let (configuration, source_path) = if inherited {
-            let copy = previous.as_ref().expect("inherited copy");
-            (crate::profile::TurnProfile::from_copy(copy, prompt), None)
-        } else {
-            let selected = request.agent.clone().ok_or_else(|| {
-                LocalError::new(
-                    LocalErrorKind::BadRequest,
-                    "new Session requires explicit agent",
-                )
-            })?;
-            let configuration_dir = super::auth::directory(self.home.as_deref())?;
-            let project = workspace.clone();
-            blocking(move || {
-                let loaded =
-                    crate::profile::load_for_turn(&selected, &project, &configuration_dir)?;
-                let configuration = crate::profile::TurnProfile::from_loaded(&loaded);
-                Ok((configuration, Some(loaded.path)))
-            })
-            .await?
-        };
-        let prepared_profile = crate::profile::PreparedProfile {
-            configuration,
-            previous,
-            inherited,
-            source_path,
-        };
         let gateway = self
             .gateway
             .clone()
             .map_err(crate::ApiError::Configuration)?;
-        let prepared_model = crate::turn::execute::PreparedModel::resolve(
-            &gateway,
-            &prepared_profile,
-            request.model.as_ref(),
-            request.effort,
-        )
-        .await?;
-        let api = match api {
-            Some(api) => api,
-            // 建库在接受事务之前；任何失败都说明这一轮确定未被接受，按拒绝返回。
-            None => self.stores.acquire(true).await?,
-        };
-        *lock(&owner.store) = Some(api.clone());
+        let prepared_model =
+            crate::turn::execute::PreparedModel::resolve(&gateway, &settings).await?;
         let shutdown = api.shutdown();
         check_submitter(submitter.as_ref())?;
         {
@@ -553,22 +638,18 @@ impl Backend {
             workspace,
             shutdown,
             observer: owner.observer.clone(),
-            new_session: request.session.is_new().then_some(sid),
             request: crate::RunTurnRequest {
                 input: request.input,
-                session_id: (!request.session.is_new()).then_some(sid),
-                agent: request.agent,
-                model: request.model,
-                effort: request.effort,
-                loaded_profile: None,
+                session_id: sid,
+                expected_settings: request.expected_settings,
                 cancel_flag: Some(owner.execution_cancel.clone()),
                 tools: Some(self.tools.clone()),
                 #[cfg(any(test, feature = "test-utils"))]
                 test_llm: None,
             },
             prepared_model: Some(prepared_model),
-            prepared_profile: Some(prepared_profile),
-            io,
+            prepared_settings: Some((settings, settings_version)),
+            io: Some(io),
         });
         *lock(&owner.core) = Some(execution.completion);
         let accepted = match execution.acceptance.await {
@@ -862,7 +943,9 @@ impl Backend {
                 Ok(Response::Cancelled { owned })
             }
             Request::Submit { .. } => Err(internal()),
-            request @ Request::Rewind { .. } => self.wait_reply(self.claim(request, None)?).await,
+            request @ (Request::Rewind { .. } | Request::Configure { .. }) => {
+                self.wait_reply(self.claim(request, None)?).await
+            }
             Request::Watch { .. } => Err(internal()),
         }
     }
@@ -871,7 +954,10 @@ impl Backend {
         loop {
             let response = reply.borrow_and_update().clone();
             if let Some(response) = response {
-                if matches!(response, Response::Error(_) | Response::Rewind(_)) {
+                if matches!(
+                    response,
+                    Response::Error(_) | Response::Rewind(_) | Response::Configure(_)
+                ) {
                     let mut done = owner.done.subscribe();
                     while done.borrow_and_update().is_none() {
                         done.changed().await.map_err(|_| internal())?;

@@ -21,7 +21,7 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "Emit JSONL (submit/cancel/head/entry/text/connection/error records) without human status lines."
+        help = "Emit JSONL (submit/configure/cancel/head/entry/text/connection/error records) without human status lines."
     )]
     json: bool,
 
@@ -62,7 +62,7 @@ enum Commands {
     },
     /// Open the terminal UI.
     Tui {
-        /// Existing session; when omitted, a session is created once the first submission is accepted.
+        /// Existing session; when omitted, a new session is created via configure.
         session_id: Option<String>,
         #[arg(long, required_unless_present = "session_id")]
         agent: Option<lattice_api::AgentName>,

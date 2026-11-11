@@ -16,9 +16,9 @@ use std::time::{Duration, Instant};
 #[cfg(feature = "fake-tools")]
 use support::tool_call;
 use support::{
-    Watcher, Wire, assert_accepted_and_closed, assert_clean_send, assert_forced_kill, direct_world,
-    driver, history, ipc, parse_send_stdout, submit_request, turn_closed, turn_lookup,
-    wire_fake_llm, wire_gated_fake_llm,
+    Watcher, Wire, assert_accepted_and_closed, assert_clean_send, assert_forced_kill,
+    configure_request, direct_world, driver, history, ipc, parse_send_stdout, submit_request,
+    turn_closed, turn_lookup, wire_fake_llm, wire_gated_fake_llm,
 };
 const FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const SECOND: &str = "00000000-0000-4000-8000-000000000002";
@@ -288,22 +288,25 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                 );
                 assert!(bootstrap.is_clean_exit(if existing_session { 0 } else { 1 }));
                 let sid = existing.clone().unwrap_or_else(|| NEW_SESSION.into());
-                let session = if existing_session {
-                    json!({"existing": sid})
-                } else {
-                    json!({"new": sid})
-                };
-                let request = submit_request(
-                    &world,
-                    FIRST,
-                    session,
-                    "identical input",
-                    Some("background"),
-                );
                 // 先用只读的 `status` 确认后台说同一协议，再进入未读回执窗口；
                 // 协议不符时在这里直接失败，而不是表现为 provider 一直等不到请求。
                 let status = ipc(&world, wait(&budget), json!({"operation":"status"}));
                 assert_eq!(status["response"], "status", "{status}");
+                if !existing_session {
+                    let configured = ipc(
+                        &world,
+                        wait(&budget),
+                        configure_request(
+                            &world,
+                            json!({"new": &sid}),
+                            Some("background"),
+                            None,
+                            None,
+                        ),
+                    );
+                    assert_eq!(configured["response"], "configure", "{configured}");
+                }
+                let request = submit_request(&world, FIRST, &sid, "identical input");
                 let unread = Wire::connect(&world, wait(&budget), &request);
                 gate.wait_until_stalled(1, wait(&budget)).unwrap();
                 // 此连接只写请求，从未读取回执；按 TurnId 查询得到已接受。
@@ -409,13 +412,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         let busy = ipc(
             &world,
             wait(&budget),
-            submit_request(
-                &world,
-                THIRD,
-                json!({"existing": a}),
-                "must not queue",
-                None,
-            ),
+            submit_request(&world, THIRD, &a, "must not queue"),
         );
         assert_eq!(busy["value"]["kind"], "busy", "{busy}");
         let second_detail = detail(&world, &budget, &mut evidence, &second_turn);
@@ -497,7 +494,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             ipc(
                 &world,
                 wait(&budget),
-                submit_request(&world, THIRD, json!({"existing": a}), "after stop", None)
+                submit_request(&world, THIRD, &a, "after stop")
             )["value"]["kind"],
             "stopping"
         );
@@ -1103,8 +1100,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             let handles: Vec<_> = candidates
                 .iter()
                 .map(|candidate| {
-                    let request =
-                        submit_request(&world, candidate, json!({"existing": sid}), "second", None);
+                    let request = submit_request(&world, candidate, sid, "second");
                     let world = &world;
                     let budget = &budget;
                     let barrier = &barrier;
@@ -1150,7 +1146,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         let reused = ipc(
             &world,
             wait(&budget),
-            submit_request(&world, tid, json!({"existing": sid}), "first", None),
+            submit_request(&world, tid, sid, "first"),
         );
         assert_eq!(conflict(&reused), Some("turn_id_used"), "{reused}");
         evidence
@@ -1849,36 +1845,46 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
         let a = detail(&world, &budget, &mut evidence, &first_turn);
         let b = detail(&world, &budget, &mut evidence, &second_turn);
         assert_ne!(a["session_id"], b["session_id"]);
-        let submit = |turn: &str, session: Value| {
+        let a_sid = a["session_id"].as_str().unwrap();
+        let b_sid = b["session_id"].as_str().unwrap();
+        let submit = |turn: &str, session_id: &str| {
             ipc(
                 &world,
                 wait(&budget),
-                submit_request(&world, turn, session, "alpha", None),
+                submit_request(&world, turn, session_id, "alpha"),
             )
         };
-        // 请求身份表自上而下核对，先符合的一行决定结果：TurnId 先于会话。
-        let used_elsewhere = submit(&first_turn, json!({"existing": b["session_id"]}));
+        // 请求身份表自上而下核对，先符合的一行决定结果：TurnId 先于会话存在性。
+        let used_elsewhere = submit(&first_turn, b_sid);
         assert_eq!(
             conflict(&used_elsewhere),
             Some("turn_id_used"),
             "{used_elsewhere}"
         );
-        let used_new = submit(&first_turn, json!({"new": a["session_id"]}));
-        assert_eq!(conflict(&used_new), Some("turn_id_used"), "{used_new}");
-        let exists = submit(THIRD, json!({"new": a["session_id"]}));
+        let used_missing = submit(&first_turn, NEW_SESSION);
+        assert_eq!(
+            conflict(&used_missing),
+            Some("turn_id_used"),
+            "{used_missing}"
+        );
+        let exists = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new": a_sid}),
+                Some("background"),
+                None,
+                None,
+            ),
+        );
         assert_eq!(conflict(&exists), Some("session_exists"), "{exists}");
-        let missing = submit(THIRD, json!({"existing": NEW_SESSION}));
+        let missing = submit(THIRD, NEW_SESSION);
         assert_eq!(missing["value"]["kind"], "not_found", "{missing}");
         let project = world.root().join("different-project");
         std::fs::create_dir(&project).unwrap();
         gix::init(&project).unwrap();
-        let mut elsewhere = submit_request(
-            &world,
-            THIRD,
-            json!({"existing": a["session_id"]}),
-            "alpha",
-            None,
-        );
+        let mut elsewhere = submit_request(&world, THIRD, a_sid, "alpha");
         elsewhere["request"]["workspace"] =
             json!(support::path_bytes(&project.canonicalize().unwrap()));
         let binding = ipc(&world, wait(&budget), elsewhere);
@@ -1903,7 +1909,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
         evidence
             .record_json(
                 "identity-conflicts",
-                &json!({"turn_used_elsewhere":used_elsewhere,"turn_used_new":used_new,
+                &json!({"turn_used_elsewhere":used_elsewhere,"turn_used_missing":used_missing,
                     "session_exists":exists,"missing":missing,"binding":binding}),
             )
             .unwrap();
@@ -1977,27 +1983,54 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         let metadata = "\n[providers.local.models.a]\neffort=['off','low','high']\n[providers.local.models.b]\neffort=['high']\n[providers.local.models.both]\neffort=['low','high']\n[providers.local.models.c]\neffort=['low']\n[providers.other.models.a]\neffort=['medium']\n";
         std::fs::write(&path, format!("{base}{metadata}")).unwrap();
         world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\neffort='low'\n[prompt]\nsystem='copy prompt'\n").unwrap();
-        let mut missing = submit_request(
+        // `configure(New)` 允许模型为空并保存基准档位；未选模型前 `submit` 被配置拒绝。
+        let draft = ipc(
             &world,
-            FIRST,
-            json!({"new":NEW_SESSION}),
-            "missing model",
-            Some("background"),
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new":NEW_SESSION}),
+                Some("background"),
+                None,
+                None,
+            ),
         );
-        let rejected = ipc(&world, wait(&budget), missing.clone());
+        assert_eq!(draft["response"], "configure", "{draft}");
+        assert_eq!(draft["value"]["head"]["model"], Value::Null);
+        assert_eq!(draft["value"]["head"]["provider"], Value::Null);
+        assert_eq!(draft["value"]["head"]["effort"], "low");
+        let rejected = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, FIRST, NEW_SESSION, "missing model"),
+        );
         assert_eq!(rejected["response"], "error");
         assert_eq!(rejected["value"]["kind"], "bad_request");
         assert!(
             rejected["value"]["message"]
                 .as_str()
                 .unwrap()
-                .contains("model selection or [agent].model")
+                .contains("model"),
+            "{rejected}"
         );
         assert!(server.captured_requests().is_empty());
-        assert!(!world.session_store_dir().join("lattice.redb").exists());
-        missing["request"]["model"] = json!("local/a");
-        missing["request"]["effort"] = json!("high");
-        let reply = ipc(&world, wait(&budget), missing);
+        let configured = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                None,
+                Some("local/a"),
+                Some("high"),
+            ),
+        );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let reply = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, FIRST, NEW_SESSION, "chosen"),
+        );
         assert_eq!(reply["response"], "acceptance", "{reply}");
         assert_eq!(
             closed_without_owner(&world, &budget, &mut evidence, FIRST)["summary"]["outcome"],
@@ -2023,21 +2056,30 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
             ),
         )
         .unwrap();
-        // 同模型的已存档位失效时拒绝，不能静默改用仍受支持的默认 low。
-        for (tid, model) in [
-            ("00000000-0000-4000-8000-fffffffffff2", None),
-            ("00000000-0000-4000-8000-fffffffffff3", Some("local/a")),
+        // 同模型的已存档位失效时拒绝（无论是直接提交还是 configure 指定同一模型），不能静默改用默认 low。
+        for (label, request) in [
+            (
+                "submit",
+                submit_request(
+                    &world,
+                    "00000000-0000-4000-8000-fffffffffff2",
+                    NEW_SESSION,
+                    "saved effort no longer supported",
+                ),
+            ),
+            (
+                "same-model-configure",
+                configure_request(
+                    &world,
+                    json!({"existing":NEW_SESSION}),
+                    None,
+                    Some("local/a"),
+                    None,
+                ),
+            ),
         ] {
-            let mut request = submit_request(
-                &world,
-                tid,
-                json!({"existing":NEW_SESSION}),
-                "saved effort no longer supported",
-                None,
-            );
-            request["request"]["model"] = json!(model);
             let rejected = ipc(&world, wait(&budget), request);
-            assert_eq!(rejected["response"], "error", "{model:?}: {rejected}");
+            assert_eq!(rejected["response"], "error", "{label}: {rejected}");
             assert_eq!(rejected["value"]["kind"], "bad_request");
             assert_eq!(server.captured_requests().len(), count);
             assert_eq!(
@@ -2104,7 +2146,7 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
             assert_eq!(head["value"]["model"], expected_model);
             assert_eq!(head["value"]["provider"], provider);
             assert_eq!(head["value"]["effort"], json!(expected_effort));
-            assert_eq!(head["value"]["profile_default_effort"], "low");
+            assert!(head["value"]["settings_version"].as_str().is_some());
             let capture = server.captured_requests().pop().unwrap();
             assert_eq!(capture.raw["model"], expected_model);
             assert_eq!(
@@ -2154,14 +2196,13 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
             &mut evidence,
             &["--json", "session", "log", NEW_SESSION],
         );
-        let mut bad = submit_request(
+        let bad = configure_request(
             &world,
-            "00000000-0000-4000-8000-ffffffffffff",
             json!({"existing":NEW_SESSION}),
-            "unsupported effort",
             None,
+            None,
+            Some("max"),
         );
-        bad["request"]["effort"] = json!("max");
         let rejected = ipc(&world, wait(&budget), bad);
         assert_eq!(rejected["response"], "error");
         assert_eq!(rejected["value"]["kind"], "bad_request");
@@ -2223,20 +2264,24 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
         let view = watcher.initial();
         let head = view.head.as_ref().unwrap();
-        assert_eq!(head.model, "old");
-        assert_eq!(head.provider, "local");
+        assert_eq!(head.model.as_deref(), Some("old"));
+        assert_eq!(head.provider.as_deref(), Some("local"));
         assert_eq!(head.effort, None);
-        assert_eq!(head.profile_default_effort.as_deref(), Some("low"));
         world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\nmodel='local/a'\neffort='low'\n[prompt]\nsystem='rebuilt prompt'\n").unwrap();
-        let rebuilt_id = "00000000-0000-4000-8000-fffffffffff1";
-        let mut rebuilt = submit_request(
+        let rebuilt_cfg = ipc(
             &world,
-            rebuilt_id,
-            json!({"existing":NEW_SESSION}),
-            "new agent baseline",
-            Some("background"),
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                Some("background"),
+                Some("local/b"),
+                None,
+            ),
         );
-        rebuilt["request"]["model"] = json!("local/b");
+        assert_eq!(rebuilt_cfg["response"], "configure", "{rebuilt_cfg}");
+        let rebuilt_id = "00000000-0000-4000-8000-fffffffffff1";
+        let rebuilt = submit_request(&world, rebuilt_id, NEW_SESSION, "new agent baseline");
         assert_eq!(
             ipc(&world, wait(&budget), rebuilt)["response"],
             "acceptance"
@@ -2249,7 +2294,6 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         );
         assert_eq!(rebuilt_head["value"]["model"], "b");
         assert_eq!(rebuilt_head["value"]["effort"], Value::Null);
-        assert_eq!(rebuilt_head["value"]["profile_default_effort"], "low");
         let capture = server.captured_requests().pop().unwrap();
         assert_eq!(capture.raw["messages"][0]["content"], "rebuilt prompt");
         assert!(capture.raw.get("reasoning_effort").is_none());
@@ -2283,7 +2327,6 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
         );
         assert_eq!(head["value"]["model"], "a");
         assert_eq!(head["value"]["effort"], "off");
-        assert_eq!(head["value"]["profile_default_effort"], "low");
         assert_eq!(
             server.captured_requests().last().unwrap().raw["reasoning_effort"],
             "none"
@@ -2419,10 +2462,9 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
         let mut watcher = Watcher::open(&world, wait(&budget), &sid);
         let view = watcher.initial();
         let head = view.head.as_ref().unwrap();
-        assert_eq!(head.provider, "openai-chat");
-        assert_eq!(head.model, "gpt-6-luna");
+        assert_eq!(head.provider.as_deref(), Some("openai-chat"));
+        assert_eq!(head.model.as_deref(), Some("gpt-6-luna"));
         assert_eq!(head.effort.as_deref(), Some("off"));
-        assert_eq!(head.profile_default_effort.as_deref(), Some("low"));
         for output in [&first, &inherited, &failure] {
             let sent = records(output);
             let id = accepted_turn(output);
@@ -2555,7 +2597,7 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
 }
 
 #[test]
-fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_profile() {
+fn session_settings_survive_sources_and_explicit_same_agent_refreshes_profile() {
     let (world, spec) = direct_world("background-copy-sources", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
@@ -2575,15 +2617,23 @@ fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_profile() {
         let mut send = |fresh: bool, agent: Option<&str>, sid: &str, prompt: &str| {
             ordinal += 1;
             let tid = format!("00000000-0000-4000-8000-{ordinal:012x}");
-            let session = if fresh {
-                json!({"new":sid})
-            } else {
-                json!({"existing":sid})
-            };
+            if fresh || agent.is_some() {
+                let session = if fresh {
+                    json!({"new":sid})
+                } else {
+                    json!({"existing":sid})
+                };
+                let configured = ipc(
+                    &world,
+                    wait(&budget),
+                    configure_request(&world, session, agent, None, None),
+                );
+                assert_eq!(configured["response"], "configure", "{configured}");
+            }
             let reply = ipc(
                 &world,
                 wait(&budget),
-                submit_request(&world, &tid, session, "check profile", agent),
+                submit_request(&world, &tid, sid, "check profile"),
             );
             assert_eq!(reply["response"], "acceptance", "{reply}");
             let turn = closed_without_owner(&world, &budget, &mut evidence, &tid);
@@ -2591,12 +2641,12 @@ fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_profile() {
             let mut watcher = Watcher::open(&world, wait(&budget), sid);
             let view = watcher.initial();
             assert_eq!(
-                view.head.as_ref().unwrap().model,
-                if prompt == "original external prompt" {
+                view.head.as_ref().unwrap().model.as_deref(),
+                Some(if prompt == "original external prompt" {
                     "background"
                 } else {
                     "refreshed"
-                }
+                })
             );
         };
         send(
@@ -2629,12 +2679,12 @@ fn profile_copy_survives_sources_and_explicit_same_agent_refreshes_profile() {
         let missing = ipc(
             &world,
             wait(&budget),
-            submit_request(
+            configure_request(
                 &world,
-                "00000000-0000-4000-8000-ffffffffffff",
                 json!({"existing":NEW_SESSION}),
-                "refresh missing",
                 Some("background"),
+                None,
+                None,
             ),
         );
         assert_eq!(missing["response"], "error");
@@ -2739,14 +2789,19 @@ fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
             serde_json::to_vec(&metadata(65536)).unwrap(),
         )
         .unwrap();
-        let mut request = submit_request(
+        let configured = ipc(
             &world,
-            FIRST,
-            json!({"new":NEW_SESSION}),
-            "retry and tools",
-            Some("background"),
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new":NEW_SESSION}),
+                Some("background"),
+                None,
+                Some("high"),
+            ),
         );
-        request["request"]["effort"] = json!("high");
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let request = submit_request(&world, FIRST, NEW_SESSION, "retry and tools");
         assert_eq!(
             ipc(&world, wait(&budget), request)["response"],
             "acceptance"

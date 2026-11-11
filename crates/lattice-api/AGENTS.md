@@ -8,14 +8,14 @@
 | --- | --- |
 | `src/lib.rs`、`src/root.rs`、`src/models.rs` | 公开接口重导出、规范本地工作区根路径解析 `resolve_local_workspace_root`、模型候选类型重导出与日志初始化转发 |
 | `src/session.rs` | `SessionApi` 会话列表、树形日志、退回、历史、用量、详情读取与 `SessionId` 精确/前缀解析 |
-| `src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 委托 `lattice-profile` 加载配置并转换为有效 profile / 会话副本，经单一构造入口生成脱敏单行 `ConfigRejection` |
+| `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
 | `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写、在途工作排空与关闭重开 |
 | `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地控制面入口、IPC 消息定义、16 MiB 单帧分帧/拼回及 Unix socket 权限与对端 UID 核验 |
-| `src/local/client.rs`、`src/local/operation.rs` | `LocalClient` 连接、自动启动后台、视图与查询转发、`stop` 收到回执后等待 socket 撤下与 `owner.lock` 释放；`LocalTurn` 提交、取消回执与 `detach` 退出交接 |
-| `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 准入与视图推送、`Owner` 独立监督及有序 `stop` 收尾 |
+| `src/local/client.rs`、`src/local/operation.rs` | `LocalClient` 连接、自动启动后台、`configure` 与视图/查询转发、`stop` 收到回执后等待 socket 撤下与 `owner.lock` 释放；`LocalTurn` 提交、取消回执与 `detach` 退出交接 |
+| `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与提交准入、视图推送、`Owner` 独立监督及有序 `stop` 收尾 |
 | `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令转发、敏感材料传输、错误映射与同连接 SIWC 登录句柄 |
 | `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
-| `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（经 `GatewayTurn::prepare` 核对可用性与带来源标注的 `EffortPolicy`，接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、生产后台接线 `start_turn` 及 `test-utils` 复用的 `run_turn` |
+| `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、生产后台接线 `start_turn` 及 `test-utils` 复用的 `run_turn` |
 | `src/turn/coordinator.rs`、`src/turn/saga.rs` | 全 Turn `SessionExecutionLock` 持有、`spawn_blocking` 存储适配、模型重试、顺序调用分发及 Step/Turn 关闭 |
 | `src/turn/tools.rs` | `ToolExecutor` / `TurnTools` / `ToolSpec` / `ToolOutcome` 工具执行接缝、生产默认注入 `NoTools`，以及 `test-fake-tools` feature 下的假执行器 `FakeToolExecutor`（按后台启动环境 `LATTICE_TEST_TOOLS` 启用） |
 | `src/turn/observer.rs` | 当前尝试的生成中文字段列表，以及各观察者待推节点与文字游标 |

@@ -401,16 +401,27 @@ pub(crate) fn path_bytes(path: &Path) -> &[u8] {
     std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())
 }
 
-/// `session` 写作 `{"new": S}` 或 `{"existing": S}`；身份都由客户端生成。
+/// `session` 写作 `{"new": S}` 或 `{"existing": S}`；创建会话与修改设置都走 `configure`。
+pub(crate) fn configure_request(
+    world: &ScenarioWorld,
+    session: Value,
+    agent: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Value {
+    json!({"operation":"configure","request":{"session":session,
+        "workspace":path_bytes(world.project_dir()),"agent":agent,"model":model,"effort":effort}})
+}
+
+/// 原始 `submit` 只针对已有 `session_id` 提交输入与可选的 `expected_settings`。
 pub(crate) fn submit_request(
     world: &ScenarioWorld,
     turn_id: &str,
-    session: Value,
+    session_id: &str,
     input: &str,
-    agent: Option<&str>,
 ) -> Value {
-    json!({"operation":"submit","request":{"turn_id":turn_id,"session":session,
-        "workspace":path_bytes(world.project_dir()),"input":input,"agent":agent}})
+    json!({"operation":"submit","request":{"turn_id":turn_id,"session":session_id,
+        "workspace":path_bytes(world.project_dir()),"input":input,"expected_settings":null}})
 }
 
 /// 按 TurnId 查询：已接受、在途，或 `not_found` 错误。

@@ -390,15 +390,38 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_summary(&middle["path_total"], &middle_summary);
         assert_summary(&middle["session_total"], &full_summary);
         assert_text(&send, &mut evidence, &middle);
-        let running = send.spawn("new branch").unwrap();
+        let running = driver
+            .start(
+                &world,
+                &LatticeCommand {
+                    args: [
+                        "--json",
+                        "session",
+                        "send",
+                        "new branch",
+                        "--session",
+                        &sid,
+                        "--agent",
+                        "priced",
+                    ]
+                    .into_iter()
+                    .map(String::from)
+                    .collect(),
+                    timeout: Some(world.budget(&spec).cap_timeout(spec.step_timeout())),
+                },
+            )
+            .unwrap();
         gate.wait_until_stalled(6, running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
-        let branch = send.wait_spawned(running).unwrap();
-        evidence.record_command("new branch", &branch.command);
-        assert!(branch.command.is_clean_exit(0));
-        let c = branch.accepted_turn_id().unwrap();
+        let branch = running.wait(None).unwrap();
+        evidence.record_command("new branch", &branch);
+        assert!(branch.is_clean_exit(0), "{}", branch.summary());
+        let c = support::parse_send_stdout(&branch.stdout, branch.exit_code())
+            .accepted_turn_id()
+            .unwrap()
+            .to_owned();
         let fork = usage(&send, &mut evidence, &sid);
         assert_eq!(fork["position"], 7);
         assert_eq!(fork["turns"].as_array().unwrap().len(), 2);

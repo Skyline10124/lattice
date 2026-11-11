@@ -49,6 +49,33 @@ impl SessionSettings {
     pub fn validate(&self) -> Result<()> {
         super::config::validate_system_prompt("settings", self.system_prompt.as_deref())
     }
+
+    /// 隔离测试的有效会话设置夹具；生产只经 `configure` 构造。
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn for_test(config: &super::FrozenTurnConfig) -> Self {
+        Self {
+            profile: EffectiveProfile {
+                agent_name: config.agent_name.clone(),
+                description: None,
+                default_model: Some(ModelRef::new(config.provider.clone(), config.model.clone())),
+                default_effort: config.effort,
+                timeout_secs: config.limits.timeout_secs,
+                retry: RetryPolicy::new(
+                    config
+                        .limits
+                        .max_model_attempts
+                        .saturating_sub(1)
+                        .min(crate::MAX_MODEL_ATTEMPTS - 1),
+                    500,
+                    3000,
+                )
+                .expect("构造测试重试策略"),
+            },
+            system_prompt: config.system_prompt.clone(),
+            model: Some(ModelRef::new(config.provider.clone(), config.model.clone())),
+            effort: config.effort,
+        }
+    }
 }
 
 #[cfg(test)]

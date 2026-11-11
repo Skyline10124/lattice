@@ -26,7 +26,7 @@ macro_rules! load_local {
         let mut session = $session;
         let selection = $selection;
         let sessions = $tx.open_table(SESSIONS).map_err(table_error)?;
-        let profile_copies = $tx.open_table(PROFILE_COPIES).map_err(table_error)?;
+        let session_settings = $tx.open_table(SESSION_SETTINGS).map_err(table_error)?;
         let nodes = $tx.open_table(NODES).map_err(table_error)?;
         let configs = $tx.open_table(CONFIGS).map_err(table_error)?;
         let turn_index = $tx.open_table(TURN_INDEX).map_err(table_error)?;
@@ -81,8 +81,11 @@ macro_rules! load_local {
             scope.nodes.insert(s.current);
             r.sessions.insert(session, s);
         }
-        if let Some(value) = profile_copies.get(session.to_string().as_str())? {
-            r.profile_copies.insert(session, decode_profile_copy(&session.to_string(), value.value())?);
+        if let Some(value) = session_settings.get(session.to_string().as_str())? {
+            r.session_settings.insert(
+                session,
+                decode_session_settings(&session.to_string(), value.value())?,
+            );
         }
         if let Selection::Node(node) = selection {
             scope.nodes.insert(node);
@@ -224,7 +227,6 @@ macro_rules! load_local {
                 Node::UserMessage { config_digest, .. } => Some(*config_digest),
                 _ => None,
             })
-            .chain(r.profile_copies.values().map(|copy| copy.prompt_config_digest))
             .collect();
         for digest in digests {
             if let std::collections::btree_map::Entry::Vacant(entry) = r.configs.entry(digest) {

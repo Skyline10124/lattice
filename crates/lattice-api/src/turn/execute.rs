@@ -12,7 +12,7 @@ use crate::{
     session::{ApiError, RequestConflict, Result, SessionApi},
 };
 use futures::FutureExt;
-use lattice_conversation::{Effort, SessionId, TurnId};
+use lattice_conversation::{SessionId, TurnId};
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -28,12 +28,10 @@ pub(crate) struct ExecutionInput {
     pub workspace: LocalWorkspaceRoot,
     pub request: RunTurnRequest,
     pub prepared_model: Option<PreparedModel>,
-    pub prepared_profile: Option<crate::profile::PreparedProfile>,
+    pub prepared_settings: Option<(SessionSettings, SettingsVersion)>,
     pub io: Option<CoordinatorStoreIo>,
     pub shutdown: Arc<AtomicBool>,
     pub observer: Arc<ObserverSink>,
-    /// 新会话身份由提交方在执行开始前给定。
-    pub new_session: Option<SessionId>,
 }
 
 pub(crate) struct PreparedModel {
@@ -41,29 +39,22 @@ pub(crate) struct PreparedModel {
     execution: super::saga::ModelExecution,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum EffortSource {
-    Explicit,
-    ProfileFile(std::path::PathBuf),
-    SessionCopy,
-}
-
 impl PreparedModel {
-    /// 在建库与接受前完成单次准入与档位选择；同一 Turn 随后沿用这个网关句柄。
+    /// 在接受前按会话设置完成单次准入与严格档位校验；同一 Turn 随后沿用这个网关句柄。
     pub(crate) async fn resolve(
         gateway: &Arc<lattice_llm::RequestGateway>,
-        profile: &crate::profile::PreparedProfile,
-        model: Option<&crate::ModelRef>,
-        effort: Option<lattice_conversation::Effort>,
+        settings: &SessionSettings,
     ) -> Result<Self> {
         let auth = gateway.auth_store();
-        let (chosen_model, policy, source) =
-            select_model_and_policy(profile, model, effort, Some(&auth))?;
+        let chosen_model = require_settings_model(settings, Some(&auth))?;
         let turn = gateway.open_turn();
         let resolved = turn
-            .prepare(&chosen_model, policy)
+            .prepare(
+                &chosen_model,
+                lattice_llm::EffortPolicy::Strict(settings.effort),
+            )
             .await
-            .map_err(|error| prepare_rejection(&error, &source, Some(&auth)))?;
+            .map_err(|error| prepare_rejection(&error, Some(&auth)))?;
         Ok(Self {
             target: resolved.target().clone(),
             execution: super::saga::ModelExecution::gateway(turn, &resolved),
@@ -71,93 +62,24 @@ impl PreparedModel {
     }
 }
 
-fn prepare_rejection(
-    error: &lattice_llm::PrepareError,
-    source: &EffortSource,
+pub(crate) fn require_settings_model(
+    settings: &SessionSettings,
     auth: Option<&lattice_llm::auth::AuthStore>,
-) -> ApiError {
-    let message = match error {
-        lattice_llm::PrepareError::UnsupportedEffort { .. } => match source {
-            EffortSource::Explicit => format!("{error} (from --effort)"),
-            EffortSource::ProfileFile(path) => {
-                format!("{error} (from [agent].effort in {})", path.display())
-            }
-            EffortSource::SessionCopy => format!("{error} (from session profile copy)"),
-        },
-        _ => error.to_string(),
-    };
-    ApiError::Configuration(crate::ConfigRejection::new(&message, auth))
+) -> Result<crate::ModelRef> {
+    settings.model.clone().ok_or_else(|| {
+        ApiError::Configuration(crate::ConfigRejection::new(
+            "session has no model selected; choose one with /model or --model",
+            auth,
+        ))
+    })
 }
 
-fn select_model_and_policy(
-    profile: &crate::profile::PreparedProfile,
-    model: Option<&crate::ModelRef>,
-    effort: Option<Effort>,
+fn prepare_rejection(
+    error: &lattice_llm::PrepareError,
     auth: Option<&lattice_llm::auth::AuthStore>,
-) -> Result<(crate::ModelRef, lattice_llm::EffortPolicy, EffortSource)> {
-    let profile_default = profile.configuration.effective.default_effort;
-    let base = if profile.inherited {
-        let current = &profile.previous.as_ref().expect("inherited copy").current;
-        Some((
-            crate::ModelRef::new(current.provider.clone(), current.model.clone()),
-            current.effort,
-        ))
-    } else {
-        profile
-            .configuration
-            .effective
-            .default_model
-            .clone()
-            .map(|default_model| (default_model, profile_default))
-    };
-    let chosen_model = match model {
-        Some(model) => model.clone(),
-        None => base
-            .as_ref()
-            .map(|(base_model, _)| base_model.clone())
-            .ok_or_else(|| {
-                ApiError::Configuration(crate::ConfigRejection::new(
-                    "model selection or [agent].model is required",
-                    auth,
-                ))
-            })?,
-    };
-    let changed = base
-        .as_ref()
-        .is_none_or(|(base_model, _)| *base_model != chosen_model);
-    let base_effort = base
-        .as_ref()
-        .map_or(profile_default, |(_, base_effort)| *base_effort);
-    let profile_source = || {
-        if profile.inherited {
-            EffortSource::SessionCopy
-        } else {
-            EffortSource::ProfileFile(
-                profile
-                    .source_path
-                    .clone()
-                    .expect("loaded profile source path"),
-            )
-        }
-    };
-    let (policy, source) = match effort {
-        Some(explicit) => (
-            lattice_llm::EffortPolicy::Strict(Some(explicit)),
-            EffortSource::Explicit,
-        ),
-        None if !changed => (
-            lattice_llm::EffortPolicy::Strict(base_effort),
-            profile_source(),
-        ),
-        None => (
-            lattice_llm::EffortPolicy::Fallback {
-                current: base_effort,
-                profile_default,
-            },
-            profile_source(),
-        ),
-    };
-    Ok((chosen_model, policy, source))
+) -> ApiError {
+    let message = crate::configure::EffortSource::SessionSettings.format_unsupported(error);
+    ApiError::Configuration(crate::ConfigRejection::new(&message, auth))
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
@@ -167,21 +89,16 @@ pub fn start_turn(
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
 ) -> TurnExecution {
-    let new_session = request
-        .session_id
-        .is_none()
-        .then(crate::local::new_session_id);
     start_execution(ExecutionInput {
         session,
         turn_id,
         workspace,
         request,
         prepared_model: None,
-        prepared_profile: None,
+        prepared_settings: None,
         io: None,
         shutdown: Arc::default(),
         observer: Arc::default(),
-        new_session,
     })
 }
 
@@ -241,11 +158,10 @@ async fn execute_owned(
         workspace,
         mut request,
         prepared_model,
-        prepared_profile,
+        prepared_settings,
         io,
         shutdown,
         observer,
-        new_session,
     } = input;
     let tools = request.tools.take().unwrap_or_else(default_tool_executor);
     let project = workspace.project_path();
@@ -256,98 +172,49 @@ async fn execute_owned(
     {
         return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
     }
-    let session_id = request
-        .session_id
-        .or(new_session)
-        .ok_or_else(|| ApiError::BadRequest("explicit SessionId required".into()))?;
+    let session_id = request.session_id;
     let io = match io {
         Some(io) => io,
         None => CoordinatorStoreIo::acquire_api(session.clone(), session_id).await?,
     };
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
-    if request.session_id.is_some() {
-        let record = coordinator
-            .io
-            .read(move |read| read.session(session_id))
-            .await?;
-        if record.project_path != project {
-            return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
-        }
-    }
-    let profile = match prepared_profile {
-        Some(profile) => profile,
+    let (settings, settings_version) = match prepared_settings {
+        Some(prepared) => prepared,
         None => {
-            let snapshot = if request.session_id.is_some() {
-                Some(
-                    coordinator
-                        .io
-                        .read(move |read| {
-                            let copy = read.profile_copy(session_id)?;
-                            let prompt = read
-                                .stored_config(&copy.prompt_config_digest)?
-                                .system_prompt;
-                            Ok((copy, prompt))
-                        })
-                        .await?,
-                )
-            } else {
-                None
-            };
-            let (previous, prompt) =
-                snapshot.map_or((None, None), |(copy, prompt)| (Some(copy), prompt));
-            let inherited = request.agent.is_none() && previous.is_some();
-            let (configuration, source_path) = if inherited {
-                let copy = previous.as_ref().expect("inherited copy");
-                (crate::profile::TurnProfile::from_copy(copy, prompt), None)
-            } else {
-                let loaded = request
-                    .loaded_profile
-                    .as_ref()
-                    .ok_or_else(|| ApiError::BadRequest("frozen configuration required".into()))?;
-                (
-                    crate::profile::TurnProfile::from_loaded(loaded),
-                    Some(loaded.path.clone()),
-                )
-            };
-            crate::profile::PreparedProfile {
-                configuration,
-                previous,
-                inherited,
-                source_path,
+            let expected = request.expected_settings;
+            let check_project = project.clone();
+            let (record, settings) = coordinator
+                .io
+                .read(move |read| {
+                    let record = read.session(session_id)?;
+                    let settings = read.session_settings(session_id)?;
+                    Ok((record, settings))
+                })
+                .await?;
+            if record.project_path != check_project {
+                return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
             }
+            let version = settings.version()?;
+            if let Some(expected) = expected
+                && expected != version
+            {
+                return Err(ApiError::Conflict(RequestConflict::SettingsChanged));
+            }
+            (settings, version)
         }
     };
-    let selected = match &request.agent {
-        Some(name) => name.clone(),
-        None if request.session_id.is_some() => profile.configuration.effective.agent_name.clone(),
-        None => {
-            return Err(ApiError::BadRequest(
-                "new Session requires explicit agent".into(),
-            ));
-        }
-    };
-    if profile.configuration.effective.agent_name != selected {
-        return Err(ApiError::BadRequest(
-            "loaded agent differs from selection".into(),
-        ));
-    }
     let (target, model) = match prepared_model {
         Some(PreparedModel { target, execution }) => (target, execution),
         None => match request.injected_llm() {
             Some((client, protocol, supported)) => {
-                let (chosen_model, policy, source) = select_model_and_policy(
-                    &profile,
-                    request.model.as_ref(),
-                    request.effort,
-                    None,
-                )?;
+                let chosen_model = require_settings_model(&settings, None)?;
+                let policy = lattice_llm::EffortPolicy::Strict(settings.effort);
                 let effort = lattice_llm::select_effort(&policy, &supported).map_err(|effort| {
                     prepare_rejection(
                         &lattice_llm::PrepareError::UnsupportedEffort {
                             model: chosen_model.clone(),
                             effort,
                         },
-                        &source,
                         None,
                     )
                 })?;
@@ -374,29 +241,7 @@ async fn execute_owned(
         return Err(StoreError::WriteDisabled.into());
     }
     let turn_tools: Arc<dyn TurnTools> = Arc::from(tools.open_turn(session_id, &workspace).await?);
-    let config = super::live::freeze_config(&profile.configuration, &target, turn_tools.specs())?;
-    let expected_profile_digest = profile
-        .previous
-        .as_ref()
-        .map(SessionProfileCopy::digest)
-        .transpose()?;
-    let profile_copy = SessionProfileCopy {
-        profile: profile.configuration.effective.clone(),
-        prompt_config_digest: if profile.inherited {
-            profile
-                .previous
-                .as_ref()
-                .expect("inherited copy")
-                .prompt_config_digest
-        } else {
-            config.digest()?
-        },
-        current: SessionModelChoice {
-            provider: target.model.provider().clone(),
-            model: target.model.model().clone(),
-            effort: target.effort,
-        },
-    };
+    let config = super::live::freeze_config(&settings, &target, turn_tools.specs())?;
     let timeout = config.limits.timeout_secs;
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
@@ -416,29 +261,31 @@ async fn execute_owned(
     let result = coordinator
         .io
         .accept(AcceptTurn {
-            session: if request.session_id.is_some() {
-                AcceptSession::Existing { id: session_id }
-            } else {
-                AcceptSession::New { id: session_id }
-            },
+            session_id,
             turn_id,
             project_path: project,
             input: request.input,
             config,
             accepted_at: chrono::Utc::now(),
-            agent_selection: if request.agent.is_some() {
-                AgentSelection::Explicit
-            } else {
-                AgentSelection::Inherited
-            },
-            profile_copy,
-            expected_profile_digest,
+            settings_version,
         })
         .await;
     let result = match result {
         Ok(result) => result,
         Err(error) => {
-            let error = ApiError::from(error);
+            let error = match ApiError::from(error) {
+                ApiError::Store(store_error) => match store_error.as_ref() {
+                    StoreError::Conflict { .. } => ApiError::Conflict(RequestConflict::TurnIdUsed),
+                    StoreError::BindingMismatch { .. } => {
+                        ApiError::Conflict(RequestConflict::BindingMismatch)
+                    }
+                    StoreError::SettingsChanged { .. } => {
+                        ApiError::Conflict(RequestConflict::SettingsChanged)
+                    }
+                    _ => ApiError::Store(store_error),
+                },
+                other => other,
+            };
             if error.outcome_unknown() {
                 accept(
                     accepted,
@@ -505,7 +352,7 @@ async fn execute_owned(
             cancel: request.cancel_flag.expect("cancel carrier initialized"),
             shutdown,
             deadline,
-            retry: profile.configuration.retry(),
+            retry: settings.profile.retry,
         },
     )
     .await?;
@@ -542,160 +389,45 @@ pub async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_conversation::Effort::{High, Low, Max, Off};
-    use lattice_llm::EffortPolicy;
-    use std::path::PathBuf;
+    use lattice_conversation::Effort::Off;
 
-    fn profile() -> crate::profile::PreparedProfile {
-        let config = FrozenTurnConfig {
-            agent_name: crate::AgentName::parse("test").unwrap(),
-            provider: crate::ProviderId::parse("profile").unwrap(),
-            model: crate::ModelId::parse("default").unwrap(),
-            effort: Some(Low),
-            system_prompt: None,
-            catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
-            limits: TurnExecutionLimits {
+    #[test]
+    fn admission_requires_model_and_attributes_unsupported_effort_to_session_settings() {
+        let modeless = SessionSettings {
+            profile: EffectiveProfile {
+                agent_name: crate::AgentName::parse("test").unwrap(),
+                description: None,
+                default_model: None,
+                default_effort: None,
                 timeout_secs: crate::TurnTimeout::default(),
-                max_model_steps: 32,
-                max_model_attempts: 1,
+                retry: crate::RetryPolicy::default(),
             },
+            system_prompt: None,
+            model: None,
+            effort: None,
         };
-        let copy = SessionProfileCopy::for_test(&config);
-        crate::profile::PreparedProfile {
-            configuration: crate::profile::TurnProfile::from_copy(&copy, None),
-            previous: Some(copy),
-            inherited: false,
-            source_path: Some(PathBuf::from("/workspace/.lattice/agents/test/agent.toml")),
-        }
-    }
-
-    #[test]
-    fn selected_target_uses_profile_or_copy_before_request_override() {
-        let agent_toml = PathBuf::from("/workspace/.lattice/agents/test/agent.toml");
-        let mut profile = profile();
-        let (chosen, policy, source) = select_model_and_policy(&profile, None, None, None).unwrap();
-        assert_eq!(
-            (chosen, policy, source),
-            (
-                crate::ModelRef::parse("profile/default").unwrap(),
-                EffortPolicy::Strict(Some(Low)),
-                EffortSource::ProfileFile(agent_toml.clone()),
-            )
-        );
-        profile.inherited = true;
-        profile.source_path = None;
-        profile.previous.as_mut().unwrap().current = SessionModelChoice {
-            provider: crate::ProviderId::parse("saved").unwrap(),
-            model: crate::ModelId::parse("same").unwrap(),
-            effort: Some(High),
+        let Err(ApiError::Configuration(missing_model)) = require_settings_model(&modeless, None)
+        else {
+            panic!("模型为空的会话设置应在准入时返回配置拒绝");
         };
-        for (request, expected_model, changed) in [
-            (None, "saved/same", false),
-            (Some("saved/same"), "saved/same", false),
-            (Some("other/same"), "other/same", true),
-            (Some("saved/org/model"), "saved/org/model", true),
-        ] {
-            let parsed = request.map(|value| crate::ModelRef::parse(value).unwrap());
-            let (chosen, policy, source) =
-                select_model_and_policy(&profile, parsed.as_ref(), None, None).unwrap();
-            let expected_policy = if changed {
-                EffortPolicy::Fallback {
-                    current: Some(High),
-                    profile_default: Some(Low),
-                }
-            } else {
-                EffortPolicy::Strict(Some(High))
-            };
-            assert_eq!(
-                (chosen, policy, source),
-                (
-                    crate::ModelRef::parse(expected_model).unwrap(),
-                    expected_policy,
-                    EffortSource::SessionCopy,
-                )
-            );
-            let (_, explicit_policy, explicit_source) =
-                select_model_and_policy(&profile, parsed.as_ref(), Some(Max), None).unwrap();
-            assert_eq!(
-                (explicit_policy, explicit_source),
-                (EffortPolicy::Strict(Some(Max)), EffortSource::Explicit)
-            );
-        }
-        profile.inherited = false;
-        profile.source_path = Some(agent_toml.clone());
-        let (chosen, policy, source) = select_model_and_policy(&profile, None, None, None).unwrap();
-        assert_eq!(
-            (chosen, policy, source),
-            (
-                crate::ModelRef::parse("profile/default").unwrap(),
-                EffortPolicy::Strict(Some(Low)),
-                EffortSource::ProfileFile(agent_toml.clone()),
-            )
+        let missing_text = missing_model.to_string();
+        assert!(
+            missing_text.contains("/model") && missing_text.contains("--model"),
+            "缺少模型的拒绝应提示 /model 与 --model，实际为 {missing_text:?}"
         );
-        profile.configuration.effective.default_model = None;
-        assert!(matches!(
-            select_model_and_policy(&profile, None, None, None),
-            Err(ApiError::Configuration(_))
-        ));
-        let override_model = crate::ModelRef::parse("chosen/org/model").unwrap();
-        let (chosen, policy, _) =
-            select_model_and_policy(&profile, Some(&override_model), None, None).unwrap();
-        assert_eq!(
-            (chosen, policy),
-            (
-                override_model,
-                EffortPolicy::Fallback {
-                    current: Some(Low),
-                    profile_default: Some(Low),
-                },
-            )
-        );
-    }
 
-    #[test]
-    fn unsupported_effort_attaches_source_attribution() {
-        let agent_toml = PathBuf::from("/workspace/.lattice/agents/coder/agent.toml");
         let unsupported = lattice_llm::PrepareError::UnsupportedEffort {
             model: crate::ModelRef::parse("openai/gpt-5").unwrap(),
             effort: Off,
         };
-        let profile_attribution = format!("(from [agent].effort in {})", agent_toml.display());
-        for (source, expected, forbidden) in [
-            (
-                EffortSource::Explicit,
-                "(from --effort)",
-                &["[agent].effort", "session profile copy"][..],
-            ),
-            (
-                EffortSource::ProfileFile(agent_toml),
-                profile_attribution.as_str(),
-                &["--effort", "session profile copy"][..],
-            ),
-            (
-                EffortSource::SessionCopy,
-                "(from session profile copy)",
-                &["--effort", "[agent].effort"][..],
-            ),
-        ] {
-            let ApiError::Configuration(rejection) = prepare_rejection(&unsupported, &source, None)
-            else {
-                panic!("expected configuration rejection for {source:?}");
-            };
-            let message = rejection.to_string();
-            assert!(
-                message.contains(&unsupported.to_string()),
-                "missing base UnsupportedEffort message in: {message}"
-            );
-            assert!(
-                message.contains(expected),
-                "expected {expected:?} for {source:?}, got: {message}"
-            );
-            for unexpected in forbidden {
-                assert!(
-                    !message.contains(unexpected),
-                    "unexpected {unexpected:?} for {source:?}, got: {message}"
-                );
-            }
-        }
+        let ApiError::Configuration(rejection) = prepare_rejection(&unsupported, None) else {
+            panic!("预期配置拒绝");
+        };
+        let message = rejection.to_string();
+        assert!(
+            message.contains(&unsupported.to_string())
+                && message.contains("(from session settings)"),
+            "提交准入的档位拒绝必须归因为会话设置: {message}"
+        );
     }
 }

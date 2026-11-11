@@ -10,7 +10,6 @@ mod connection;
 mod input;
 mod markdown;
 mod queue;
-mod selection;
 mod session;
 mod view;
 mod wrapping;
@@ -25,15 +24,12 @@ pub struct TuiOptions {
     pub project_root: PathBuf,
 }
 
-pub async fn run(options: TuiOptions) -> anyhow::Result<std::process::ExitCode> {
-    let workspace = if options.session_id.is_some() && options.agent.is_none() {
-        Some(tokio::task::spawn_blocking(lattice_api::LocalWorkspaceRoot::resolve).await??)
-    } else {
-        None
-    };
+pub async fn run(mut options: TuiOptions) -> anyhow::Result<std::process::ExitCode> {
+    let workspace = tokio::task::spawn_blocking(lattice_api::LocalWorkspaceRoot::resolve).await??;
+    options.project_root = workspace.canonical_path().to_path_buf();
     let client = lattice_api::local::LocalClient::new(lattice_api::StateLayout::resolve()?);
     client.ensure_running().await?;
-    let ctx = session::open_or_create(&options, workspace.as_ref(), &client).await?;
+    let ctx = session::open_or_create(&options, &workspace, &client).await?;
     app::run_app(options, ctx, client).await?;
     Ok(std::process::ExitCode::SUCCESS)
 }

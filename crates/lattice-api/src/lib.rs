@@ -13,6 +13,7 @@
 //! facade values only.
 
 mod config_rejection;
+mod configure;
 mod redact;
 pub use config_rejection::ConfigRejection;
 pub mod local;
@@ -24,7 +25,7 @@ mod stores;
 pub mod turn;
 
 pub use lattice_conversation::Effort;
-pub use lattice_session::store::{NodeId, TurnSummary, UsageSummary};
+pub use lattice_session::store::{NodeId, SettingsVersion, TurnSummary, UsageSummary};
 pub use lattice_session::{
     AgentName, AgentNameError, ProjectPath, RetryPolicy, RetryPolicyError, StateLayout,
     TurnTimeout, TurnTimeoutError,

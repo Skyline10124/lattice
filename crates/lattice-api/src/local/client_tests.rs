@@ -233,10 +233,10 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
 }
 fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
-        model: "test".into(),
-        provider: "openai-compatible".into(),
+        model: Some(ModelId::parse("test").unwrap()),
+        provider: Some(ProviderId::parse("openai-compatible").unwrap()),
         effort: None,
-        profile_default_effort: None,
+        settings_version: serde_json::from_value(serde_json::json!("22".repeat(32))).unwrap(),
         session_id: sid(),
         position: NodeId(2),
         agent: "local-test".into(),
@@ -291,13 +291,11 @@ fn entry(id: TurnId, closed: bool) -> Box<ConversationEntry> {
 }
 fn request(peer: &Peer, id: TurnId) -> TurnRequest {
     TurnRequest {
-        model: None,
-        effort: None,
         turn_id: id,
-        session: SubmitSession::New(sid()),
+        session: sid(),
         workspace: peer._directory.path().into(),
         input: "原始输入".into(),
-        agent: Some(AgentName::parse("local-test").unwrap()),
+        expected_settings: None,
     }
 }
 fn accepted(id: TurnId) -> Response {
@@ -328,11 +326,11 @@ async fn cancel_status(turn: &mut LocalTurn, expected: CancelStatus) {
 async fn submit(peer: &Peer, id: TurnId) -> (LocalTurn, Wire) {
     let mut turn = peer.client.start_turn(request(peer, id));
     assert!(
-        matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, session_id, new: true } } if turn_id == id && session_id == sid())
+        matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, session_id } } if turn_id == id && session_id == sid())
     );
     let (wire, request) = peer.request().await;
     assert!(
-        matches!(request, Request::Submit { request: TurnRequest { turn_id, session: SubmitSession::New(_), .. }, .. } if turn_id == id)
+        matches!(request, Request::Submit { request: TurnRequest { turn_id, session, .. }, .. } if turn_id == id && session == sid())
     );
     (turn, wire)
 }
@@ -461,8 +459,7 @@ async fn accepted_submission_ignores_backlogged_views_until_its_user_message() {
         for root in [true, false] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let mut input = request(&peer, id);
-            input.session = SubmitSession::Existing(sid());
+            let input = request(&peer, id);
             let mut turn = if own_view {
                 peer.client.start_turn(input)
             } else {
@@ -1034,13 +1031,12 @@ async fn late_acceptance_after_cancel_handoff_follows_the_submitted_turn() {
         for recover in [false, true] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let mut input = request(&peer, id);
-            input.session = SubmitSession::Existing(sid());
+            let input = request(&peer, id);
             let mut turn = peer.client.start_turn(input);
             assert!(matches!(
                 next(&mut turn).await,
                 LocalUpdate::Submit {
-                    update: SubmissionUpdate::Sending { new: false, .. }
+                    update: SubmissionUpdate::Sending { .. }
                 }
             ));
             let (mut wire, _) = peer.request().await;
@@ -1358,14 +1354,23 @@ async fn cancel_handoff_preserves_late_backend_rejection_separately_from_transpo
     }
 }
 #[tokio::test]
-async fn updates_round_trip_the_seven_record_shapes() {
+async fn updates_round_trip_the_record_shapes() {
     let id = new_turn_id();
     let updates = vec![
+        LocalUpdate::Configure {
+            session_id: sid(),
+            result: ConfigureResult::Configured {
+                head: head(id, false),
+                adjustment: Some(EffortAdjustment {
+                    from: Some(Effort::Max),
+                    to: Some(Effort::High),
+                }),
+            },
+        },
         LocalUpdate::Submit {
             update: SubmissionUpdate::Sending {
                 turn_id: id,
                 session_id: sid(),
-                new: true,
             },
         },
         LocalUpdate::Submit {
@@ -1399,6 +1404,7 @@ async fn updates_round_trip_the_seven_record_shapes() {
         },
     ];
     for (update, expected) in updates.into_iter().zip([
+        "configure",
         "submit",
         "submit",
         "head",

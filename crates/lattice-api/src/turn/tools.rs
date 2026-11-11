@@ -213,17 +213,6 @@ pub mod fake {
             let invocation_id = started.binding().invocation_id;
             let default_line = format!("{name}:{invocation_id}\n");
 
-            if let Some(ready_value) = arguments.get("ready_path") {
-                let Some(ready_path) = ready_value.as_str() else {
-                    return invalid_arg("ready_path 必须是绝对路径字符串");
-                };
-                if let Err(outcome) =
-                    write_marker(PathBuf::from(ready_path), default_line.clone(), false).await
-                {
-                    return outcome;
-                }
-            }
-
             if let Some(marker_value) = arguments.get("marker_path") {
                 let Some(marker_path) = marker_value.as_str() else {
                     return invalid_arg("marker_path 必须是绝对路径字符串");
@@ -234,6 +223,17 @@ pub mod fake {
                     .map(ToOwned::to_owned)
                     .unwrap_or_else(|| default_line.clone());
                 if let Err(outcome) = write_marker(PathBuf::from(marker_path), line, true).await {
+                    return outcome;
+                }
+            }
+
+            if let Some(ready_value) = arguments.get("ready_path") {
+                let Some(ready_path) = ready_value.as_str() else {
+                    return invalid_arg("ready_path 必须是绝对路径字符串");
+                };
+                if let Err(outcome) =
+                    write_marker(PathBuf::from(ready_path), default_line.clone(), false).await
+                {
                     return outcome;
                 }
             }

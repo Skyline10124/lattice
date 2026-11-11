@@ -10,19 +10,30 @@ use std::collections::VecDeque;
 
 const LIMIT: usize = 5;
 
+/// 排队消息对应的预期设置版本：入队时固定的快照，或等待本客户端在途 configure 的回复。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum QueuedSettings {
+    Snapshot(Option<lattice_api::local::SettingsVersion>),
+    PendingConfigure(u64),
+}
+
 /// 仅由输入文字和已验证锚点的草稿组成，不从历史消息恢复可编辑草稿。
 #[derive(Clone)]
-pub(crate) struct Outgoing(Message);
+pub(crate) struct Outgoing {
+    pub(crate) message: Message,
+    pub(crate) expected_settings: Option<lattice_api::local::SettingsVersion>,
+}
 impl std::ops::Deref for Outgoing {
     type Target = Message;
     fn deref(&self) -> &Message {
-        &self.0
+        &self.message
     }
 }
 
 pub(crate) struct QueuedMessage {
     pub(crate) id: BlockId,
-    message: Outgoing,
+    message: Message,
+    settings: QueuedSettings,
 }
 impl std::ops::Deref for QueuedMessage {
     type Target = Message;
@@ -83,7 +94,14 @@ impl Queue {
             return None;
         }
         let message = self.messages.pop_front()?;
-        let payload = message.message.clone();
+        let expected_settings = match &message.settings {
+            QueuedSettings::Snapshot(version) => *version,
+            QueuedSettings::PendingConfigure(_) => None,
+        };
+        let payload = Outgoing {
+            message: message.message.clone(),
+            expected_settings,
+        };
         self.awaiting = Some((turn, message));
         Some(payload)
     }
@@ -221,9 +239,9 @@ impl Queue {
                 position,
             } => {
                 if save {
-                    message.message.0.text = input.text();
+                    message.message.text = input.text();
                     if message.text.trim().is_empty() {
-                        message.message.0.text.clear();
+                        message.message.text.clear();
                     }
                 }
                 if !message.is_empty() {
@@ -274,32 +292,81 @@ impl Queue {
             .saturating_add(usize::from(self.awaiting.is_some()))
             >= LIMIT
     }
-    pub(crate) fn take_message(&mut self, text: String) -> Outgoing {
+    pub(crate) fn take_message(
+        &mut self,
+        text: String,
+        expected_settings: Option<lattice_api::local::SettingsVersion>,
+    ) -> Outgoing {
         self.drafts.sort_by_key(|d| d.comment.n);
-        Outgoing(Message {
-            text: if text.trim().is_empty() {
-                String::new()
-            } else {
-                text
+        Outgoing {
+            message: Message {
+                text: if text.trim().is_empty() {
+                    String::new()
+                } else {
+                    text
+                },
+                comments: self.drafts.drain(..).map(|d| d.comment).collect(),
             },
-            comments: self.drafts.drain(..).map(|d| d.comment).collect(),
-        })
+            expected_settings,
+        }
     }
-    pub(crate) fn enqueue(&mut self, id: BlockId, text: String) -> bool {
+    pub(crate) fn enqueue(&mut self, id: BlockId, text: String, settings: QueuedSettings) -> bool {
         if self.is_full() || (text.trim().is_empty() && self.drafts.is_empty()) {
             return false;
         }
-        let message = self.take_message(text);
-        self.messages.push_back(QueuedMessage { id, message });
+        let message = self.take_message(text, None).message;
+        self.messages.push_back(QueuedMessage {
+            id,
+            message,
+            settings,
+        });
         true
+    }
+    pub(crate) fn rebind_pending_configure(&mut self, generation: u64) {
+        for message in &mut self.messages {
+            if matches!(message.settings, QueuedSettings::PendingConfigure(_)) {
+                message.settings = QueuedSettings::PendingConfigure(generation);
+            }
+        }
+        if let Some(Editor {
+            target: EditTarget::Queued { message, .. },
+            ..
+        }) = &mut self.editor
+            && matches!(message.settings, QueuedSettings::PendingConfigure(_))
+        {
+            message.settings = QueuedSettings::PendingConfigure(generation);
+        }
+    }
+    pub(crate) fn resolve_configure(
+        &mut self,
+        generation: u64,
+        version: Option<lattice_api::local::SettingsVersion>,
+    ) -> bool {
+        let mut resolved = false;
+        for message in &mut self.messages {
+            if message.settings == QueuedSettings::PendingConfigure(generation) {
+                message.settings = QueuedSettings::Snapshot(version);
+                resolved = true;
+            }
+        }
+        if let Some(Editor {
+            target: EditTarget::Queued { message, .. },
+            ..
+        }) = &mut self.editor
+            && message.settings == QueuedSettings::PendingConfigure(generation)
+        {
+            message.settings = QueuedSettings::Snapshot(version);
+            resolved = true;
+        }
+        resolved
     }
     pub(crate) fn restore(&mut self, message: Outgoing, blocks: &mut BlockList) -> String {
         self.drafts
-            .extend(message.0.comments.into_iter().map(|comment| Draft {
+            .extend(message.message.comments.into_iter().map(|comment| Draft {
                 id: blocks.allocate_id(),
                 comment,
             }));
-        message.0.text
+        message.message.text
     }
     pub(crate) fn retain_steps(
         &mut self,
@@ -319,7 +386,7 @@ impl Queue {
         };
         self.drafts.retain(|d| keep(&d.comment));
         for message in &mut self.messages {
-            message.message.0.comments.retain(&mut keep);
+            message.message.comments.retain(&mut keep);
         }
         let edited_position = self
             .editor
@@ -341,7 +408,7 @@ impl Queue {
                     !keep(&draft.comment)
                 }
                 EditTarget::Queued { message, position } => {
-                    message.message.0.comments.retain(&mut keep);
+                    message.message.comments.retain(&mut keep);
                     if let Some(retained_before) = edited_position {
                         *position = retained_before;
                     }
@@ -360,6 +427,6 @@ impl Queue {
     }
     pub(crate) fn drain(&mut self) -> impl Iterator<Item = String> + '_ {
         self.finish_edit(false);
-        self.messages.drain(..).map(|m| m.message.0.text)
+        self.messages.drain(..).map(|m| m.message.text)
     }
 }

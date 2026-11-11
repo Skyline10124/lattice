@@ -40,6 +40,23 @@ pub(crate) fn effort_changed_status(
     )
 }
 
+pub(crate) fn configure_failed_status(error: &LocalError) -> Status {
+    match error.kind {
+        lattice_api::local::LocalErrorKind::Busy => status(
+            NoticeLevel::Warn,
+            "当前有一轮正在执行，这一轮执行中不能修改设置".into(),
+        ),
+        lattice_api::local::LocalErrorKind::Transport => status(
+            NoticeLevel::Warn,
+            format!("修改会话设置结果未知：{}", error.message),
+        ),
+        _ => status(
+            NoticeLevel::Error,
+            format!("修改会话设置失败：{}", error.message),
+        ),
+    }
+}
+
 fn recovered_notice(turn_id: TurnId) -> String {
     format!("按 TurnId 查到已接受的请求：turn {turn_id}；未重复执行")
 }
@@ -105,15 +122,21 @@ pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
 }
 
 pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError, kept: KeptInput) -> Status {
-    status(
-        NoticeLevel::Error,
+    let text = if error.conflict == Some(lattice_api::local::ConflictReason::SettingsChanged) {
+        format!(
+            "请求 {} 被拒绝：会话设置已变更，请确认当前设置后重试{}",
+            turn_id,
+            history_hint(kept)
+        )
+    } else {
         format!(
             "请求 {} 被拒绝或回执失败：{}{}",
             turn_id,
             error.message,
             history_hint(kept)
-        ),
-    )
+        )
+    };
+    status(NoticeLevel::Error, text)
 }
 
 pub(crate) fn submission_unknown_status(turn_id: TurnId, error: Option<&LocalError>) -> Status {

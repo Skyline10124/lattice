@@ -372,10 +372,10 @@ pub(super) fn detail(id: TurnId, outcome: &str) -> TurnDetail {
 }
 pub(super) fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
-        model: "test".into(),
-        provider: "openai-compatible".into(),
+        model: Some(lattice_api::ModelId::parse("test").unwrap()),
+        provider: Some(lattice_api::ProviderId::parse("openai-compatible").unwrap()),
         effort: None,
-        profile_default_effort: None,
+        settings_version: serde_json::from_value(json!("11".repeat(32))).unwrap(),
         session_id: sid(),
         position: NodeId(2),
         agent: "test".into(),
@@ -761,13 +761,11 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
     let peer = Peer::new();
     let id = lattice_api::local::new_turn_id();
     let turn = peer.client.start_turn(TurnRequest {
-        model: None,
-        effort: None,
         turn_id: id,
-        session: SubmitSession::New(sid()),
+        session: sid(),
         workspace: peer._root.path().into(),
         input: "input".into(),
-        agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+        expected_settings: None,
     });
     let mut submit = peer.request("submit").await;
     turn.cancel();
@@ -829,11 +827,314 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
 }
 
 #[tokio::test]
-async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_request() {
+async fn send_configure_outcomes_retries_and_exit_codes() {
+    let _guard = signal_guard().await;
+    // 1. configure 被拒绝：先输出 configure(rejected)，再输出同一个错误的 submit(rejected)，不再发 submit；配置错误退出 2，存储不可用退出 1。
+    for (kind, expected_exit) in [("bad_request", 2u8), ("store_unavailable", 1u8)] {
+        let peer = Peer::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let workspace = peer._root.path().to_path_buf();
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: "hello".into(),
+                session_id: None,
+                agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+                model: None,
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        let driver = async {
+            let mut cfg = peer.request("configure").await;
+            let new_sid = cfg.request["request"]["session"]["new"]
+                .as_str()
+                .expect("新建会话发 configure(new)")
+                .to_string();
+            assert!(SessionId::parse(&new_sid).is_ok());
+            assert_eq!(cfg.request["request"]["agent"], "test");
+            cfg.reply(
+                "error",
+                json!({"kind":kind,"message":"exact configure failure","recovery":null,"store":null}),
+            )
+            .await;
+            new_sid
+        };
+        let (result, new_sid) =
+            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(send, driver) })
+                .await
+                .unwrap();
+        assert_eq!(result.unwrap(), std::process::ExitCode::from(expected_exit));
+        let records: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            records.len(),
+            3,
+            "被拒绝时应输出 sending + configure(rejected) + receipt(rejected)"
+        );
+        assert_eq!(records[0]["type"], "submit");
+        assert_eq!(records[0]["stage"], "sending");
+        assert_eq!(records[0]["session_id"], new_sid);
+        assert_eq!(records[1]["type"], "configure");
+        assert_eq!(records[1]["session_id"], new_sid);
+        assert_eq!(records[1]["result"], "rejected");
+        assert_eq!(records[1]["error"]["message"], "exact configure failure");
+        assert_eq!(records[2]["type"], "submit");
+        assert_eq!(records[2]["stage"], "receipt");
+        assert_eq!(records[2]["result"], "rejected");
+        assert_eq!(records[2]["error"]["message"], "exact configure failure");
+    }
+
+    // 2. configure(New) 结果不明 -> 重发得到 SessionExists -> 查 head 继续提交，退出 0。
+    {
+        let peer = Peer::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let workspace = peer._root.path().to_path_buf();
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: "after unknown".into(),
+                session_id: None,
+                agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+                model: None,
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        let driver = async {
+            let first = peer.request("configure").await;
+            let created_sid: SessionId = first.request["request"]["session"]["new"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            let first_req = first.request.clone();
+            drop(first);
+            let mut retry = peer.request("configure").await;
+            assert_eq!(retry.request, first_req, "重发必须保持同一参数");
+            retry
+                .reply(
+                    "error",
+                    json!({"kind":"conflict","conflict":"session_exists","message":"session already exists","recovery":null,"store":null}),
+                )
+                .await;
+            let (mut head_stream, _) = peer.listener.accept().await.unwrap();
+            let mut magic = [0; 8];
+            head_stream.read_exact(&mut magic).await.unwrap();
+            let len = head_stream.read_u32().await.unwrap();
+            let mut buf = vec![0; len as usize];
+            head_stream.read_exact(&mut buf).await.unwrap();
+            let head_req: Value = serde_json::from_slice(&buf).unwrap();
+            assert_eq!(head_req["operation"], "head");
+            assert_eq!(head_req["session_id"], created_sid.to_string());
+            let mut head_wire = Wire {
+                stream: head_stream,
+                sequence: 0,
+                request: head_req,
+            };
+            let mut draft_head = head(lattice_api::local::new_turn_id(), false);
+            draft_head.session_id = created_sid;
+            draft_head.position = NodeId(0);
+            draft_head.turn_id = None;
+            head_wire.reply_head(draft_head).await;
+
+            let mut submit = peer.request("submit").await;
+            let turn_id: TurnId = submit.request["request"]["turn_id"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap();
+            assert_eq!(
+                submit.request["request"]["session"],
+                created_sid.to_string()
+            );
+            assert!(submit.request["request"]["expected_settings"].is_null());
+            let mut detail_val = detail(turn_id, "completed");
+            detail_val.session_id = created_sid;
+            submit
+                .reply(
+                    "acceptance",
+                    json!({"acceptance":"accepted","turn":TurnView::from(&detail_val)}),
+                )
+                .await;
+
+            let (mut watch_stream, _) = peer.listener.accept().await.unwrap();
+            watch_stream.read_exact(&mut magic).await.unwrap();
+            let wlen = watch_stream.read_u32().await.unwrap();
+            let mut wbuf = vec![0; wlen as usize];
+            watch_stream.read_exact(&mut wbuf).await.unwrap();
+            let wreq: Value = serde_json::from_slice(&wbuf).unwrap();
+            assert_eq!(wreq["operation"], "watch");
+            let mut watch = Wire {
+                stream: watch_stream,
+                sequence: 0,
+                request: wreq,
+            };
+            let mut done_head = head(turn_id, false);
+            done_head.session_id = created_sid;
+            watch.view(ViewUpdate::Head(done_head)).await;
+            watch
+                .view(ViewUpdate::Entry {
+                    entry: entry(turn_id, "completed"),
+                })
+                .await;
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(send, driver) })
+                .await
+                .unwrap();
+        assert_eq!(result.unwrap(), std::process::ExitCode::SUCCESS);
+        let records: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records[0]["stage"], "sending");
+        assert_eq!(records[1]["type"], "configure");
+        assert_eq!(records[1]["result"], "configured");
+        assert_eq!(records[2]["stage"], "receipt");
+        assert_eq!(records[2]["result"], "accepted");
+    }
+
+    // 3. configure(Existing) 结果不明 -> 首次重发 Busy -> 第二次重发成功，继续提交。
+    {
+        let peer = Peer::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let workspace = peer._root.path().to_path_buf();
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: "busy retry".into(),
+                session_id: Some("1111".into()),
+                agent: None,
+                model: Some(lattice_api::ModelRef::parse("local/org/model").unwrap()),
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        let driver = async {
+            resolve_session(&peer).await;
+            let first = peer.request("configure").await;
+            assert_eq!(
+                first.request["request"]["session"],
+                json!({"existing":sid()})
+            );
+            drop(first);
+            let mut retry1 = peer.request("configure").await;
+            retry1
+                .reply(
+                    "error",
+                    json!({"kind":"busy","message":"session has a turn in progress"}),
+                )
+                .await;
+            let mut retry2 = peer.request("configure").await;
+            let configured_head = head(lattice_api::local::new_turn_id(), false);
+            retry2
+                .reply(
+                    "configure",
+                    json!({"head":configured_head,"adjustment":{"from":"high","to":"medium"}}),
+                )
+                .await;
+            let mut submit = peer.request("submit").await;
+            submit
+                .reply(
+                    "error",
+                    json!({"kind":"bad_request","message":"missing credential"}),
+                )
+                .await;
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(send, driver) })
+                .await
+                .unwrap();
+        assert_eq!(result.unwrap(), std::process::ExitCode::from(2));
+        let records: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records[1]["type"], "configure");
+        assert_eq!(records[1]["result"], "configured");
+        assert_eq!(
+            records[1]["adjustment"],
+            json!({"from":"high","to":"medium"})
+        );
+        assert_eq!(records[2]["stage"], "receipt");
+        assert_eq!(records[2]["result"], "rejected");
+    }
+
+    // 4. configure 结果不明，重发最多 2 次（共 3 次请求）后仍不明 -> 输出 configure(unknown) + receipt(not_accepted)，退出 1。
+    {
+        let peer = Peer::new();
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let workspace = peer._root.path().to_path_buf();
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: "still unknown".into(),
+                session_id: Some("1111".into()),
+                agent: None,
+                model: Some(lattice_api::ModelRef::parse("local/org/model").unwrap()),
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        let driver = async {
+            resolve_session(&peer).await;
+            for _ in 0..3 {
+                let wire = peer.request("configure").await;
+                drop(wire);
+            }
+        };
+        let (result, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(send, driver) })
+                .await
+                .unwrap();
+        assert_eq!(result.unwrap(), std::process::ExitCode::from(1));
+        let records: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records.len(), 3);
+        assert_eq!(records[0]["stage"], "sending");
+        assert_eq!(records[1]["type"], "configure");
+        assert_eq!(records[1]["result"], "unknown");
+        assert_eq!(records[1]["error"]["kind"], "transport");
+        assert_eq!(records[2]["stage"], "receipt");
+        assert_eq!(records[2]["result"], "not_accepted");
+    }
+}
+
+#[tokio::test]
+async fn send_configures_new_and_explicit_sessions_before_submitting() {
     const MODE: &str = "LATTICE_TEST_CLI_SUBMISSION_MODE";
     if let Ok(mode) = std::env::var(MODE) {
         let peer = Peer::new();
-        let existing = mode == "existing";
+        let existing = mode == "existing" || mode == "explicit";
         let explicit = mode == "explicit";
         let send = run_session_prompt(
             &peer.client,
@@ -852,21 +1153,39 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
                 let mut resolve = peer.request("resolve_session").await;
                 resolve.reply("session",json!({"session_id":sid(),"project_path":b"/test-project".as_slice(),"current":2,"created_at":"2026-10-17T00:00:00Z","updated_at":"2026-10-17T00:00:01Z"})).await;
             }
+            let expected_sid = if mode == "new" || explicit {
+                let mut cfg = peer.request("configure").await;
+                let creq = &cfg.request["request"];
+                let target_sid: SessionId = if mode == "new" {
+                    let parsed: SessionId =
+                        creq["session"]["new"].as_str().unwrap().parse().unwrap();
+                    assert_eq!(creq["agent"], "test");
+                    assert!(creq["model"].is_null());
+                    assert!(creq["effort"].is_null());
+                    parsed
+                } else {
+                    assert_eq!(creq["session"], json!({"existing":sid()}));
+                    assert!(creq["agent"].is_null());
+                    assert_eq!(creq["model"], "local/org/model");
+                    assert_eq!(creq["effort"], "off");
+                    sid()
+                };
+                let mut configured_head = head(lattice_api::local::new_turn_id(), false);
+                configured_head.session_id = target_sid;
+                cfg.reply(
+                    "configure",
+                    json!({"head":configured_head,"adjustment":null}),
+                )
+                .await;
+                target_sid
+            } else {
+                sid()
+            };
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];
             assert_eq!(request["input"], "original input");
-            assert_eq!(
-                request["model"],
-                if explicit {
-                    json!("local/org/model")
-                } else {
-                    Value::Null
-                }
-            );
-            assert_eq!(
-                request["effort"],
-                if explicit { json!("off") } else { Value::Null }
-            );
+            assert_eq!(request["session"], expected_sid.to_string());
+            assert!(request["expected_settings"].is_null());
             assert!(TurnId::parse(request["turn_id"].as_str().unwrap()).is_ok());
             assert_eq!(
                 wire.request
@@ -877,16 +1196,6 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
                     .collect::<Vec<_>>(),
                 vec!["operation", "request"]
             );
-            if existing {
-                assert_eq!(request["session"], json!({"existing":sid()}));
-                assert!(
-                    request["agent"].is_null(),
-                    "未指定 agent 的追加必须保留继承选择，不能变成显式覆盖"
-                );
-            } else {
-                assert!(SessionId::parse(request["session"]["new"].as_str().unwrap()).is_ok());
-                assert_eq!(request["agent"], "test");
-            }
             wire.reply("error",json!({"kind":"bad_request","message":"mock rejection","recovery":null,"store":null})).await;
         };
         let (result, ()) =
@@ -899,7 +1208,7 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
     for mode in ["new", "existing", "explicit"] {
         let root = tempfile::tempdir().unwrap();
         let mut command = std::process::Command::new(std::env::current_exe().unwrap());
-        command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::submission_identity_and_inherited_selection_are_kept_in_the_wire_request","--nocapture"]);
+        command.env_clear().env("PATH","/usr/bin:/bin").env("HOME",root.path()).env(MODE,mode).current_dir(root.path()).args(["--exact","commands::run::ipc_tests::send_configures_new_and_explicit_sessions_before_submitting","--nocapture"]);
         let output = tokio::task::spawn_blocking(move || command.output().unwrap())
             .await
             .unwrap();
@@ -910,10 +1219,20 @@ async fn submission_identity_and_inherited_selection_are_kept_in_the_wire_reques
             .lines()
             .filter_map(|l| serde_json::from_str(l).ok())
             .collect();
-        assert_eq!(records.len(), 2);
-        assert_eq!(records[0]["stage"], "sending");
-        assert_eq!(records[1]["stage"], "receipt");
-        assert_eq!(records[1]["result"], "rejected");
-        assert_eq!(records[0]["turn_id"], records[1]["turn_id"]);
+        if mode == "existing" {
+            assert_eq!(records.len(), 2, "不带选择的已有会话追加不发 configure");
+            assert_eq!(records[0]["stage"], "sending");
+            assert_eq!(records[1]["stage"], "receipt");
+            assert_eq!(records[1]["result"], "rejected");
+            assert_eq!(records[0]["turn_id"], records[1]["turn_id"]);
+        } else {
+            assert_eq!(records.len(), 3);
+            assert_eq!(records[0]["stage"], "sending");
+            assert_eq!(records[1]["type"], "configure");
+            assert_eq!(records[1]["result"], "configured");
+            assert_eq!(records[2]["stage"], "receipt");
+            assert_eq!(records[2]["result"], "rejected");
+            assert_eq!(records[0]["turn_id"], records[2]["turn_id"]);
+        }
     }
 }

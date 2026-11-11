@@ -8,11 +8,11 @@ use std::time::Duration;
 use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
 use crate::connection::{
-    KeptInput, Viewed, cancellation_status, detach_lines, discarded_comments_status,
-    effort_changed_status, execution_diagnostic_status, handoff_status, model_query_failed_status,
-    model_query_notice, not_accepted_status, not_submitted_status, observation_lost_status,
-    older_turns_unavailable_status, orphaned_turn_status, recovered_status, rejected_status,
-    submission_unknown_status,
+    KeptInput, Viewed, cancellation_status, configure_failed_status, detach_lines,
+    discarded_comments_status, effort_changed_status, execution_diagnostic_status, handoff_status,
+    model_query_failed_status, model_query_notice, not_accepted_status, not_submitted_status,
+    observation_lost_status, older_turns_unavailable_status, orphaned_turn_status,
+    recovered_status, rejected_status, submission_unknown_status,
 };
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::{Generating, SessionContext};
@@ -27,12 +27,15 @@ use crossterm::event::{
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_api::local::{
-    CancelStatus, ConnectionStatus, ConversationEntry, DetachReport, LocalClient, LocalError,
-    LocalErrorKind, LocalHistory, LocalTurn, LocalUpdate, Node, NodeId, NoticeLevel,
-    PublicTurnOutcome, SessionHead, SessionId, StepKey, SubmissionReceipt, SubmissionResult,
-    SubmissionUpdate, SubmitSession, TextSegment, TextUpdate, TurnId, TurnRequest, ViewUpdate,
+    CancelStatus, ConfigureReply, ConfigureRequest, ConfigureSession, ConnectionStatus,
+    ConversationEntry, DetachReport, LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate,
+    Node, NodeId, NoticeLevel, PublicTurnOutcome, SessionHead, SessionId, StepKey,
+    SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment, TextUpdate, TurnId,
+    TurnRequest, ViewUpdate,
 };
-use lattice_api::{ModelCandidateQuery, ModelId, ModelRef, ProviderId, UsageSummary};
+use lattice_api::{Effort, ModelCandidateQuery, ModelRef, UsageSummary};
+#[cfg(test)]
+use lattice_api::{ModelId, ProviderId};
 use tokio::time::Instant;
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -124,6 +127,14 @@ pub(crate) struct OlderRequest {
     pub(crate) epoch: u64,
 }
 
+/// 由 `/model` 或 `/effort` 触发、交由应用循环异步发出的会话设置修改请求。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct PendingConfigure {
+    pub(crate) generation: u64,
+    pub(crate) model: Option<ModelRef>,
+    pub(crate) effort: Option<Effort>,
+}
+
 pub(crate) struct App {
     pub(crate) ctx: SessionContext,
     pub(crate) blocks: BlockList,
@@ -140,21 +151,22 @@ pub(crate) struct App {
     pub(crate) viewport: Viewport,
     pub(crate) phase: TurnPhase,
     pub(crate) connected: bool,
-    pub(crate) model: Option<String>,
-    pub(crate) provider: Option<String>,
-    pending_agent: Option<lattice_api::AgentName>,
-    agent_submissions: HashSet<TurnId>,
-    pub(crate) selection: crate::selection::Selection,
     query_generation: u64,
     model_query: Option<ModelQuery>,
+    configure_generation: u64,
+    pub(crate) configure_in_flight: Option<u64>,
+    pub(crate) configure_request: Option<PendingConfigure>,
+    send_after_configure: bool,
     pub(crate) turn_usage: Option<UsageSummary>,
     pub(crate) context_tokens: Option<u64>,
     /// 由应用循环取走并执行的请求。
     pub(crate) cancel_requested: Option<CancelTarget>,
     pub(crate) view_wanted: bool,
     pub(crate) older_request: Option<OlderRequest>,
-    pub(crate) recover_request: Option<TurnId>,
     cancelling: bool,
+    /// 最新收到的会话头（来自启动 configure、运行中 configure 回复或视图推送），
+    /// 供状态行、选择面板和 expected_settings 读取。
+    latest_head: Option<SessionHead>,
     /// 已确认的会话头：它当前位置的条目已经到达。各轮是否结束与正在执行的一轮只按它判定；
     /// 视图开始前为空。
     pub(crate) head: Option<SessionHead>,
@@ -190,10 +202,6 @@ pub(crate) struct App {
     awaiting_before_view: Option<TurnId>,
     /// 结果未知的那次提交，按 TurnId 留到收到它的确定结果为止。
     unknown_submission: Option<(TurnId, UnknownSubmission)>,
-    /// 新会话首次提交时生成的 SessionId；确认被接受前之后的提交沿用它与 `New`。
-    new_session: Option<SessionId>,
-    /// 新会话下结果未知的提交；后台答复会话已存在时按它找回。
-    unconfirmed: Option<TurnId>,
     /// 已实时显示的提交回执：请求与结果种类。交接报告只省略相同的事实。
     shown_receipts: HashSet<(TurnId, std::mem::Discriminant<SubmissionResult>)>,
     pub(crate) cancel_status: Option<CancelStatus>,
@@ -207,14 +215,17 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
-        Self {
-            view_wanted: ctx.session_id.is_some(),
-            pending_agent: ctx.startup_agent.clone(),
-            agent_submissions: HashSet::new(),
-            selection: Default::default(),
+    pub(crate) fn new(mut ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
+        let initial_head = ctx.initial_head.take();
+        let initial_adjustment = ctx.initial_adjustment.take();
+        let mut app = Self {
+            view_wanted: true,
             query_generation: 0,
             model_query: None,
+            configure_generation: 0,
+            configure_in_flight: None,
+            configure_request: None,
+            send_after_configure: false,
             ctx,
             blocks: BlockList::default(),
             banner: None,
@@ -228,14 +239,12 @@ impl App {
             viewport: Viewport::new(),
             phase: TurnPhase::Idle,
             connected: true,
-            model: None,
-            provider: None,
             turn_usage: None,
             context_tokens: None,
             cancel_requested: None,
             older_request: None,
-            recover_request: None,
             cancelling: false,
+            latest_head: initial_head,
             head: None,
             pending_head: None,
             entries: BTreeMap::new(),
@@ -253,8 +262,6 @@ impl App {
             awaiting_head: None,
             awaiting_before_view: None,
             unknown_submission: None,
-            new_session: None,
-            unconfirmed: None,
             shown_receipts: Default::default(),
             cancel_status: None,
             kitty_keyboard,
@@ -262,7 +269,11 @@ impl App {
             should_quit: false,
             term_width: 80,
             term_height: 24,
+        };
+        if let Some(adjustment) = initial_adjustment {
+            app.push_status(effort_changed_status(adjustment.from, adjustment.to));
         }
+        app
     }
 
     /// 保留键先执行；其余动作交给 Dock 栈顶解释，模块不接触 LocalTurn。
@@ -382,17 +393,21 @@ impl App {
                 DockIntent::ClosePanel => self.dock.close_panel(),
                 DockIntent::EditPanel(action) => self.dock.edit_panel(action),
                 DockIntent::Choose(choice) => {
-                    let before = self.next_effort();
-                    match choice {
+                    let (model, effort) = match choice {
                         PanelChoice::Model(model) => {
-                            self.selection.choose_model(*model);
-                            let after = self.next_effort();
-                            if self.configuration_head().is_some() && before != after {
-                                self.push_status(effort_changed_status(before, after));
-                            }
+                            (Some(ModelRef::new(model.provider, model.model)), None)
                         }
-                        PanelChoice::Effort(effort) => self.selection.choose_effort(effort),
-                    }
+                        PanelChoice::Effort(effort) => (None, Some(effort)),
+                    };
+                    self.configure_generation = self.configure_generation.saturating_add(1);
+                    let generation = self.configure_generation;
+                    self.configure_in_flight = Some(generation);
+                    self.configure_request = Some(PendingConfigure {
+                        generation,
+                        model,
+                        effort,
+                    });
+                    self.queue.rebind_pending_configure(generation);
                     self.dock.close_panel();
                 }
                 DockIntent::None => {}
@@ -464,34 +479,40 @@ impl App {
     pub(crate) fn apply_builtin(&mut self, input: &str) -> bool {
         match input {
             "/quit" | "/exit" | "/q" => { self.should_quit = true; true }
-            "/reconnect" => { self.view_wanted = self.ctx.session_id.is_some(); true }
+            "/reconnect" => { self.view_wanted = true; true }
             "/help" | "/?" => { self.dock.open_panel(Panel::Help(help_lines(self.kitty_keyboard))); true }
-            "/model" => { self.query_generation += 1; self.dock.open_panel(Panel::models(self.query_generation, self.next_target().map(|target| target.to_string()))); self.model_query = self.dock.query(); true }
-            "/effort" => { self.query_generation += 1; self.dock.open_panel(Panel::efforts(self.query_generation, self.next_target(), self.next_effort())); self.model_query = self.dock.query(); true }
+            "/model" => { self.query_generation += 1; self.dock.open_panel(Panel::models(self.query_generation, self.current_target().map(|target| target.to_string()))); self.model_query = self.dock.query(); true }
+            "/effort" => { self.query_generation += 1; self.dock.open_panel(Panel::efforts(self.query_generation, self.current_target(), self.current_effort())); self.model_query = self.dock.query(); true }
             _ => false,
         }
     }
 
-    fn configuration_head(&self) -> Option<&SessionHead> {
-        self.pending_head.as_ref().or(self.head.as_ref())
+    pub(crate) fn current_head(&self) -> Option<&SessionHead> {
+        self.latest_head.as_ref()
     }
 
-    pub(crate) fn next_effort(&self) -> Option<lattice_api::Effort> {
-        self.selection.preview_effort(self.configuration_head())
+    pub(crate) fn current_effort(&self) -> Option<Effort> {
+        self.current_head().and_then(|head| head.effort)
     }
 
-    fn next_target(&self) -> Option<ModelRef> {
-        self.selection.model().cloned().or_else(|| {
-            Some(ModelRef::new(
-                ProviderId::parse(self.provider.as_deref()?).ok()?,
-                ModelId::parse(self.model.as_deref()?).ok()?,
-            ))
-        })
+    pub(crate) fn current_target(&self) -> Option<ModelRef> {
+        let head = self.current_head()?;
+        Some(ModelRef::new(head.provider.clone()?, head.model.clone()?))
     }
 
-    fn sync_selection(&mut self) {
-        let target = self.next_target();
-        let effort = self.next_effort();
+    pub(crate) fn current_agent(&self) -> String {
+        self.current_head()
+            .map(|head| head.agent.clone())
+            .unwrap_or_default()
+    }
+
+    fn current_settings_version(&self) -> Option<lattice_api::local::SettingsVersion> {
+        self.current_head().map(|head| head.settings_version)
+    }
+
+    fn sync_head_panels(&mut self) {
+        let target = self.current_target();
+        let effort = self.current_effort();
         self.dock
             .update_current(target.as_ref().map(ToString::to_string), effort);
         if self
@@ -506,10 +527,36 @@ impl App {
         }
     }
 
-    /// 接受证据只结清发送时的选择，面板重新从当前会话头派生。
-    fn confirm_selection(&mut self, turn_id: TurnId) {
-        self.selection.accepted(turn_id);
-        self.sync_selection();
+    pub(crate) fn apply_configure(
+        &mut self,
+        generation: u64,
+        result: lattice_api::local::Result<ConfigureReply>,
+    ) {
+        if generation != self.configure_generation {
+            return;
+        }
+        self.configure_in_flight = None;
+        match result {
+            Ok(reply) => {
+                let version = Some(reply.head.settings_version);
+                self.latest_head = Some(reply.head);
+                self.sync_head_panels();
+                self.queue.resolve_configure(generation, version);
+                if let Some(adjustment) = reply.adjustment {
+                    self.push_status(effort_changed_status(adjustment.from, adjustment.to));
+                }
+            }
+            Err(error) => {
+                self.send_after_configure = false;
+                if self
+                    .queue
+                    .resolve_configure(generation, self.current_settings_version())
+                {
+                    self.queue.pause();
+                }
+                self.push_status(configure_failed_status(&error));
+            }
+        }
     }
 
     fn apply_models(
@@ -528,10 +575,10 @@ impl App {
                 }
                 let current = match &request.query {
                     ModelCandidateQuery::Target(_) => {
-                        self.next_effort().map(|effort| effort.to_string())
+                        self.current_effort().map(|effort| effort.to_string())
                     }
                     ModelCandidateQuery::List { .. } => {
-                        self.next_target().map(|target| target.to_string())
+                        self.current_target().map(|target| target.to_string())
                     }
                 };
                 self.dock.populate(result, current);
@@ -613,15 +660,12 @@ impl App {
         // 旧句柄的回执只结清自己的名额，不覆盖新 Turn 的状态或输入。
         if let Some(id) = report.turn_id {
             match report.submission.as_ref().map(|receipt| &receipt.result) {
-                Some(SubmissionResult::Accepted { turn }) => {
-                    self.confirm_selection(id);
+                Some(SubmissionResult::Accepted { .. }) => {
                     self.queue.release(id);
                     self.resolve_unknown(id);
-                    self.accept_session(turn.session_id);
                 }
                 // 交接报告只生成状态消息，不归还输入。
                 Some(SubmissionResult::Rejected { .. } | SubmissionResult::NotAccepted) => {
-                    self.selection.rejected(id);
                     self.resolve_unknown(id);
                     if self.queue.reject(id) {
                         self.mark_rejected_comments(id);
@@ -664,7 +708,9 @@ impl App {
             // 视图出错后不再推送，与连接出错一样是观察中断。
             LocalUpdate::Error { error } => self.connection_lost(&ConnectionStatus::Error(error)),
             // 只读视图既不提交也不取消。
-            LocalUpdate::Submit { .. } | LocalUpdate::Cancel { .. } => {}
+            LocalUpdate::Submit { .. }
+            | LocalUpdate::Configure { .. }
+            | LocalUpdate::Cancel { .. } => {}
         }
         self.settle(true);
         if self.initial && self.pending_head.is_none() {
@@ -704,6 +750,7 @@ impl App {
             LocalUpdate::Head(_)
             | LocalUpdate::Entry { .. }
             | LocalUpdate::Text(_)
+            | LocalUpdate::Configure { .. }
             | LocalUpdate::Connection { .. }
             | LocalUpdate::Error { .. } => {}
         }
@@ -716,7 +763,6 @@ impl App {
             .insert((turn_id, std::mem::discriminant(&receipt.result)));
         match receipt.result {
             SubmissionResult::Accepted { turn } => {
-                self.consume_agent(turn_id);
                 self.queue.release(turn_id);
                 self.resolve_unknown(turn_id);
                 if self
@@ -726,20 +772,23 @@ impl App {
                 {
                     self.submitted = None;
                 }
-                self.accept_session(turn.session_id);
                 // 已确认的会话头到达这一轮之前，仍按正在运行处理。
                 if !self.head_reached(turn_id) {
                     self.awaiting_head = Some(turn_id);
                 }
-                self.mark_accepted(turn_id);
+                self.mark_accepted(turn_id, &turn.agent_name);
                 // 直接收到的接受由助手标题线表达，不另写接受行。
                 if receipt.recovered {
                     self.push_status(recovered_status(turn_id));
                 }
             }
             SubmissionResult::Rejected { error } => {
-                self.session_exists(&error);
                 let kept = self.reject_submission(turn_id);
+                if kept != KeptInput::Nothing
+                    && error.conflict == Some(lattice_api::local::ConflictReason::SettingsChanged)
+                {
+                    self.queue.pause();
+                }
                 self.push_status(rejected_status(turn_id, &error, kept));
             }
             // 不来自查询的未被接受是取消发生在请求写出之前，这次提交没有发出。
@@ -763,29 +812,20 @@ impl App {
                     };
                     self.unknown_submission = Some((turn_id, held));
                 }
-                if self.ctx.session_id.is_none() {
-                    self.unconfirmed = Some(turn_id);
-                }
                 self.push_status(submission_unknown_status(turn_id, error.as_ref()));
             }
         }
         self.refresh_status_fields();
     }
 
-    /// 确认会话已经建立：此后的提交写 `Existing`，并开始观察它。
-    fn accept_session(&mut self, session_id: SessionId) {
-        if self.ctx.session_id.is_none() {
-            self.ctx.session_id = Some(session_id);
-            self.view_wanted = true;
-        }
-        self.new_session = None;
-        self.unconfirmed = None;
-    }
-
     /// 接受回执先于条目到达时，在提交的 USER 块后显示助手标题线。
-    fn mark_accepted(&mut self, turn_id: TurnId) {
-        self.consume_agent(turn_id);
+    fn mark_accepted(&mut self, turn_id: TurnId, agent_name: &str) {
         if let Some(start) = self.pending_start(turn_id) {
+            if let Block::UserTurn { agent, .. } = &mut self.blocks.entries[start].block
+                && agent.is_empty()
+            {
+                *agent = agent_name.to_owned();
+            }
             let range = self.blocks.group(start);
             if !self.blocks.entries[range.clone()]
                 .iter()
@@ -794,13 +834,6 @@ impl App {
                 self.blocks
                     .replace(range.end..range.end, vec![Block::AssistantStart]);
             }
-        }
-    }
-
-    fn consume_agent(&mut self, turn_id: TurnId) {
-        self.confirm_selection(turn_id);
-        if self.agent_submissions.remove(&turn_id) {
-            self.pending_agent = None;
         }
     }
 
@@ -1016,7 +1049,10 @@ impl App {
     fn submit(&mut self) -> Option<String> {
         let raw = self.input.text();
         if raw.trim().is_empty() && self.queue.draft_count() == 0 {
-            if self.phase == TurnPhase::Idle && self.input.is_empty() {
+            if self.phase == TurnPhase::Idle
+                && self.configure_in_flight.is_none()
+                && self.input.is_empty()
+            {
                 self.queue.resume();
                 return self.send_queue_head();
             }
@@ -1027,20 +1063,43 @@ impl App {
             self.input.clear();
             return None;
         }
-        if self.phase != TurnPhase::Idle {
+        if self.phase != TurnPhase::Idle || self.configure_in_flight.is_some() {
             let id = self.blocks.allocate_id();
-            if self.queue.enqueue(id, raw) {
+            let settings = match self.configure_in_flight {
+                Some(generation) => crate::queue::QueuedSettings::PendingConfigure(generation),
+                None => crate::queue::QueuedSettings::Snapshot(self.current_settings_version()),
+            };
+            if self.queue.enqueue(id, raw, settings) {
                 self.input.clear();
+                if self.phase == TurnPhase::Idle && self.configure_in_flight.is_some() {
+                    self.send_after_configure = true;
+                }
             }
             return None;
         }
         self.input.clear();
         self.check_comments_before_send();
-        let message = self.queue.take_message(raw);
+        let message = self
+            .queue
+            .take_message(raw, self.current_settings_version());
         Some(self.start_submission(message, lattice_api::local::new_turn_id()))
     }
 
     fn auto_submit(&mut self) -> Option<String> {
+        if self.should_quit || self.phase != TurnPhase::Idle || self.configure_in_flight.is_some() {
+            return None;
+        }
+        if self.send_after_configure {
+            if self.queue.is_paused() {
+                self.send_after_configure = false;
+                return None;
+            }
+            if self.queue.is_editing() {
+                return None;
+            }
+            self.send_after_configure = false;
+            return self.send_queue_head();
+        }
         let turn = self.head.as_ref()?.turn_id?;
         let completed = self
             .last_summary(turn)
@@ -1054,7 +1113,7 @@ impl App {
     }
 
     fn send_queue_head(&mut self) -> Option<String> {
-        if self.should_quit || self.phase != TurnPhase::Idle {
+        if self.should_quit || self.phase != TurnPhase::Idle || self.configure_in_flight.is_some() {
             return None;
         }
         self.check_comments_before_send();
@@ -1065,6 +1124,7 @@ impl App {
 
     // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
     fn start_submission(&mut self, message: crate::queue::Outgoing, id: TurnId) -> String {
+        self.send_after_configure = false;
         self.history.push(message.text.trim());
         let raw = message.encode();
         self.cancel_status = None;
@@ -1074,7 +1134,7 @@ impl App {
             turn_id: id,
             node: None,
             ordinal: None,
-            agent: self.ctx.active_agent.clone(),
+            agent: self.current_agent(),
         });
         self.blocks.push(crate::session::user_block(raw.clone()));
         self.refresh_phase();
@@ -1111,8 +1171,6 @@ impl App {
     /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，
     /// 不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
-        self.selection.rejected(turn_id);
-        self.agent_submissions.remove(&turn_id);
         let automatic = self.queue.reject(turn_id);
         let mut kept = KeptInput::Restored;
         let manual = match self.unknown_submission.take_if(|(id, _)| *id == turn_id) {
@@ -1178,8 +1236,6 @@ impl App {
     }
 
     fn apply_head(&mut self, head: SessionHead) {
-        self.model = Some(head.model.clone());
-        self.provider = Some(head.provider.clone());
         // 新视图的首条会话头或路径已替换：之后到它当前位置的条目为止是初始条目。
         // 路径替换立即丢弃此前的条目；新视图等首个初始条目到达再替换，重连失败时内容保留。
         let starts = std::mem::take(&mut self.view_starting) || head.path_replaced;
@@ -1192,8 +1248,7 @@ impl App {
         if starts {
             self.initial = true;
         }
-        self.ctx.session_id = Some(head.session_id);
-        self.ctx.active_agent = head.agent.clone();
+        self.ctx.session_id = head.session_id;
         self.connected = true;
         if head.diagnostic != self.diagnostic {
             if let Some(error) = &head.diagnostic {
@@ -1203,8 +1258,9 @@ impl App {
         }
         // 当前位置是根节点时没有对应的条目，会话头立即确认。
         let root = head.position == NodeId(0);
+        self.latest_head = Some(head.clone());
         self.pending_head = Some(head);
-        self.sync_selection();
+        self.sync_head_panels();
         if root {
             self.confirm_head();
         }
@@ -1262,7 +1318,6 @@ impl App {
         // 视图中出现这次提交的 UserMessage，同样说明已被接受；回执可能更晚到或者丢失。
         // 它只证明已接受，忙状态仍保留到会话头确认。
         if user_message {
-            self.consume_agent(turn);
             self.resolve_unknown(turn);
         }
         if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
@@ -1441,9 +1496,7 @@ impl App {
         if self.viewport.scroll() != 0 || self.older_pending {
             return;
         }
-        let Some(session_id) = self.ctx.session_id else {
-            return;
-        };
+        let session_id = self.ctx.session_id;
         let Some((before, ordinal)) = self.entries.iter().find_map(|(node, entry)| match entry {
             ConversationEntry::UserMessage { ordinal, .. } => Some((*node, *ordinal)),
             ConversationEntry::Step { .. } => None,
@@ -1505,7 +1558,6 @@ impl App {
                 continue;
             };
             if matches!(entry, ConversationEntry::UserMessage { .. }) {
-                self.confirm_selection(turn);
                 self.resolve_unknown(turn);
             }
             if self.entries.contains_key(&node) {
@@ -1540,56 +1592,10 @@ impl App {
         self.refresh_status_fields();
     }
 
-    /// 按 TurnId 找回新会话的上一次提交。已被接受时会话已经建立，改为 `Existing` 并开始观察；
-    /// 查无此请求时它确定未被接受。
-    pub(crate) fn apply_recovery(
-        &mut self,
-        turn_id: TurnId,
-        result: lattice_api::local::Result<lattice_api::local::TurnDetail>,
-    ) {
-        match result {
-            Ok(turn) => {
-                self.consume_agent(turn_id);
-                self.resolve_unknown(turn_id);
-                self.accept_session(turn.session_id);
-                self.push_status(recovered_status(turn_id));
-            }
-            // 按 TurnId 查询为 NotFound：提交确定未被接受，归还输入。它没有建立会话，
-            // 之后的提交再遇到会话已存在时不再找回它。
-            Err(error) if error.kind == LocalErrorKind::NotFound => {
-                if self.unconfirmed == Some(turn_id) {
-                    self.unconfirmed = None;
-                }
-                let kept = self.reject_submission(turn_id);
-                self.push_status(not_accepted_status(turn_id, kept));
-            }
-            Err(error) => self.push_status(submission_unknown_status(turn_id, Some(&error))),
-        }
-        self.refresh_phase();
-    }
-
-    /// 新会话的提交得到“会话已存在”：上一次结果未知的提交实际已建立会话，按它的 TurnId 找回。
-    fn session_exists(&mut self, error: &LocalError) {
-        if error.conflict == Some(lattice_api::local::ConflictReason::SessionExists)
-            && self.ctx.session_id.is_none()
-        {
-            self.recover_request = self.unconfirmed;
-        }
-    }
-
-    /// 这次提交的身份：已有会话写 `Existing`；新会话在首次提交时生成 SessionId，
-    /// 确认被接受前之后的提交沿用它与 `New`。
-    pub(crate) fn submission_identity(&mut self) -> Option<(TurnId, SubmitSession)> {
+    /// 这次提交的身份：会话在启动时已存在或经 `configure(New)` 建立。
+    pub(crate) fn submission_identity(&self) -> Option<(TurnId, SessionId)> {
         let (turn_id, _) = self.submitted.as_ref()?;
-        let session = match self.ctx.session_id {
-            Some(id) => SubmitSession::Existing(id),
-            None => SubmitSession::New(
-                *self
-                    .new_session
-                    .get_or_insert_with(lattice_api::local::new_session_id),
-            ),
-        };
-        Some((*turn_id, session))
+        Some((*turn_id, self.ctx.session_id))
     }
 
     /// 这一轮已经结束：最后一步已关闭，或者会话头说明它不在执行（当前位置在别处，或没有 Owner）。
@@ -1716,16 +1722,13 @@ where
     let mut turn_open = false;
     let mut cancels = FuturesUnordered::new();
     let mut older = FuturesUnordered::new();
-    let mut recoveries = FuturesUnordered::new();
     let mut models = FuturesUnordered::new();
+    let mut configures = FuturesUnordered::new();
     let mut dirty = true;
     let result = loop {
-        if std::mem::take(&mut app.view_wanted)
-            && !app.should_quit
-            && let Some(session_id) = app.ctx.session_id
-        {
+        if std::mem::take(&mut app.view_wanted) && !app.should_quit {
             // 重新开始 watch 用新的句柄，旧连接上尚未读出的推送随旧句柄丢弃。
-            view = Some(client.observe(session_id));
+            view = Some(client.observe(app.ctx.session_id));
             app.begin_view();
         }
         if let Some(target) = app.cancel_requested.take() {
@@ -1754,16 +1757,32 @@ where
                 .boxed(),
             );
         }
-        if let Some(turn_id) = app.recover_request.take() {
-            let client = client.clone();
-            recoveries.push(async move { (turn_id, client.wait_for_turn(turn_id).await) }.boxed());
-        }
         if let Some(request) = app.model_query.take() {
             let client = client.clone();
             models.push(
                 async move {
                     let result = client.models(request.query.clone()).await;
                     (request, result)
+                }
+                .boxed(),
+            );
+        }
+        if let Some(request) = app.configure_request.take() {
+            let client = client.clone();
+            let session = ConfigureSession::Existing(app.ctx.session_id);
+            let workspace = options.project_root.clone();
+            configures.push(
+                async move {
+                    let result = client
+                        .configure(ConfigureRequest {
+                            session,
+                            workspace,
+                            agent: None,
+                            model: request.model,
+                            effort: request.effort,
+                        })
+                        .await;
+                    (request.generation, result)
                 }
                 .boxed(),
             );
@@ -1809,8 +1828,8 @@ where
             }
             Some((turn_id, result)) = cancels.next(), if !cancels.is_empty() => app.apply_cancel_result(turn_id, result),
             Some((request, result)) = older.next(), if !older.is_empty() => app.apply_older(request, result),
-            Some((turn_id, result)) = recoveries.next(), if !recoveries.is_empty() => app.apply_recovery(turn_id, result),
             Some((request, result)) = models.next(), if !models.is_empty() => app.apply_models(request, result),
+            Some((generation, result)) = configures.next(), if !configures.is_empty() => app.apply_configure(generation, result),
             _ = ticker.tick() => {
                 dirty |= app.expire_ctrl_c_notice(Instant::now());
                 if !dirty { continue; }
@@ -1884,19 +1903,17 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
 
 fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<TurnRequest> {
     let (turn_id, session) = app.submission_identity()?;
-    let agent = app.pending_agent.clone();
-    if agent.is_some() {
-        app.agent_submissions.insert(turn_id);
-    }
-    let (model, effort) = app.selection.submission(turn_id);
+    let expected_settings = app
+        .submitted
+        .as_ref()
+        .filter(|(id, _)| *id == turn_id)
+        .and_then(|(_, message)| message.expected_settings);
     Some(TurnRequest {
-        model,
-        effort,
         turn_id,
         session,
         workspace: options.project_root.clone(),
         input: prompt,
-        agent,
+        expected_settings,
     })
 }
 
@@ -2059,8 +2076,8 @@ mod tests {
         use lattice_api::{Effort::Low, ModelCandidates};
         let mut app = test_app(true);
         let mut current = head(0, None, false);
-        current.provider = "p".into();
-        current.model = "m6".into();
+        current.provider = Some(ProviderId::parse("p").unwrap());
+        current.model = Some(ModelId::parse("m6").unwrap());
         app.apply_view(LocalUpdate::Head(current));
         app.input.set_text("hidden draft");
         let open_models = |app: &mut App| {
@@ -2081,6 +2098,34 @@ mod tests {
                         .collect(),
                     warnings: vec![],
                 }),
+            );
+        };
+        let confirm_chosen_model = |app: &mut App, expected: &str, reason: &str| {
+            let pending = app
+                .configure_request
+                .take()
+                .unwrap_or_else(|| panic!("{reason}: 选定模型应发出 configure 请求"));
+            assert_eq!(
+                pending.model.as_ref().map(ToString::to_string).as_deref(),
+                Some(expected),
+                "{reason}"
+            );
+            assert_eq!(pending.effort, None, "{reason}");
+            let target = pending.model.unwrap();
+            let mut updated = head(0, None, false);
+            updated.provider = Some(target.provider().clone());
+            updated.model = Some(target.model().clone());
+            app.apply_configure(
+                pending.generation,
+                Ok(ConfigureReply {
+                    head: updated,
+                    adjustment: None,
+                }),
+            );
+            assert_eq!(
+                app.current_target().map(|t| t.to_string()).as_deref(),
+                Some(expected),
+                "{reason}"
             );
         };
         open_models(&mut app);
@@ -2105,10 +2150,7 @@ mod tests {
         assert!(!down.contains("p/m3"), "Down 越过原可见区时内部滚动");
         assert_eq!((cursor.x, cursor.y), (0, 6));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(
-            app.next_target().map(|target| target.to_string()),
-            Some("p/m7".into())
-        );
+        confirm_chosen_model(&mut app, "p/m7", "选择 m7");
         open_models(&mut app);
         for _ in 0..5 {
             app.apply_action(KeyAction::Up);
@@ -2118,10 +2160,7 @@ mod tests {
         assert!(up.contains("p/m0") && !up.contains("p/m7"));
         assert_eq!((cursor.x, cursor.y), (0, 5));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(
-            app.next_target().map(|target| target.to_string()),
-            Some("p/m2".into())
-        );
+        confirm_chosen_model(&mut app, "p/m2", "选择 m2");
         open_models(&mut app);
         for _ in 0..20 {
             app.apply_action(KeyAction::Up);
@@ -2130,11 +2169,7 @@ mod tests {
         assert_eq!(first.lines().nth(3).unwrap().trim(), "p/m0");
         assert_eq!((cursor.x, cursor.y), (0, 3));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(
-            app.next_target().map(|target| target.to_string()),
-            Some("p/m0".into()),
-            "顶部夹紧"
-        );
+        confirm_chosen_model(&mut app, "p/m0", "顶部夹紧");
         open_models(&mut app);
         for _ in 0..20 {
             app.apply_action(KeyAction::Down);
@@ -2143,11 +2178,7 @@ mod tests {
         assert_eq!(last.lines().nth(6).unwrap().trim(), "p/m9");
         assert_eq!((cursor.x, cursor.y), (0, 6));
         app.apply_action(KeyAction::Submit);
-        assert_eq!(
-            app.next_target().map(|target| target.to_string()),
-            Some("p/m9".into()),
-            "底部夹紧"
-        );
+        confirm_chosen_model(&mut app, "p/m9", "底部夹紧");
         open_models(&mut app);
         let (small, cursor) = screen(&mut app, 7, 5);
         assert_eq!(small.lines().nth(2).unwrap().trim(), "过滤：");
@@ -2174,10 +2205,7 @@ mod tests {
         assert!(!restored.contains("invisible"));
         assert_eq!(app.input.text(), "hidden draft");
         app.apply_action(KeyAction::Submit);
-        assert_eq!(
-            app.next_target().map(|target| target.to_string()),
-            Some("p/m9".into())
-        );
+        confirm_chosen_model(&mut app, "p/m9", "释放消息后选择 m9");
         app.apply_builtin("/model");
         let query = app.model_query.take().unwrap();
         app.apply_models(
@@ -2198,10 +2226,11 @@ mod tests {
             screen(&mut app, width, height);
         }
         app.apply_action(KeyAction::Clear);
+        assert_eq!(app.configure_request, None, "Esc 不发出 configure 请求");
         assert_eq!(
-            app.next_target().map(|target| target.to_string()),
+            app.current_target().map(|target| target.to_string()),
             Some("p/m9".into()),
-            "Esc 保留原选择"
+            "Esc 保留当前会话头模型"
         );
     }
 
@@ -2240,10 +2269,19 @@ mod tests {
         let shown = screen(&mut app);
         assert!(shown.contains("p/broken"), "{shown}");
         app.apply_action(KeyAction::Submit);
+        let pending = app
+            .configure_request
+            .take()
+            .expect("选定候选时应发出 configure 请求");
         assert_eq!(
-            app.next_target().map(|target| target.to_string()),
+            pending.model.as_ref().map(ToString::to_string),
             Some("p/broken".into())
         );
+        // 会话头已持有后续配置失效的模型时，/effort 按会话头精确查询并显示失效原因且不可选定。
+        let mut broken_head = head(0, None, false);
+        broken_head.provider = Some(ProviderId::parse("p").unwrap());
+        broken_head.model = Some(ModelId::parse("broken").unwrap());
+        app.apply_view(LocalUpdate::Head(broken_head));
         app.apply_builtin("/effort");
         let query = app.model_query.take().unwrap();
         assert_eq!(
@@ -2254,7 +2292,11 @@ mod tests {
         let shown = screen(&mut app);
         assert!(shown.contains("effort low"), "{shown}");
         app.apply_action(KeyAction::Submit);
-        assert_eq!(app.next_effort(), None, "没有可选档位，Enter 不选定");
+        assert_eq!(
+            app.configure_request, None,
+            "没有可选档位，Enter 不发出 configure 请求"
+        );
+        assert_eq!(app.current_effort(), None);
     }
 
     #[test]

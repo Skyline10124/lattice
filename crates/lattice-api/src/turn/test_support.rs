@@ -14,6 +14,7 @@ pub(super) struct TestFixture {
     pub store: Arc<SessionStore>,
     pub layout: crate::StateLayout,
     pub root: crate::LocalWorkspaceRoot,
+    pub session_id: lattice_conversation::SessionId,
     pub request: RunTurnRequest,
     // 数据库句柄先于临时目录释放。
     pub _state: tempfile::TempDir,
@@ -110,13 +111,26 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let agent = crate::AgentName::parse("test").unwrap();
     let loaded_profile =
         lattice_profile::load_agent_profile(&agent, &paths, crate::local::ipc::uid()).unwrap();
+    let session_id = crate::local::new_session_id();
+    let turn_profile = crate::profile::TurnProfile::from_loaded(&loaded_profile);
+    let settings = lattice_session::store::SessionSettings {
+        profile: turn_profile.effective,
+        system_prompt: turn_profile.system_prompt,
+        model: loaded_profile.profile.agent.model,
+        effort: loaded_profile.profile.agent.effort,
+    };
+    store
+        .create_session(
+            &store.try_lock_session(session_id).unwrap(),
+            root.project_path(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .unwrap();
     let request = RunTurnRequest {
-        model: None,
-        effort: None,
         input: "hello".into(),
-        session_id: None,
-        agent: Some(agent),
-        loaded_profile: Some(loaded_profile),
+        session_id,
+        expected_settings: None,
         cancel_flag: None,
         tools: Some(StaticTestTools::from_names(enabled_tools)),
         test_llm: Some((
@@ -130,6 +144,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         store,
         layout,
         root,
+        session_id,
         request,
         _state: state,
         _project: project,
@@ -146,6 +161,46 @@ pub(super) fn setup_with_events(events: Vec<ScriptEvent>, tools: &[&str]) -> Tes
     )
 }
 impl TestFixture {
+    pub fn update_settings(
+        &self,
+        mutate: impl FnOnce(&mut lattice_session::store::SessionSettings),
+    ) {
+        let lock = self.store.try_lock_session(self.session_id).unwrap();
+        let mut settings = self
+            .store
+            .begin_read()
+            .unwrap()
+            .session_settings(self.session_id)
+            .unwrap();
+        mutate(&mut settings);
+        self.store
+            .update_settings(
+                &lock,
+                &self.root.project_path(),
+                settings,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+    }
+    pub fn create_session(&self) -> lattice_conversation::SessionId {
+        let sid = crate::local::new_session_id();
+        let settings = self
+            .store
+            .begin_read()
+            .unwrap()
+            .session_settings(self.session_id)
+            .unwrap();
+        let lock = self.store.try_lock_session(sid).unwrap();
+        self.store
+            .create_session(
+                &lock,
+                self.root.project_path(),
+                settings,
+                chrono::Utc::now(),
+            )
+            .unwrap();
+        sid
+    }
     pub fn start(&self, request: RunTurnRequest) -> (TurnExecution, Arc<ObserverSink>) {
         let observer = Arc::new(ObserverSink::default());
         let execution = super::execute::start_execution(super::execute::ExecutionInput {
@@ -155,11 +210,10 @@ impl TestFixture {
             workspace: self.root.clone(),
             request,
             prepared_model: None,
-            prepared_profile: None,
+            prepared_settings: None,
             io: None,
             shutdown: Arc::default(),
             observer: observer.clone(),
-            new_session: Some(crate::local::new_session_id()),
         });
         (execution, observer)
     }

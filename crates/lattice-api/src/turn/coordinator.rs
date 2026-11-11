@@ -124,6 +124,28 @@ impl CoordinatorStoreIo {
             .await
     }
 
+    pub(crate) async fn create_session(
+        &self,
+        project_path: lattice_session::ProjectPath,
+        settings: SessionSettings,
+    ) -> Result<SessionRecord> {
+        self.write(move |store, lock| {
+            store.create_session(lock, project_path, settings, chrono::Utc::now())
+        })
+        .await
+    }
+
+    pub(crate) async fn update_settings(
+        &self,
+        project_path: lattice_session::ProjectPath,
+        settings: SessionSettings,
+    ) -> Result<SessionRecord> {
+        self.write(move |store, lock| {
+            store.update_settings(lock, &project_path, settings, chrono::Utc::now())
+        })
+        .await
+    }
+
     pub(crate) async fn accept(&self, input: AcceptTurn) -> Result<AcceptedTurn> {
         self.write(move |store, lock| store.accept_turn(lock, input))
             .await

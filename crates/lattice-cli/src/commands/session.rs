@@ -49,7 +49,7 @@ pub struct SendArgs {
     /// Existing session to continue, by ID or unique prefix; omit to start a new session.
     #[arg(long = "session")]
     pub session_id: Option<String>,
-    /// Agent to use. Required for a new session; selecting it rebuilds the session profile copy.
+    /// Agent to use. Required for a new session; selecting it updates session settings.
     #[arg(long, required_unless_present = "session_id")]
     pub agent: Option<lattice_api::AgentName>,
     #[arg(
@@ -85,7 +85,7 @@ pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, S
 
 #[derive(Subcommand)]
 pub enum SessionAction {
-    /// Submit a request; without --session the session is created in the acceptance transaction.
+    /// Submit a request; without --session a new session is created via configure.
     Send(SendArgs),
     /// Move the conversation position to node N only; the original fork is kept and files are not rolled back.
     Rewind {

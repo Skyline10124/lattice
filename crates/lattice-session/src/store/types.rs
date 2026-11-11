@@ -262,34 +262,15 @@ pub struct InvocationIndexEntry {
     pub address: ToolCallAddress,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptSession {
-    New { id: SessionId },
-    Existing { id: SessionId },
-}
-impl AcceptSession {
-    pub fn id(&self) -> SessionId {
-        match self {
-            Self::New { id } | Self::Existing { id } => *id,
-        }
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentSelection {
-    Explicit,
-    Inherited,
-}
 #[derive(Clone)]
 pub struct AcceptTurn {
-    pub session: AcceptSession,
+    pub session_id: SessionId,
     pub turn_id: TurnId,
     pub project_path: ProjectPath,
     pub input: String,
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
-    pub agent_selection: AgentSelection,
-    pub profile_copy: super::SessionProfileCopy,
-    pub expected_profile_digest: Option<[u8; 32]>,
+    pub settings_version: super::SettingsVersion,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptedTurn {
@@ -649,6 +630,8 @@ pub enum StoreError {
     SessionCollision { session_id: SessionId },
     #[error("session project binding mismatch: {session_id}")]
     BindingMismatch { session_id: SessionId },
+    #[error("session settings changed: {session_id}")]
+    SettingsChanged { session_id: SessionId },
     #[error("sequence exhausted: {kind}")]
     SequenceExhausted { kind: &'static str },
     #[error("writes disabled; close and reopen the database")]

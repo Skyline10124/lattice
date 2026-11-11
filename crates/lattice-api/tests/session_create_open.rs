@@ -1,11 +1,11 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Session 在首次接受时原子创建；重开及同身份冲突保持冻结配置和原始输入。
+//! Session 由 create_session 显式创建；首轮接受、重开及同身份冲突保持冻结配置和原始输入。
 use lattice_api::local::*;
 use lattice_api::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
 use lattice_llm::testing::ScriptEvent;
-use lattice_session::store::{PublicTurnOutcome, SessionStore};
+use lattice_session::store::{EffectiveProfile, PublicTurnOutcome, SessionSettings, SessionStore};
 use std::sync::Arc;
 
 #[tokio::test]
@@ -43,13 +43,33 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         std::os::unix::fs::MetadataExt::uid(&std::fs::symlink_metadata(project.path()).unwrap());
     let alpha = AgentName::parse("alpha").unwrap();
     let loaded_profile = lattice_profile::load_agent_profile(&alpha, &paths, uid).unwrap();
+    let root = lattice_api::LocalWorkspaceRoot::from_path(project.path()).unwrap();
+    let session_id = new_session_id();
+    let settings = SessionSettings {
+        profile: EffectiveProfile {
+            agent_name: loaded_profile.profile.agent.name,
+            description: loaded_profile.profile.agent.description,
+            default_model: loaded_profile.profile.agent.model.clone(),
+            default_effort: loaded_profile.profile.agent.effort,
+            timeout_secs: loaded_profile.profile.llm.timeout_secs,
+            retry: loaded_profile.profile.llm.retry,
+        },
+        system_prompt: Some(loaded_profile.system_prompt),
+        model: loaded_profile.profile.agent.model,
+        effort: loaded_profile.profile.agent.effort,
+    };
+    store
+        .create_session(
+            &store.try_lock_session(session_id).unwrap(),
+            root.project_path(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .unwrap();
     let request = RunTurnRequest {
-        model: None,
-        effort: None,
         input: " original \n".into(),
-        session_id: None,
-        agent: Some(alpha),
-        loaded_profile: Some(loaded_profile),
+        session_id,
+        expected_settings: None,
         cancel_flag: None,
         tools: None,
         test_llm: Some((
@@ -58,13 +78,12 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
             vec![],
         )),
     };
-    let root = lattice_api::LocalWorkspaceRoot::from_path(project.path()).unwrap();
     let id = new_turn_id();
     let execution = lattice_api::start_turn(api.clone(), id, root.clone(), request.clone());
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
     };
-    let session_id = turn.session_id;
+    assert_eq!(turn.session_id, session_id);
     let TurnCompletion::Closed(completed) = execution.completion.await.unwrap().unwrap();
     assert_eq!(completed.summary.outcome, PublicTurnOutcome::Completed);
     drop(execution.cancel_flag);
@@ -78,8 +97,6 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let store = Arc::new(SessionStore::open(&layout).unwrap());
     let api = SessionApi::from_store(store.clone());
     let mut retry = request;
-    retry.loaded_profile = None;
-    retry.agent = None;
     retry.test_llm = None;
     let execution = lattice_api::start_turn(api, id, root, retry);
     assert!(matches!(

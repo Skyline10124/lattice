@@ -199,6 +199,39 @@ impl LocalClient {
             }
         }
     }
+    pub async fn configure(&self, request: ConfigureRequest) -> Result<ConfigureReply> {
+        match self.call(Request::Configure { request }).await? {
+            Response::Configure(reply) => Ok(reply),
+            _ => Err(protocol()),
+        }
+    }
+    /// 单次发送 configure，区分连接前或确定未提交的拒绝与连接建立后的结果不明。
+    pub async fn configure_once(&self, request: ConfigureRequest) -> ConfigureOutcome {
+        let mut stream = match ipc::connect(self.layout.clone()).await {
+            Ok(stream) => stream,
+            Err(error) => return ConfigureOutcome::Rejected(error),
+        };
+        if let Err(error) = ipc::write_request(&mut stream, &Request::Configure { request }).await {
+            return ConfigureOutcome::Unknown(error);
+        }
+        match ipc::ResponseReader::default().read(&mut stream).await {
+            Ok(Response::Configure(reply)) => ConfigureOutcome::Configured(reply),
+            Ok(Response::Error(error))
+                if error.kind == LocalErrorKind::Internal
+                    || error.recovery.as_ref().is_some_and(|r| {
+                        matches!(
+                            r.cause,
+                            RecoveryCause::CommitFailed | RecoveryCause::WorkerFailed
+                        )
+                    }) =>
+            {
+                ConfigureOutcome::Unknown(error)
+            }
+            Ok(Response::Error(error)) => ConfigureOutcome::Rejected(error),
+            Ok(_) => ConfigureOutcome::Unknown(protocol()),
+            Err(error) => ConfigureOutcome::Unknown(error),
+        }
+    }
     pub async fn rewind(
         &self,
         session_id: SessionId,
@@ -418,10 +451,11 @@ mod tests {
                     .is_err()
             );
             let response = Response::View(ViewUpdate::Head(SessionHead {
-                model: "test".into(),
-                provider: "openai-compatible".into(),
+                model: Some(ModelId::parse("test").unwrap()),
+                provider: Some(ProviderId::parse("openai-compatible").unwrap()),
                 effort: None,
-                profile_default_effort: None,
+                settings_version: serde_json::from_value(serde_json::json!("11".repeat(32)))
+                    .unwrap(),
                 session_id: super::super::new_session_id(),
                 position: NodeId(0),
                 agent: "test".into(),

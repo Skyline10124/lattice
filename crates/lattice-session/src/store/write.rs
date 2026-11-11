@@ -283,12 +283,63 @@ impl SessionStore {
         }
     }
 
+    pub fn create_session(
+        &self,
+        lock: &SessionExecutionLock,
+        project_path: ProjectPath,
+        settings: SessionSettings,
+        now: Timestamp,
+    ) -> Result<SessionRecord> {
+        self.check_lock(lock, lock.session_id)?;
+        settings.validate()?;
+        self.write(lock, Selection::Session, |r, _| {
+            let s = lock.session_id;
+            if r.sessions.contains_key(&s) {
+                return Err(StoreError::SessionCollision { session_id: s });
+            }
+            let record = SessionRecord {
+                session_id: s,
+                project_path,
+                current: NodeId(0),
+                created_at: now,
+                updated_at: now,
+            };
+            r.sessions.insert(s, record.clone());
+            r.nodes.insert((s, NodeId(0)), Node::Root);
+            r.session_settings.insert(s, settings);
+            Ok(record)
+        })
+    }
+
+    pub fn update_settings(
+        &self,
+        lock: &SessionExecutionLock,
+        project_path: &ProjectPath,
+        settings: SessionSettings,
+        now: Timestamp,
+    ) -> Result<SessionRecord> {
+        self.check_lock(lock, lock.session_id)?;
+        settings.validate()?;
+        self.write(lock, Selection::Session, |r, _| {
+            let s = lock.session_id;
+            let session = r
+                .sessions
+                .get_mut(&s)
+                .ok_or_else(|| missing("session", s))?;
+            check_binding(session, project_path)?;
+            session.updated_at = now;
+            let record = session.clone();
+            r.session_settings.insert(s, settings);
+            Ok(record)
+        })
+    }
+
     pub fn accept_turn(
         &self,
         lock: &SessionExecutionLock,
         input: AcceptTurn,
     ) -> Result<AcceptedTurn> {
-        self.check_lock(lock, input.session.id())?;
+        self.check_lock(lock, input.session_id)?;
         self.write(lock, Selection::Accept(input.turn_id), |r, _| {
             if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
                 let s = node_ref.session_id;
@@ -297,9 +348,9 @@ impl SessionStore {
                     .get(&s)
                     .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
                 let existing_input = r.turn_input(s, input.turn_id)?;
-                if existing_input != input.input
+                if s != input.session_id
+                    || existing_input != input.input
                     || existing_session.project_path != input.project_path
-                    || matches!(input.session, AcceptSession::Existing { id } if id != s)
                 {
                     return Err(StoreError::Conflict {
                         turn_id: input.turn_id,
@@ -311,49 +362,25 @@ impl SessionStore {
                 return Err(invalid("input", "user input exceeds byte bound"));
             }
             validate::config(&input.config)?;
-            let s = input.session.id();
-            if matches!(input.session, AcceptSession::New { .. }) {
-                if r.sessions.contains_key(&s) {
-                    return Err(StoreError::SessionCollision { session_id: s });
-                }
-                if input.agent_selection != AgentSelection::Explicit {
-                    return Err(invalid("agent", "new session requires explicit agent"));
-                }
-                r.sessions.insert(
-                    s,
-                    SessionRecord {
-                        session_id: s,
-                        project_path: input.project_path.clone(),
-                        current: NodeId(0),
-                        created_at: input.accepted_at,
-                        updated_at: input.accepted_at,
-                    },
-                );
-                r.nodes.insert((s, NodeId(0)), Node::Root);
-            }
+            let s = input.session_id;
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
             check_binding(session, &input.project_path)?;
-            let previous = r.profile_copies.get(&s);
-            let actual_digest = previous.map(SessionProfileCopy::digest).transpose()?;
-            if actual_digest != input.expected_profile_digest {
-                return Err(StoreError::Conflict {
-                    turn_id: input.turn_id,
-                });
-            }
-            if !input.profile_copy.matches_config(&input.config) {
-                return Err(invalid(
-                    "profile",
-                    "profile copy differs from frozen configuration",
-                ));
-            }
-            if input.agent_selection == AgentSelection::Inherited {
-                let previous =
-                    previous.ok_or_else(|| invalid("profile", "inherited profile copy missing"))?;
-                if previous.profile != input.profile_copy.profile
-                    || previous.prompt_config_digest != input.profile_copy.prompt_config_digest
-                {
-                    return Err(invalid("profile", "inherited profile data changed"));
-                }
+            let current_settings = r.session_settings.get(&s).ok_or_else(|| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "missing session settings",
+                )
+            })?;
+            current_settings.validate().map_err(|_| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "invalid session settings",
+                )
+            })?;
+            if current_settings.version()? != input.settings_version {
+                return Err(StoreError::SettingsChanged { session_id: s });
             }
             let parent = session.current;
             let user_node = r.next_node(s)?;
@@ -363,23 +390,6 @@ impl SessionStore {
                 .digest()
                 .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
             r.configs.entry(config_digest).or_insert(stored);
-            let prompt = r
-                .configs
-                .get(&input.profile_copy.prompt_config_digest)
-                .ok_or_else(|| invalid("profile", "profile prompt reference missing"))?;
-            if prompt.system_prompt != input.config.system_prompt {
-                return Err(invalid(
-                    "profile",
-                    "profile prompt differs from frozen configuration",
-                ));
-            }
-            if input.agent_selection == AgentSelection::Explicit
-                || r.profile_copies
-                    .get(&s)
-                    .is_none_or(|copy| copy.current != input.profile_copy.current)
-            {
-                r.profile_copies.insert(s, input.profile_copy);
-            }
             r.nodes.insert(
                 (s, user_node),
                 Node::UserMessage {

@@ -6,58 +6,96 @@ use crate::app::{Block, ToolState};
 use crate::blocks::BlockList;
 use crate::connection::{closing_status, retry_status};
 use lattice_api::local::{
-    AttemptProgress, ConversationEntry, LocalClient, MessageRole, MessageSemantic, ModelAttemptKey,
-    Node, ResultPayload, SessionId, SlotProgress, StepContent, SuccessContent,
+    AttemptProgress, ConfigureRequest, ConfigureSession, ConflictReason, ConversationEntry,
+    LocalClient, LocalError, LocalErrorKind, MessageRole, MessageSemantic, ModelAttemptKey, Node,
+    ResultPayload, SessionId, SlotProgress, StepContent, SuccessContent,
 };
 
 pub(crate) struct SessionContext {
-    pub session_id: Option<SessionId>,
-    pub active_agent: String,
-    pub startup_agent: Option<lattice_api::AgentName>,
+    pub session_id: SessionId,
+    pub initial_head: Option<lattice_api::local::SessionHead>,
+    pub initial_adjustment: Option<lattice_api::local::EffortAdjustment>,
 }
 
-/// 只读打开；新会话的 SessionId 在首次提交时生成，接受前不算已建立。
+/// 启动会话上下文：不带会话时 `configure(New)` 创建草稿；带会话与 `--agent` 时 `configure(Existing)`；
+/// 只读打开已有会话时校验项目路径，不读取 log。
 pub(crate) async fn open_or_create(
     options: &TuiOptions,
-    workspace: Option<&lattice_api::LocalWorkspaceRoot>,
+    workspace: &lattice_api::LocalWorkspaceRoot,
     client: &LocalClient,
 ) -> anyhow::Result<SessionContext> {
     if let Some(id) = &options.session_id {
         let session = client.resolve_session(id).await?;
-        if let Some(workspace) = workspace
-            && session.project_path != workspace.project_path()
-        {
-            return Err(lattice_api::local::LocalError {
-                kind: lattice_api::local::LocalErrorKind::Conflict,
+        if session.project_path != workspace.project_path() {
+            return Err(LocalError {
+                kind: LocalErrorKind::Conflict,
                 message: format!(
                     "会话 {} 属于项目 {}，与当前项目路径不一致",
                     session.session_id,
                     session.project_path.to_string_lossy()
                 ),
-                conflict: Some(lattice_api::local::ConflictReason::BindingMismatch),
+                conflict: Some(ConflictReason::BindingMismatch),
                 recovery: None,
                 store: None,
             }
             .into());
         }
-        let log = client.log(session.session_id).await?;
+        if let Some(agent) = options.agent.clone() {
+            let reply = client
+                .configure(ConfigureRequest {
+                    session: ConfigureSession::Existing(session.session_id),
+                    workspace: workspace.canonical_path().to_path_buf(),
+                    agent: Some(agent),
+                    model: None,
+                    effort: None,
+                })
+                .await
+                .map_err(|mut err| {
+                    if err.kind == LocalErrorKind::Busy {
+                        err.message =
+                            format!("会话 {} 正在执行一轮，请稍后再试", session.session_id);
+                    } else if err.conflict == Some(ConflictReason::BindingMismatch) {
+                        err.message = format!(
+                            "会话 {} 属于项目 {}，与当前项目路径不一致",
+                            session.session_id,
+                            session.project_path.to_string_lossy()
+                        );
+                    }
+                    anyhow::Error::from(err)
+                })?;
+            return Ok(SessionContext {
+                session_id: session.session_id,
+                initial_head: Some(reply.head),
+                initial_adjustment: reply.adjustment,
+            });
+        }
         return Ok(SessionContext {
-            session_id: Some(session.session_id),
-            active_agent: log
-                .current_agent
-                .map(|agent| agent.as_str().to_owned())
-                .unwrap_or_default(),
-            startup_agent: options.agent.clone(),
+            session_id: session.session_id,
+            initial_head: None,
+            initial_adjustment: None,
         });
     }
-    let agent = options
-        .agent
-        .clone()
-        .ok_or_else(|| anyhow::anyhow!("new Session requires explicit agent"))?;
+    let agent = options.agent.clone().ok_or_else(|| LocalError {
+        kind: LocalErrorKind::BadRequest,
+        message: "new Session requires explicit agent".into(),
+        conflict: None,
+        recovery: None,
+        store: None,
+    })?;
+    let session_id = lattice_api::local::new_session_id();
+    let reply = client
+        .configure(ConfigureRequest {
+            session: ConfigureSession::New(session_id),
+            workspace: workspace.canonical_path().to_path_buf(),
+            agent: Some(agent),
+            model: None,
+            effort: None,
+        })
+        .await?;
     Ok(SessionContext {
-        session_id: None,
-        active_agent: agent.as_str().to_owned(),
-        startup_agent: Some(agent),
+        session_id,
+        initial_head: Some(reply.head),
+        initial_adjustment: reply.adjustment,
     })
 }
 

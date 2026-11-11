@@ -14,13 +14,6 @@ pub(crate) struct TurnProfile {
     pub system_prompt: Option<String>,
 }
 
-pub(crate) struct PreparedProfile {
-    pub configuration: TurnProfile,
-    pub previous: Option<lattice_session::store::SessionProfileCopy>,
-    pub inherited: bool,
-    pub source_path: Option<std::path::PathBuf>,
-}
-
 impl TurnProfile {
     pub(crate) fn from_loaded(loaded: &LoadedAgentProfile) -> Self {
         let source = &loaded.profile;
@@ -36,20 +29,6 @@ impl TurnProfile {
             effective,
             system_prompt: Some(loaded.system_prompt.clone()),
         }
-    }
-
-    pub(crate) fn from_copy(
-        copy: &lattice_session::store::SessionProfileCopy,
-        prompt: Option<String>,
-    ) -> Self {
-        Self {
-            effective: copy.profile.clone(),
-            system_prompt: prompt,
-        }
-    }
-
-    pub(crate) fn retry(&self) -> crate::RetryPolicy {
-        self.effective.retry
     }
 }
 
@@ -126,27 +105,17 @@ mod tests {
 
         let normalized = TurnProfile::from_loaded(&loaded);
         assert_eq!(normalized.effective.timeout_secs.as_secs(), 300);
-        let config = lattice_session::store::FrozenTurnConfig {
-            agent_name: test_agent,
-            model: crate::ModelId::parse("test").unwrap(),
-            provider: crate::ProviderId::parse("local").unwrap(),
-            effort: None,
+        let settings = lattice_session::store::SessionSettings {
+            profile: normalized.effective.clone(),
             system_prompt: normalized.system_prompt.clone(),
-            catalog: lattice_session::store::ToolCatalogSnapshot::new(vec![]).unwrap(),
-            limits: lattice_session::store::TurnExecutionLimits {
-                timeout_secs: crate::TurnTimeout::default(),
-                max_model_steps: 32,
-                max_model_attempts: normalized.retry().max_attempts(),
-            },
+            model: normalized.effective.default_model.clone(),
+            effort: normalized.effective.default_effort,
         };
-        let mut copy = lattice_session::store::SessionProfileCopy::for_test(&config);
-        copy.profile = normalized.effective.clone();
-        let bytes = serde_json::to_vec(&copy).unwrap();
-        let persisted: lattice_session::store::SessionProfileCopy =
+        let bytes = serde_json::to_vec(&settings).unwrap();
+        let persisted: lattice_session::store::SessionSettings =
             serde_json::from_slice(&bytes).unwrap();
-        let restored = TurnProfile::from_copy(&persisted, config.system_prompt);
-        assert_eq!(restored.effective, normalized.effective);
-        assert_eq!(restored.system_prompt.as_deref(), Some(prompt.as_str()));
+        assert_eq!(persisted.profile, normalized.effective);
+        assert_eq!(persisted.system_prompt.as_deref(), Some(prompt.as_str()));
 
         // 防止 TurnProfile::from_loaded 截断或忽略超过一小时的显式 timeout_secs；
         // EffectiveProfile 为私有持久结构，E2E 无法在不跑满长流的情况下直接读取该字段。

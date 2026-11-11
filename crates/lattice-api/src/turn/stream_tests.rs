@@ -119,10 +119,10 @@ fn timed(failures: usize) -> Arc<TimedLlm> {
 async fn stream_turn_retry_uses_profile_backoff_and_cap() {
     let llm = timed(3);
     let fixture = setup_fixture(llm.clone(), &[]);
-    let mut request = fixture.request.clone();
-    request.loaded_profile.as_mut().unwrap().profile.llm.retry =
-        crate::RetryPolicy::new(3, 40, 60).unwrap();
-    let (detail, events) = fixture.run(request).await;
+    fixture.update_settings(|s| {
+        s.profile.retry = crate::RetryPolicy::new(3, 40, 60).unwrap();
+    });
+    let (detail, events) = fixture.run(fixture.request.clone()).await;
     let delays: Vec<_> = events
         .iter()
         .filter_map(|event| match event {
@@ -238,10 +238,10 @@ async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
             });
         }
         let fixture = setup_fixture(Arc::new(builder.build()), &[]);
-        let mut request = fixture.request.clone();
-        request.loaded_profile.as_mut().unwrap().profile.llm.retry =
-            crate::RetryPolicy::new(2, 1, 1).unwrap();
-        let (detail, events) = fixture.run(request).await;
+        fixture.update_settings(|s| {
+            s.profile.retry = crate::RetryPolicy::new(2, 1, 1).unwrap();
+        });
+        let (detail, events) = fixture.run(fixture.request.clone()).await;
         let attempts = &detail.steps[0].attempts;
         assert_eq!(attempts.len(), count);
         let retries: Vec<_> = events
@@ -308,11 +308,12 @@ async fn wait_retry(observer: &ObserverSink) {
 async fn stream_turn_retry_cancellation_closes_without_another_request() {
     let llm = timed(1);
     let fixture = setup_fixture(llm.clone(), &[]);
+    fixture.update_settings(|s| {
+        s.profile.retry = crate::RetryPolicy::new(1, 10_000, 10_000).unwrap();
+    });
     let cancel = Arc::new(AtomicBool::new(false));
     let mut request = fixture.request.clone();
     request.cancel_flag = Some(cancel.clone());
-    request.loaded_profile.as_mut().unwrap().profile.llm.retry =
-        crate::RetryPolicy::new(1, 10_000, 10_000).unwrap();
     let (execution, observer) = fixture.start(request);
     execution.acceptance.await.unwrap().unwrap();
     wait_retry(&observer).await;
@@ -340,14 +341,16 @@ async fn stream_turn_retry_respects_explicit_and_default_deadlines() {
     ] {
         let llm = timed(10);
         let fixture = setup_fixture(llm.clone(), &[]);
-        let mut request = fixture.request.clone();
-        let config = &mut request.loaded_profile.as_mut().unwrap().profile.llm;
-        config.timeout_secs = timeout;
-        config.retry = crate::RetryPolicy::new(10, 60_000, 60_000).unwrap();
-        let (detail, events) =
-            tokio::time::timeout(Duration::from_secs(seconds + 1), fixture.run(request))
-                .await
-                .expect("deadline must interrupt backoff");
+        fixture.update_settings(|s| {
+            s.profile.timeout_secs = timeout;
+            s.profile.retry = crate::RetryPolicy::new(10, 60_000, 60_000).unwrap();
+        });
+        let (detail, events) = tokio::time::timeout(
+            Duration::from_secs(seconds + 1),
+            fixture.run(fixture.request.clone()),
+        )
+        .await
+        .expect("deadline must interrupt backoff");
         let starts = llm.starts.lock().unwrap();
         assert_eq!(starts.len(), count);
         assert!(

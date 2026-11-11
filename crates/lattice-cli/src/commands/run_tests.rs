@@ -15,7 +15,13 @@ fn json_updates_keep_submission_receipt_and_error_shapes() {
             update: SubmissionUpdate::Sending {
                 turn_id: id,
                 session_id: sid,
-                new: true,
+            },
+        },
+        LocalUpdate::Configure {
+            session_id: sid,
+            result: ConfigureResult::Configured {
+                head: ipc_tests::head(id, false),
+                adjustment: None,
             },
         },
         LocalUpdate::Submit {
@@ -77,6 +83,7 @@ fn json_updates_keep_submission_receipt_and_error_shapes() {
             .collect::<Vec<_>>(),
         [
             "submit",
+            "configure",
             "submit",
             "cancel",
             "head",
@@ -85,6 +92,107 @@ fn json_updates_keep_submission_receipt_and_error_shapes() {
             "connection",
             "error"
         ]
+    );
+}
+
+#[test]
+fn json_and_human_configure_updates_render_expected_shapes_and_adjustment_line() {
+    let id = lattice_api::local::new_turn_id();
+    let sid = lattice_api::local::new_session_id();
+    let head = ipc_tests::head(id, false);
+    let error: LocalError = serde_json::from_value(
+        json!({"kind":"bad_request","message":"unsupported effort","recovery":null,"store":null}),
+    )
+    .unwrap();
+    let updates = [
+        LocalUpdate::Configure {
+            session_id: sid,
+            result: ConfigureResult::Configured {
+                head: head.clone(),
+                adjustment: Some(EffortAdjustment {
+                    from: Some(lattice_api::Effort::High),
+                    to: Some(lattice_api::Effort::Medium),
+                }),
+            },
+        },
+        LocalUpdate::Configure {
+            session_id: sid,
+            result: ConfigureResult::Configured {
+                head: head.clone(),
+                adjustment: None,
+            },
+        },
+        LocalUpdate::Configure {
+            session_id: sid,
+            result: ConfigureResult::Rejected {
+                error: error.clone(),
+            },
+        },
+        LocalUpdate::Configure {
+            session_id: sid,
+            result: ConfigureResult::Unknown { error: None },
+        },
+    ];
+    let mut json_out = Vec::new();
+    let mut json_err = Vec::new();
+    let mut state = RunRenderState::default();
+    for update in &updates {
+        render_update(
+            update,
+            &mut state,
+            &mut json_out,
+            &mut json_err,
+            false,
+            true,
+        )
+        .unwrap();
+    }
+    assert!(json_err.is_empty());
+    let records: Vec<serde_json::Value> = String::from_utf8(json_out)
+        .unwrap()
+        .lines()
+        .map(|l| serde_json::from_str(l).unwrap())
+        .collect();
+    assert_eq!(records[0]["type"], "configure");
+    assert_eq!(records[0]["session_id"], sid.to_string());
+    assert_eq!(records[0]["result"], "configured");
+    assert_eq!(records[0]["head"], serde_json::to_value(&head).unwrap());
+    assert_eq!(
+        records[0]["adjustment"],
+        json!({"from":"high","to":"medium"})
+    );
+    assert_eq!(records[1]["result"], "configured");
+    assert!(records[1]["adjustment"].is_null());
+    assert_eq!(records[2]["result"], "rejected");
+    assert_eq!(records[2]["error"]["message"], "unsupported effort");
+    assert_eq!(records[3]["result"], "unknown");
+    assert!(records[3]["error"].is_null());
+
+    // 人类模式下只有带 adjustment 的 configure 输出一行调整说明。
+    let mut human_out = Vec::new();
+    let mut human_err = Vec::new();
+    let mut human_state = RunRenderState::default();
+    for update in &updates[0..2] {
+        render_update(
+            update,
+            &mut human_state,
+            &mut human_out,
+            &mut human_err,
+            false,
+            false,
+        )
+        .unwrap();
+    }
+    assert!(human_out.is_empty());
+    let err_text = String::from_utf8(human_err).unwrap();
+    assert_eq!(
+        err_text.lines().count(),
+        1,
+        "只有带 adjustment 的 configure 记录在人类模式下输出一行说明：{err_text}"
+    );
+    assert!(
+        err_text.contains("high") && err_text.contains("medium"),
+        "调整说明应标明原档位与新档位：{err_text}"
     );
 }
 

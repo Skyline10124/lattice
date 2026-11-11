@@ -246,41 +246,38 @@ fn config() -> FrozenTurnConfig {
 }
 
 fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
+    let cfg = config();
     AcceptTurn {
-        session: AcceptSession::New { id: s },
+        session_id: s,
         turn_id: t,
         project_path: project(1),
         input: "用户问题🌳".into(),
-        config: config(),
+        settings_version: SessionSettings::for_test(&cfg).version().unwrap(),
+        config: cfg,
         accepted_at: now(),
-        agent_selection: AgentSelection::Explicit,
-        profile_copy: SessionProfileCopy::for_test(&config()),
-        expected_profile_digest: None,
     }
 }
 
-// 旧领域测试的夹具以最终冻结配置准备副本；副本本身的拒绝测试直接调用领域入口。
+// 通用夹具在首次写入前自动创建会话并对齐当前设置版本；设置本身的校验与拒绝测试直接调用领域入口。
 fn accept_prepared(
     db: &SessionStore,
     lock: &SessionExecutionLock,
     mut input: AcceptTurn,
 ) -> Result<AcceptedTurn> {
-    let previous = db.begin_read()?.profile_copy(input.session.id()).ok();
-    input.expected_profile_digest = previous
-        .as_ref()
-        .map(SessionProfileCopy::digest)
-        .transpose()?;
-    input.profile_copy = if input.agent_selection == AgentSelection::Inherited {
-        let mut copy = previous.unwrap_or_else(|| SessionProfileCopy::for_test(&input.config));
-        copy.current = SessionModelChoice {
-            provider: input.config.provider.clone(),
-            model: input.config.model.clone(),
-            effort: input.config.effort,
-        };
-        copy
-    } else {
-        SessionProfileCopy::for_test(&input.config)
-    };
+    if db.begin_read()?.find_session(input.session_id)?.is_none()
+        && db.begin_read()?.turn_node(input.turn_id)?.is_none()
+        && lock.session_id() == input.session_id
+    {
+        db.create_session(
+            lock,
+            input.project_path.clone(),
+            SessionSettings::for_test(&input.config),
+            input.accepted_at,
+        )?;
+    }
+    if let Ok(settings) = db.begin_read()?.session_settings(input.session_id) {
+        input.settings_version = settings.version()?;
+    }
     db.accept_turn(lock, input)
 }
 
@@ -455,16 +452,8 @@ fn structured_result_wire() {
 }
 
 #[test]
-fn domain_types_v8_wire() {
-    let choice_wire = json!({
-        "provider": "openai",
-        "model": "org/gpt-5",
-        "effort": "medium"
-    });
-    let choice: SessionModelChoice = serde_json::from_value(choice_wire.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&choice).unwrap(), choice_wire);
-
-    let copy_wire = json!({
+fn domain_types_v9_wire() {
+    let settings_wire = json!({
         "profile": {
             "agent_name": "coder",
             "description": "coding agent",
@@ -477,18 +466,18 @@ fn domain_types_v8_wire() {
                 "max_delay_ms": 3000
             }
         },
-        "prompt_config_digest": "ab".repeat(32),
-        "current": {
-            "provider": "openai",
-            "model": "org/gpt-5",
-            "effort": "medium"
-        }
+        "system_prompt": "系统提示",
+        "model": "openai/org/gpt-5",
+        "effort": "medium"
     });
-    let copy: SessionProfileCopy = serde_json::from_value(copy_wire.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&copy).unwrap(), copy_wire);
-    let encoded_copy = encode(&copy).unwrap();
-    assert_eq!(&encoded_copy[..4], &9_u32.to_be_bytes());
-    assert_eq!(decode_profile_copy("s1", &encoded_copy).unwrap(), copy);
+    let settings: SessionSettings = serde_json::from_value(settings_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&settings).unwrap(), settings_wire);
+    let encoded_settings = encode(&settings).unwrap();
+    assert_eq!(&encoded_settings[..4], &9_u32.to_be_bytes());
+    assert_eq!(
+        decode_session_settings("s1", &encoded_settings).unwrap(),
+        settings
+    );
 
     let user_wire = json!({
         "kind": "user_message",
@@ -975,7 +964,12 @@ fn commit_failure_disables_all_writers() {
                     },
                     || {
                         with_fault(point, || {
-                            accept_prepared(&db, &lock, accept(sid(1), tid(1)))
+                            db.create_session(
+                                &lock,
+                                project(1),
+                                SessionSettings::for_test(&config()),
+                                now(),
+                            )
                         })
                     },
                 )
@@ -1006,7 +1000,13 @@ fn commit_failure_disables_all_writers() {
                                     })
                                     .map(|_| ())
                                 } else {
-                                    accept_prepared(db, &lock, accept(sid(n), tid(n))).map(|_| ())
+                                    db.create_session(
+                                        &lock,
+                                        project(1),
+                                        SessionSettings::for_test(&config()),
+                                        now(),
+                                    )
+                                    .map(|_| ())
                                 }
                             },
                         );
@@ -1062,7 +1062,7 @@ fn commit_failure_disables_all_writers() {
         assert_eq!(
             db.begin_read()
                 .unwrap()
-                .turn_node(tid(1))
+                .find_session(sid(1))
                 .unwrap()
                 .is_some(),
             point == FaultPoint::UnknownAfter
@@ -1584,8 +1584,11 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let old = node_at(&db, 2);
+    let mut beta_settings = SessionSettings::for_test(&config());
+    beta_settings.profile.agent_name = agent("beta");
+    db.update_settings(&lock, &project(1), beta_settings, now())
+        .unwrap();
     let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
     next.config.agent_name = agent("beta");
     accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 1);
@@ -1598,18 +1601,19 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now()),
         Err(StoreError::InvalidTransition { .. })
     ));
-    let mut retry = accept(sid(2), tid(1));
+    let mut retry = accept(sid(1), tid(1));
     retry.config.agent_name = agent("ignored");
+    assert!(matches!(
+        accept_prepared(&db, &lock, retry).unwrap(),
+        AcceptedTurn::Existing(t) if t.session_id == sid(1)
+    ));
     let lock2 = db.try_lock_session(sid(2)).unwrap();
-    assert!(
-        matches!(accept_prepared(&db, &lock2,retry).unwrap(),AcceptedTurn::Existing(t) if t.session_id==sid(1))
-    );
     for case in 0..3 {
         let mut conflicting = accept(sid(1), tid(1));
         match case {
             0 => conflicting.input.push('!'),
             1 => conflicting.project_path = project(2),
-            _ => conflicting.session = AcceptSession::Existing { id: sid(2) },
+            _ => conflicting.session_id = sid(2),
         }
         assert!(
             matches!(
@@ -1620,7 +1624,6 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
         );
     }
     let mut wrong_project = accept(sid(1), tid(99));
-    wrong_project.session = AcceptSession::Existing { id: sid(1) };
     wrong_project.project_path = project(2);
     assert!(
         matches!(
@@ -1644,10 +1647,6 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     );
     db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let mut next = accept(sid(1), tid(3));
-    next.session = AcceptSession::Existing { id: sid(1) };
-    next.agent_selection = AgentSelection::Inherited;
-    assert!(accept_prepared(&db, &lock, next.clone()).is_err());
-    next.agent_selection = AgentSelection::Explicit;
     next.config.system_prompt = Some("different".into());
     accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 2);
@@ -1669,23 +1668,25 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
 }
 
 #[test]
-fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
-    // 分别防止冻结限制拒绝合法值、副本校验未同步、保存成功却无法严格重开，
-    // 以及切换 agent 覆盖副本后历史 UserMessage 节点的越界 timeout 漏过重开校验。
-    // 直接读写冻结事实、副本与底层表，外部场景无法等价构造这些私有记录状态。
+fn timeout_bounds_preserve_frozen_limits_and_session_settings_on_reopen() {
     for timeout_secs in [1, 300, 3600, 3601, MAX_TURN_TIMEOUT_SECS] {
         let (_dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         let mut first = accept(sid(1), tid(1));
         first.config.limits.timeout_secs = timeout(timeout_secs);
-        first.profile_copy = SessionProfileCopy::for_test(&first.config);
         let expected_first = first.config.clone();
-        let expected_first_copy = first.profile_copy.clone();
+        let expected_first_settings = SessionSettings::for_test(&first.config);
+        first.settings_version = expected_first_settings.version().unwrap();
+        db.create_session(&lock, project(1), expected_first_settings.clone(), now())
+            .unwrap();
         db.accept_turn(&lock, first)
             .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
         let read = db.begin_read().unwrap();
         assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_first);
-        assert_eq!(read.profile_copy(sid(1)).unwrap(), expected_first_copy);
+        assert_eq!(
+            read.session_settings(sid(1)).unwrap(),
+            expected_first_settings
+        );
         drop(read);
         drop(lock);
         drop(db);
@@ -1694,13 +1695,19 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
             .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
         let lock = reopened.try_lock_session(sid(1)).unwrap();
         let mut second = accept(sid(1), tid(2));
-        second.session = AcceptSession::Existing { id: sid(1) };
-        second.expected_profile_digest = Some(expected_first_copy.digest().unwrap());
         second.config.agent_name = agent("beta");
         second.config.limits.timeout_secs = TurnTimeout::default();
-        second.profile_copy = SessionProfileCopy::for_test(&second.config);
         let expected_second = second.config.clone();
-        let expected_second_copy = second.profile_copy.clone();
+        let expected_second_settings = SessionSettings::for_test(&second.config);
+        reopened
+            .update_settings(
+                &lock,
+                &project(1),
+                expected_second_settings.clone(),
+                now() + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        second.settings_version = expected_second_settings.version().unwrap();
         reopened.accept_turn(&lock, second).unwrap();
         drop(lock);
         drop(reopened);
@@ -1710,20 +1717,25 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
         let read = reopened.begin_read().unwrap();
         assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_first);
         assert_eq!(read.turn_config(sid(1), tid(2)).unwrap(), expected_second);
-        assert_eq!(read.profile_copy(sid(1)).unwrap(), expected_second_copy);
+        assert_eq!(
+            read.session_settings(sid(1)).unwrap(),
+            expected_second_settings
+        );
     }
 
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    let first = accept(sid(1), tid(1));
-    let digest = first.profile_copy.digest().unwrap();
-    db.accept_turn(&lock, first).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let mut second = accept(sid(1), tid(2));
-    second.session = AcceptSession::Existing { id: sid(1) };
-    second.expected_profile_digest = Some(digest);
     second.config.agent_name = agent("beta");
-    second.profile_copy = SessionProfileCopy::for_test(&second.config);
-    db.accept_turn(&lock, second).unwrap();
+    db.update_settings(
+        &lock,
+        &project(1),
+        SessionSettings::for_test(&second.config),
+        now() + chrono::Duration::seconds(1),
+    )
+    .unwrap();
+    accept_prepared(&db, &lock, second).unwrap();
     let base = records(&db);
     drop(lock);
     drop(db);
@@ -1758,45 +1770,75 @@ fn timeout_bounds_preserve_frozen_limits_and_profile_copy_on_reopen() {
 fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    for case in 0..9 {
+    assert!(
+        matches!(
+            db.accept_turn(&lock, accept(sid(1), tid(1))),
+            Err(StoreError::NotFound {
+                kind: "session",
+                ..
+            })
+        ),
+        "不存在的会话调用 accept_turn 必须返回 NotFound"
+    );
+    assert!(records(&db).nodes.is_empty());
+
+    let mut bad_settings = SessionSettings::for_test(&config());
+    bad_settings.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1));
+    assert!(
+        matches!(
+            db.create_session(&lock, project(1), bad_settings, now()),
+            Err(StoreError::InvalidInput { .. })
+        ),
+        "设置无效时 create_session 必须拒绝且不落库"
+    );
+    assert!(records(&db).nodes.is_empty());
+
+    let base_settings = SessionSettings::for_test(&config());
+    let base_version = base_settings.version().unwrap();
+    db.create_session(&lock, project(1), base_settings.clone(), now())
+        .unwrap();
+    assert!(matches!(
+        db.create_session(&lock, project(1), base_settings, now()),
+        Err(StoreError::SessionCollision { session_id }) if session_id == sid(1)
+    ));
+    let before = records(&db);
+
+    for case in 0..8 {
         let mut a = accept(sid(1), tid(1));
+        a.settings_version = base_version;
         let expected_detail = match case {
             0 => {
                 a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1);
                 None
             }
             1 => {
-                a.agent_selection = AgentSelection::Inherited;
-                None
-            }
-            2 => {
                 a.config.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1));
                 None
             }
-            3 => {
+            2 => {
                 a.config
                     .catalog
                     .entries
                     .push(a.config.catalog.entries[0].clone());
                 None
             }
-            4 => {
+            3 => {
                 a.config.limits.max_model_steps = 33;
                 Some("invalid frozen configuration")
             }
-            5 => {
+            4 => {
                 a.config.limits.max_model_attempts = 0;
                 Some("invalid frozen configuration")
             }
-            6 => {
+            5 => {
                 a.config.catalog.digest = [0; 32];
                 None
             }
-            7 => {
+            6 => {
                 a.config.limits.max_model_attempts = 12;
                 Some("invalid frozen configuration")
             }
-            8 => {
+            7 => {
                 use sha2::{Digest, Sha256};
                 let first = a.config.catalog.entries[0].clone();
                 let mut z = first.clone();
@@ -1812,7 +1854,7 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
             }
             _ => unreachable!(),
         };
-        let result = accept_prepared(&db, &lock, a);
+        let result = db.accept_turn(&lock, a);
         if let Some(expected_detail) = expected_detail {
             assert!(
                 matches!(&result, Err(StoreError::InvalidInput { field: "config", detail }) if detail == expected_detail),
@@ -1821,7 +1863,7 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
         } else {
             assert!(result.is_err(), "{case}");
         }
-        assert!(records(&db).nodes.is_empty());
+        assert!(before == records(&db), "{case} 修改了持久记录");
     }
     assert!(matches!(
         db.try_lock_session(sid(1)),
@@ -1829,21 +1871,36 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     ));
     let other = db.try_lock_session(sid(2)).unwrap();
     assert!(matches!(
-        accept_prepared(&db, &other, accept(sid(1), tid(1))),
+        db.accept_turn(&other, accept(sid(1), tid(1))),
         Err(StoreError::InvalidLockCapability)
     ));
     let (_d2, _l2, db2) = store();
     assert!(matches!(
-        accept_prepared(&db2, &lock, accept(sid(1), tid(1))),
+        db2.create_session(
+            &lock,
+            project(1),
+            SessionSettings::for_test(&config()),
+            now()
+        ),
+        Err(StoreError::InvalidLockCapability)
+    ));
+    assert!(matches!(
+        db2.update_settings(
+            &lock,
+            &project(1),
+            SessionSettings::for_test(&config()),
+            now()
+        ),
+        Err(StoreError::InvalidLockCapability)
+    ));
+    assert!(matches!(
+        db2.accept_turn(&lock, accept(sid(1), tid(1))),
         Err(StoreError::InvalidLockCapability)
     ));
     let mut a = accept(sid(1), tid(1));
     a.input = "x".repeat(MAX_USER_INPUT_BYTES);
-    accept_prepared(&db, &lock, a).unwrap();
-    assert!(matches!(
-        accept_prepared(&db, &lock, accept(sid(1), tid(2))),
-        Err(StoreError::SessionCollision { .. })
-    ));
+    a.settings_version = base_version;
+    db.accept_turn(&lock, a).unwrap();
     assert_eq!(
         db.begin_read().unwrap().session(sid(1)).unwrap().current,
         NodeId(2)
@@ -2067,8 +2124,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
         drop(read);
         let lock = db.try_lock_session(sid(1)).unwrap();
         db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
-        let mut next = accept(sid(1), tid(2));
-        next.session = AcceptSession::Existing { id: sid(1) };
+        let next = accept(sid(1), tid(2));
         accept_prepared(&db, &lock, next).unwrap();
         assert_eq!(detail(&db), expected, "old turn changed at cut {cut}");
     }
@@ -2605,9 +2661,12 @@ fn conversation_tree() -> (
         .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 1, 0), 0)), now())
         .unwrap();
+    let mut beta_settings = SessionSettings::for_test(&config());
+    beta_settings.profile.agent_name = agent("beta");
+    db.update_settings(&lock, &project(1), beta_settings, now())
+        .unwrap();
     for t in [tid(2), tid(3)] {
         let mut next = accept(sid(1), t);
-        next.session = AcceptSession::Existing { id: sid(1) };
         next.config.agent_name = agent("beta");
         accept_prepared(&db, &lock, next).unwrap();
         if t == tid(2) {
@@ -2687,8 +2746,7 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
         NodeId(7)
     );
     db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
-    let mut branch = accept(sid(1), tid(4));
-    branch.session = AcceptSession::Existing { id: sid(1) };
+    let branch = accept(sid(1), tid(4));
     accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 10).unwrap();
@@ -2707,12 +2765,12 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     db.rewind(&lock, NodeId(1), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1]);
-    assert_eq!(view.current_agent, Some(agent("alpha")));
+    assert_eq!(view.current_agent, Some(agent("beta")));
     db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
-    assert_eq!(view.current_agent, Some(agent("alpha")));
+    assert_eq!(view.current_agent, Some(agent("beta")));
 }
 
 #[test]
@@ -2731,8 +2789,7 @@ fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
     assert!(read.history(sid(1), NodeId(1), 1).unwrap().is_empty());
     drop(read);
     db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
-    let mut branch = accept(sid(1), tid(4));
-    branch.session = AcceptSession::Existing { id: sid(1) };
+    let branch = accept(sid(1), tid(4));
     accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
     assert_eq!(read.history(sid(1), NodeId(6), 2).unwrap(), both);
@@ -2757,8 +2814,7 @@ fn conversation_reads_reject_invalid_boundaries_and_missing_targets() {
     accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let other = db.try_lock_session(sid(2)).unwrap();
     accept_prepared(&db, &other, accept(sid(2), tid(2))).unwrap();
-    let mut next = accept(sid(2), tid(3));
-    next.session = AcceptSession::Existing { id: sid(2) };
+    let next = accept(sid(2), tid(3));
     accept_prepared(&db, &other, next).unwrap();
     let read = db.begin_read().unwrap();
     for before in [NodeId(0), NodeId(2), NodeId(3), NodeId(99)] {
@@ -2961,8 +3017,7 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
         .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 1), 0)), now())
         .unwrap();
-    let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
+    let next = accept(sid(1), tid(2));
     accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(old_read.view(sid(1), 1).unwrap(), view);
     assert_eq!(old_read.usage(sid(1)).unwrap(), usage);
@@ -3394,8 +3449,7 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
             let (_d, _l, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
             accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
-            let mut next = accept(sid(1), tid(2));
-            next.session = AcceptSession::Existing { id: sid(1) };
+            let next = accept(sid(1), tid(2));
             accept_prepared(&db, &lock, next).unwrap();
             let tx = db.db.begin_write().unwrap();
             {
@@ -3800,7 +3854,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
 
 #[test]
 fn value_versions_and_schema_rejections_name_the_database() {
-    for table in [META, SESSIONS, PROFILE_COPIES, CONFIGS, TURN_INDEX, INDEX] {
+    for table in [META, SESSIONS, SESSION_SETTINGS, CONFIGS, TURN_INDEX, INDEX] {
         let (_d, layout, db) = store();
         let (lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
         drop(lock);
@@ -3852,16 +3906,22 @@ fn value_versions_and_schema_rejections_name_the_database() {
 
 #[test]
 fn transaction_failure_matrix() {
-    for phase in 0..11 {
-        for point in [FaultPoint::UnknownBefore, FaultPoint::UnknownAfter] {
+    for phase in 0..13 {
+        for point in [
+            FaultPoint::Poisoned,
+            FaultPoint::UnknownBefore,
+            FaultPoint::UnknownAfter,
+        ] {
             let (_dir, layout, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
-            if phase > 0 && phase != 10 {
+            if phase != 11 {
+                accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+            }
+            if phase > 0 && !matches!(phase, 10..=12) {
                 db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                     .unwrap();
             }
-            let calls = if phase >= 4 && phase != 8 && phase != 10 {
+            let calls = if phase >= 4 && !matches!(phase, 8 | 10..=12) {
                 Some(
                     db.register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
                         .unwrap(),
@@ -3869,11 +3929,11 @@ fn transaction_failure_matrix() {
             } else {
                 None
             };
-            if phase >= 5 && phase != 8 && phase != 10 {
+            if phase >= 5 && !matches!(phase, 8 | 10..=12) {
                 db.start_invocation(&lock, &calls.as_ref().unwrap().bindings[0], now())
                     .unwrap();
             }
-            if phase >= 6 && phase != 8 && phase != 10 {
+            if phase >= 6 && !matches!(phase, 8 | 10..=12) {
                 db.finish_invocation(
                     &lock,
                     TerminalInput {
@@ -3932,16 +3992,11 @@ fn transaction_failure_matrix() {
                         now(),
                     )
                     .map(|_| ()),
-                10 => {
-                    let mut next = accept(sid(1), tid(2));
-                    next.session = AcceptSession::Existing { id: sid(1) };
-                    accept_prepared(&db, &lock, next).map(|_| ())
-                }
                 7 => db.rewind(&lock, NodeId(0), &project(1), now()).map(|_| ()),
                 8 => db
                     .register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
                     .map(|_| ()),
-                _ => db
+                9 => db
                     .close_step(
                         &lock,
                         CloseStep::Continue {
@@ -3950,20 +4005,47 @@ fn transaction_failure_matrix() {
                         now(),
                     )
                     .map(|_| ()),
+                10 => accept_prepared(&db, &lock, accept(sid(1), tid(2))).map(|_| ()),
+                11 => db
+                    .create_session(
+                        &lock,
+                        project(1),
+                        SessionSettings::for_test(&config()),
+                        now(),
+                    )
+                    .map(|_| ()),
+                12 => {
+                    let mut updated = SessionSettings::for_test(&config());
+                    updated.profile.agent_name = agent("beta");
+                    updated.system_prompt = Some("更新后的系统提示".into());
+                    db.update_settings(
+                        &lock,
+                        &project(1),
+                        updated,
+                        now() + chrono::Duration::seconds(10),
+                    )
+                    .map(|_| ())
+                }
+                _ => unreachable!(),
             });
-            assert!(matches!(
-                result,
-                Err(StoreError::CommitFailed {
-                    kind: CommitFailureKind::OutcomeUnknown,
-                    ..
-                })
-            ));
+            let expected_kind = if point == FaultPoint::Poisoned {
+                CommitFailureKind::TransactionPoisoned
+            } else {
+                CommitFailureKind::OutcomeUnknown
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(StoreError::CommitFailed { kind, .. }) if kind == expected_kind
+                ),
+                "phase {phase} point {point:?}: {result:?}"
+            );
             assert!(before == codec::load_read(&read.tx).unwrap());
             let after = codec::load_read(&db.begin_read().unwrap().tx).unwrap();
             assert_eq!(
                 before == after,
-                point == FaultPoint::UnknownBefore,
-                "phase {phase}"
+                point != FaultPoint::UnknownAfter,
+                "phase {phase} point {point:?}"
             );
             validate::records(&after).unwrap();
             drop(read);
@@ -4056,7 +4138,7 @@ fn overwrite_records(tx: &redb::WriteTransaction, r: &Records) {
         }};
     }
     string_table!(SESSIONS, &r.sessions);
-    string_table!(PROFILE_COPIES, &r.profile_copies);
+    string_table!(SESSION_SETTINGS, &r.session_settings);
     string_table!(TURN_INDEX, &r.turn_index);
     string_table!(INDEX, &r.index);
     {
@@ -4082,8 +4164,7 @@ fn ordinary_operations_load_only_referenced_turns() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
-    let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
+    let next = accept(sid(1), tid(2));
     accept_prepared(&db, &lock, next).unwrap();
     let other = db.try_lock_session(sid(2)).unwrap();
     accept_prepared(&db, &other, accept(sid(2), tid(3))).unwrap();
@@ -4534,7 +4615,6 @@ fn sequence_exhaustion_aborts_transactions() {
         tx.commit().unwrap();
 
         let mut input = accept(sid(1), tid(3));
-        input.session = AcceptSession::Existing { id: sid(1) };
         input.config.system_prompt = Some("new config must not survive exhaustion".into());
         let new_digest = input.config.digest().unwrap();
         let before = records(&db);
@@ -4734,200 +4814,291 @@ fn local_reads_reject_broken_references() {
 }
 
 #[test]
-fn profile_copy_acceptance_rejects_stale_or_inconsistent_preparation() {
+fn draft_session_reopens_with_readable_projections_and_empty_configs() {
     let (_dir, layout, db) = store();
-    let lock = db.try_lock_session(sid(1)).unwrap();
-    let first = accept(sid(1), tid(1));
-    db.accept_turn(&lock, first).unwrap();
-    let original = db.begin_read().unwrap().profile_copy(sid(1)).unwrap();
-    let before = records(&db);
-    for case in ["stale", "profile", "prompt", "model", "effort", "limits"] {
-        let mut next = accept(sid(1), tid(2));
-        next.session = AcceptSession::Existing { id: sid(1) };
-        next.agent_selection = AgentSelection::Inherited;
-        next.expected_profile_digest = Some(original.digest().unwrap());
-        next.profile_copy = original.clone();
-        match case {
-            "stale" => next.expected_profile_digest = Some([1; 32]),
-            "profile" => next.profile_copy.profile.description = Some("changed".into()),
-            "prompt" => next.profile_copy.prompt_config_digest = [1; 32],
-            "model" => next.profile_copy.current.model = model("different"),
-            "effort" => next.profile_copy.current.effort = Some(lattice_conversation::Effort::High),
-            "limits" => {
-                next.profile_copy.profile.timeout_secs =
-                    timeout(original.profile.timeout_secs.as_secs() + 1)
-            }
-            _ => unreachable!(),
-        }
-        let result = db.accept_turn(&lock, next);
-        assert!(
-            matches!(
-                result,
-                Err(StoreError::Conflict { .. } | StoreError::InvalidInput { .. })
-            ),
-            "{case}: {result:?}"
-        );
-        assert!(before == records(&db), "{case} partially changed records");
-    }
-    let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
-    next.agent_selection = AgentSelection::Inherited;
-    next.expected_profile_digest = Some(original.digest().unwrap());
-    next.profile_copy = original;
-    next.config.effort = Some(lattice_conversation::Effort::Off);
-    next.profile_copy.current.effort = next.config.effort;
-    db.accept_turn(&lock, next.clone()).unwrap();
-    let changed = records(&db);
-    // 原身份找回优先于过期的准备摘要，不重复替换副本。
-    assert!(matches!(
-        db.accept_turn(&lock, next.clone()),
-        Ok(AcceptedTurn::Existing(_))
-    ));
-    assert!(changed == records(&db));
-    // 当前二进制的 catalog 可变化，提示引用仍指向首次副本的配置。
-    next.turn_id = tid(3);
-    next.expected_profile_digest = Some(next.profile_copy.digest().unwrap());
-    let mut updated_entries = next.config.catalog.entries.clone();
-    updated_entries[0].tool_identity = "lancet-node:observe@v2".into();
-    next.config.catalog = ToolCatalogSnapshot::new(updated_entries).unwrap();
-    assert_ne!(
-        next.config.digest().unwrap(),
-        next.profile_copy.prompt_config_digest
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    let mut draft_settings = SessionSettings::for_test(&config());
+    draft_settings.system_prompt = Some("草稿内联系统提示".into());
+    draft_settings.model = None;
+    draft_settings.effort = None;
+    let created = db
+        .create_session(&lock, project(1), draft_settings.clone(), now())
+        .expect("创建草稿会话");
+    assert_eq!(created.session_id, sid(1), "草稿会话 ID 应一致");
+    assert_eq!(created.current, NodeId(0), "草稿当前位置应为根节点 0");
+    assert_eq!(created.created_at, now(), "created_at 应等于传入时间");
+    assert_eq!(created.updated_at, now(), "updated_at 应等于 created_at");
+    assert!(
+        records(&db).configs.is_empty(),
+        "草稿的系统提示内联保存，configs 表不能产生新条目"
     );
-    let unchanged = next.profile_copy.clone();
-    // 从根分叉后，相邻轮次不再替副本带入旧 catalog 的提示配置。
-    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
-    db.accept_turn(&lock, next).unwrap();
-    assert_eq!(
-        db.begin_read().unwrap().session(sid(1)).unwrap().current,
-        NodeId(6)
-    );
-    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
-    assert_eq!(
-        db.begin_read()
-            .unwrap()
-            .current_agent(sid(1))
-            .unwrap()
-            .as_ref(),
-        Some(&unchanged.profile.agent_name)
-    );
-    assert_eq!(
-        db.begin_read().unwrap().profile_copy(sid(1)).unwrap(),
-        unchanged
-    );
-    // 同名重建只改描述等非 Turn 冻结字段，旧的合法 Explicit 准备也必须由完整摘要拒绝。
-    let mut stale = accept(sid(1), tid(5));
-    stale.session = AcceptSession::Existing { id: sid(1) };
-    stale.expected_profile_digest = Some(unchanged.digest().unwrap());
-    stale.config.effort = unchanged.current.effort;
-    stale.profile_copy = unchanged;
-    let mut rebuilt = stale.clone();
-    rebuilt.turn_id = tid(4);
-    rebuilt.profile_copy.profile.description = Some("updated description".into());
-    db.accept_turn(&lock, rebuilt).unwrap();
-    let before_stale = records(&db);
-    assert!(matches!(
-        db.accept_turn(&lock, stale),
-        Err(StoreError::Conflict { turn_id }) if turn_id == tid(5)
-    ));
-    assert!(before_stale == records(&db), "失效准备不能改动任何记录");
-    let changed = records(&db);
     drop(lock);
     drop(db);
-    assert!(changed == records(&SessionStore::open(&layout).unwrap()));
+
+    let reopened = SessionStore::open(&layout).expect("草稿会话应能通过严格打开");
+    assert!(
+        records(&reopened).configs.is_empty(),
+        "重开后 configs 表仍应为空"
+    );
+    let read = reopened.begin_read().expect("开启只读事务");
+    let head_record = read.session(sid(1)).expect("读取草稿 SessionRecord");
+    assert_eq!(head_record, created, "重开后草稿会话头记录应保持一致");
+    assert_eq!(
+        read.path_node(sid(1), head_record.current)
+            .expect("读取草稿当前路径根节点"),
+        Node::Root,
+        "草稿当前路径节点应为根节点"
+    );
+    assert_eq!(
+        read.session_settings(sid(1)).expect("读取草稿会话设置"),
+        draft_settings,
+        "重开后草稿会话设置应保持一致"
+    );
+    let view = read.view(sid(1), 10).expect("读取草稿会话视图");
+    assert_eq!(view.session, created);
+    assert_eq!(view.current_agent, Some(agent("alpha")));
+    assert!(view.entries.is_empty(), "草稿视图的对话条目应为空");
+
+    let listed = read.list(None, 10).expect("读取草稿列表投影");
+    assert_eq!(
+        listed.items,
+        vec![SessionListRow {
+            session_id: sid(1),
+            project_path: project(1),
+            current: NodeId(0),
+            node_count: 1,
+            unclosed_turn: None,
+            updated_at: now(),
+        }],
+        "列表应包含仅有 1 个根节点的草稿"
+    );
+
+    let log = read.log(sid(1)).expect("读取草稿日志投影");
+    assert_eq!(log.session, created);
+    assert_eq!(log.current_agent, Some(agent("alpha")));
+    assert_eq!(log.unclosed_turn, None);
+    assert_eq!(
+        log.nodes,
+        vec![LogRow {
+            node: NodeHeader {
+                id: NodeId(0),
+                parent: None,
+                turn_id: None,
+                kind: NodeKind::Root,
+            },
+            current: true,
+            turn_start: None,
+        }],
+        "日志投影应只包含当前根节点"
+    );
+
+    assert!(
+        matches!(
+            read.history(sid(1), NodeId(0), 10),
+            Err(StoreError::InvalidInput {
+                field: "before",
+                ..
+            })
+        ),
+        "草稿在根节点分页应按非用户消息边界返回 InvalidInput 而非损坏"
+    );
+
+    let usage = read.usage(sid(1)).expect("读取草稿用量投影");
+    assert_eq!(usage.session_id, sid(1));
+    assert_eq!(usage.position, NodeId(0));
+    assert!(usage.turns.is_empty(), "草稿没有轮次用量");
+    assert_eq!(usage.path_total.attempts, 0);
+    assert_eq!(usage.session_total.attempts, 0);
 }
 
 #[test]
-fn profile_copy_is_atomic_with_new_and_replacement_acceptance() {
-    for replacement in [false, true] {
-        for point in [
-            FaultPoint::Poisoned,
-            FaultPoint::UnknownBefore,
-            FaultPoint::UnknownAfter,
-        ] {
-            let (_dir, layout, db) = store();
-            let lock = db.try_lock_session(sid(1)).unwrap();
-            if replacement {
-                db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-            }
-            let before = records(&db);
-            let mut next = accept(sid(1), tid(2));
-            if replacement {
-                next.session = AcceptSession::Existing { id: sid(1) };
-                next.expected_profile_digest =
-                    Some(before.profile_copies[&sid(1)].digest().unwrap());
-            }
-            next.config.agent_name = agent("beta");
-            next.config.system_prompt = Some("replacement prompt".into());
-            next.config.effort = Some(lattice_conversation::Effort::Low);
-            next.profile_copy = SessionProfileCopy::for_test(&next.config);
-            let copy = next.profile_copy.clone();
-            let result = with_fault(point, || db.accept_turn(&lock, next));
-            assert!(matches!(result, Err(StoreError::CommitFailed { .. })));
-            let after = records(&db);
-            if point == FaultPoint::UnknownAfter {
-                assert_eq!(after.profile_copies[&sid(1)], copy);
-                assert_eq!(
-                    after.turn_index[&tid(2)].node,
-                    NodeId(if replacement { 3 } else { 1 })
-                );
-                assert!(after.configs.contains_key(&copy.prompt_config_digest));
-                assert_eq!(after.nodes.len(), if replacement { 5 } else { 3 });
-            } else {
-                assert!(before == after);
-            }
-            drop(lock);
-            drop(db);
-            assert!(after == records(&SessionStore::open(&layout).unwrap()));
-        }
-    }
-}
-
-#[test]
-fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
+fn update_settings_preserves_frozen_turn_configs() {
     let (_dir, layout, db) = store();
-    let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    let mut first_cfg = config();
+    first_cfg.system_prompt = Some("第一轮冻结系统提示".into());
+    first_cfg.effort = Some(lattice_conversation::Effort::Medium);
+    let initial_settings = SessionSettings::for_test(&first_cfg);
+    db.create_session(&lock, project(1), initial_settings.clone(), now())
+        .expect("创建会话");
+    let mut first_turn = accept(sid(1), tid(1));
+    first_turn.config = first_cfg.clone();
+    first_turn.settings_version = initial_settings.version().expect("计算初始设置版本");
+    db.accept_turn(&lock, first_turn).expect("接受第一轮");
+
+    let later = now() + chrono::Duration::seconds(30);
+    let mut updated_settings = SessionSettings::for_test(&first_cfg);
+    updated_settings.profile.agent_name = agent("beta");
+    updated_settings.profile.description = Some("新 agent 描述".into());
+    updated_settings.profile.timeout_secs = timeout(900);
+    updated_settings.system_prompt = Some("修改后的下一轮系统提示".into());
+    updated_settings.model = None;
+    updated_settings.effort = None;
+
+    assert!(
+        matches!(
+            db.update_settings(&lock, &project(2), updated_settings.clone(), later),
+            Err(StoreError::BindingMismatch { session_id }) if session_id == sid(1)
+        ),
+        "项目绑定不一致时 update_settings 必须返回 BindingMismatch"
+    );
+
+    let updated_record = db
+        .update_settings(&lock, &project(1), updated_settings.clone(), later)
+        .expect("更新会话设置");
+    assert_eq!(updated_record.created_at, now(), "created_at 必须保持不变");
+    assert_eq!(
+        updated_record.updated_at, later,
+        "update_settings 必须刷新 updated_at"
+    );
+    assert_eq!(
+        records(&db).configs.len(),
+        1,
+        "update_settings 不能向 configs 表追加配置条目"
+    );
+    drop(lock);
+    drop(db);
+
+    let reopened = SessionStore::open(&layout).expect("修改设置与最后一轮不同时仍可通过严格打开");
+    let read = reopened.begin_read().expect("开启只读事务");
+    assert_eq!(
+        read.session_settings(sid(1)).expect("读取更新后的设置"),
+        updated_settings,
+        "重开后会话设置应为更新后的值"
+    );
+    assert_eq!(
+        read.current_agent(sid(1)).expect("读取当前 agent"),
+        Some(agent("beta")),
+        "当前 agent 应取自更新后的会话设置"
+    );
+    assert_eq!(
+        read.turn_config(sid(1), tid(1))
+            .expect("读取第一轮冻结配置"),
+        first_cfg,
+        "已有轮次的冻结配置不能受 update_settings 影响"
+    );
+    assert_eq!(
+        read.turn_detail(sid(1), tid(1))
+            .expect("读取第一轮详情")
+            .agent_name,
+        agent("alpha"),
+        "已有轮次节点上的 agent_name 必须保持第一轮冻结值"
+    );
+}
+
+#[test]
+fn accept_turn_rejects_mismatched_settings_version_without_writing_nodes() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    let initial_settings = SessionSettings::for_test(&config());
+    db.create_session(&lock, project(1), initial_settings.clone(), now())
+        .expect("创建草稿会话");
+
+    let mut other_settings = initial_settings.clone();
+    other_settings.effort = Some(lattice_conversation::Effort::High);
+    let wrong_version = other_settings.version().expect("计算不同设置版本");
+
+    let before_draft = records(&db);
+    let mut stale_on_draft = accept(sid(1), tid(1));
+    stale_on_draft.settings_version = wrong_version;
+    let draft_err = db
+        .accept_turn(&lock, stale_on_draft)
+        .expect_err("草稿会话上版本不符应拒绝接受");
+    assert!(
+        matches!(draft_err, StoreError::SettingsChanged { session_id } if session_id == sid(1)),
+        "预期返回 SettingsChanged，实际为 {draft_err:?}"
+    );
+    assert!(
+        before_draft == records(&db),
+        "草稿上 SettingsChanged 不能写入任何节点或配置"
+    );
+
+    let mut valid_first = accept(sid(1), tid(1));
+    valid_first.settings_version = initial_settings.version().expect("计算初始版本");
+    db.accept_turn(&lock, valid_first.clone())
+        .expect("版本匹配时应正常接受第一轮");
+
+    let later = now() + chrono::Duration::seconds(5);
+    db.update_settings(&lock, &project(1), other_settings.clone(), later)
+        .expect("更新会话设置");
+    let before_second = records(&db);
+
+    // 同一 TurnId 重放优先于设置版本核对，仍返回 Existing。
+    assert!(
+        matches!(
+            db.accept_turn(&lock, valid_first),
+            Ok(AcceptedTurn::Existing(detail)) if detail.turn_id == tid(1)
+        ),
+        "已接受 TurnId 重放在设置更新后仍应返回 Existing"
+    );
+    assert!(before_second == records(&db), "重放不能修改持久记录");
+
+    let mut stale_second = accept(sid(1), tid(2));
+    stale_second.settings_version = initial_settings.version().expect("计算旧版本");
+    let second_err = db
+        .accept_turn(&lock, stale_second)
+        .expect_err("设置更新后携带旧版本应返回 SettingsChanged");
+    assert!(
+        matches!(second_err, StoreError::SettingsChanged { session_id } if session_id == sid(1)),
+        "预期返回 SettingsChanged，实际为 {second_err:?}"
+    );
+    assert!(
+        before_second == records(&db),
+        "SettingsChanged 不能写入任何新节点或索引"
+    );
+
+    drop(lock);
+    drop(db);
+    assert!(
+        before_second == records(&SessionStore::open(&layout).expect("重开会话库")),
+        "重开后记录与拒绝前完全一致"
+    );
+}
+
+#[test]
+fn session_settings_strict_open_checks_shape_draft_and_bounds() {
+    // 只有根节点的会话应当通过严格打开。
+    {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+        let mut draft = SessionSettings::for_test(&config());
+        draft.model = None;
+        draft.effort = None;
+        db.create_session(&lock, project(1), draft.clone(), now())
+            .expect("创建只有根节点的会话");
+        let expected = records(&db);
+        drop(lock);
+        drop(db);
+        let reopened = SessionStore::open(&layout).expect("只有根节点的会话必须通过严格打开");
+        assert!(expected == records(&reopened));
+    }
+
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).expect("接受基准轮次");
     let base = records(&db);
     drop(lock);
     drop(db);
-    for case in [
-        "missing",
-        "orphan",
-        "prompt",
-        "wrong_prompt",
-        "agent",
-        "model",
-        "effort",
-        "limits",
-    ] {
+
+    for case in ["missing", "orphan", "oversized_prompt"] {
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
         let mut changed = base.clone();
-        let copy = changed.profile_copies.get_mut(&sid(1)).unwrap();
         match case {
             "missing" => {
-                changed.profile_copies.remove(&sid(1));
+                changed.session_settings.remove(&sid(1));
             }
             "orphan" => {
                 changed
-                    .profile_copies
-                    .insert(sid(2), base.profile_copies[&sid(1)].clone());
+                    .session_settings
+                    .insert(sid(2), base.session_settings[&sid(1)].clone());
             }
-            "prompt" => copy.prompt_config_digest = [1; 32],
-            "wrong_prompt" => {
-                let mut other = config().stored();
-                other.system_prompt = Some("another valid stored prompt".into());
-                let digest = other.digest().unwrap();
-                validate::stored_config(&digest, &other).unwrap();
-                changed.configs.insert(digest, other);
-                copy.prompt_config_digest = digest;
-            }
-            "agent" => copy.profile.agent_name = agent("beta"),
-            "model" => copy.current.model = model("different"),
-            "effort" => copy.current.effort = Some(lattice_conversation::Effort::Off),
-            "limits" => {
-                copy.profile.timeout_secs = timeout(copy.profile.timeout_secs.as_secs() + 1)
+            "oversized_prompt" => {
+                changed
+                    .session_settings
+                    .get_mut(&sid(1))
+                    .unwrap()
+                    .system_prompt = Some("a".repeat(2 * 1024 * 1024 + 1));
             }
             _ => unreachable!(),
         }
@@ -4939,9 +5110,10 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
                 SessionStore::open(&layout),
                 Err(StoreError::Corruption { .. })
             ),
-            "{case}"
+            "严格打开必须拒绝损坏或自身无效的设置（case={case}）"
         );
     }
+
     for case in [
         "unknown",
         "legacy_profile_field",
@@ -4950,8 +5122,7 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
         "default_model",
         "timeout_secs",
         "retry",
-        "current_provider",
-        "current_model",
+        "model",
         "version",
         "key",
         "canonical",
@@ -4962,20 +5133,19 @@ fn profile_copy_strict_open_checks_shape_and_persistent_relations() {
         let tx = raw.begin_write().unwrap();
         overwrite_records(&tx, &base);
         if case == "table" {
-            tx.delete_table(PROFILE_COPIES).unwrap();
+            tx.delete_table(SESSION_SETTINGS).unwrap();
         } else {
-            let mut table = tx.open_table(PROFILE_COPIES).unwrap();
-            let mut value = serde_json::to_value(&base.profile_copies[&sid(1)]).unwrap();
+            let mut table = tx.open_table(SESSION_SETTINGS).unwrap();
+            let mut value = serde_json::to_value(&base.session_settings[&sid(1)]).unwrap();
             match case {
                 "unknown" => value["unknown"] = json!(true),
                 "legacy_profile_field" => value["profile"]["enabled_tools"] = json!(["observe"]),
-                "effort" => value["current"]["effort"] = json!("default"),
+                "effort" => value["effort"] = json!("default"),
                 "agent_name" => value["profile"]["agent_name"] = json!("../bad"),
                 "default_model" => value["profile"]["default_model"] = json!("missing-slash"),
                 "timeout_secs" => value["profile"]["timeout_secs"] = json!(0),
                 "retry" => value["profile"]["retry"]["max_retries"] = json!(11),
-                "current_provider" => value["current"]["provider"] = json!("Bad_id"),
-                "current_model" => value["current"]["model"] = json!(""),
+                "model" => value["model"] = json!("Bad_id/gpt-5"),
                 _ => {}
             }
             let mut bytes = encode(&value).unwrap();
@@ -5071,7 +5241,10 @@ fn non_hex_tool_identity_catalog_digest_and_binding_mismatch() {
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut turn_accept = accept(sid(1), tid(1));
     turn_accept.config.catalog = snapshot.clone();
-    turn_accept.profile_copy = SessionProfileCopy::for_test(&turn_accept.config);
+    let settings = SessionSettings::for_test(&turn_accept.config);
+    turn_accept.settings_version = settings.version().unwrap();
+    db.create_session(&lock, turn_accept.project_path.clone(), settings, now())
+        .expect("创建测试会话");
     db.accept_turn(&lock, turn_accept)
         .expect("接受含非十六进制 tool_identity 的 Turn");
 

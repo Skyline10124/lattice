@@ -315,7 +315,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
     let s = scope.session;
     let err = || corrupt("sessions", &s.to_string(), "invalid local relations");
     let Some(session) = r.sessions.get(&s) else {
-        return if r.turn_index.is_empty() && r.nodes.is_empty() && r.profile_copies.is_empty() {
+        return if r.turn_index.is_empty() && r.nodes.is_empty() && r.session_settings.is_empty() {
             Ok(())
         } else {
             Err(err())
@@ -330,7 +330,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
     for (digest, stored) in &r.configs {
         stored_config(digest, stored).map_err(|_| err())?;
     }
-    profile_copy(r, s)?;
+    session_settings(r, s)?;
     for n in &scope.nodes {
         if r.nodes.contains_key(&(s, *n)) {
             node(r, s, *n)?;
@@ -398,7 +398,7 @@ pub(super) fn records(r: &Records) -> Result<()> {
                 "session identity/root/current mismatch",
             ));
         }
-        profile_copy(r, *id)?;
+        session_settings(r, *id)?;
         let mut expected = 0u64;
         for ((_, n), _) in r.nodes.range((*id, NodeId(0))..=(*id, NodeId(u64::MAX))) {
             if n.0 != expected {
@@ -407,11 +407,15 @@ pub(super) fn records(r: &Records) -> Result<()> {
             expected = next_sequence(expected, "node")?;
         }
     }
-    if r.profile_copies
+    if r.session_settings
         .keys()
         .any(|id| !r.sessions.contains_key(id))
     {
-        return Err(err("profile_copies", "set".into(), "orphan profile copy"));
+        return Err(err(
+            "session_settings",
+            "set".into(),
+            "orphan session settings",
+        ));
     }
     let mut user_nodes = BTreeMap::new();
     let mut all_slots = BTreeMap::new();
@@ -486,28 +490,15 @@ pub(super) fn records(r: &Records) -> Result<()> {
     Ok(())
 }
 
-fn profile_copy(r: &Records, session: SessionId) -> Result<()> {
+fn session_settings(r: &Records, session: SessionId) -> Result<()> {
     let error = || {
         corrupt(
-            "profile_copies",
+            "session_settings",
             &session.to_string(),
-            "invalid profile copy relation",
+            "invalid session settings",
         )
     };
-    let copy = r.profile_copies.get(&session).ok_or_else(error)?;
-    let config = r
-        .max_node(session)
-        .and_then(|node| r.nodes.get(&(session, node)))
-        .and_then(Node::turn_id)
-        .ok_or_else(error)
-        .and_then(|turn| r.turn_config(session, turn))
-        .map_err(|_| error())?;
-    let prompt = r
-        .configs
-        .get(&copy.prompt_config_digest)
-        .ok_or_else(error)?;
-    if !copy.matches_config(&config) || prompt.system_prompt != config.system_prompt {
-        return Err(error());
-    }
+    let settings = r.session_settings.get(&session).ok_or_else(error)?;
+    settings.validate().map_err(|_| error())?;
     Ok(())
 }

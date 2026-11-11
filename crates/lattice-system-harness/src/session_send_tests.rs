@@ -50,12 +50,15 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
     }
     entry
 }
+fn settings_version() -> String {
+    "11".repeat(32)
+}
 fn head(owner: bool) -> Value {
-    json!({"type":"head","session_id":"s","position":3,"agent":"reader","model":"m","provider":"p","effort":null,"profile_default_effort":null,"turn_id":"t","owner":owner,
+    json!({"type":"head","session_id":"s","position":3,"agent":"reader","model":"m","provider":"p","effort":null,"settings_version":settings_version(),"turn_id":"t","owner":owner,
         "diagnostic":null,"path_replaced":false})
 }
 fn sending() -> Value {
-    json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true})
+    json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s"})
 }
 fn accepted() -> Value {
     json!({"type":"submit","stage":"receipt","turn_id":"t","result":"accepted","recovered":false,
@@ -297,7 +300,7 @@ fn exit_code_follows_the_latest_value_of_the_last_step() {
     );
     let parsed = parse(&with(vec![continued, last]));
     assert_eq!(parsed.closed_result(), Some(("s", "t", "completed")));
-    assert_eq!(parsed.sending(), Some(("t", "s", true)));
+    assert_eq!(parsed.sending(), Some(("t", "s")));
     assert_eq!(parsed.accepted_session_id(), Some("s"));
     assert_eq!(parsed.reply_text(), "firstanswer");
 }
@@ -690,7 +693,8 @@ fn receipt_violations_preserve_command_evidence() {
 
 #[test]
 fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
-    let sending = serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true});
+    let sending =
+        serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s"});
     let receipt = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"t","result":"not_accepted","recovered":false});
     let other = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"other","result":"unknown","recovered":false});
     for (records, error) in [
@@ -749,4 +753,101 @@ fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
         assert!(partial.malformed_lines.is_empty());
         assert_eq!(partial.receipt_error, None);
     }
+}
+
+#[test]
+fn configure_records_head_settings_version_and_settings_changed_conflict_parse() {
+    let draft_head = json!({
+        "session_id": "s",
+        "position": 0,
+        "agent": "reader",
+        "model": null,
+        "provider": null,
+        "effort": null,
+        "settings_version": settings_version(),
+        "turn_id": null,
+        "owner": false,
+        "diagnostic": null,
+        "path_replaced": false
+    });
+    let configured = json!({
+        "type": "configure",
+        "session_id": "s",
+        "result": "configured",
+        "head": draft_head,
+        "adjustment": {"from": "high", "to": null}
+    });
+    assert_eq!(
+        parse_record(&configured).expect("解析 configured 记录"),
+        SendRecord::Configure(ConfigureRecord {
+            session_id: "s".into(),
+            result: ConfigureResult::Configured {
+                head: Box::new(Head {
+                    session_id: "s".into(),
+                    position: 0,
+                    agent: "reader".into(),
+                    model: None,
+                    provider: None,
+                    effort: None,
+                    settings_version: settings_version(),
+                    turn_id: None,
+                    owner: false,
+                    diagnostic: None,
+                    path_replaced: false,
+                }),
+                adjustment: Some(EffortAdjustment {
+                    from: Some("high".into()),
+                    to: None,
+                }),
+            },
+        })
+    );
+
+    let cfg_rejected = json!({
+        "type": "configure",
+        "session_id": "s",
+        "result": "rejected",
+        "error": {"kind": "bad_request", "message": "bad profile"}
+    });
+    let seq = parse(&[sending(), cfg_rejected, rejected("bad_request", None)]);
+    assert!(seq.malformed_lines.is_empty(), "{:?}", seq.malformed_lines);
+    assert_eq!(seq.type_sequence(), vec!["submit", "configure", "submit"]);
+    assert_eq!(
+        seq.rejection().map(|e| e.kind.as_str()),
+        Some("bad_request"),
+        "带 configure 记录的拒绝序列也应提取拒绝错误"
+    );
+
+    let cfg_unknown = json!({
+        "type": "configure",
+        "session_id": "s",
+        "result": "unknown",
+        "error": {"kind": "transport", "message": "eof"}
+    });
+    assert!(matches!(
+        parse_record(&cfg_unknown).expect("解析 unknown configure 记录"),
+        SendRecord::Configure(ConfigureRecord {
+            result: ConfigureResult::Unknown(Some(_)),
+            ..
+        })
+    ));
+
+    let settings_changed = parse(&[sending(), rejected("conflict", Some("settings_changed"))]);
+    assert!(
+        settings_changed.malformed_lines.is_empty(),
+        "settings_changed 应是合法冲突原因：{:?}",
+        settings_changed.malformed_lines
+    );
+    assert_eq!(
+        settings_changed
+            .rejection()
+            .and_then(|e| e.conflict.as_deref()),
+        Some("settings_changed")
+    );
+
+    // model 与 provider 必须同时为字符串或同时为 null。
+    let mut half_model = draft_head;
+    half_model["type"] = json!("head");
+    half_model["model"] = json!("m");
+    assert!(parse_record(&half_model).is_err());
 }

@@ -41,8 +41,9 @@ fn first_prompt_is_the_only_session_creation_and_request() {
         );
         let sid = result.accepted_session_id().expect("accepted SID");
         let tid = result.accepted_turn_id().expect("accepted TurnId");
-        // CLI 在发出请求前生成并输出身份，写明新建；接受事务建立的就是这个 Session。
-        assert_eq!(result.sending(), Some((tid, sid, true)));
+        // CLI 在发出请求前生成并输出身份，先经 `configure(New)` 建立草稿再提交本轮。
+        assert_eq!(result.sending(), Some((tid, sid)));
+        assert_eq!(result.configures().count(), 1);
         let list = send.run_command(&["--json", "session", "list"]).unwrap();
         evidence.record_command("session list", &list);
         let list: Value = serde_json::from_slice(&list.stdout).unwrap();

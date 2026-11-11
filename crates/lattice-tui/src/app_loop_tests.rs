@@ -1187,13 +1187,22 @@ fn entry_reply(entry: ConversationEntry) -> Value {
 /// 接受回执，会话取请求写明的那一个。
 fn accepted_reply(request: &Value) -> Value {
     let mut turn = serde_json::to_value(turn_view(request_turn(request))).unwrap();
-    turn["session_id"] = json!(request_session(request).id());
+    turn["session_id"] = json!(request_session(request));
     response("acceptance", json!({"acceptance":"accepted","turn":turn}))
+}
+fn configure_reply(
+    head: SessionHead,
+    adjustment: Option<lattice_api::local::EffortAdjustment>,
+) -> Value {
+    response(
+        "configure",
+        serde_json::to_value(ConfigureReply { head, adjustment }).unwrap(),
+    )
 }
 fn request_turn(request: &Value) -> TurnId {
     serde_json::from_value(request["request"]["turn_id"].clone()).unwrap()
 }
-fn request_session(request: &Value) -> SubmitSession {
+fn request_session(request: &Value) -> SessionId {
     serde_json::from_value(request["request"]["session"].clone()).unwrap()
 }
 fn requests<'a>(seen: &'a [Value], op: &'a str) -> impl Iterator<Item = &'a Value> {
@@ -1214,7 +1223,7 @@ async fn bounded<T>(limit: Duration, run: impl std::future::Future<Output = T>) 
 #[derive(Clone)]
 struct Frame {
     phase: TurnPhase,
-    session: Option<SessionId>,
+    session: SessionId,
     connected: bool,
     input: String,
     text: String,
@@ -1264,20 +1273,20 @@ struct Remote {
     frames: watch::Receiver<Frame>,
 }
 impl Harness {
-    fn new(new_session: bool) -> Self {
+    fn new(_new_session: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
         let unused = lattice_api::AgentName::parse("unused").unwrap();
         let options = TuiOptions {
-            session_id: (!new_session).then(|| SESSION.into()),
-            agent: Some(unused.clone()),
+            session_id: Some(SESSION.into()),
+            agent: Some(unused),
             session_dir: root.path().join("history"),
             project_root: root.path().into(),
         };
         let app = App::new(
             SessionContext {
-                startup_agent: Some(unused),
-                session_id: (!new_session).then(sid),
-                active_agent: "unused".into(),
+                session_id: sid(),
+                initial_head: None,
+                initial_adjustment: None,
             },
             false,
             &options.session_dir,
@@ -1499,8 +1508,8 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
 
 #[tokio::test(start_paused = true)]
 async fn ctrl_c_hint_expiry_redraws_without_input() {
+    let peer = Peer::start(|_| Reply::Never);
     let mut h = Harness::new(true);
-    let client = LocalClient::new(lattice_api::StateLayout::in_state_root(h._root.path()));
     let remote = h.remote.clone();
     let driver = async {
         remote.ctrl('c');
@@ -1516,177 +1525,11 @@ async fn ctrl_c_hint_expiry_redraws_without_input() {
         assert_eq!(cleared.text, shown.text);
         remote.ctrl('d');
     };
-    let ((), exit) = bounded(LOOP_LIMIT, async { tokio::join!(driver, h.run(&client)) }).await;
-    assert!(exit.result.is_ok());
-}
-
-#[tokio::test]
-async fn new_session_submits_new_until_accepted_then_existing() {
-    let views = Views::default();
-    let view_tx = views.clone();
-    let mut submits = 0;
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "submit" => {
-            submits += 1;
-            match submits {
-                1 | 3 => Reply::Now(error_reply(local_error(
-                    LocalErrorKind::Busy,
-                    "session is busy",
-                ))),
-                _ => Reply::Now(accepted_reply(r)),
-            }
-        }
-        "watch" => views.subscribe(),
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(true);
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("first");
-        let seen = peer.wait(|s| count(s, "submit") == 1).await;
-        let SubmitSession::New(created) = request_session(&seen[0]) else {
-            panic!("新会话首次提交写明新建：{}", seen[0]);
-        };
-        let shown = remote
-            .wait(|f| f.input == "first" && f.dock.contains("session is busy"))
-            .await;
-        assert_eq!(shown.session, None, "被拒之前没有已建立的会话");
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Enter, KeyModifiers::NONE);
-        let seen = peer.wait(|s| count(s, "submit") == 2).await;
-        let second = requests(&seen, "submit").nth(1).unwrap();
-        assert_eq!(
-            request_session(second),
-            SubmitSession::New(created),
-            "确认被接受前沿用同一 SessionId 与 New"
-        );
-        assert_ne!(request_turn(second), request_turn(&seen[0]));
-        remote.wait(|f| f.session == Some(created)).await;
-        let seen = peer.wait(|s| count(s, "watch") >= 1).await;
-        assert!(
-            requests(&seen, "watch").all(|r| r["session_id"] == json!(created)),
-            "接受后观察建立的会话"
-        );
-        let turn = request_turn(second);
-        let created_head = |position, owner| SessionHead {
-            model: "test".into(),
-            provider: "openai-compatible".into(),
-            effort: None,
-            profile_default_effort: None,
-            session_id: created,
-            ..head(position, Some(turn), owner)
-        };
-        view_tx.push([
-            head_reply(created_head(2, false)),
-            entry_reply(user(1, turn, 1, "first")),
-            entry_reply(step(2, turn, 0).text("done").finished().entry()),
-        ]);
-        remote
-            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains("done"))
-            .await;
-        assert_eq!(
-            count(&peer.seen.borrow(), "watch"),
-            1,
-            "提交句柄不另开视图，只有 TUI 自己的 watch"
-        );
-        remote.line("third");
-        let seen = peer.wait(|s| count(s, "submit") == 3).await;
-        assert_eq!(
-            request_session(requests(&seen, "submit").nth(2).unwrap()),
-            SubmitSession::Existing(created),
-            "确认被接受后改为 Existing"
-        );
-        remote.wait(|f| f.dock.contains("session is busy")).await;
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.ctrl('d');
-    };
     let ((), exit) = bounded(LOOP_LIMIT, async {
         tokio::join!(driver, h.run(&peer.client))
     })
     .await;
     assert!(exit.result.is_ok());
-    assert_eq!(count(&peer.seen.borrow(), "cancel"), 0, "普通退出不取消");
-}
-
-#[tokio::test]
-async fn session_exists_conflict_recovers_the_previous_submission_by_turn_id() {
-    let mut submits = 0;
-    let mut lookups = 0;
-    let mut created = Value::Null;
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "submit" => {
-            submits += 1;
-            created = json!(request_session(r).id());
-            if submits == 1 {
-                // 后台报告接受事务结果不明；随后的查询也失败，提交结果仍未知。
-                Reply::Now(response(
-                    "acceptance",
-                    json!({"acceptance":"confirmation_unknown","turn_id":r["request"]["turn_id"],
-                        "session_id":created}),
-                ))
-            } else {
-                let mut error = local_error(LocalErrorKind::Conflict, "session exists");
-                error.conflict = Some(lattice_api::local::ConflictReason::SessionExists);
-                Reply::Now(error_reply(error))
-            }
-        }
-        "turn" => {
-            lookups += 1;
-            if lookups == 1 {
-                Reply::Now(error_reply(local_error(
-                    LocalErrorKind::StoreUnavailable,
-                    "lookup failed",
-                )))
-            } else {
-                let turn_id = serde_json::from_value(r["turn_id"].clone()).unwrap();
-                let mut turn = serde_json::to_value(turn_detail(turn_id)).unwrap();
-                turn["session_id"] = created.clone();
-                Reply::Now(response("turn", json!({"status":"accepted","turn":turn})))
-            }
-        }
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(true);
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("first");
-        let seen = peer.wait(|s| count(s, "turn") == 1).await;
-        let first = request_turn(&seen[0]);
-        let created = request_session(&seen[0]).id();
-        remote.wait(|f| f.dock.contains("提交结果未知")).await;
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.line("second");
-        let seen = peer.wait(|s| count(s, "turn") == 2).await;
-        assert_eq!(
-            request_session(requests(&seen, "submit").nth(1).unwrap()),
-            SubmitSession::New(created)
-        );
-        assert_eq!(
-            requests(&seen, "turn").nth(1).unwrap()["turn_id"],
-            json!(first),
-            "按上一次提交的 TurnId 找回"
-        );
-        let shown = remote
-            .wait(|f| f.text.contains("按 TurnId 查到已接受的请求") && f.session.is_some())
-            .await;
-        assert_eq!(shown.input, "second", "被拒的这一次保留输入");
-        let seen = peer.wait(|s| count(s, "watch") == 1).await;
-        assert_eq!(
-            requests(&seen, "watch").next().unwrap()["session_id"],
-            json!(created),
-            "找回后按建立的会话开始 watch"
-        );
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.ctrl('d');
-    };
-    let ((), exit) = bounded(LOOP_LIMIT, async {
-        tokio::join!(driver, h.run(&peer.client))
-    })
-    .await;
-    assert!(exit.result.is_ok());
-    assert_eq!(count(&peer.seen.borrow(), "submit"), 2);
 }
 
 #[tokio::test]
@@ -1898,7 +1741,7 @@ async fn cancel_after_acceptance_reaches_the_new_turn_despite_stale_heads() {
 }
 
 #[tokio::test]
-async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
+async fn late_receipt_after_unknown_continues_streaming_or_shows_the_rejection() {
     for accept in [true, false] {
         let views = Views::default();
         let view_tx = views.clone();
@@ -1913,13 +1756,18 @@ async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
         let mut h = Harness::new(true);
         let remote = h.remote.clone();
         let driver = async {
+            let seen = peer.wait(|s| count(s, "watch") == 1).await;
+            assert_eq!(
+                requests(&seen, "watch").next().unwrap()["session_id"],
+                json!(sid())
+            );
+            view_tx.push([head_reply(head(0, None, false))]);
+            remote.wait(|f| f.connected).await;
             remote.line("first");
             let seen = peer.wait(|s| count(s, "submit") == 1).await;
             let submit = requests(&seen, "submit").next().unwrap().clone();
             let turn = request_turn(&submit);
-            let SubmitSession::New(created) = request_session(&submit) else {
-                panic!("新会话首次提交写明新建：{submit}");
-            };
+            assert_eq!(request_session(&submit), sid());
             // 首次取消后提交等待到期：结果未知，句柄继续等迟到的回执。
             remote.ctrl('c');
             remote
@@ -1932,18 +1780,11 @@ async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
             remote.wait(|f| f.input == "new draft").await;
             if accept {
                 submit_tx.send(accepted_reply(&submit)).unwrap();
-                // 迟到的接受：按这次提交的 SessionId 开始观察，视图照常推进。
-                let seen = peer.wait(|s| count(s, "watch") == 1).await;
-                assert_eq!(
-                    requests(&seen, "watch").next().unwrap()["session_id"],
-                    json!(created)
-                );
                 let created_head = SessionHead {
-                    model: "test".into(),
-                    provider: "openai-compatible".into(),
+                    model: Some(ModelId::parse("test").unwrap()),
+                    provider: Some(ProviderId::parse("openai-compatible").unwrap()),
                     effort: None,
-                    profile_default_effort: None,
-                    session_id: created,
+                    session_id: sid(),
                     ..head(2, Some(turn), true)
                 };
                 view_tx.push([
@@ -1952,7 +1793,7 @@ async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
                     entry_reply(step(2, turn, 0).text("late answer").sent().entry()),
                 ]);
                 let shown = remote.wait(|f| f.text.contains("late answer")).await;
-                assert_eq!(shown.session, Some(created));
+                assert_eq!(shown.session, sid());
                 assert_eq!(shown.input, "new draft");
                 // 正在运行：第一次 Ctrl+C 取消这一轮，窗口内第二次退出。
                 remote.ctrl('c');
@@ -1961,12 +1802,12 @@ async fn late_receipt_after_unknown_starts_watching_or_shows_the_rejection() {
                 submit_tx
                     .send(error_reply(local_error(LocalErrorKind::Busy, "late busy")))
                     .unwrap();
-                // 迟到的拒绝按后台错误回执显示，不开始观察；输入区已有草稿，不覆盖，原输入从输入历史找回。
+                // 迟到的拒绝按后台错误回执显示；输入区已有草稿，不覆盖，原输入从输入历史找回。
                 let shown = remote.wait(|f| f.dock.contains("late busy")).await;
                 assert_eq!(shown.input, "new draft");
                 assert!(shown.dock.contains("Ctrl+↑"), "{}", shown.dock);
-                assert_eq!(shown.session, None);
-                assert_eq!(count(&peer.seen.borrow(), "watch"), 0);
+                assert_eq!(shown.session, sid());
+                assert_eq!(count(&peer.seen.borrow(), "watch"), 1);
                 remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
                 remote.press(KeyCode::Esc, KeyModifiers::NONE);
                 remote.ctrl('d');
@@ -2026,120 +1867,6 @@ async fn paging_up_queries_turns_before_the_earliest_user_message() {
 }
 
 #[tokio::test]
-async fn paged_acceptance_after_unknown_and_reconnect_consumes_old_choices() {
-    use lattice_api::Effort::{Low, Off};
-    let original = Views::default();
-    let original_tx = original.clone();
-    let reconnected = Views::default();
-    let reconnected_tx = reconnected.clone();
-    let mut watches = 0;
-    let mut first = None;
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "watch" => {
-            watches += 1;
-            if watches == 1 {
-                original.subscribe()
-            } else {
-                reconnected.subscribe()
-            }
-        }
-        "submit" if first.is_none() => {
-            first = Some(request_turn(r));
-            Reply::Now(response(
-                "acceptance",
-                json!({"acceptance":"confirmation_unknown","turn_id":r["request"]["turn_id"],"session_id":SESSION}),
-            ))
-        }
-        "submit" => Reply::Now(error_reply(local_error(
-            LocalErrorKind::Busy,
-            "next captured",
-        ))),
-        "turn" => Reply::Now(error_reply(local_error(
-            LocalErrorKind::Transport,
-            "lookup unavailable",
-        ))),
-        "history" => {
-            let id = first.unwrap();
-            Reply::Now(response(
-                "history",
-                serde_json::to_value(LocalHistory {
-                    entries: vec![
-                        user(1, id, 1, "unknown first"),
-                        step(2, id, 0).text("paged answer").finished().entry(),
-                    ],
-                })
-                .unwrap(),
-            ))
-        }
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(false);
-    h.app
-        .selection
-        .choose_model(model_candidate("p", "pending", &[Low]));
-    h.app.selection.choose_effort(Low);
-    let remote = h.remote.clone();
-    let driver = async {
-        original_tx.push([head_reply(head(0, None, false))]);
-        remote.wait(|f| f.connected).await;
-        remote.line("unknown first");
-        let unknown = remote.wait(|f| f.dock.contains("lookup unavailable")).await;
-        assert!(unknown.statusline.contains("pending") && unknown.statusline.contains("low"));
-        original_tx.push([error_reply(local_error(
-            LocalErrorKind::Transport,
-            "view interrupted",
-        ))]);
-        remote.wait(|f| !f.connected).await;
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        let mut current = head(22, Some(numbered_turn(11)), false);
-        current.provider = "other".into();
-        current.model = "current".into();
-        current.effort = Some(Off);
-        reconnected_tx.push([head_reply(current)]);
-        reconnected_tx.push(turns(2..=11).into_iter().map(entry_reply));
-        remote.line("/reconnect");
-        let recent = remote
-            .wait(|f| f.connected && f.text.contains("answer-11") && f.phase == TurnPhase::Idle)
-            .await;
-        assert!(
-            !recent.text.contains("paged answer"),
-            "重连窗口尚未提供 T1 的持久条目"
-        );
-        assert!(recent.statusline.contains("pending"), "未知提交仍保留选择");
-        for _ in 0..20 {
-            remote.press(KeyCode::PageUp, KeyModifiers::NONE);
-        }
-        let seen = peer.wait(|s| count(s, "history") == 1).await;
-        assert_eq!(requests(&seen, "history").next().unwrap()["before"], 3);
-        remote.wait(|f| f.text.contains("paged answer")).await;
-        remote.press(KeyCode::End, KeyModifiers::CONTROL);
-        remote.line("after paged acceptance");
-        let seen = peer.wait(|s| count(s, "submit") == 2).await;
-        let next = &requests(&seen, "submit").nth(1).unwrap()["request"];
-        assert_eq!(
-            next["model"],
-            Value::Null,
-            "历史 UserMessage 确认后不能重发旧模型"
-        );
-        assert_eq!(
-            next["effort"],
-            Value::Null,
-            "历史 UserMessage 确认后不能重发旧档位"
-        );
-        let shown = remote.wait(|f| f.dock.contains("next captured")).await;
-        assert!(shown.statusline.contains("current") && shown.statusline.contains("off"));
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.ctrl('d');
-    };
-    let ((), exit) = bounded(LOOP_LIMIT, async {
-        tokio::join!(driver, h.run(&peer.client))
-    })
-    .await;
-    assert!(exit.result.is_ok());
-}
-
-#[tokio::test]
 async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
     let running = numbered_turn(1);
     let views = Views::default();
@@ -2147,7 +1874,6 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
         "submit" => Reply::Now(accepted_reply(r)),
-        "models" => Reply::Now(model_reply(&r["query"])),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
@@ -2156,7 +1882,7 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
         view_tx.push([
             head_reply(SessionHead {
                 effort: Some(lattice_api::Effort::High),
-                profile_default_effort: Some(lattice_api::Effort::Low),
+                settings_version: settings_version(0x11),
                 ..head(2, Some(running), true)
             }),
             entry_reply(user(1, running, 1, "other client")),
@@ -2165,17 +1891,6 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
         remote.wait(|f| f.phase == TurnPhase::Streaming).await;
         remote.line("queued via loop");
         remote.line("second");
-        remote.line("/model");
-        remote.wait(|f| f.panel.contains("p/chosen")).await;
-        remote
-            .keys
-            .unbounded_send(Ok(Event::Paste("chosen".into())))
-            .unwrap();
-        remote.wait(|f| f.panel.contains("过滤：chosen")).await;
-        remote.press(KeyCode::Enter, KeyModifiers::NONE);
-        remote
-            .wait(|f| f.statusline.contains("chosen") && f.statusline.contains("low"))
-            .await;
         for c in "untouched draft".chars() {
             remote.press(KeyCode::Char(c), KeyModifiers::NONE);
         }
@@ -2183,7 +1898,7 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
         view_tx.push([
             head_reply(SessionHead {
                 effort: Some(lattice_api::Effort::High),
-                profile_default_effort: Some(lattice_api::Effort::Low),
+                settings_version: settings_version(0x11),
                 ..head(2, Some(running), false)
             }),
             entry_reply(step(2, running, 0).text("done").finished().entry()),
@@ -2191,12 +1906,11 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let request = requests(&seen, "submit").next().unwrap();
         assert_eq!(request["request"]["input"], "queued via loop");
-        assert_eq!(request["request"]["model"], "p/chosen", "使用发送时选择");
-        assert!(
-            request["request"]["effort"].is_null(),
-            "显示的回退 low 不得成为显式档位"
+        assert_eq!(
+            request["request"]["expected_settings"],
+            json!(settings_version(0x11))
         );
-        assert_eq!(request_session(request), SubmitSession::Existing(sid()));
+        assert_eq!(request_session(request), sid());
         let shown = remote
             .wait(|f| f.phase == TurnPhase::Streaming && f.text.matches("排队").count() == 1)
             .await;
@@ -2261,36 +1975,6 @@ async fn idle_timer_runs_only_while_the_head_shows_an_owner() {
 }
 
 #[tokio::test]
-async fn existing_submission_keeps_explicit_agent() {
-    let peer = Peer::start(|r| match r["operation"].as_str().unwrap() {
-        "submit" => Reply::Now(error_reply(local_error(LocalErrorKind::Busy, "busy"))),
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(false);
-    let override_agent = lattice_api::AgentName::parse("override-agent").unwrap();
-    h.options.agent = Some(override_agent.clone());
-    h.app.pending_agent = Some(override_agent);
-    let remote = h.remote.clone();
-    let driver = async {
-        remote.line("hi");
-        let seen = peer.wait(|s| count(s, "submit") == 1).await;
-        let request = requests(&seen, "submit").next().unwrap();
-        assert_eq!(request["request"]["agent"], "override-agent");
-        assert_eq!(request_session(request), SubmitSession::Existing(sid()));
-        remote.wait(|f| f.input == "hi" && !f.dock.is_empty()).await;
-        // 被拒回执是 Error，暂驻 Dock；释放后回到输入区。
-        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
-        remote.press(KeyCode::Esc, KeyModifiers::NONE);
-        remote.line("/quit");
-    };
-    let ((), exit) = bounded(LOOP_LIMIT, async {
-        tokio::join!(driver, h.run(&peer.client))
-    })
-    .await;
-    assert!(exit.result.is_ok());
-}
-
-#[tokio::test]
 async fn every_loop_exit_saves_queue_originals_in_order() {
     for exit_kind in 0..6 {
         let mut h = queued_app();
@@ -2322,8 +2006,8 @@ async fn every_loop_exit_saves_queue_originals_in_order() {
             } else {
                 Box::pin(futures::stream::iter(events))
             };
-        let client = LocalClient::new(lattice_api::StateLayout::in_state_root(h._root.path()));
-        let exit = run_loop(&h.options, &mut h.app, &client, events, |_| {
+        let peer = Peer::start(|_| Reply::Never);
+        let exit = run_loop(&h.options, &mut h.app, &peer.client, events, |_| {
             if exit_kind == 5 {
                 anyhow::bail!("draw failed");
             }
@@ -2361,9 +2045,33 @@ fn model_reply(query: &Value) -> Value {
 }
 
 #[tokio::test]
-async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input() {
-    let peer = Peer::start(|r| match r["operation"].as_str().unwrap() {
+async fn model_and_effort_panels_configure_session_and_submit_uses_configured_head() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let mut configures = 0;
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
         "models" => Reply::Now(model_reply(&r["query"])),
+        "configure" => {
+            configures += 1;
+            let configured = match configures {
+                1 => SessionHead {
+                    provider: Some(ProviderId::parse("p").unwrap()),
+                    model: Some(ModelId::parse("chosen").unwrap()),
+                    effort: Some(lattice_api::Effort::Low),
+                    settings_version: settings_version(0x22),
+                    ..head(0, None, false)
+                },
+                _ => SessionHead {
+                    provider: Some(ProviderId::parse("p").unwrap()),
+                    model: Some(ModelId::parse("chosen").unwrap()),
+                    effort: Some(lattice_api::Effort::Off),
+                    settings_version: settings_version(0x33),
+                    ..head(0, None, false)
+                },
+            };
+            Reply::Now(configure_reply(configured, None))
+        }
         "submit" => Reply::Now(error_reply(local_error(
             LocalErrorKind::Busy,
             "chosen busy",
@@ -2373,6 +2081,14 @@ async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input()
     let mut h = Harness::new(true);
     let remote = h.remote.clone();
     let driver = async {
+        view_tx.push([head_reply(SessionHead {
+            model: None,
+            provider: None,
+            effort: None,
+            settings_version: settings_version(0x10),
+            ..head(0, None, false)
+        })]);
+        remote.wait(|f| f.statusline.contains("unused")).await;
         remote.line("/effort");
         remote.wait(|f| f.panel.contains("先用 /model")).await;
         remote.press(KeyCode::Esc, KeyModifiers::NONE);
@@ -2393,6 +2109,12 @@ async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input()
             .wait(|f| f.panel.contains("P/CHOSEN") && !f.panel.contains("p/ignored"))
             .await;
         remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let seen = peer.wait(|s| count(s, "configure") == 1).await;
+        let first_cfg = &requests(&seen, "configure").next().unwrap()["request"];
+        assert_eq!(first_cfg["session"], json!({"existing": sid()}));
+        assert_eq!(first_cfg["model"], json!("p/chosen"));
+        assert_eq!(first_cfg["effort"], Value::Null);
+        assert_eq!(first_cfg["agent"], Value::Null);
         remote
             .wait(|f| f.statusline.contains("chosen") && !f.panel.contains("MODEL"))
             .await;
@@ -2405,17 +2127,25 @@ async fn model_and_effort_panels_send_explicit_choices_and_keep_rejected_input()
         remote
             .wait(|f| f.panel.contains("off") && f.panel.contains("low"))
             .await;
+        remote.press(KeyCode::Up, KeyModifiers::NONE);
         remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let seen = peer.wait(|s| count(s, "configure") == 2).await;
+        let second_cfg = &requests(&seen, "configure").nth(1).unwrap()["request"];
+        assert_eq!(second_cfg["session"], json!({"existing": sid()}));
+        assert_eq!(second_cfg["model"], Value::Null);
+        assert_eq!(second_cfg["effort"], json!("off"));
         remote
             .wait(|f| f.statusline.contains("off") && !f.panel.contains("EFFORT"))
             .await;
         remote.line("selected prompt");
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let request = &requests(&seen, "submit").next().unwrap()["request"];
-        assert_eq!(request["model"], "p/chosen");
-        assert_eq!(request["effort"], "off");
-        assert_eq!(request["agent"], "unused");
+        assert_eq!(request["session"], json!(sid()));
         assert_eq!(request["input"], "selected prompt");
+        assert_eq!(request["expected_settings"], json!(settings_version(0x33)));
+        assert!(request.get("model").is_none());
+        assert!(request.get("effort").is_none());
+        assert!(request.get("agent").is_none());
         let rejected = remote.wait(|f| f.dock.contains("chosen busy")).await;
         assert_eq!(rejected.input, "selected prompt");
         assert!(rejected.statusline.contains("chosen") && rejected.statusline.contains("off"));
@@ -2481,7 +2211,7 @@ async fn held_model_query_keeps_view_cancel_and_exit_responsive() {
 }
 
 #[tokio::test(start_paused = true)]
-async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_query_is_held() {
+async fn head_change_retargets_effort_and_ignores_old_results_while_new_query_is_held() {
     use lattice_api::Effort::{Low, Off};
     for old_success in [true, false] {
         let views = Views::default();
@@ -2499,20 +2229,17 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
             _ => Reply::Never,
         });
         let mut h = Harness::new(false);
-        h.app
-            .selection
-            .choose_model(model_candidate("p", "pending", &[Low]));
-        h.app.selection.choose_effort(Low);
-        h.app.input.set_text("unconfirmed selection");
-        let prompt = h.app.submit().unwrap();
-        let first = begin_turn(&h.options, &mut h.app, prompt).unwrap();
-        h.app.apply_submission(receipt(
-            first.turn_id,
-            SubmissionResult::Unknown { error: None },
-        ));
-        h.app.dock.release();
         let remote = h.remote.clone();
         let driver = async {
+            let mut initial = head(0, None, false);
+            initial.provider = Some(ProviderId::parse("p").unwrap());
+            initial.model = Some(ModelId::parse("pending").unwrap());
+            initial.effort = Some(Low);
+            initial.settings_version = settings_version(0x11);
+            view_tx.push([head_reply(initial)]);
+            remote
+                .wait(|f| f.statusline.contains("pending") && f.statusline.contains("low"))
+                .await;
             remote.line("/effort");
             let seen = peer.wait(|s| count(s, "models") == 1).await;
             assert_eq!(
@@ -2524,49 +2251,35 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
                 .wait(|f| f.panel.contains("过滤：L") && f.panel.contains("加载中"))
                 .await;
             let current_turn = numbered_turn(2);
-            let mut current = head(4, Some(current_turn), false);
+            let mut current = head(2, Some(current_turn), false);
             current.agent = "head-c-arrived".into();
-            current.provider = "other".into();
-            current.model = "current".into();
+            current.provider = Some(ProviderId::parse("other").unwrap());
+            current.model = Some(ModelId::parse("current").unwrap());
             current.effort = Some(Off);
-            view_tx.push([head_reply(current)]);
-            let masked = remote
-                .wait(|f| f.statusline.contains("head-c-arrived"))
-                .await;
-            assert!(masked.statusline.contains("pending") && masked.statusline.contains("low"));
-            assert_eq!(
-                count(&peer.seen.borrow(), "models"),
-                1,
-                "待确认选择仍遮住新 head"
-            );
+            current.settings_version = settings_version(0x22);
             view_tx.push([
-                entry_reply(user(1, first.turn_id, 1, "unconfirmed selection")),
-                entry_reply(user(3, current_turn, 2, "other client")),
+                head_reply(current),
+                entry_reply(user(1, current_turn, 1, "other client")),
                 entry_reply(
-                    step(4, current_turn, 0)
+                    step(2, current_turn, 0)
                         .text("current answer")
                         .finished()
                         .entry(),
                 ),
             ]);
-            remote
-                .wait(|f| {
-                    f.statusline.contains("current")
-                        && f.statusline.contains("off")
-                        && f.text.contains("current answer")
-                })
-                .await;
-            let retargeted = remote.processed().await;
-            let seen = peer.seen.borrow().clone();
-            assert_eq!(
-                count(&seen, "models"),
-                2,
-                "接受清除选择后必须精确查询新目标"
-            );
+            let seen = peer.wait(|s| count(s, "models") == 2).await;
             assert_eq!(
                 requests(&seen, "models").nth(1).unwrap()["query"],
                 json!({"target":"other/current"})
             );
+            let retargeted = remote
+                .wait(|f| {
+                    f.statusline.contains("head-c-arrived")
+                        && f.statusline.contains("current")
+                        && f.statusline.contains("off")
+                        && f.text.contains("current answer")
+                })
+                .await;
             assert!(retargeted.panel.contains("过滤：L"));
             assert!(retargeted.panel.contains("加载中"));
             let old = if old_success {
@@ -2615,12 +2328,7 @@ async fn accepting_choices_retargets_effort_and_ignores_old_results_while_new_qu
             remote.line("probe inherited choices");
             let seen = peer.wait(|s| count(s, "submit") == 1).await;
             let request = &requests(&seen, "submit").next().unwrap()["request"];
-            assert_eq!(request["model"], Value::Null);
-            assert_eq!(
-                request["effort"],
-                Value::Null,
-                "忽略旧成功及加载时 Enter 后仍继承 head"
-            );
+            assert_eq!(request["expected_settings"], json!(settings_version(0x22)));
             remote.wait(|f| f.dock.contains("probe captured")).await;
             remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
             remote.press(KeyCode::Esc, KeyModifiers::NONE);
@@ -2675,8 +2383,7 @@ async fn readonly_open_rejects_mismatched_project_path_before_watch() {
         session_dir: current.path().join("state"),
         project_root: workspace.canonical_path().to_path_buf(),
     };
-    let error = match crate::session::open_or_create(&options, Some(&workspace), &peer.client).await
-    {
+    let error = match crate::session::open_or_create(&options, &workspace, &peer.client).await {
         Ok(_) => panic!("只读打开属于另一个项目的会话必须在 watch 之前失败"),
         Err(error) => error,
     };
@@ -2699,5 +2406,298 @@ async fn readonly_open_rejects_mismatched_project_path_before_watch() {
         local.message.contains("/other/project-\u{FFFD}"),
         "错误消息应使用中文写明会话所属项目的有损路径: {}",
         local.message
+    );
+}
+
+#[tokio::test]
+async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() {
+    for succeed in [true, false] {
+        let views = Views::default();
+        let view_tx = views.clone();
+        let (cfg1_tx, cfg1_rx) = oneshot::channel();
+        let (cfg2_tx, cfg2_rx) = oneshot::channel();
+        let mut cfgs = [Some(cfg1_rx), Some(cfg2_rx)].into_iter();
+        let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+            "watch" => views.subscribe(),
+            "models" => Reply::Now(model_reply(&r["query"])),
+            "configure" => Reply::Hold(cfgs.next().unwrap().unwrap()),
+            "submit" => Reply::Now(error_reply(local_error(
+                LocalErrorKind::Busy,
+                "submitted after configure",
+            ))),
+            _ => Reply::Never,
+        });
+        let mut h = Harness::new(true);
+        let remote = h.remote.clone();
+        let driver = async {
+            view_tx.push([head_reply(SessionHead {
+                settings_version: settings_version(0x10),
+                ..head(0, None, false)
+            })]);
+            remote.wait(|f| f.statusline.contains("unused")).await;
+
+            // 第一次 /model 选择并发出在途 configure。
+            remote.line("/model");
+            remote.wait(|f| f.panel.contains("p/chosen")).await;
+            remote
+                .keys
+                .unbounded_send(Ok(Event::Paste("p/chosen".into())))
+                .unwrap();
+            remote
+                .wait(|f| f.panel.contains("p/chosen") && !f.panel.contains("p/ignored"))
+                .await;
+            remote.press(KeyCode::Enter, KeyModifiers::NONE);
+            peer.wait(|s| count(s, "configure") == 1).await;
+
+            // configure 在途时 Dock 提示 Enter 排队，按 Enter 入队而不直接提交。
+            remote.wait(|f| f.panel.contains("Enter 排队")).await;
+            remote.line("queued during configure");
+            let queued_frame = remote.wait(|f| f.text.contains("排队")).await;
+            assert_eq!(
+                count(&peer.seen.borrow(), "submit"),
+                0,
+                "configure 在途不能直接提交"
+            );
+            assert!(queued_frame.input.is_empty());
+
+            // 在第一次回复到达前再次 /effort 发出新代次 configure，旧回复必须按代次丢弃。
+            remote.line("/effort");
+            remote.wait(|f| f.panel.contains("off")).await;
+            remote.press(KeyCode::Enter, KeyModifiers::NONE);
+            peer.wait(|s| count(s, "configure") == 2).await;
+
+            cfg1_tx
+                .send(configure_reply(
+                    SessionHead {
+                        provider: Some(ProviderId::parse("p").unwrap()),
+                        model: Some(ModelId::parse("chosen").unwrap()),
+                        settings_version: settings_version(0x99),
+                        ..head(0, None, false)
+                    },
+                    None,
+                ))
+                .unwrap();
+            let after_stale = remote.processed().await;
+            assert_eq!(
+                count(&peer.seen.borrow(), "submit"),
+                0,
+                "过期 configure 回复不能触发出队或改写状态"
+            );
+            assert!(!after_stale.statusline.contains("chosen"));
+
+            if succeed {
+                cfg2_tx
+                    .send(configure_reply(
+                        SessionHead {
+                            provider: Some(ProviderId::parse("p").unwrap()),
+                            model: Some(ModelId::parse("chosen").unwrap()),
+                            effort: Some(lattice_api::Effort::Off),
+                            settings_version: settings_version(0x44),
+                            ..head(0, None, false)
+                        },
+                        None,
+                    ))
+                    .unwrap();
+                let seen = peer.wait(|s| count(s, "submit") == 1).await;
+                let submit = &requests(&seen, "submit").next().unwrap()["request"];
+                assert_eq!(submit["input"], "queued during configure");
+                assert_eq!(
+                    submit["expected_settings"],
+                    json!(settings_version(0x44)),
+                    "在途 configure 成功后应用其回复中的版本发送"
+                );
+                remote
+                    .wait(|f| f.dock.contains("submitted after configure"))
+                    .await;
+                remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            } else {
+                cfg2_tx
+                    .send(error_reply(local_error(
+                        LocalErrorKind::BadRequest,
+                        "bad effort choice",
+                    )))
+                    .unwrap();
+                let failed = remote.wait(|f| f.dock.contains("bad effort choice")).await;
+                assert_eq!(
+                    count(&peer.seen.borrow(), "submit"),
+                    0,
+                    "configure 失败时排队消息不能发出"
+                );
+                assert!(
+                    failed.text.contains("暂停") && failed.text.contains("queued during configure"),
+                    "消息仍留在暂停的队列中：{}",
+                    failed.text
+                );
+                remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+            }
+            remote.press(KeyCode::Esc, KeyModifiers::NONE);
+            remote.ctrl('d');
+        };
+        let ((), exit) = bounded(LOOP_LIMIT, async {
+            tokio::join!(driver, h.run(&peer.client))
+        })
+        .await;
+        assert!(exit.result.is_ok());
+        if !succeed {
+            assert!(h.app.queue.is_paused(), "configure 失败时队列应暂停");
+        }
+    }
+}
+
+#[tokio::test]
+async fn queued_message_uses_enqueued_settings_version_across_later_head_pushes() {
+    let running = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let driver = async {
+        view_tx.push([
+            head_reply(SessionHead {
+                settings_version: settings_version(0x21),
+                ..head(2, Some(running), true)
+            }),
+            entry_reply(user(1, running, 1, "running prompt")),
+            entry_reply(step(2, running, 0).sent().entry()),
+        ]);
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+        remote.line("enqueued at 0x21");
+        remote.wait(|f| f.text.contains("排队")).await;
+
+        // 另一客户端在这一轮完成前后修改了会话设置，推送了新版本 0x22。
+        view_tx.push([
+            head_reply(SessionHead {
+                settings_version: settings_version(0x22),
+                ..head(2, Some(running), false)
+            }),
+            entry_reply(step(2, running, 0).text("done").finished().entry()),
+        ]);
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let submit = &requests(&seen, "submit").next().unwrap()["request"];
+        assert_eq!(submit["input"], "enqueued at 0x21");
+        assert_eq!(
+            submit["expected_settings"],
+            json!(settings_version(0x21)),
+            "排队消息必须使用入队时记录的会话头版本，不被之后的推送改写"
+        );
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+}
+
+#[tokio::test]
+async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watch() {
+    let dir = tempfile::tempdir().expect("创建工作区目录");
+    let workspace = lattice_api::LocalWorkspaceRoot::from_path(dir.path()).expect("解析工作区");
+
+    // 1. 新建会话 configure(New) 失败时以启动错误退出，不开始 watch。
+    let fail_peer = Peer::start(|r| match r["operation"].as_str() {
+        Some("configure") => Reply::Now(error_reply(local_error(
+            LocalErrorKind::BadRequest,
+            "agent profile missing",
+        ))),
+        _ => Reply::Never,
+    });
+    let new_opts = crate::TuiOptions {
+        session_id: None,
+        agent: Some(lattice_api::AgentName::parse("coder").unwrap()),
+        session_dir: dir.path().join("state"),
+        project_root: workspace.canonical_path().to_path_buf(),
+    };
+    let err = match crate::session::open_or_create(&new_opts, &workspace, &fail_peer.client).await {
+        Ok(_) => panic!("新建会话 configure 失败必须以启动错误退出"),
+        Err(err) => err,
+    };
+    let seen = fail_peer.wait(|s| count(s, "configure") == 1).await;
+    assert_eq!(count(&seen, "watch"), 0);
+    let cfg_req = &requests(&seen, "configure").next().unwrap()["request"];
+    assert!(cfg_req["session"].get("new").is_some());
+    assert_eq!(cfg_req["agent"], json!("coder"));
+    let local = err.downcast_ref::<LocalError>().expect("保持 LocalError");
+    assert!(local.message.contains("agent profile missing"));
+
+    // 2. 新建会话 configure(New) 成功时返回初始会话头与 adjustment。
+    let ok_peer = Peer::start(|r| match r["operation"].as_str() {
+        Some("configure") => {
+            let new_id: SessionId =
+                serde_json::from_value(r["request"]["session"]["new"].clone()).unwrap();
+            let mut h = head(0, None, false);
+            h.session_id = new_id;
+            h.agent = "coder".into();
+            Reply::Now(configure_reply(
+                h,
+                Some(lattice_api::local::EffortAdjustment {
+                    from: Some(lattice_api::Effort::High),
+                    to: Some(lattice_api::Effort::Low),
+                }),
+            ))
+        }
+        _ => Reply::Never,
+    });
+    let created_ctx = crate::session::open_or_create(&new_opts, &workspace, &ok_peer.client)
+        .await
+        .expect("configure(New) 成功");
+    assert_eq!(
+        created_ctx.initial_head.as_ref().map(|h| h.agent.as_str()),
+        Some("coder")
+    );
+    assert!(created_ctx.initial_adjustment.is_some());
+
+    // 3. `lattice tui S --agent A` 遇到 Busy 时写明会话正在执行一轮、稍后再试，并退出。
+    let raw_cwd = workspace.project_path().as_bytes().to_vec();
+    let busy_peer = Peer::start(move |r| match r["operation"].as_str() {
+        Some("resolve_session") => Reply::Now(json!({
+            "response": "session",
+            "value": {
+                "session_id": sid(),
+                "project_path": raw_cwd.as_slice(),
+                "current": 2,
+                "created_at": "2026-10-17T00:00:00Z",
+                "updated_at": "2026-10-17T00:00:01Z"
+            }
+        })),
+        Some("configure") => Reply::Now(error_reply(local_error(
+            LocalErrorKind::Busy,
+            "session is busy",
+        ))),
+        _ => Reply::Never,
+    });
+    let existing_agent_opts = crate::TuiOptions {
+        session_id: Some("11111111".into()),
+        agent: Some(lattice_api::AgentName::parse("reviewer").unwrap()),
+        session_dir: dir.path().join("state"),
+        project_root: workspace.canonical_path().to_path_buf(),
+    };
+    let busy_err =
+        match crate::session::open_or_create(&existing_agent_opts, &workspace, &busy_peer.client)
+            .await
+        {
+            Ok(_) => panic!("已有会话 configure Busy 必须以启动错误退出"),
+            Err(err) => err,
+        };
+    let seen = busy_peer.wait(|s| count(s, "configure") == 1).await;
+    assert_eq!(count(&seen, "watch"), 0);
+    assert_eq!(
+        requests(&seen, "configure").next().unwrap()["request"]["session"],
+        json!({"existing": sid()})
+    );
+    let busy_local = busy_err
+        .downcast_ref::<LocalError>()
+        .expect("保持 LocalError");
+    assert_eq!(busy_local.kind, LocalErrorKind::Busy);
+    assert!(
+        busy_local.message.contains("正在执行一轮") && busy_local.message.contains("稍后再试"),
+        "Busy 错误应说明会话正在执行一轮、稍后再试：{}",
+        busy_local.message
     );
 }
