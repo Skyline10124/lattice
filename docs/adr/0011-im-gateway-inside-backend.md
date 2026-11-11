@@ -219,8 +219,8 @@ stopping()                       -> 停机通知
 
   不可用与配置无效时后台照常运行。
 - **生效。** 配置与凭据在构造时读取，修改之后重新挂载 IM 生效，不需要重启后台：
-  - `lattice-daemon` 用 inotify 监视配置目录下的 `im/`；`im/` 还不存在时先监视配置目录，收到 `im/` 的 `IN_CREATE` 或 `IN_MOVED_TO` 后改为监视它，并随即请求一次重新挂载，因为处理目录事件之前 `config.toml` 可能已经写好，那次写入的事件收不到；事件队列溢出（`IN_Q_OVERFLOW`）时同样请求一次。`config.toml` 写完关闭（`IN_CLOSE_WRITE`）或改名到位（`IN_MOVED_TO`，即编辑器的原子保存）时请求重新挂载，结果写进日志与 `components`；`im/` 中其他文件的事件忽略，`auth.json` 的变化由 `lattice im auth` 负责。读取只由这两个事件触发，不会在写入方关闭文件或改名之前发生。事件不保证读取时文件不再变化：读取期间文件又被截断重写时，按读到的内容处理，例如读到空文件即为未启用、停下 IM，下一次事件到达时纠正。监视目录而不是文件，因为原子保存会换掉文件的 inode。删除 `config.toml` 不触发，因为有的编辑器保存时先把原文件移走、再写新文件；
-  - `lattice im reload` 经 IPC 请求重新挂载，用于删除文件之后，或想当场看到结果时；
+  - 后台启动时、挂载 IM 之前，确保配置目录及其下的 `im/` 存在，缺失时新建为 0700；已存在但属主或权限不符时不自动修改，IM 列为未挂载及原因，不监视。`lattice-daemon` 用 inotify 监视 `im/`；`im/` 被删除后监视随之失效，由 `lattice im reload` 重新建立目录与监视。`config.toml` 写完关闭（`IN_CLOSE_WRITE`）或改名到位（`IN_MOVED_TO`，即编辑器的原子保存）时请求重新挂载，结果写进日志与 `components`；`im/` 中其他文件的事件忽略，`auth.json` 的变化由 `lattice im auth` 负责。读取只由这两个事件触发，不会在写入方关闭文件或改名之前发生。事件不保证读取时文件不再变化：读取期间文件又被截断重写时，按读到的内容处理，例如读到空文件即为未启用、停下 IM，下一次事件到达时纠正。监视目录而不是文件，因为原子保存会换掉文件的 inode。删除 `config.toml` 不触发，因为有的编辑器保存时先把原文件移走、再写新文件；
+  - `lattice im reload` 经 IPC 请求重新挂载，用于删除文件或 `im/` 之后，或想当场看到结果时；
   - `lattice im auth set|remove` 写入成功后，后台随即重新挂载 IM；
   - 后两者的回执带结果：已挂载、仍按上一份配置运行及原因、未挂载及原因，或未启用。`lattice im reload` 在结果不是已挂载或未启用时退出 `1`。
 
@@ -473,7 +473,7 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 | `architecture/crates.md`（新建） | crate 的职责、依赖白名单与闭包检查，登记进 `docs/README.md` 的架构索引 | 拆分；托管与 IM 补充各自的规则 |
 | `architecture/session/` 各文件、`architecture/tui/README.md`、`architecture/llm/README.md`、`architecture/storage.md` | 指向 `lattice-api` 的模块路径改为新 crate | 拆分 |
 | `architecture/storage.md` | 本地后台由 systemd 托管、一个用户一个后台；私有状态根加 `im/ledger`；`lattice-store` 的职责加私有文件模块 | 托管、IM |
-| `architecture/session/acceptance.md` | 配置来源与后台启动：后台环境来自 unit；配置目录的内容加 `im/` | 托管、IM |
+| `architecture/session/acceptance.md` | 配置来源与后台启动：后台环境来自 unit；配置目录的内容加 `im/`，后台启动时新建缺失的配置目录与 `im/` | 托管、IM |
 | `architecture/platform.md` | 宿主需要 systemd user session | 托管 |
 | `architecture/im.md`（新建） | IM 的启用、配置与凭据、配置监视与重新挂载、台账、消息处理、命令、回复与故障隔离，登记进架构索引 | IM |
 | `architecture/llm/credentials.md` | 凭据文件的权限与原子替换由 `lattice-store` 提供 | IM |
