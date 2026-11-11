@@ -157,7 +157,7 @@ pub enum SlotState {
     Terminal,
 }
 
-/// Step 条目中一个调用槽位的结论；`error_code` 取 Failed 原因中的 CEP 错误码。
+/// Step 条目中一个调用槽位的结论；`error_code` 取 Failed 原因中的工具错误码。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
     pub invocation_id: String,
@@ -226,11 +226,37 @@ impl Entry {
 pub struct Head {
     pub session_id: String,
     pub position: u64,
-    pub agent: Option<String>,
+    pub agent: String,
+    pub model: Option<String>,
+    pub provider: Option<String>,
+    pub effort: Option<String>,
+    pub settings_version: String,
     pub turn_id: Option<String>,
     pub owner: bool,
     pub diagnostic: Option<LocalError>,
     pub path_replaced: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortAdjustment {
+    pub from: Option<String>,
+    pub to: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ConfigureResult {
+    Configured {
+        head: Box<Head>,
+        adjustment: Option<EffortAdjustment>,
+    },
+    Rejected(LocalError),
+    Unknown(Option<LocalError>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfigureRecord {
+    pub session_id: String,
+    pub result: ConfigureResult,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -263,11 +289,10 @@ pub struct Receipt {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Submit {
-    /// 发出请求前写明身份；`new` 表示提交写明新建会话。
+    /// 发出请求前写明身份。
     Sending {
         turn_id: String,
         session_id: String,
-        new: bool,
     },
     Receipt(Receipt),
 }
@@ -302,6 +327,7 @@ pub enum ConnectionStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub enum SendRecord {
     Submit(Submit),
+    Configure(ConfigureRecord),
     Cancel(CancelRecord),
     Head(Head),
     Entry(Box<Entry>),
@@ -311,7 +337,7 @@ pub enum SendRecord {
         error: Option<LocalError>,
     },
     Error(LocalError),
-    /// 合法但不属于七种的记录；场景据此断言没有多出的记录类型。
+    /// 合法但不属于已知类型的记录；场景据此断言没有多出的记录类型。
     Unknown {
         type_name: String,
         raw: Value,
@@ -321,6 +347,7 @@ impl SendRecord {
     pub fn type_name(&self) -> &str {
         match self {
             Self::Submit(_) => "submit",
+            Self::Configure(_) => "configure",
             Self::Cancel(_) => "cancel",
             Self::Head(_) => "head",
             Self::Entry(_) => "entry",
@@ -384,7 +411,7 @@ fn local_error(value: &Value) -> Result<LocalError, String> {
     if let Some(reason) = &conflict
         && !matches!(
             reason.as_str(),
-            "turn_id_used" | "session_exists" | "binding_mismatch"
+            "turn_id_used" | "session_exists" | "binding_mismatch" | "settings_changed"
         )
     {
         return Err(format!("unknown conflict reason `{reason}`"));
@@ -467,12 +494,44 @@ fn summary(value: &Value) -> Result<TurnSummary, String> {
 }
 fn usage(value: &Value) -> Result<(), String> {
     if !value.is_null() {
-        for key in ["prompt_tokens", "completion_tokens", "total_tokens"] {
-            uint(value, key)?;
+        if !value.is_object() {
+            return Err("usage must be an object".into());
+        }
+        for key in ["input", "cache_read", "cache_write", "output", "reasoning"] {
+            let field = value
+                .get(key)
+                .ok_or_else(|| format!("missing usage.{key}"))?;
+            if !field.is_null() && field.as_u64().is_none() {
+                return Err(format!("invalid usage.{key}"));
+            }
         }
     }
     Ok(())
 }
+fn validate_replay_origin(origin: &Value) -> Result<(), String> {
+    if !matches!(
+        string(origin, "protocol")?,
+        "chat-completions"
+            | "responses"
+            | "anthropic-messages"
+            | "generate-content"
+            | "interactions"
+    ) {
+        return Err("unknown attempt protocol".into());
+    }
+    let provider = string(origin, "provider_id")?;
+    if provider.is_empty()
+        || provider.len() > 64
+        || !provider.as_bytes()[0].is_ascii_lowercase() && !provider.as_bytes()[0].is_ascii_digit()
+        || !provider
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+    {
+        return Err("invalid attempt provider id".into());
+    }
+    Ok(())
+}
+
 /// 现有 `StepDetail`：各尝试、槽位及由阶段给出的结论。
 fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> {
     string(&value["key"], "turn_id")?;
@@ -490,28 +549,20 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
     for attempt in array(value, "attempts")? {
         uint(attempt, "attempt")?;
         let origin = &attempt["origin"];
-        if !matches!(
-            string(origin, "protocol")?,
-            "chat-completions"
-                | "responses"
-                | "anthropic-messages"
-                | "generate-content"
-                | "interactions"
-        ) {
-            return Err("unknown attempt protocol".into());
-        }
-        let provider = string(origin, "provider_id")?;
-        if provider.is_empty()
-            || provider.len() > 64
-            || !provider.as_bytes()[0].is_ascii_lowercase()
-                && !provider.as_bytes()[0].is_ascii_digit()
-            || !provider
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        {
-            return Err("invalid attempt provider id".into());
-        }
+        validate_replay_origin(origin)?;
         usage(attempt.get("usage").ok_or("missing usage")?)?;
+        if !matches!(string(attempt, "usage_kind")?, "complete" | "partial") {
+            return Err("invalid usage_kind".into());
+        }
+        let cost = attempt.get("cost").ok_or("missing cost")?;
+        if !cost.is_null()
+            && (!cost["usd"]
+                .as_f64()
+                .is_some_and(|value| value.is_finite() && value >= 0.0)
+                || !cost["exact"].is_boolean())
+        {
+            return Err("invalid cost".into());
+        }
         attempts.push(match string(&attempt["progress"], "progress")? {
             "sent" => AttemptState::Sent,
             "ended" => {
@@ -661,7 +712,27 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
             let stored_attempts = array(content, "attempts")?.len();
             let reply = match &content["reply"] {
                 Value::Null => Vec::new(),
-                reply => message_segments(reply)?,
+                reply => {
+                    let origin = &reply["provider_origin"];
+                    validate_replay_origin(origin)?;
+                    let stored = array(content, "attempts")?
+                        .last()
+                        .ok_or("reply requires a completed attempt")?;
+                    let detailed = array(&value["step"], "attempts")?
+                        .last()
+                        .ok_or("reply requires attempt detail")?;
+                    for attempt in [stored, detailed] {
+                        if attempt["progress"]["progress"] != "ended"
+                            || attempt["progress"]["end"]["end"] != "completed"
+                        {
+                            return Err("reply requires a completed attempt".into());
+                        }
+                    }
+                    if origin != &stored["origin"] || origin != &detailed["origin"] {
+                        return Err("reply source differs from the completed attempt".into());
+                    }
+                    message_segments(reply)?
+                }
             };
             let detail = &value["step"];
             let (attempts, slots) = step_detail(detail)?;
@@ -714,15 +785,35 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
     })
 }
 fn head(value: &Value) -> Result<Head, String> {
+    if value.get("profile_default_effort").is_some() {
+        return Err("`profile_default_effort` has been removed from head".into());
+    }
     let position = uint(value, "position")?;
     let turn_id = nullable_string(value, "turn_id")?;
     if (position == 0) != turn_id.is_none() {
         return Err("only the root position has no Turn".into());
     }
+    let model = nullable_string(value, "model")?;
+    let provider = nullable_string(value, "provider")?;
+    if model.is_some() != provider.is_some() {
+        return Err("`model` and `provider` must be both strings or both null".into());
+    }
+    let settings_version = string(value, "settings_version")?.to_owned();
+    if settings_version.len() != 64
+        || !settings_version
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err("`settings_version` must be 64 lowercase hex chars".into());
+    }
     Ok(Head {
         session_id: string(value, "session_id")?.into(),
         position,
-        agent: nullable_string(value, "agent")?,
+        agent: string(value, "agent")?.into(),
+        model,
+        provider,
+        effort: nullable_string(value, "effort")?,
+        settings_version,
         turn_id,
         owner: boolean(value, "owner")?,
         diagnostic: match value.get("diagnostic") {
@@ -736,11 +827,15 @@ fn head(value: &Value) -> Result<Head, String> {
 fn submit(value: &Value) -> Result<Submit, String> {
     let turn_id = string(value, "turn_id")?.to_owned();
     Ok(match string(value, "stage")? {
-        "sending" => Submit::Sending {
-            turn_id,
-            session_id: string(value, "session_id")?.into(),
-            new: boolean(value, "new")?,
-        },
+        "sending" => {
+            if value.get("new").is_some() {
+                return Err("`new` must not appear on sending record".into());
+            }
+            Submit::Sending {
+                turn_id,
+                session_id: string(value, "session_id")?.into(),
+            }
+        }
         "receipt" => {
             let recovered = boolean(value, "recovered")?;
             let result = match string(value, "result")? {
@@ -797,11 +892,40 @@ fn cancel(value: &Value) -> Result<CancelRecord, String> {
     })
 }
 
+fn configure(value: &Value) -> Result<ConfigureRecord, String> {
+    let session_id = string(value, "session_id")?.to_owned();
+    let result = match string(value, "result")? {
+        "configured" => {
+            let head = head(value.get("head").ok_or("`head` must be present")?)?;
+            if head.session_id != session_id {
+                return Err("configured head session_id differs from configure record".into());
+            }
+            let adjustment = match value.get("adjustment") {
+                Some(Value::Null) => None,
+                Some(adj) => Some(EffortAdjustment {
+                    from: nullable_string(adj, "from")?,
+                    to: nullable_string(adj, "to")?,
+                }),
+                None => return Err("`adjustment` must be present".into()),
+            };
+            ConfigureResult::Configured {
+                head: Box::new(head),
+                adjustment,
+            }
+        }
+        "rejected" => ConfigureResult::Rejected(local_error(&value["error"])?),
+        "unknown" => ConfigureResult::Unknown(optional_error(value, "error")?),
+        _ => return Err("unknown configure result".into()),
+    };
+    Ok(ConfigureRecord { session_id, result })
+}
+
 /// 解析一条 `--json` 记录，或 Local IPC `view` 消息的 `value`（同样以 `type` 为标签）。
 pub fn parse_record(value: &Value) -> Result<SendRecord, String> {
     let kind = string(value, "type")?;
     Ok(match kind {
         "submit" => SendRecord::Submit(submit(value)?),
+        "configure" => SendRecord::Configure(configure(value)?),
         "cancel" => SendRecord::Cancel(cancel(value)?),
         "head" => SendRecord::Head(head(value)?),
         "entry" => {
@@ -987,8 +1111,8 @@ impl std::ops::Deref for SendExecution {
     }
 }
 impl SendOutcome {
-    /// `sending` 之后这次提交以一条 `rejected` 回执结束、没有别的记录时，回执中的 LocalError。
-    /// 后台的拒绝与请求写出前提交端的拒绝（例如配置加载失败）都在这里，不是 `error` 记录。
+    /// `sending` 之后这次提交（可选经过一条 `configure`）以一条 `rejected` 回执结束、
+    /// 没有别的记录时，回执中的 LocalError。
     pub fn rejection(&self) -> Option<&LocalError> {
         match &self.records[..] {
             [
@@ -998,18 +1122,32 @@ impl SendOutcome {
                     result: ReceiptResult::Rejected(error),
                     ..
                 })),
+            ]
+            | [
+                SendRecord::Submit(Submit::Sending { turn_id, .. }),
+                SendRecord::Configure(_),
+                SendRecord::Submit(Submit::Receipt(Receipt {
+                    turn_id: receipt,
+                    result: ReceiptResult::Rejected(error),
+                    ..
+                })),
             ] if turn_id == receipt => Some(error),
             _ => None,
         }
     }
-    /// 第一条 `submit`（发出请求前）写明的 TurnId、SessionId 与是否新建。
-    pub fn sending(&self) -> Option<(&str, &str, bool)> {
+    /// 第一条 `submit`（发出请求前）写明的 TurnId 与 SessionId。
+    pub fn sending(&self) -> Option<(&str, &str)> {
         self.records.iter().find_map(|record| match record {
             SendRecord::Submit(Submit::Sending {
                 turn_id,
                 session_id,
-                new,
-            }) => Some((turn_id.as_str(), session_id.as_str(), *new)),
+            }) => Some((turn_id.as_str(), session_id.as_str())),
+            _ => None,
+        })
+    }
+    pub fn configures(&self) -> impl Iterator<Item = &ConfigureRecord> {
+        self.records.iter().filter_map(|record| match record {
+            SendRecord::Configure(configure) => Some(configure),
             _ => None,
         })
     }
@@ -1147,6 +1285,7 @@ pub fn derive_send_exit_code(records: &[SendRecord]) -> SendExitCode {
             matches!(
                 record,
                 SendRecord::Submit(_)
+                    | SendRecord::Configure(_)
                     | SendRecord::Head(_)
                     | SendRecord::Entry(_)
                     | SendRecord::Text(_)
@@ -1252,7 +1391,8 @@ fn submission_receipt_error(records: &[SendRecord]) -> Option<SubmissionReceiptE
     None
 }
 
-/// 首次提交由 CLI 生成 SessionId；驱动在接受回执之后才把它用于 `--session`。
+/// 首次发送不带 `--session`，通过 `--agent` 经 `configure(New)` 创建会话并提交；
+/// 收到接受回执后，后续发送只传 `--session` 沿用后台会话设置。
 pub struct SessionSendDriver<'a> {
     driver: &'a LatticeDriver,
     world: &'a ScenarioWorld,
@@ -1289,11 +1429,11 @@ impl<'a> SessionSendDriver<'a> {
             "session".into(),
             "send".into(),
             prompt.into(),
-            "--agent".into(),
-            self.agent.clone(),
         ];
         if let Some(id) = self.session_id() {
             args.extend(["--session".into(), id.into()]);
+        } else {
+            args.extend(["--agent".into(), self.agent.clone()]);
         }
         LatticeCommand {
             args,

@@ -6,6 +6,7 @@ use std::collections::BTreeSet;
 use serde_json::json;
 
 use super::*;
+use crate::models::test_support::{list_query, target_query};
 
 fn cache(dir: &Path, source: &serde_json::Value) {
     std::fs::create_dir_all(dir.join("cache")).unwrap();
@@ -14,6 +15,343 @@ fn cache(dir: &Path, source: &serde_json::Value) {
         serde_json::to_vec(source).unwrap(),
     )
     .unwrap();
+}
+
+#[tokio::test]
+async fn account_candidates_use_catalog_membership_and_shared_openai_metadata() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("providers.toml"), "[providers.chatgpt.models.known]\ncontext=4321\neffort=['high','low']\n[providers.chatgpt.models.known.cost]\ninput=0\n[providers.chatgpt.models.only-handwritten]\noutput=123\n").unwrap();
+    cache(
+        directory.path(),
+        &json!({"openai":{"models":{
+            "known":{"id":"known","name":"Public name","limit":{"context":100,"output":200},"reasoning":true,"reasoning_options":[{"type":"effort","values":["low","medium","high"]}],"cost":{"input":1,"output":2}},
+            "retired":{"id":"retired","status":"deprecated"},
+            "public-only":{"id":"public-only","limit":{"context":321}}
+        }}}),
+    );
+    let path = directory.path().join("cache/chatgpt-models.json");
+    std::fs::write(
+        &path,
+        json!({"version":1,"fetched_at":"2020-01-01T00:00:00Z","models":[
+            {"slug":"unknown","display_name":"Account unknown"},
+            {"slug":"retired","display_name":"Account retired"},
+            {"slug":"known","display_name":"Account known"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let candidates =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
+    assert!(candidates.warnings.is_empty());
+    assert_eq!(
+        candidates
+            .models
+            .iter()
+            .map(|model| model.model.as_str())
+            .collect::<Vec<_>>(),
+        vec!["known", "unknown"]
+    );
+    let known = &candidates.models[0];
+    assert_eq!(known.name.as_deref(), Some("Account known"));
+    assert_eq!((known.context, known.output), (Some(4321), Some(200)));
+    assert_eq!(known.supported_efforts, vec![Effort::Low, Effort::High]);
+    assert_eq!(known.cost.as_ref().unwrap().input, Some(0.0));
+    assert_eq!(known.cost.as_ref().unwrap().output, Some(2.0));
+    assert_eq!(
+        known.availability,
+        crate::Availability::Unconfigured {
+            requirement: crate::ConfigurationRequirement::ChatgptLogin
+        }
+    );
+    let unknown = &candidates.models[1];
+    assert_eq!(unknown.name.as_deref(), Some("Account unknown"));
+    assert_eq!(
+        (unknown.context, unknown.output, unknown.cost.as_ref()),
+        (None, None, None)
+    );
+    assert!(unknown.supported_efforts.is_empty());
+    for target in [
+        "chatgpt/retired",
+        "chatgpt/public-only",
+        "chatgpt/org/unknown",
+    ] {
+        assert_eq!(
+            crate::model_candidates(directory.path(), &target_query(target))
+                .unwrap()
+                .models
+                .len(),
+            1
+        );
+    }
+    // 坏目录按缺目录处理：未登录时不提示，已经登录时说明原因。
+    std::fs::write(&path, "{bad").unwrap();
+    let invalid =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
+    assert!(invalid.models.is_empty());
+    assert!(invalid.warnings.is_empty());
+    let auth = directory.path().join("auth.json");
+    std::fs::write(&auth, json!({"version":1,"providers":{"chatgpt":{
+        "type":"chatgpt","host_id":"host","client_id":"client",
+        "account":{"subject":"subject","email":"user@example.com"},
+        "tokens":{"access_token":"access-secret","refresh_token":"refresh-secret","id_token":"id-secret",
+            "expires_at":"2020-01-01T00:00:00+00:00","scopes":["chatgpt.tokens.use.direct"]}
+    }}}).to_string()).unwrap();
+    std::fs::set_permissions(
+        &auth,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
+    let invalid =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
+    assert!(invalid.models.is_empty());
+    assert!(matches!(
+        invalid.warnings.as_slice(),
+        [warning] if warning.provider.as_deref() == Some("chatgpt")
+            && warning.message.starts_with("ChatGPT account model directory is unavailable: ")
+    ));
+    std::fs::write(
+        &path,
+        json!({"version":1,"fetched_at":"2020-01-01T00:00:00Z","models":[]}).to_string(),
+    )
+    .unwrap();
+    let empty =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
+    assert!(empty.models.is_empty());
+    assert!(empty.warnings.is_empty());
+}
+
+#[test]
+fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(directory.path().join("providers.toml"), "[providers.local]\nprotocol='chat-completions'\nbase_url='http://localhost:1'\nauth='none'\ncatalog='custom-catalog'\n[providers.local.models.active]\ncontext=456\n[providers.local.models.broken]\neffort=['low']\n[providers.local.models.broken.features]\nthinking_toggle='enable-thinking'\n[providers.local.models.retired-broken]\neffort=['low']\n[providers.local.models.retired-broken.features]\nthinking_toggle='enable-thinking'\n[providers.empty]\nprotocol='chat-completions'\nbase_url='http://localhost:2'\ncatalog='absent-catalog'\n[providers.empty.models.handwritten]\noutput=12\n").unwrap();
+    cache(
+        directory.path(),
+        &json!({"custom-catalog":{"models":{
+            "active":{"id":"active","limit":{"context":123,"output":45},"cost":{"input":1,"output":2}},
+            "old":{"id":"old","status":"deprecated","reasoning_options":[{"type":"effort","values":["high","none"]}]},
+            "retired-broken":{"id":"retired-broken","status":"deprecated"}
+        }}}),
+    );
+    // 手写档位无效的模型单独标出；已弃用的 retired-broken 同样无效，但先被滤掉，不出现也不报错。
+    let candidates =
+        crate::model_candidates(directory.path(), &list_query(Some("local"), false)).unwrap();
+    assert_eq!(candidates.models.len(), 2);
+    let broken = &candidates.models[1];
+    assert_eq!(broken.model, "broken");
+    assert!(broken.supported_efforts.is_empty());
+    assert!(matches!(
+        &broken.availability,
+        crate::Availability::Invalid { reason }
+            if reason.contains("thinking_toggle") && reason.contains("model \"broken\"")
+    ));
+    let model = &candidates.models[0];
+    assert_eq!(
+        (model.provider.as_str(), model.model.as_str()),
+        ("local", "active")
+    );
+    assert_eq!((model.context, model.output), (Some(456), Some(45)));
+    assert_eq!(model.cost.as_ref().unwrap().input, Some(1.0));
+    assert_eq!(model.availability, crate::Availability::Ready);
+    let empty =
+        crate::model_candidates(directory.path(), &list_query(Some("empty"), false)).unwrap();
+    assert_eq!(empty.models[0].model, "handwritten");
+    assert_eq!(
+        empty.models[0].availability,
+        crate::Availability::Unconfigured {
+            requirement: crate::ConfigurationRequirement::ApiKey
+        }
+    );
+    assert!(
+        empty
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("empty")
+                && warning.message.contains("absent-catalog"))
+    );
+    // 全量列表包含 Ready / Unconfigured / Invalid 三种状态；ready_only 去掉不可用项且不残留被跳过 provider 的警告。
+    let all = crate::model_candidates(directory.path(), &list_query(None, false)).unwrap();
+    assert!(
+        all.models
+            .iter()
+            .any(|m| m.provider == "local" && m.model == "active" && m.availability.is_ready())
+    );
+    assert!(all.models.iter().any(|m| {
+        m.provider == "empty"
+            && m.model == "handwritten"
+            && matches!(m.availability, crate::Availability::Unconfigured { .. })
+    }));
+    assert!(all.models.iter().any(|m| {
+        m.provider == "local"
+            && m.model == "broken"
+            && matches!(m.availability, crate::Availability::Invalid { .. })
+    }));
+    assert!(
+        all.warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("empty"))
+    );
+    let ready_only = crate::model_candidates(directory.path(), &list_query(None, true)).unwrap();
+    assert_eq!(
+        ready_only
+            .models
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.model))
+            .collect::<Vec<_>>(),
+        vec!["local/active"]
+    );
+    assert!(ready_only.warnings.is_empty());
+    // 未登录时没有账号目录，也不提示登录。
+    let chatgpt =
+        crate::model_candidates(directory.path(), &list_query(Some("chatgpt"), false)).unwrap();
+    assert!(chatgpt.models.is_empty());
+    assert!(chatgpt.warnings.is_empty());
+    let retired = crate::model_candidates(directory.path(), &target_query("local/old")).unwrap();
+    assert_eq!(retired.models.len(), 1);
+    assert_eq!(retired.models[0].model, "old");
+    assert_eq!(
+        retired.models[0].supported_efforts,
+        vec![Effort::Off, Effort::High]
+    );
+    // 精确查询与列表一致：返回带诊断的候选，不让查询失败。
+    let exact = crate::model_candidates(directory.path(), &target_query("local/retired-broken"))
+        .unwrap()
+        .models;
+    assert_eq!(exact.len(), 1);
+    assert!(exact[0].supported_efforts.is_empty());
+    assert!(matches!(
+        exact[0].availability,
+        crate::Availability::Invalid { .. }
+    ));
+    let unknown =
+        crate::model_candidates(directory.path(), &target_query("local/org/unknown")).unwrap();
+    assert_eq!(
+        serde_json::to_value(&unknown.models).unwrap(),
+        json!([{
+            "provider":"local", "model":"org/unknown", "name":null,
+            "context":null, "output":null, "supported_efforts":[], "cost":null,
+            "availability":{"status":"ready"}
+        }])
+    );
+    let subscription =
+        crate::model_candidates(directory.path(), &target_query("chatgpt/unknown")).unwrap();
+    assert_eq!(subscription.models.len(), 1);
+    assert_eq!(subscription.models[0].provider, "chatgpt");
+    assert!(subscription.models[0].supported_efforts.is_empty());
+    assert!(subscription.warnings.is_empty());
+    for query in [
+        target_query("missing/model"),
+        list_query(Some("missing"), false),
+    ] {
+        let error = crate::model_candidates(directory.path(), &query).unwrap_err();
+        assert!(
+            matches!(&error, crate::LlmError::Config { message } if message.contains("available providers:")),
+            "{error}"
+        );
+    }
+    std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
+    std::fs::set_permissions(
+        directory.path().join("auth.json"),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o600),
+    )
+    .unwrap();
+    let invalid =
+        crate::model_candidates(directory.path(), &target_query("empty/unknown")).unwrap();
+    assert!(matches!(
+        invalid.models[0].availability,
+        crate::Availability::Invalid { .. }
+    ));
+    assert!(
+        !invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.is_none())
+    );
+    assert!(
+        invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.provider.as_deref() == Some("empty")
+                && warning.message.contains("absent-catalog"))
+    );
+    let ready_with_bad_auth =
+        crate::model_candidates(directory.path(), &list_query(None, true)).unwrap();
+    assert_eq!(
+        ready_with_bad_auth
+            .models
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.model))
+            .collect::<Vec<_>>(),
+        vec!["local/active"]
+    );
+    assert!(ready_with_bad_auth.warnings.is_empty());
+    let no_auth =
+        crate::model_candidates(directory.path(), &target_query("local/unknown")).unwrap();
+    assert_eq!(no_auth.models[0].availability, crate::Availability::Ready);
+}
+
+#[test]
+fn candidates_follow_builtin_order_before_custom_provider_ids() {
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        r#"
+[providers.zzz]
+protocol='chat-completions'
+base_url='http://localhost:1'
+auth='none'
+[providers.zzz.models.sort-a]
+[providers.openai]
+catalog='sort-catalog'
+[providers.openai.models.sort-z]
+[providers.openai.models.sort-a]
+[providers.xai.models.sort-a]
+[providers.anthropic.models.sort-a]
+[providers.aaa]
+protocol='chat-completions'
+base_url='http://localhost:1'
+auth='none'
+catalog='sort-catalog'
+[providers.aaa.models.sort-z]
+[providers.aaa.models.sort-a]
+"#,
+    )
+    .unwrap();
+    cache(
+        directory.path(),
+        &json!({"sort-catalog":{"models":{
+            "sort-a":{"id":"sort-a", "name":"Z Model"},
+            "sort-z":{"id":"sort-z", "name":"A Model"}
+        }}}),
+    );
+    let candidates = crate::model_candidates(directory.path(), &list_query(None, false)).unwrap();
+    let names: Vec<_> = candidates
+        .models
+        .iter()
+        .filter(|model| model.model.as_str().starts_with("sort-"))
+        .map(|model| format!("{}/{}", model.provider, model.model))
+        .collect();
+    assert_eq!(
+        names,
+        [
+            "openai/sort-a",
+            "openai/sort-z",
+            "anthropic/sort-a",
+            "xai/sort-a",
+            "aaa/sort-a",
+            "aaa/sort-z",
+            "zzz/sort-a"
+        ]
+    );
 }
 
 #[test]
@@ -44,7 +382,7 @@ fn conversion_keeps_only_the_allowlist_and_preserves_raw_reasoning() {
             "id": "m", "name": "Model", "limit": {"context": 123, "output": 45},
             "reasoning": true, "reasoning_options": source["openai"]["models"]["m"]["reasoning_options"],
             "tool_call": false, "modalities": {"input": ["text", "image"]},
-            "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 3.0, "reasoning": 4.0},
+            "cost": {"input": 1.0, "output": 2.0, "cache_read": 0.1, "cache_write": 3.0},
             "status": "deprecated"
         }}}})
     );
@@ -202,7 +540,7 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
                   "reasoning": true, "reasoning_options": [{"type": "toggle"}], "tool_call": true,
                   "modalities": {"input": ["text"]}, "status": "deprecated",
                   "cost": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4, "reasoning": 5}},
-            "n": {"id": "n", "tool_call": false, "limit": {"context": 200, "output": 60},
+            "n": {"id": "n", "reasoning": false, "tool_call": false, "limit": {"context": 200, "output": 60},
                   "cost": {"input": 1, "output": 2, "cache_read": 3, "cache_write": 4}}
         }}}),
     );
@@ -211,15 +549,18 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
         r#"
         [providers.openai.models.m]
         context = 999
+        reasoning = false
         effort = ["off", "high"]
         tools = false
         cost = { output = 0.0, cache_write = 7.0 }
         [providers.openai.models.n]
         output = 90
+        reasoning = true
         tools = true
         cost = { input = 8.0, cache_read = 9.0 }
         [providers.openai.models.only]
         output = 12
+        reasoning = true
         [providers.openai.models.empty]
     "#,
     )
@@ -239,15 +580,14 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
             input: Some(1.0),
             output: Some(0.0),
             cache_read: Some(3.0),
-            cache_write: Some(7.0),
-            reasoning: Some(5.0)
+            cache_write: Some(7.0)
         })
     );
     assert_eq!(m.effort, Some(vec![Effort::Off, Effort::High]));
     assert_eq!(m.tool_call, Some(false));
     assert_eq!(m.name.as_deref(), Some("Remote name"));
     assert_eq!(m.status.as_deref(), Some("deprecated"));
-    assert_eq!(m.reasoning, Some(true));
+    assert_eq!(m.reasoning, Some(false));
     assert_eq!(m.reasoning_options, Some(json!([{"type": "toggle"}])));
     assert_eq!(
         m.modalities.as_ref().unwrap().input,
@@ -267,11 +607,11 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
             input: Some(8.0),
             output: Some(2.0),
             cache_read: Some(9.0),
-            cache_write: Some(4.0),
-            reasoning: None
+            cache_write: Some(4.0)
         })
     );
     assert_eq!(n.tool_call, Some(true));
+    assert_eq!(n.reasoning, Some(true));
     assert_eq!(n.effort, None);
     let only = &models["only"];
     assert_eq!(only.id, "only");
@@ -283,8 +623,11 @@ fn handwritten_values_override_individual_fields_and_can_define_models_alone() {
         })
     );
     assert_eq!(only.tool_call, Some(true));
+    assert_eq!(only.reasoning, Some(true));
+    assert_eq!(only.reasoning_options, None);
     assert_eq!(only.cost, None);
     assert_eq!(models["empty"].limit, None);
+    assert_eq!(models["empty"].reasoning, None);
 }
 
 #[test]

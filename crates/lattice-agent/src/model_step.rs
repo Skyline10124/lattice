@@ -47,6 +47,17 @@ pub trait LlmClient: Send + Sync {
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>;
 }
 
+#[async_trait::async_trait]
+impl LlmClient for lattice_llm::ResolvedRequest {
+    async fn stream_chat(
+        &self,
+        request: ChatRequest,
+        control: StreamControl,
+    ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+        Ok(lattice_llm::ResolvedRequest::stream_chat(self, request, control).await?)
+    }
+}
+
 /// Why a model step could not even start streaming.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModelStepError {
@@ -100,11 +111,15 @@ pub enum ModelStepAttempt {
     Complete {
         message: NativeMessage<UnboundToolCall>,
         usage: Option<lattice_conversation::TokenUsage>,
+        usage_kind: lattice_conversation::UsageCompleteness,
+        cost: Option<lattice_conversation::CostEstimate>,
         finish_reason: Option<String>,
     },
     Stopped {
         cause: ModelStopCause,
         usage: Option<lattice_conversation::TokenUsage>,
+        usage_kind: lattice_conversation::UsageCompleteness,
+        cost: Option<lattice_conversation::CostEstimate>,
         diagnostic: ModelDiagnostic,
     },
 }
@@ -117,8 +132,8 @@ pub enum ModelStepAttempt {
 pub enum ModelStepEvent {
     /// 收到首个 provider 事件；不改变错误的重试属性。
     Opened {
-        provider: Option<String>,
-        model: String,
+        provider: Option<lattice_conversation::ProviderId>,
+        model: lattice_conversation::ModelId,
     },
     /// A reasoning delta.
     ReasoningDelta { content: String },
@@ -134,16 +149,13 @@ pub struct ModelStepRequest {
     pub system_prompt: Option<String>,
     /// Assembled provider-neutral history of completed (bound) messages.
     pub history: Vec<lattice_conversation::ConversationItem>,
-    /// Model alias.
-    pub model: String,
-    /// Optional provider override.
-    pub provider: Option<String>,
+    /// provider 内的模型标识。
+    pub model: lattice_conversation::ModelId,
+    /// 模型引用指定的 provider 标识。
+    pub provider: lattice_conversation::ProviderId,
+    pub effort: Option<lattice_conversation::Effort>,
     /// Frozen tool definitions.
     pub tools: Vec<ToolDefinition>,
-    /// Sampling temperature, when configured.
-    pub temperature: Option<f64>,
-    /// Output token bound, when configured.
-    pub max_tokens: Option<u32>,
     /// Cooperative cancellation flag.
     pub cancel: Option<Arc<AtomicBool>>,
     /// Cooperative deadline for this attempt only.
@@ -187,12 +199,12 @@ impl ModelStepDriver {
             messages,
             tools: request.tools.clone(),
             target: ModelTarget {
-                model: request.model.clone(),
-                provider: request.provider.clone(),
+                model: lattice_conversation::ModelRef::new(
+                    request.provider.clone(),
+                    request.model.clone(),
+                ),
+                effort: request.effort,
             },
-            temperature: request.temperature,
-            max_tokens: request.max_tokens,
-            max_completion_tokens: None,
             client_request_id: request.session_id.clone(),
         };
 
@@ -201,7 +213,12 @@ impl ModelStepDriver {
             deadline: request.deadline,
         };
         if let Some(reason) = control.stop() {
-            return Ok(stopped(ReplyStop::Stream(reason), None));
+            return Ok(stopped(
+                ReplyStop::Stream(reason),
+                None,
+                lattice_conversation::UsageCompleteness::Partial,
+                None,
+            ));
         }
 
         let opening = self.llm.stream_chat(chat, control.clone());
@@ -215,7 +232,7 @@ impl ModelStepDriver {
                     };
                 }
                 _ = tokio::time::sleep(CONTROL_POLL_INTERVAL), if request.deadline.is_some() || request.cancel.is_some() => {
-                    if let Some(reason) = control.stop() { return Ok(stopped(ReplyStop::Stream(reason), None)); }
+                    if let Some(reason) = control.stop() { return Ok(stopped(ReplyStop::Stream(reason), None, lattice_conversation::UsageCompleteness::Partial, None)); }
                 }
             }
         };
@@ -236,7 +253,7 @@ impl ModelStepDriver {
                 opened = true;
                 if let Some(observer) = live.as_deref_mut() {
                     observer(ModelStepEvent::Opened {
-                        provider: request.provider.clone(),
+                        provider: Some(request.provider.clone()),
                         model: request.model.clone(),
                     });
                 }
@@ -258,6 +275,8 @@ impl ModelStepDriver {
                         ReplyOutcome::Complete { message } => ModelStepAttempt::Complete {
                             message: message.into_message(),
                             usage: report.usage,
+                            usage_kind: report.usage_kind,
+                            cost: report.cost,
                             finish_reason: report.finish_reason,
                         },
                         ReplyOutcome::Rejected {
@@ -265,21 +284,35 @@ impl ModelStepDriver {
                         } => ModelStepAttempt::Stopped {
                             cause: ModelStopCause::InvalidBatch,
                             usage: report.usage,
+                            usage_kind: report.usage_kind,
+                            cost: report.cost,
                             diagnostic: ModelDiagnostic {
                                 provider_error: None,
                                 invalid_batch: Some(validation),
                             },
                         },
-                        ReplyOutcome::Interrupted { reason } => stopped(reason, report.usage),
+                        ReplyOutcome::Interrupted { reason } => {
+                            stopped(reason, report.usage, report.usage_kind, report.cost)
+                        }
                     });
                 }
             }
         }
-        Ok(stopped(ReplyStop::Stream(StreamStop::UnexpectedEof), None))
+        Ok(stopped(
+            ReplyStop::Stream(StreamStop::UnexpectedEof),
+            None,
+            lattice_conversation::UsageCompleteness::Partial,
+            None,
+        ))
     }
 }
 
-fn stopped(reason: ReplyStop, usage: Option<lattice_conversation::TokenUsage>) -> ModelStepAttempt {
+fn stopped(
+    reason: ReplyStop,
+    usage: Option<lattice_conversation::TokenUsage>,
+    usage_kind: lattice_conversation::UsageCompleteness,
+    cost: Option<lattice_conversation::CostEstimate>,
+) -> ModelStepAttempt {
     let (cause, message) = match reason {
         ReplyStop::OutputLimit(_) => (ModelStopCause::OutputLimit, None),
         ReplyStop::Stream(StreamStop::Cancelled) => (ModelStopCause::Cancelled, None),
@@ -302,6 +335,8 @@ fn stopped(reason: ReplyStop, usage: Option<lattice_conversation::TokenUsage>) -
     ModelStepAttempt::Stopped {
         cause,
         usage,
+        usage_kind,
+        cost,
         diagnostic: ModelDiagnostic {
             provider_error: message.map(|message| lattice_llm::bound_diagnostic(&message)),
             invalid_batch: None,
@@ -329,29 +364,52 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
 mod tests {
     use super::*;
     use crate::testing::FakeStreamingLlmClient;
-    use lattice_conversation::{InvocationId, MAX_ASSISTANT_CONTENT_BYTES, ToolCallAddress};
+    use lattice_conversation::MAX_ASSISTANT_CONTENT_BYTES;
     use lattice_llm::testing::ScriptEvent;
 
-    struct ProjectionCheckingClient;
-
-    #[async_trait::async_trait]
-    impl LlmClient for ProjectionCheckingClient {
-        async fn stream_chat(
-            &self,
-            request: ChatRequest,
-            control: StreamControl,
-        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-            lattice_llm::protocol::projection::request_messages_to_wire(
-                lattice_conversation::ProviderOrigin::OpenAiCompatible,
-                &request.messages,
-            )
-            .map_err(|error| {
-                Box::new(lattice_llm::LlmError::Projection(error))
-                    as Box<dyn std::error::Error + Send + Sync>
-            })?;
-            Ok(lattice_llm::testing::script_stream(vec![], control))
+    #[tokio::test]
+    async fn effort_is_preserved_in_chat_request() {
+        struct Capturing(std::sync::Mutex<Vec<Option<lattice_conversation::Effort>>>);
+        #[async_trait::async_trait]
+        impl LlmClient for Capturing {
+            async fn stream_chat(
+                &self,
+                request: ChatRequest,
+                control: StreamControl,
+            ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
+            {
+                self.0.lock().unwrap().push(request.target.effort);
+                Ok(lattice_llm::testing::script_stream(
+                    lattice_conversation::ReplayOrigin {
+                        protocol: lattice_conversation::Protocol::ChatCompletions,
+                        provider_id: request.target.model.provider().clone(),
+                    },
+                    vec![],
+                    control,
+                ))
+            }
         }
+        let client = Arc::new(Capturing(std::sync::Mutex::new(vec![])));
+        let driver = ModelStepDriver::new(client.clone());
+        for effort in [
+            None,
+            Some(lattice_conversation::Effort::Off),
+            Some(lattice_conversation::Effort::High),
+        ] {
+            let mut input = request();
+            input.effort = effort;
+            driver.run(&input, None).await.unwrap();
+        }
+        assert_eq!(
+            *client.0.lock().unwrap(),
+            [
+                None,
+                Some(lattice_conversation::Effort::Off),
+                Some(lattice_conversation::Effort::High)
+            ]
+        );
     }
+
     fn driver(events: Vec<ScriptEvent>) -> ModelStepDriver {
         ModelStepDriver::new(Arc::new(
             FakeStreamingLlmClient::builder()
@@ -362,13 +420,12 @@ mod tests {
 
     fn request() -> ModelStepRequest {
         ModelStepRequest {
+            effort: None,
             system_prompt: None,
             history: Vec::new(),
-            model: "test-model".to_string(),
-            provider: None,
+            model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+            provider: lattice_conversation::ProviderId::parse("test").unwrap(),
             tools: Vec::new(),
-            temperature: None,
-            max_tokens: None,
             cancel: None,
             deadline: None,
             session_id: None,
@@ -380,43 +437,6 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-    }
-
-    fn bound_assistant(
-        provider_call_id: Option<&str>,
-        invocation: InvocationId,
-    ) -> NativeMessage<lattice_conversation::BoundToolCall> {
-        let address = ToolCallAddress {
-            message: lancet_protocol_marker(),
-            part_ordinal: 0,
-        };
-        let call = lattice_conversation::UnboundToolCall {
-            provider_call_id: provider_call_id.map(str::to_string),
-            name: "observe__workspace".to_string(),
-            arguments: serde_json::json!({}),
-        }
-        .bind(invocation, address);
-        NativeMessage::new(
-            MessageRole::Assistant,
-            None,
-            vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
-                call,
-            })],
-        )
-    }
-
-    fn lancet_protocol_marker() -> lattice_conversation::ModelMessageAddress {
-        lattice_conversation::ModelMessageAddress {
-            session_id: lattice_conversation::SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c")
-                .unwrap(),
-            turn_id: lattice_conversation::TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c")
-                .unwrap(),
-            model_step_ordinal: 0,
-        }
-    }
-
-    fn invocation(index: u64) -> InvocationId {
-        InvocationId::parse(&format!("00000000-0000-4000-8000-{index:012x}")).unwrap()
     }
 
     #[tokio::test]
@@ -647,45 +667,6 @@ mod tests {
                 retryable: false,
                 ..
             })
-        ));
-    }
-
-    #[test]
-    fn history_tool_results_without_provider_ids_fail_typed() {
-        let assistant = bound_assistant(None, invocation(0));
-        let tool = lattice_conversation::StoredToolResult {
-            invocation_id: invocation(0),
-            name: "observe__workspace".into(),
-            payload: lattice_conversation::ResultPayload::Succeeded(
-                lattice_conversation::SuccessContent::Json {
-                    value: serde_json::json!({}),
-                    digest: lattice_conversation::tool_content_digest("{}"),
-                    byte_length: 2,
-                },
-            ),
-        };
-        let result = runtime().block_on(
-            ModelStepDriver::new(Arc::new(ProjectionCheckingClient)).run(
-                &ModelStepRequest {
-                    history: vec![lattice_conversation::ConversationItem::Step(
-                        lattice_conversation::StepContent {
-                            assistant,
-                            results: vec![tool],
-                        },
-                    )],
-                    ..request()
-                },
-                None,
-            ),
-        );
-        assert!(matches!(
-            result,
-            Err(ModelStepError::Projection(
-                lattice_llm::protocol::projection::ProjectionError::ToolResultWithoutProviderCallId {
-                    invocation_id,
-                    ..
-                },
-            )) if invocation_id == invocation(0)
         ));
     }
 

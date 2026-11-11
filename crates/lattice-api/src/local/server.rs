@@ -21,6 +21,13 @@ use tokio::{
     task::JoinSet,
 };
 
+#[cfg(test)]
+#[path = "server_configure_tests.rs"]
+mod configure_tests;
+#[cfg(test)]
+#[path = "server_models_tests.rs"]
+mod models_tests;
+
 struct Owner {
     identity: Option<TurnRequest>,
     session: Option<SessionId>,
@@ -43,12 +50,17 @@ struct Admission {
     turns: HashMap<TurnId, Arc<Owner>>,
     sessions: HashMap<SessionId, Arc<Owner>>,
     owners: Vec<Arc<Owner>>,
+    cleanups: usize,
     diagnostics: HashMap<TurnId, LocalError>,
     unconfirmed_operations: usize,
 }
 struct Backend {
+    #[cfg(test)]
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
+    gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
+    metadata: Arc<super::metadata::MetadataRefresh>,
+    tools: Arc<dyn crate::ToolExecutor>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -84,6 +96,19 @@ impl Drop for ObserverLease {
         }
     }
 }
+const DRAFT_TTL_HOURS: i64 = 24;
+/// 同时登记的 Owner 上限；新的提交、configure、rewind 与草稿清理达到上限时都不再占位。
+const MAX_OWNERS: usize = 32;
+struct CleanupGuard {
+    backend: Arc<Backend>,
+}
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.backend.admission);
+        state.cleanups -= 1;
+        self.backend.changed.send_modify(|v| *v += 1);
+    }
+}
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("backend lock poisoned")
 }
@@ -99,7 +124,13 @@ fn busy() -> LocalError {
 fn conflict(reason: ConflictReason) -> LocalError {
     LocalError {
         conflict: Some(reason),
-        ..LocalError::new(LocalErrorKind::Conflict, "request identity conflicts")
+        ..LocalError::new(
+            LocalErrorKind::Conflict,
+            match reason {
+                ConflictReason::SettingsChanged => "session settings changed",
+                _ => "request identity conflicts",
+            },
+        )
     }
 }
 fn not_found() -> LocalError {
@@ -119,11 +150,53 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| internal())?
 }
 impl Backend {
-    fn new(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Arc<Self> {
+    fn chatgpt_auth(&self) -> Result<lattice_llm::auth::ChatgptAuth> {
+        self.gateway
+            .as_ref()
+            .map(|gateway| gateway.chatgpt_auth())
+            .map_err(|error| crate::ApiError::Configuration(error.clone()).into())
+    }
+
+    fn begin_stop(&self) {
+        lock(&self.admission).stopping = true;
+        self.metadata.stop();
+        if let Ok(auth) = self.chatgpt_auth() {
+            auth.stop_logins();
+        }
+    }
+
+    fn with_tools(
+        layout: crate::StateLayout,
+        home: Option<std::path::PathBuf>,
+        tools: Arc<dyn crate::ToolExecutor>,
+    ) -> Arc<Self> {
+        Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der(), tools)
+    }
+
+    fn with_tls_roots(
+        layout: crate::StateLayout,
+        home: Option<std::path::PathBuf>,
+        roots: Vec<Vec<u8>>,
+        tools: Arc<dyn crate::ToolExecutor>,
+    ) -> Arc<Self> {
+        let directory = super::auth::directory(home.as_deref())
+            .map_err(|error| crate::ConfigRejection::new(&error.message, None));
+        let gateway = directory.clone().and_then(|directory| {
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
+            lattice_llm::RequestGateway::new(directory, roots)
+                .map(Arc::new)
+                .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
+        });
+        let stores = crate::stores::StoreManager::new(layout.clone());
         Arc::new(Self {
-            home,
-            stores: crate::stores::StoreManager::new(layout.clone()),
+            #[cfg(test)]
             layout,
+            home,
+            metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
+            gateway,
+            tools,
+            stores,
             epoch: uuid::Uuid::new_v4().to_string(),
             admission: Mutex::default(),
             changed: watch::channel(0).0,
@@ -156,6 +229,159 @@ impl Backend {
             unconfirmed_operations: state.unconfirmed_operations,
         }
     }
+    fn has_active_work(&self) -> bool {
+        let state = lock(&self.admission);
+        !state.owners.is_empty() || state.cleanups != 0
+    }
+    #[cfg(test)]
+    fn has_cleanups(&self) -> bool {
+        lock(&self.admission).cleanups != 0
+    }
+    fn has_watchers(&self, session_id: SessionId) -> bool {
+        let sink = lock(&self.observers)
+            .get(&session_id)
+            .map(|entry| entry.sink.clone());
+        sink.is_some_and(|sink| sink.has_watchers())
+    }
+    fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
+        let mut state = lock(&self.admission);
+        if state.stopping {
+            return None;
+        }
+        state.cleanups += 1;
+        Some(CleanupGuard {
+            backend: self.clone(),
+        })
+    }
+    fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            backend.cleanup_drafts().await;
+        });
+    }
+    async fn cleanup_drafts(self: &Arc<Self>) {
+        if lock(&self.admission).stopping {
+            return;
+        }
+        let api = match self.open().await {
+            Ok(api) => api,
+            Err(error)
+                if uninitialized(&error)
+                    || error
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled) =>
+            {
+                return;
+            }
+            Err(error) => {
+                tracing::warn!("草稿清理打开会话库失败：{}", error.message);
+                return;
+            }
+        };
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(DRAFT_TTL_HOURS);
+        let candidates = match api.read(move |read| read.expired_drafts(cutoff)).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let local = LocalError::from(error);
+                tracing::warn!("草稿清理扫描候选会话失败：{}", local.message);
+                return;
+            }
+        };
+        #[cfg(test)]
+        tests::pause(&self.gates.cleanup_scanned).await;
+
+        for sid in candidates {
+            let owner = {
+                let mut state = lock(&self.admission);
+                if state.stopping {
+                    return;
+                }
+                if state.owners.len() >= MAX_OWNERS
+                    || state.sessions.contains_key(&sid)
+                    || self.has_watchers(sid)
+                {
+                    continue;
+                }
+                let owner = Arc::new(Owner {
+                    identity: None,
+                    session: Some(sid),
+                    reply: watch::channel(None).0,
+                    done: watch::channel(None).0,
+                    observer: self.observer(sid),
+                    execution_cancel: Arc::default(),
+                    started: AtomicBool::new(false),
+                    core: Mutex::new(None),
+                    store: Mutex::new(Some(api.clone())),
+                });
+                state.sessions.insert(sid, owner.clone());
+                owner.observer.owner_changed();
+                state.owners.push(owner.clone());
+                owner
+            };
+            let step = std::panic::AssertUnwindSafe(async {
+                #[cfg(test)]
+                tests::pause(&self.gates.cleanup_claimed).await;
+                let io = match CoordinatorStoreIo::acquire_api(api.clone(), sid).await {
+                    Ok(io) => io,
+                    Err(crate::turn::coordinator::CoordinatorIoError::Store(
+                        lattice_session::store::StoreError::Busy { .. },
+                    )) => return Ok(()),
+                    Err(error) => return Err(crate::ApiError::from(error)),
+                };
+                owner.started.store(true, Ordering::Release);
+                io.delete_draft(cutoff)
+                    .await
+                    .map(|_| ())
+                    .map_err(crate::ApiError::from)
+            })
+            .catch_unwind()
+            .await;
+            let reopen =
+                matches!(&step, Ok(Err(error)) if error.requires_reopen()) || step.is_err();
+            let result: Result<()> = match step {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => {
+                    let local = LocalError::from(error);
+                    tracing::warn!("清理草稿会话 {sid} 失败：{}", local.message);
+                    Err(local)
+                }
+                Err(_) => {
+                    let local = internal();
+                    tracing::warn!("清理草稿会话 {sid} 时发生内部错误");
+                    Err(local)
+                }
+            };
+            {
+                let mut state = lock(&self.admission);
+                if let Err(error) = &result
+                    && matches!(
+                        error.kind,
+                        LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
+                    )
+                    && (owner.started.load(Ordering::Acquire) || error.recovery.is_some())
+                {
+                    state.unconfirmed_operations += 1;
+                }
+                if state
+                    .sessions
+                    .get(&sid)
+                    .is_some_and(|o| Arc::ptr_eq(o, &owner))
+                {
+                    state.sessions.remove(&sid);
+                    owner.observer.owner_changed();
+                }
+                state.owners.retain(|o| !Arc::ptr_eq(o, &owner));
+                owner.done.send_replace(Some(result));
+                self.changed.send_modify(|v| *v += 1);
+            }
+            drop(lock(&owner.store).take());
+            if reopen {
+                break;
+            }
+        }
+    }
     async fn open(&self) -> Result<crate::SessionApi> {
         self.stores.acquire(false).await.map_err(Into::into)
     }
@@ -183,8 +409,9 @@ impl Backend {
         submitter: Option<UnixStream>,
     ) -> Result<Arc<Owner>> {
         let (identity, session) = match &operation {
-            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session.id())),
+            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session)),
             Request::Rewind { session_id, .. } => (None, Some(*session_id)),
+            Request::Configure { request } => (None, Some(request.session.id())),
             _ => return Err(internal()),
         };
         let owner = {
@@ -204,7 +431,7 @@ impl Backend {
                     "backend is draining",
                 ));
             }
-            if state.owners.len() >= 32 {
+            if state.owners.len() >= MAX_OWNERS {
                 return Err(busy());
             }
             let owner = Arc::new(Owner {
@@ -243,7 +470,7 @@ impl Backend {
                 {
                     Response::Acceptance(Acceptance::ConfirmationUnknown {
                         turn_id: request.turn_id,
-                        session_id: request.session.id(),
+                        session_id: request.session,
                     })
                 } else {
                     Response::Error(result.clone().err().unwrap_or_else(internal))
@@ -269,10 +496,8 @@ impl Backend {
                         error.kind,
                         LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
                     )
-                    // 提交的只读准入检查失败时尚无执行收尾；建库提交不确定仍计入。
-                    && (task_owner.identity.is_none()
-                        || task_owner.started.load(Ordering::Acquire)
-                        || error.recovery.is_some())
+                    // 只读准入检查失败时尚未写入会话库；已进入写入或带恢复需求的操作仍计入。
+                    && (task_owner.started.load(Ordering::Acquire) || error.recovery.is_some())
                 {
                     state.unconfirmed_operations += 1;
                     if let Some(request) = &task_owner.identity {
@@ -308,10 +533,8 @@ impl Backend {
         submitter: Option<UnixStream>,
     ) -> Result<()> {
         match operation {
-            Request::Submit {
-                request,
-                configuration,
-            } => self.submit(request, configuration, owner, submitter).await,
+            Request::Submit { request } => self.submit(request, owner, submitter).await,
+            Request::Configure { request } => self.configure(request, owner).await,
             Request::Rewind {
                 session_id,
                 target,
@@ -321,14 +544,15 @@ impl Backend {
                 let api = self.open().await?;
                 *lock(&owner.store) = Some(api.clone());
                 let binding = api.read(move |r| r.session(session_id)).await?;
-                if binding.project_store_key != root.store_key() {
+                if binding.project_path != root.project_path() {
                     return Err(conflict(ConflictReason::BindingMismatch));
                 }
                 let io = CoordinatorStoreIo::acquire_api(api, session_id)
                     .await
                     .map_err(crate::ApiError::from)?;
+                owner.started.store(true, Ordering::Release);
                 let record = TurnCoordinator::new(io, Arc::new(RandomIdSource))
-                    .rewind(target)
+                    .rewind(target, root.project_path())
                     .await
                     .map_err(crate::ApiError::from)?;
                 #[cfg(test)]
@@ -340,79 +564,209 @@ impl Backend {
             _ => Err(internal()),
         }
     }
+    async fn configure(
+        self: &Arc<Self>,
+        request: ConfigureRequest,
+        owner: &Arc<Owner>,
+    ) -> Result<()> {
+        if !request.workspace.is_absolute() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "invalid Configure request",
+            ));
+        }
+        let workspace = canonical_workspace(request.workspace).await?;
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        let sid = request.session.id();
+        let is_new = matches!(request.session, ConfigureSession::New(_));
+
+        enum BaseSource {
+            Agent(crate::AgentName),
+            Current(lattice_session::store::SessionSettings),
+        }
+
+        let (mut io, base_source) = match request.session {
+            ConfigureSession::New(_) => {
+                if let Some(api) = &api
+                    && api.read(move |r| r.find_session(sid)).await?.is_some()
+                {
+                    return Err(conflict(ConflictReason::SessionExists));
+                }
+                let Some(agent_name) = request.agent else {
+                    return Err(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "new Session requires explicit agent",
+                    ));
+                };
+                let io = match &api {
+                    Some(api) => Some(
+                        CoordinatorStoreIo::acquire_api(api.clone(), sid)
+                            .await
+                            .map_err(crate::ApiError::from)?,
+                    ),
+                    None => None,
+                };
+                (io, BaseSource::Agent(agent_name))
+            }
+            ConfigureSession::Existing(_) => {
+                let api = api.as_ref().ok_or_else(not_found)?;
+                let record = match api.read(move |r| r.session(sid)).await {
+                    Ok(record) => record,
+                    Err(crate::ApiError::Store(error))
+                        if matches!(
+                            error.as_ref(),
+                            lattice_session::store::StoreError::NotFound { .. }
+                        ) =>
+                    {
+                        return Err(not_found());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if record.project_path != workspace.project_path() {
+                    return Err(conflict(ConflictReason::BindingMismatch));
+                }
+                let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
+                    .await
+                    .map_err(crate::ApiError::from)?;
+                let current = io
+                    .read(move |read| {
+                        read.session(sid)?;
+                        read.session_settings(sid)
+                    })
+                    .await
+                    .map_err(crate::ApiError::from)?;
+                let base_source = match request.agent {
+                    Some(agent_name) => BaseSource::Agent(agent_name),
+                    None => BaseSource::Current(current),
+                };
+                (Some(io), base_source)
+            }
+        };
+
+        let directory = super::auth::directory(self.home.as_deref())?;
+        let workspace_for_load = workspace.clone();
+        let cmd_model = request.model;
+        let cmd_effort = request.effort;
+        let (settings, adjustment) = blocking(move || {
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            let base = match base_source {
+                BaseSource::Agent(name) => {
+                    let loaded =
+                        crate::profile::load_for_turn(&name, &workspace_for_load, &directory)?;
+                    crate::configure::SettingsBase::Agent(crate::configure::LoadedAgent {
+                        profile: crate::profile::TurnProfile::from_loaded(&loaded),
+                        source_path: loaded.path,
+                    })
+                }
+                BaseSource::Current(ref current) => {
+                    crate::configure::SettingsBase::Current(current)
+                }
+            };
+            let (settings, adjustment) =
+                crate::configure::resolve_settings(base, cmd_model, cmd_effort, |target| {
+                    lattice_llm::model_supported_efforts(&directory, target)
+                })
+                .map_err(|rejection| {
+                    crate::ApiError::Configuration(crate::ConfigRejection::new(
+                        &rejection.to_string(),
+                        Some(&auth),
+                    ))
+                })?;
+            settings.validate().map_err(crate::ApiError::from)?;
+            Ok((settings, adjustment))
+        })
+        .await?;
+
+        let io = match io.take() {
+            Some(io) => io,
+            None => {
+                let api = self.stores.acquire(true).await?;
+                *lock(&owner.store) = Some(api.clone());
+                CoordinatorStoreIo::acquire_api(api, sid)
+                    .await
+                    .map_err(crate::ApiError::from)?
+            }
+        };
+
+        owner.started.store(true, Ordering::Release);
+        if is_new {
+            let session = io
+                .create_session(workspace.project_path(), settings)
+                .await
+                .map_err(crate::ApiError::from)?;
+            #[cfg(feature = "test-crash-barriers")]
+            crate::turn::crash_barrier::configure_hit(&session)
+                .await
+                .map_err(crate::ApiError::from)?;
+            #[cfg(not(feature = "test-crash-barriers"))]
+            let _ = session;
+        } else {
+            io.update_settings(workspace.project_path(), settings)
+                .await
+                .map_err(crate::ApiError::from)?;
+        }
+
+        let mut head = io
+            .read(move |read| crate::turn::observer::session_head(read, sid))
+            .await
+            .map_err(crate::ApiError::from)?;
+        {
+            let state = lock(&self.admission);
+            (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
+        }
+        owner.observer.owner_changed();
+        owner.reply(Response::Configure(ConfigureReply { head, adjustment }));
+        Ok(())
+    }
     async fn submit(
         self: &Arc<Self>,
         request: TurnRequest,
-        configuration: Box<super::FrozenConfiguration>,
         owner: &Arc<Owner>,
         submitter: Option<UnixStream>,
     ) -> Result<()> {
         let api = self.optional_store().await?;
         *lock(&owner.store) = api.clone();
-        // 身份优先于工作区、配置和同会话 Busy；重发不承担找回职责。
+        // 身份优先于工作区、会话存在性、绑定和同会话 Busy；重发不承担找回职责。
         if let Some(api) = &api {
             let turn_id = request.turn_id;
             if api.read(move |r| r.turn_node(turn_id)).await?.is_some() {
                 return Err(conflict(ConflictReason::TurnIdUsed));
             }
         }
+        if !request.workspace.is_absolute() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "invalid Turn request",
+            ));
+        }
         let workspace = canonical_workspace(request.workspace.clone()).await?;
-        let sid = request.session.id();
-        let record = if let Some(api) = &api {
-            match api.read(move |r| r.session(sid)).await {
-                Ok(record) => Some(record),
-                Err(crate::ApiError::Store(error))
-                    if matches!(
-                        error.as_ref(),
-                        lattice_session::store::StoreError::NotFound { .. }
-                    ) =>
-                {
-                    None
-                }
-                Err(error) => return Err(error.into()),
+        let sid = request.session;
+        let api = api.ok_or_else(not_found)?;
+        let record = match api.read(move |r| r.session(sid)).await {
+            Ok(record) => record,
+            Err(crate::ApiError::Store(error))
+                if matches!(
+                    error.as_ref(),
+                    lattice_session::store::StoreError::NotFound { .. }
+                ) =>
+            {
+                return Err(not_found());
             }
-        } else {
-            None
+            Err(error) => return Err(error.into()),
         };
-        match request.session {
-            SubmitSession::New(_) if record.is_some() => {
-                return Err(conflict(ConflictReason::SessionExists));
-            }
-            SubmitSession::Existing(_) => {
-                let record = record.as_ref().ok_or_else(not_found)?;
-                if record.project_store_key != workspace.store_key() {
-                    return Err(conflict(ConflictReason::BindingMismatch));
-                }
-            }
-            _ => {}
+        if record.project_path != workspace.project_path() {
+            return Err(conflict(ConflictReason::BindingMismatch));
         }
         {
             let mut state = lock(&self.admission);
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            // 身份、绑定与 Busy 的优先级不变；廉价拒绝不能占住新会话身份。
-            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES
-                || !request.workspace.is_absolute()
-            {
+            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES {
                 return Err(LocalError::new(
                     LocalErrorKind::BadRequest,
                     "invalid Turn request",
-                ));
-            }
-            if request
-                .agent
-                .as_ref()
-                .is_some_and(|name| name.trim().is_empty() || name.len() > 128)
-                || (request.agent.is_none()
-                    && (request.session.is_new()
-                        || record
-                            .as_ref()
-                            .is_some_and(|record| record.current == NodeId(0))))
-            {
-                return Err(LocalError::new(
-                    LocalErrorKind::BadRequest,
-                    "new Session or root requires explicit agent",
                 ));
             }
             state.sessions.insert(sid, owner.clone());
@@ -427,35 +781,31 @@ impl Backend {
         #[cfg(test)]
         tests::pause(&self.gates.registered).await;
         check_submitter(submitter.as_ref())?;
-        let inherited = if !request.session.is_new() {
-            api.as_ref()
-                .expect("existing Session store")
-                .read(move |r| r.current_agent(sid))
-                .await?
-        } else {
-            None
-        };
-        let selected = request.agent.clone().or(inherited).ok_or_else(|| {
-            LocalError::new(
-                LocalErrorKind::BadRequest,
-                "current agent could not be inherited",
-            )
-        })?;
+        let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
+            .await
+            .map_err(crate::ApiError::from)?;
+        let (settings, settings_version) = io
+            .read(move |read| {
+                read.session(sid)?;
+                let settings = read.session_settings(sid)?;
+                let version = settings.version()?;
+                Ok((settings, version))
+            })
+            .await
+            .map_err(crate::ApiError::from)?;
+        if let Some(expected) = &request.expected_settings
+            && *expected != settings_version
+        {
+            return Err(conflict(ConflictReason::SettingsChanged));
+        }
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
-        let (loaded_profile, connection) = blocking(move || configuration.into_execution()).await?;
-        if loaded_profile.profile.agent.name != selected {
-            return Err(LocalError::new(
-                LocalErrorKind::BadRequest,
-                "loaded agent differs from selection",
-            ));
-        }
-        let api = match api {
-            Some(api) => api,
-            // 建库在接受事务之前；任何失败都说明这一轮确定未被接受，按拒绝返回。
-            None => self.stores.acquire(true).await?,
-        };
-        *lock(&owner.store) = Some(api.clone());
+        let gateway = self
+            .gateway
+            .clone()
+            .map_err(crate::ApiError::Configuration)?;
+        let prepared_model =
+            crate::turn::execute::PreparedModel::resolve(&gateway, &settings).await?;
         let shutdown = api.shutdown();
         check_submitter(submitter.as_ref())?;
         {
@@ -465,24 +815,22 @@ impl Backend {
         }
         let execution = crate::turn::start_execution(crate::turn::execute::ExecutionInput {
             session: api,
-            layout: self.layout.clone(),
             turn_id: request.turn_id,
             workspace,
             shutdown,
             observer: owner.observer.clone(),
-            new_session: request.session.is_new().then_some(sid),
             request: crate::RunTurnRequest {
                 input: request.input,
-                session_id: (!request.session.is_new()).then_some(sid),
-                agent: request.agent,
-                loaded_profile: Some(loaded_profile),
+                session_id: sid,
+                expected_settings: request.expected_settings,
                 cancel_flag: Some(owner.execution_cancel.clone()),
+                tools: Some(self.tools.clone()),
                 #[cfg(any(test, feature = "test-utils"))]
                 test_llm: None,
-                #[cfg(any(test, feature = "test-utils"))]
-                test_project_root: None,
             },
-            connection: Some(connection),
+            prepared_model: Some(prepared_model),
+            prepared_settings: Some((settings, settings_version)),
+            io: Some(io),
         });
         *lock(&owner.core) = Some(execution.completion);
         let accepted = match execution.acceptance.await {
@@ -584,13 +932,37 @@ impl Backend {
                 .await
             }
             Request::AuthRemove { provider } => {
+                if provider == "chatgpt" {
+                    let result = self
+                        .chatgpt_auth()?
+                        .remove()
+                        .await
+                        .map_err(super::auth::error)?;
+                    return Ok(Response::AuthRemoved(AuthRemoval {
+                        removed: result.removed,
+                        revocation: Some(result.revocation),
+                    }));
+                }
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {
-                    let removed = auth.remove(&provider).map_err(super::auth::error)?;
-                    Ok(Response::AuthRemoved { removed })
+                    let removed = auth.remove_api_key(&provider).map_err(super::auth::error)?;
+                    Ok(Response::AuthRemoved(AuthRemoval {
+                        removed,
+                        revocation: None,
+                    }))
                 })
                 .await
             }
+            Request::AuthLogout { provider } => {
+                super::auth::require_chatgpt(&provider)?;
+                let revocation = self
+                    .chatgpt_auth()?
+                    .logout()
+                    .await
+                    .map_err(super::auth::error)?;
+                Ok(Response::AuthLoggedOut(AuthLoggedOut { revocation }))
+            }
+            Request::AuthLogin { .. } => Err(super::client::protocol()),
             Request::AuthStatus {} => {
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {
@@ -600,11 +972,85 @@ impl Backend {
                 })
                 .await
             }
+            Request::Models { query } => {
+                let directory = super::auth::directory(self.home.as_deref())?;
+                let mut warning = None;
+                let ready_only = match &query {
+                    ModelCandidateQuery::List {
+                        provider,
+                        ready_only,
+                    } if provider.as_ref().is_none_or(|id| id == "chatgpt") => {
+                        let check_directory = directory.clone();
+                        let check_query = query.clone();
+                        // 先校验本地请求，错误配置或非法筛选不能触发目录网络请求。
+                        blocking(move || {
+                            let auth = lattice_llm::auth::AuthStore::new(check_directory.clone());
+                            lattice_llm::model_candidates(&check_directory, &check_query)
+                                .map(|_| ())
+                                .map_err(|error| {
+                                    crate::ApiError::Configuration(crate::ConfigRejection::new(
+                                        &error.to_string(),
+                                        Some(&auth),
+                                    ))
+                                    .into()
+                                })
+                        })
+                        .await?;
+                        if let Err(error) = self.metadata.ensure_chatgpt().await {
+                            warning = Some(error.message);
+                        }
+                        Some(*ready_only)
+                    }
+                    _ => None,
+                };
+                blocking(move || {
+                    let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                    lattice_llm::model_candidates(&directory, &query)
+                        .map(|mut candidates| {
+                            if let Some(message) = warning {
+                                let chatgpt_in_scope = ready_only != Some(true)
+                                    || auth.status().is_ok_and(|status| {
+                                        status.providers.iter().any(|provider| {
+                                            provider.provider == "chatgpt"
+                                                && provider.availability.is_ready()
+                                        })
+                                    });
+                                if chatgpt_in_scope {
+                                    candidates.warnings.retain(|warning| {
+                                        warning.provider.as_deref() != Some("chatgpt")
+                                    });
+                                    candidates.warnings.push(lattice_llm::ModelWarning {
+                                        provider: Some("chatgpt".into()),
+                                        message,
+                                    });
+                                }
+                            }
+                            redact_model_candidates(&mut candidates, &auth);
+                            Response::Models(candidates)
+                        })
+                        .map_err(|error| {
+                            crate::ApiError::Configuration(crate::ConfigRejection::new(
+                                &error.to_string(),
+                                Some(&auth),
+                            ))
+                            .into()
+                        })
+                })
+                .await
+            }
+            Request::ModelsRefresh {} => {
+                self.metadata.refresh().await?;
+                Ok(Response::ModelsRefreshed)
+            }
             Request::Stop => {
                 let mut changed = self.changed.subscribe();
-                lock(&self.admission).stopping = true;
-                while self.status().owners != 0 {
+                self.begin_stop();
+                self.metadata.drain().await;
+                while self.has_active_work() {
                     changed.changed().await.map_err(|_| internal())?;
+                }
+                if let Ok(auth) = self.chatgpt_auth() {
+                    auth.shutdown().await.map_err(super::auth::error)?;
                 }
                 Ok(Response::Status(self.status()))
             }
@@ -638,6 +1084,9 @@ impl Backend {
             Request::Log { session_id } => Ok(Response::Log(
                 self.open().await?.read(move |r| r.log(session_id)).await?,
             )),
+            Request::Usage { session_id } => Ok(Response::Usage(Box::new(
+                self.open().await?.usage(session_id).await?,
+            ))),
             Request::Turn { turn_id } => Ok(Response::Turn(self.lookup(turn_id).await?)),
             Request::Head { session_id } => {
                 Ok(Response::Head(self.session_head(session_id).await?))
@@ -675,56 +1124,8 @@ impl Backend {
                 Ok(Response::Cancelled { owned })
             }
             Request::Submit { .. } => Err(internal()),
-            request @ Request::Rewind { .. } => self.wait_reply(self.claim(request, None)?).await,
-            Request::AuditQuery {
-                workspace,
-                selection,
-                after,
-                limit,
-            } => {
-                let filter = audit_filter(workspace, selection).await?;
-                Ok(Response::Audit(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::query_audit(r, &filter, after, limit as usize))
-                        .await?,
-                ))
-            }
-            Request::AuditTail {
-                workspace,
-                selection,
-                after,
-                limit,
-            } => {
-                let filter = audit_filter(workspace, selection).await?;
-                Ok(Response::AuditTail(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::tail_audit(r, &filter, after, limit as usize))
-                        .await?,
-                ))
-            }
-            Request::AuditReplay {
-                workspace,
-                session_id,
-                turn_id,
-            } => {
-                let project = canonical_workspace(workspace).await?.store_key();
-                Ok(Response::AuditReplay(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::replay_audit(r, &project, session_id, turn_id))
-                        .await?,
-                ))
-            }
-            Request::OperatorStatus { workspace } => {
-                let project = canonical_workspace(workspace).await?.store_key();
-                Ok(Response::OperatorStatus(
-                    self.open()
-                        .await?
-                        .read(move |r| lancet_api::collect_status(r, &project))
-                        .await?,
-                ))
+            request @ (Request::Rewind { .. } | Request::Configure { .. }) => {
+                self.wait_reply(self.claim(request, None)?).await
             }
             Request::Watch { .. } => Err(internal()),
         }
@@ -734,7 +1135,10 @@ impl Backend {
         loop {
             let response = reply.borrow_and_update().clone();
             if let Some(response) = response {
-                if matches!(response, Response::Error(_) | Response::Rewind(_)) {
+                if matches!(
+                    response,
+                    Response::Error(_) | Response::Rewind(_) | Response::Configure(_)
+                ) {
                     let mut done = owner.done.subscribe();
                     while done.borrow_and_update().is_none() {
                         done.changed().await.map_err(|_| internal())?;
@@ -753,9 +1157,39 @@ impl Backend {
     ) -> Result<()> {
         let _permit = self.subscriptions.try_acquire().map_err(|_| busy())?;
         let observer = self.observer(session_id);
-        let cursor = observer.register();
-        let mut changed = observer.subscribe();
         let mut closed = self.closed.subscribe();
+        // 与草稿清理占位共用准入锁边界：发现无身份 Owner 时先等待其结束再登记并重读。
+        let cursor = loop {
+            if *closed.borrow() {
+                return Ok(());
+            }
+            let blocking_owner = {
+                let state = lock(&self.admission);
+                match state
+                    .sessions
+                    .get(&session_id)
+                    .filter(|owner| owner.identity.is_none())
+                    .cloned()
+                {
+                    Some(owner) => Some(owner),
+                    None => break observer.register(),
+                }
+            };
+            if let Some(owner) = blocking_owner {
+                #[cfg(test)]
+                tests::pause(&self.gates.watch_waiting_owner).await;
+                let mut done = owner.done.subscribe();
+                while done.borrow_and_update().is_none() {
+                    tokio::select! {
+                        changed = done.changed() => {
+                            changed.map_err(|_| internal())?;
+                        }
+                        _ = closed.changed() => return Ok(()),
+                    }
+                }
+            }
+        };
+        let mut changed = observer.subscribe();
         let mut first = true;
         let mut last_head: Option<SessionHead> = None;
         loop {
@@ -913,24 +1347,47 @@ async fn canonical_workspace(path: std::path::PathBuf) -> Result<crate::LocalWor
     })
     .await
 }
-async fn audit_filter(
-    workspace: std::path::PathBuf,
-    selection: AuditSelection,
-) -> Result<lattice_session::store::AuditFilter> {
-    Ok(lattice_session::store::AuditFilter {
-        project_store_key: canonical_workspace(workspace).await?.store_key(),
-        session_id: selection.session_id,
-        turn_id: selection.turn_id,
-        method: selection.method,
-        outcome: selection.outcome,
-    })
-}
 async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()> {
     ipc::check_peer(&stream)?;
-    let request = tokio::time::timeout(Duration::from_secs(10), ipc::read::<Request>(&mut stream))
-        .await
-        .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
+    let request = tokio::time::timeout(
+        Duration::from_secs(10),
+        ipc::read_request::<Request>(&mut stream),
+    )
+    .await
+    .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
     let mut writer = ipc::ResponseWriter::default();
+    if let Request::AuthLogin { provider } = request {
+        let auth = super::auth::require_chatgpt(&provider).and_then(|()| {
+            if backend.status().stopping {
+                Err(LocalError::new(
+                    LocalErrorKind::Stopping,
+                    "backend is stopping",
+                ))
+            } else {
+                backend.chatgpt_auth()
+            }
+        });
+        return match auth {
+            Ok(auth) => {
+                let metadata = backend.metadata.clone();
+                super::auth::login::exchange(stream, auth.start_login(), move || {
+                    let metadata = metadata.clone();
+                    Box::pin(async move {
+                        match metadata.refresh_chatgpt().await {
+                            Ok(model_count) => {
+                                super::auth::login::AuthCatalogOutcome::Refreshed { model_count }
+                            }
+                            Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
+                                warning: error.message,
+                            },
+                        }
+                    })
+                })
+                .await
+            }
+            Err(error) => writer.write(&mut stream, &Response::Error(error)).await,
+        };
+    }
     if let Request::Watch { session_id } = request {
         let result = backend.watch(&mut stream, &mut writer, session_id).await;
         #[cfg(test)]
@@ -940,6 +1397,15 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
         }
         return Ok(());
     }
+    let cleanup_after_reply = matches!(
+        &request,
+        Request::Configure {
+            request: ConfigureRequest {
+                session: ConfigureSession::New(_),
+                ..
+            }
+        }
+    );
     let response = if matches!(request, Request::Submit { .. }) {
         let socket = stream.into_std()?;
         let submitter = UnixStream::from_std(socket.try_clone()?)?;
@@ -951,22 +1417,61 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     } else {
         backend.dispatch(request).await
     };
-    writer
+    let cleanup_guard = if cleanup_after_reply {
+        backend.begin_cleanup()
+    } else {
+        None
+    };
+    let write_result = writer
         .write(&mut stream, &response.unwrap_or_else(Response::Error))
-        .await
+        .await;
+    if let Some(guard) = cleanup_guard {
+        backend.spawn_cleanup_drafts(guard);
+    }
+    write_result
 }
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
-/// HOME 原值随后台保存，只在凭据操作中解析配置目录。
+/// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
+    let backend_layout = layout.clone();
+    let tools = crate::turn::default_tool_executor();
+    serve_with_backend(layout, move || {
+        Backend::with_tools(backend_layout, home, tools)
+    })
+    .await
+}
+
+/// 测试后台以空动作替代自动与手动元数据刷新，其余操作沿用正式入口。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test(
+    layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
+) -> Result<()> {
+    let backend_layout = layout.clone();
+    let tools = crate::turn::default_tool_executor();
+    serve_with_backend(layout, move || {
+        let mut backend = Backend::with_tools(backend_layout, home, tools);
+        Arc::get_mut(&mut backend)
+            .expect("unshared test backend")
+            .metadata = super::metadata::MetadataRefresh::without_network();
+        backend
+    })
+    .await
+}
+
+async fn serve_with_backend(
+    layout: crate::StateLayout,
+    build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
+) -> Result<()> {
     let binding_layout = layout.clone();
     let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
     let listener = UnixListener::from_std(listener)?;
-    let backend = Backend::new(layout, home);
+    let backend = blocking(move || Ok(build_backend())).await?;
+    let metadata_task = backend.metadata.start();
     let mut connections = JoinSet::new();
     let mut failure = None;
     loop {
-        let status = backend.status();
-        if status.stopping && status.owners == 0 {
+        if backend.status().stopping && !backend.has_active_work() {
             break;
         }
         tokio::select! {
@@ -980,15 +1485,51 @@ pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>)
         }
     }
     let mut changed = backend.changed.subscribe();
-    while backend.status().owners != 0 {
+    backend.begin_stop();
+    if metadata_task.await.is_err() {
+        failure.get_or_insert_with(internal);
+    }
+    backend.metadata.drain().await;
+    while backend.has_active_work() {
         changed.changed().await.map_err(|_| internal())?;
     }
+    if let Ok(auth) = backend.chatgpt_auth()
+        && let Err(error) = auth.shutdown().await
+    {
+        failure.get_or_insert_with(|| super::auth::error(error));
+    }
     backend.closed.send_replace(true);
+    #[cfg(test)]
+    tests::pause(&backend.gates.listener_close).await;
     drop(listener);
     while connections.join_next().await.is_some() {}
+    #[cfg(test)]
+    let lock_release = Mutex::new(lock(&backend.gates.lock_release).take());
     drop(backend);
-    blocking(move || instance.cleanup()).await?;
+    // socket 先撤下，实例锁随 instance 最后释放；stop 方以实例锁可取得判定退场。
+    let instance = blocking(move || instance.cleanup().map(|()| instance)).await?;
+    #[cfg(test)]
+    tests::pause(&lock_release).await;
+    drop(instance);
     failure.map_or(Ok(()), Err)
+}
+
+/// 告警和单模型配置诊断跨过后台边界前都要遮掉已知凭据。
+pub(super) fn redact_model_candidates(
+    candidates: &mut lattice_llm::ModelCandidates,
+    auth: &lattice_llm::auth::AuthStore,
+) {
+    let redact = |message: &mut String| {
+        *message = crate::ConfigRejection::new(message, Some(auth)).to_string();
+    };
+    for warning in &mut candidates.warnings {
+        redact(&mut warning.message);
+    }
+    for model in &mut candidates.models {
+        if let lattice_llm::Availability::Invalid { reason } = &mut model.availability {
+            redact(reason);
+        }
+    }
 }
 
 #[cfg(test)]

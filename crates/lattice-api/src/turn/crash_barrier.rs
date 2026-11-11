@@ -1,10 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 显式故障产物的提交后停点；marker 仅记录身份和事务序号，不复制正文。
+//! 显式故障产物的提交后停点；marker 仅记录会话、Step 与调用槽位自身标识，不复制正文。
 use super::coordinator::{CoordinatorIoError, CoordinatorStoreIo};
-use lancet_protocol::{InvocationBinding, InvocationId, SessionId, TurnId};
-use lattice_session::store::ChangeSeq;
+use lattice_conversation::{InvocationId, SessionId, TurnId};
+use lattice_session::store::InvocationBinding;
 use serde::Serialize;
 use std::{io::Write, path::PathBuf};
 
@@ -17,7 +17,6 @@ struct Marker {
     step: Option<u32>,
     part: Option<u32>,
     invocation_id: Option<InvocationId>,
-    change_seq: ChangeSeq,
 }
 fn selected(config: &str, name: &str, step: Option<u32>, part: Option<u32>) -> bool {
     config == name
@@ -54,37 +53,24 @@ pub(crate) async fn hit(
     {
         return Ok(());
     }
-    let session_id = io.session_id();
-    let change_seq = io
-        .read(move |read| {
-            let project = read.session(session_id)?.project_store_key;
-            Ok(read.operator_status(&project)?.latest_change)
-        })
-        .await?;
     let marker = Marker {
         barrier,
-        session_id,
+        session_id: io.session_id(),
         turn_id: Some(turn_id),
         current: None,
         step,
         part: binding.map(|b| b.identity.part_ordinal),
         invocation_id: binding.map(|b| b.invocation_id),
-        change_seq,
     };
     stop(marker).await
 }
 
 pub(crate) async fn rewind_hit(
-    io: &CoordinatorStoreIo,
     session: &lattice_session::store::SessionRecord,
 ) -> Result<(), CoordinatorIoError> {
     if std::env::var("LATTICE_TEST_TURN_BARRIER").as_deref() != Ok("rewind_committed") {
         return Ok(());
     }
-    let project = session.project_store_key;
-    let change_seq = io
-        .read(move |read| Ok(read.operator_status(&project)?.latest_change))
-        .await?;
     stop(Marker {
         barrier: "rewind_committed",
         session_id: session.session_id,
@@ -93,7 +79,24 @@ pub(crate) async fn rewind_hit(
         step: None,
         part: None,
         invocation_id: None,
-        change_seq,
+    })
+    .await
+}
+
+pub(crate) async fn configure_hit(
+    session: &lattice_session::store::SessionRecord,
+) -> Result<(), CoordinatorIoError> {
+    if std::env::var("LATTICE_TEST_TURN_BARRIER").as_deref() != Ok("configure_committed") {
+        return Ok(());
+    }
+    stop(Marker {
+        barrier: "configure_committed",
+        session_id: session.session_id,
+        turn_id: None,
+        current: Some(session.current),
+        step: None,
+        part: None,
+        invocation_id: None,
     })
     .await
 }

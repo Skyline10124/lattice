@@ -1,21 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Direct-Local secret discipline: a real protected-file read is refused,
-//! and public sinks plus failure artifacts keep per-run sentinels private.
+//! Direct-Local 秘密保护场景：凭据不进入模型回复或公开查询输出，配置拒绝原因先脱敏再返回，
+//! 失败产物与报告对秘密字面量完整脱敏并保留原始主断言。
 
 mod support;
 
 use std::fs;
 
 use lattice_system_harness::{
-    AssertError, ScenarioEvidence, SessionSendDriver, SlotOutcome, SseScript, failure_dir,
+    AssertError, ScenarioEvidence, SessionSendDriver, SseScript, failure_dir,
     finalize_with_failure_artifacts,
 };
 use serde_json::Value;
 use support::{
     assert_clean_send, cli, direct_world, driver, finish_recorded, finish_scenario, require,
-    sequence, tool_call, tool_result_value, wire_fake_llm,
+    wire_fake_llm,
 };
 
 // Preserve all decoded JSONL fields, including records unknown to the typed
@@ -33,41 +33,17 @@ fn record_jsonl(evidence: &mut ScenarioEvidence, name: &str, bytes: &[u8]) {
     evidence.record_json(name, &Value::Array(events)).unwrap();
 }
 
-/// Prove a prepared protected file reaches the observation policy, the typed
-/// refusal reaches the recovery request, and no public sink exposes its content
-/// or the provider credential. Audit evidence distinguishes policy hiding from
-/// a genuinely missing file even though both look like NotFound to the guest.
+/// 验证录入的 provider 凭据发往模型服务但绝不进入回复或公开查询输出，且配置拒绝诊断对其脱敏。
 #[test]
 fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-secrets",
-        "dl-secret",
-        "[\"observe__workspace\"]",
-        "\n[lancet.workspace]\ndenied_read_patterns = [\"private.txt\"]\n",
-    );
+    let (world, spec) = direct_world("direct-secrets", "dl-secret", "");
     let unique = world.root().file_name().unwrap().to_str().unwrap();
-    let denied_content = format!("sentinel-denied-content-{unique}");
-    // No key prefix, authentication syntax, URL, or 40-character opaque run:
-    // only known-credential redaction can hide this value in the declared name.
+    // 不带密钥前缀、认证语法、URL 或 40 字符随机串：只有按已录入凭据值脱敏才能隐藏它。
     let credential = format!("fixture.{unique}");
     assert!(credential.len() < 40);
-    world
-        .write_project_file("private.txt", &format!("{denied_content}\n"))
-        .expect("write private");
 
-    let server = wire_fake_llm(
-        &world,
-        "dl-secret",
-        sequence(vec![
-            tool_call(
-                "secret-read",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"private.txt"}}"#,
-            ),
-            SseScript::plain("hello"),
-        ]),
-    );
+    let server = wire_fake_llm(&world, "dl-secret", SseScript::plain("hello"));
     world
         .register_key(
             lattice_system_harness::ProviderFixture::chat_completions("dl-secret"),
@@ -75,35 +51,23 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         )
         .unwrap();
     server.expect_api_key(&credential);
-    let mut evidence = ScenarioEvidence::new(
-        &world,
-        &spec.name,
-        [credential.clone(), denied_content.clone()],
-    )
-    .unwrap();
+    let mut evidence = ScenarioEvidence::new(&world, &spec.name, [credential.clone()]).unwrap();
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-secret");
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let turn = send.send("read private.txt").expect("turn");
+        let turn = send.send("say hello").expect("turn");
         evidence.record_command("secrets send", &turn.command);
         record_jsonl(&mut evidence, "send-events", &turn.command.stdout);
         assert_clean_send(&turn).unwrap();
         assert!(turn.command.is_clean_exit(0));
-        assert!(turn.has_completed(), "recovery turn must complete");
+        assert!(turn.has_completed(), "纯文本轮次应正常完成");
+        assert!(
+            !String::from_utf8_lossy(&turn.command.stdout).contains(&credential),
+            "认证凭据不得进入公开回复流"
+        );
         let sid = send.session_id().expect("accepted Session");
         let tid = turn.accepted_turn_id().expect("accepted Turn");
-        let slots = turn.parsed.slots();
-        assert_eq!(
-            slots.len(),
-            1,
-            "protected read must be attempted exactly once"
-        );
-        assert_eq!(slots[0].method, "observe__workspace");
-        assert_eq!(slots[0].outcome, SlotOutcome::Failed);
         let captures = server.captured_requests();
-        assert_eq!(captures.len(), 2, "refusal recovery must reach provider");
-        let refusal = tool_result_value(&captures[1]).expect("recovery tool result envelope");
-        assert_eq!(refusal["error"]["code"], -32003);
-        assert_eq!(refusal["error"]["message"], "not_found: 'private.txt'");
+        assert_eq!(captures.len(), 1, "正常轮次应向 provider 发送一次请求");
 
         let mut query = |name: &str, args: &[&str]| -> Value {
             let output = cli(&world, &spec, args);
@@ -129,37 +93,6 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         let log = query("session-log", &["--json", "session", "log", sid]);
         assert!(log.is_object(), "session log root object");
         assert!(!log["nodes"].as_array().expect("session nodes").is_empty());
-        let audit = query(
-            "audit-query",
-            &["--json", "audit", "query", "--session", sid],
-        );
-        assert!(audit.is_object(), "audit query root object");
-        let rows = audit["rows"].as_array().expect("audit rows");
-        assert_eq!(rows.len(), 1, "audit must contain the protected read");
-        let row = &rows[0];
-        assert_eq!(row["binding"]["method"], "observe__workspace");
-        assert_eq!(row["binding"]["session_id"], sid);
-        assert_eq!(row["binding"]["turn_id"], tid);
-        assert_eq!(row["state"]["state"], "terminal");
-        assert_eq!(row["state"]["outcome"], "failed");
-        assert_eq!(row["state"]["evidence"]["kind"], "recorded");
-        let denials = row["state"]["evidence"]["value"]["denied"]["denied"]
-            .as_array()
-            .expect("recorded host denials");
-        assert_eq!(denials.len(), 1);
-        assert_eq!(
-            denials[0]["reason"], "read_denied",
-            "protected file must reach the read policy"
-        );
-        let replay = query(
-            "audit-replay",
-            &["--json", "audit", "replay", "--session", sid, "--turn", tid],
-        );
-        assert!(replay.is_object(), "audit replay root object");
-        assert_eq!(replay["calls"].as_array().expect("replay calls"), rows);
-        let status = query("lancet-status", &["--json", "lancet", "status"]);
-        assert!(status.is_object(), "lancet status root object");
-        assert_eq!(status["recent"].as_array().expect("recent calls").len(), 1);
         let detail = query("session-turn", &["--json", "session", "turn", tid]);
         assert!(detail.is_object(), "session turn root object");
         assert!(!detail["steps"].as_array().expect("turn steps").is_empty());
@@ -185,7 +118,8 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
         for (output, reason) in [(&rj, &rj.stdout), (&rt, &rt.stderr)] {
             assert!(output.is_clean_exit(2), "configuration rejection exits 2");
             assert!(
-                String::from_utf8_lossy(reason).contains("declares '[REDACTED]'"),
+                String::from_utf8_lossy(reason)
+                    .contains("invalid value `[REDACTED]` for `name` in [agent]"),
                 "rejection reason must show the declared name redacted"
             );
         }
@@ -212,7 +146,7 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
 #[test]
 fn direct_secrets_failure_bundle_redacts_sentinels() {
     let driver = driver();
-    let (world, spec) = direct_world("direct-secrets-bundle", "dl-sec-b", "[]", "");
+    let (world, spec) = direct_world("direct-secrets-bundle", "dl-sec-b", "");
     let unique = world.root().file_name().unwrap().to_str().unwrap();
     let credential = format!("bundle-auth.{unique}");
     let fake_key = format!("sk-reply-fixture-{unique}");

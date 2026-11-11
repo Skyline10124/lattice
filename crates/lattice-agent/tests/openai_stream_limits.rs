@@ -26,7 +26,7 @@ struct OpenAiFrames {
 impl LlmClient for OpenAiFrames {
     async fn stream_chat(
         &self,
-        _: ChatRequest,
+        request: ChatRequest,
         control: lattice_llm::StreamControl,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let mut parser = OpenAiSseParser::new();
@@ -36,7 +36,10 @@ impl LlmClient for OpenAiFrames {
             stream::iter(parser.parse_chunk(None, &frame))
         }));
         Ok(lattice_llm::testing::assemble_reply_stream(
-            Some(lattice_conversation::ProviderOrigin::OpenAiCompatible),
+            Some(lattice_conversation::ReplayOrigin {
+                protocol: lattice_conversation::Protocol::ChatCompletions,
+                provider_id: request.target.model.provider().clone(),
+            }),
             input,
             control,
         ))
@@ -78,13 +81,12 @@ async fn run(frames: Vec<String>) -> (ModelStepAttempt, usize) {
     let attempt = driver
         .run(
             &ModelStepRequest {
+                effort: None,
                 system_prompt: None,
                 history: vec![],
-                model: "test-model".to_string(),
-                provider: Some("openai".to_string()),
+                model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                provider: lattice_conversation::ProviderId::parse("openai").unwrap(),
                 tools: vec![],
-                temperature: None,
-                max_tokens: None,
                 cancel: None,
                 deadline: None,
                 session_id: None,
@@ -103,6 +105,10 @@ async fn order_f13_interleaved_legal_arguments_complete() {
         let mut frames = vec![];
         if !late_metadata {
             metadata(&mut frames, a);
+        } else {
+            frames.push(delta(
+                json!({"tool_calls":[{"index":a,"id":format!("call-{a}")}]}),
+            ));
         }
         arguments(&mut frames, a, &payload[..8]);
         metadata(&mut frames, b);
@@ -133,6 +139,8 @@ async fn order_f14_interleaved_limit_stops_at_crossing_fragment() {
         let mut frames = vec![];
         if !late_metadata {
             metadata(&mut frames, 9);
+        } else {
+            frames.push(delta(json!({"tool_calls":[{"index":9,"id":"call-9"}]})));
         }
         arguments(&mut frames, 9, &payload[..600_000]);
         metadata(&mut frames, 2);

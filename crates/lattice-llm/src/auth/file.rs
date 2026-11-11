@@ -22,11 +22,7 @@ static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 pub(super) struct Directory(File);
 
 fn effective_uid() -> u32 {
-    unsafe extern "C" {
-        fn geteuid() -> u32;
-    }
-    // Linux 的 uid_t 是 u32；geteuid 无参数、无指针访问。
-    unsafe { geteuid() }
+    rustix::process::geteuid().as_raw()
 }
 
 fn check_metadata(meta: &fs::Metadata, directory: bool, owner: u32) -> Result<(), AuthError> {
@@ -138,11 +134,38 @@ impl Directory {
     }
 
     pub(super) fn write(&self, document: &format::Document) -> Result<(), AuthError> {
+        self.write_with_directory_sync(document, File::sync_all)
+    }
+
+    fn write_with_directory_sync(
+        &self,
+        document: &format::Document,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+    ) -> Result<(), AuthError> {
+        self.write_with_hooks(document, sync_directory, || Ok(()), |_| {})
+    }
+
+    pub(super) fn write_guarded<G, E: From<AuthError>>(
+        &self,
+        document: &format::Document,
+        before_publish: impl FnOnce() -> Result<G, E>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<(), E> {
+        self.write_with_hooks(document, File::sync_all, before_publish, published)
+    }
+
+    fn write_with_hooks<G, E: From<AuthError>>(
+        &self,
+        document: &format::Document,
+        sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
+        before_publish: impl FnOnce() -> Result<G, E>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<(), E> {
         let mut bytes = Zeroizing::new(Vec::new());
         serde_json::to_writer(&mut *bytes, document)
             .map_err(|_| AuthError::Internal("cannot encode credentials"))?;
         if bytes.len() > MAX_FILE_BYTES {
-            return Err(AuthError::InvalidFile("file exceeds 1 MiB"));
+            return Err(AuthError::InvalidFile("file exceeds 1 MiB").into());
         }
         let mut temporary = self.temporary()?;
         let mut file = &temporary.file;
@@ -152,15 +175,21 @@ impl Directory {
             .map_err(|error| AuthError::io("sync temporary credential file", error))?;
         // 发布前再次检查现有目标；不通过替换绕过权限或链接拒绝。
         self.current()?;
+        let mut publication = before_publish()?;
         renameat(&self.0, &temporary.name, &self.0, "auth.json")
             .map_err(|error| AuthError::io("replace credential file", error))?;
         temporary.published = true;
-        self.0.sync_all().map_err(|error| {
-            AuthError::io(
-                "sync directory after replacement (file may already have changed)",
-                error,
-            )
-        })
+        published(&mut publication);
+        // 发布事实已确定，目录 fsync 不再占用取消与发布之间的门闩。
+        drop(publication);
+        sync_directory(&self.0)
+            .map_err(|error| {
+                AuthError::io(
+                    "sync directory after replacement (file may already have changed)",
+                    error,
+                )
+            })
+            .map_err(E::from)
     }
 
     fn temporary(&self) -> Result<Temporary<'_>, AuthError> {
@@ -218,6 +247,86 @@ impl Drop for Temporary<'_> {
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn guarded_write_orders_hooks_and_releases_guard_before_directory_sync() {
+        use crate::auth::UpdateError;
+        use std::sync::{
+            Mutex,
+            atomic::{AtomicBool, Ordering},
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = Directory::open(root.path(), false).unwrap().unwrap();
+        let mut document = format::Document::default();
+        directory.write(&document).unwrap();
+        document.providers.insert(
+            "openai".into(),
+            format::Credential::ApiKey {
+                key: crate::auth::Secret("local-test-key".into()),
+            },
+        );
+        let result: Result<(), UpdateError> = directory.write_guarded(
+            &document,
+            || Err::<(), _>(UpdateError::Conflict),
+            |_| panic!("被拒绝的写入不能发布"),
+        );
+        assert!(matches!(result, Err(UpdateError::Conflict)));
+        assert!(directory.read().unwrap().providers.is_empty());
+
+        let publication = Mutex::new(());
+        let published = AtomicBool::new(false);
+        let result: Result<(), UpdateError> = directory.write_with_hooks(
+            &document,
+            |_| {
+                assert!(published.load(Ordering::SeqCst));
+                assert!(publication.try_lock().is_ok());
+                Err(std::io::Error::other("test directory sync failure"))
+            },
+            || Ok(publication.lock().unwrap()),
+            |_| {
+                assert!(publication.try_lock().is_err());
+                assert!(directory.read().unwrap().providers.contains_key("openai"));
+                published.store(true, Ordering::SeqCst);
+            },
+        );
+        assert!(matches!(result, Err(UpdateError::Storage(_))));
+        assert!(directory.read().unwrap().providers.contains_key("openai"));
+    }
+
+    #[test]
+    fn directory_sync_failure_reports_uncertainty_after_the_replacement_is_visible() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = Directory::open(root.path(), false).unwrap().unwrap();
+        let mut document = format::Document::default();
+        directory.write(&document).unwrap();
+        document.providers.insert(
+            "openai".into(),
+            format::Credential::ApiKey {
+                key: super::super::Secret("replacement-test-secret".into()),
+            },
+        );
+        let error = directory
+            .write_with_directory_sync(&document, |_| {
+                Err(std::io::Error::other("directory sync failed"))
+            })
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            AuthError::Io {
+                operation: "sync directory after replacement (file may already have changed)",
+                ..
+            }
+        ));
+        assert!(matches!(directory.read().unwrap().providers.get("openai"),
+            Some(format::Credential::ApiKey { key }) if key.0 == "replacement-test-secret"));
+        assert_eq!(
+            fs::metadata(root.path().join("auth.json")).unwrap().mode() & 0o777,
+            0o600
+        );
+    }
 
     #[test]
     fn ownership_requires_the_effective_user_for_both_files_and_directories() {

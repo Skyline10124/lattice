@@ -4,23 +4,41 @@
 //! LATTICE LLM vocabulary and functional call facade.
 
 pub mod auth;
+mod availability;
+pub use availability::{Availability, ConfigurationRequirement};
 mod client;
-mod connection;
-pub use connection::{ConnectionMaterial, LlmConnection, load_tls_roots_der};
-mod endpoints;
+mod tls;
+pub use tls::{load_tls_roots_der, usable_tls_roots_der};
+mod gateway;
+pub use gateway::{GatewayTurn, PrepareError, RequestGateway, ResolvedRequest};
+pub use protocol::Protocol;
 mod logging;
+mod models;
+pub use models::{
+    ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning,
+    model_candidates, model_supported_efforts,
+};
 pub(crate) mod metadata;
-pub use metadata::{MODELS_URL, MetadataError, fetch_snapshot};
+pub use metadata::{
+    ChatgptCatalogState, MODELS_URL, MetadataError, MetadataRefreshControl, fetch_snapshot,
+    metadata_auto_refresh_enabled,
+};
 pub mod protocol;
 pub(crate) mod provider;
-pub use provider::{ModelRef, ModelRefError};
+pub use lattice_conversation::{
+    MAX_MODEL_ID_BYTES, MAX_PROVIDER_ID_BYTES, ModelId, ModelIdError, ModelRef, ModelRefError,
+    ProviderId, ProviderIdError,
+};
+mod reasoning;
+pub use reasoning::{EffortPolicy, select_effort};
 mod reply;
 mod reply_stream;
-mod router;
 pub mod sse;
 mod stub;
 #[cfg(test)]
 mod test_reply;
+#[cfg(test)]
+mod test_tls;
 mod transport;
 mod types;
 
@@ -30,11 +48,7 @@ pub use reply::{
     AccumulatedReply, LiveDelta, ReplyOutcome, ReplyProtocolError, ReplyStop, StreamStop,
 };
 pub use reply_stream::{CONTROL_POLL_INTERVAL, StreamControl};
-pub use router::{
-    CredentialStatus, MISSING_OPENAI_COMPATIBLE_MODEL_HINT, ModelRouter, ProviderKind,
-    ResolvedModel, credential_env_vars,
-};
-pub use stub::{LlmError, LlmStream, StubLlm, stream};
+pub use stub::{LlmError, LlmStream, StubLlm};
 pub use transport::{MAX_DIAGNOSTIC_CHARS, bound_diagnostic};
 pub use types::{
     AttemptReport, ChatRequest, LlmEvent, ModelTarget, ProviderFailure, ToolDefinition,
@@ -46,39 +60,3 @@ pub mod testing;
 // Expose the real parser only for cross-crate streaming boundary tests.
 #[cfg(feature = "test-utils")]
 pub use protocol::chat_completions::OpenAiSseParser;
-
-#[cfg(test)]
-mod test_env {
-    use std::sync::{LazyLock, Mutex};
-
-    static ENV_MUTEX: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
-
-    pub(crate) fn with_env_vars(vars: &[(&str, Option<&str>)], f: impl FnOnce()) {
-        let _lock = ENV_MUTEX.lock().unwrap_or_else(|error| error.into_inner());
-        let previous: Vec<(&str, Option<String>)> = vars
-            .iter()
-            .map(|(key, _)| (*key, std::env::var(key).ok()))
-            .collect();
-
-        for (key, value) in vars {
-            set_env_var(key, *value);
-        }
-
-        f();
-
-        for (key, value) in previous {
-            set_env_var(key, value.as_deref());
-        }
-    }
-
-    fn set_env_var(key: &str, value: Option<&str>) {
-        // SAFETY: Every environment mutation in this test binary uses ENV_MUTEX,
-        // and each mutated key is only observed inside the protected closure.
-        unsafe {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-    }
-}

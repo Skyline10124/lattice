@@ -8,7 +8,7 @@ use crate::reply::{PartKind, StringPatch};
 pub use crate::reply_stream::assemble_reply_stream;
 use crate::{LlmStream, ProviderFailure, StreamControl, StreamStop};
 use futures::{StreamExt, stream};
-use lattice_conversation::{MessagePart, MessageSemantic, ProviderOrigin, UnboundToolCall};
+use lattice_conversation::{MessagePart, MessageSemantic, ReplayOrigin, UnboundToolCall};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Clone)]
@@ -156,14 +156,14 @@ impl ScriptParser {
     }
 }
 
-pub fn script_stream(events: Vec<ScriptEvent>, control: StreamControl) -> LlmStream {
+pub fn script_stream(
+    origin: ReplayOrigin,
+    events: Vec<ScriptEvent>,
+    control: StreamControl,
+) -> LlmStream {
     let mut parser = ScriptParser::default();
     let input = stream::iter(events).flat_map(move |event| stream::iter(parser.parse(event)));
-    assemble_reply_stream(
-        Some(ProviderOrigin::OpenAiCompatible),
-        Box::pin(input),
-        control,
-    )
+    assemble_reply_stream(Some(origin), Box::pin(input), control)
 }
 
 /// 把夹具的有序部件转成输入脚本；不允许注入累积器的完成结局。

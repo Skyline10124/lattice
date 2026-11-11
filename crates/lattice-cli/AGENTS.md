@@ -1,34 +1,45 @@
 # lattice-cli 工作指引
 
-## 职责
+维护 `lattice` 二进制入口、命令行解析、文本与 JSONL 渲染及退出码，经 `lattice-api::local::LocalClient` 与 `lattice-tui` 为用户和自动化脚本提供命令行界面。
 
-维护 `lattice` 二进制入口、clap 命令与分派、文本和 JSONL 渲染、日志与退出码。Session 操作、凭据与模型命令通过公开 LocalClient 交给后台；CLI 不读取 profile、provider 配置、模型元数据或凭据，也不在前端拥有 Turn 执行任务。
+## 模块
 
-- `main.rs`：命令、全局参数、分派和退出处理。
-- `commands/run.rs`：保留提交身份与 agent、模型、推理档位的选择，经 LocalClient 的具体交互句柄 LocalTurn 发起提交/观察/取消意图，渲染回执、会话头、对话条目、生成中的文字与 usage，处理信号和退出选择；共同编排见[客户端接口](../../docs/architecture/session.md#实现模块与公开操作)。
-- `commands/session.rs`：经后台执行会话操作、发送、查询与取消；执行者消失的 Turn 停在已写入的进度，新提交和会话写操作直接进行。`session usage` 渲染后台给出的逐轮用量与费用估算。
-- `lattice auth` 与 `lattice models`：只负责界面，经后台录入与删除 key、SIWC 登录与登出、查询凭据状态与模型候选、刷新元数据，见[凭据命令](../../docs/architecture/llm.md#凭据命令)。
-- `commands/daemon.rs`：serve/status/stop 入口与状态根解析；自动启动使用 API 的具体 LocalClient，后台继承启动它的进程的环境，见[配置来源与后台启动](../../docs/architecture/session.md#配置来源与后台启动)。
-- audit/status 经 Local IPC 查询后台，不在 CLI 直接打开会话库或组成 runtime。
+| 模块 | 负责 |
+| --- | --- |
+| `src/main.rs` | `lattice` 入口、`clap` 命令定义、参数解析错误脱敏、日志初始化与进程退出码 |
+| `src/commands/mod.rs` | 子命令模块导出 |
+| `src/commands/run.rs` | 请求身份预生成与输出、`configure` 会话创建/设置更新、`LocalTurn` 提交/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
+| `src/commands/session.rs` | `session` 子命令（`send`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）参数处理、后台调用与用量费用渲染 |
+| `src/commands/daemon.rs` | `daemon serve`、`status`、`stop` 入口与私有状态根解析 |
+| `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、无回显终端或标准输入读取密钥、SIWC 登录浏览器与粘贴交互（`login.rs`）、可唤醒输入线程（`login/input.rs`）及信号下终端模式恢复（`terminal.rs`） |
+| `src/commands/models.rs` | `models` 候选列表渲染、配置问题 stderr 提示与 `models refresh` |
 
-## 上位文档
+## 先读
 
-修改前读取[会话合同](../../docs/architecture/session.md)、[模型接入合同](../../docs/architecture/llm.md)、[存储后台边界](../../docs/architecture/storage.md#本地后台与访问边界)、[LANCET 操作员接口](../../docs/architecture/lancet.md#操作员接口)、[TUI 分工](../../docs/architecture/tui.md)和[测试工程](../../docs/development/testing.md)。提交接线重点核对[配置冻结](../../docs/architecture/session.md#执行配置冻结)、[profile 副本](../../docs/architecture/session.md#会话的-profile-副本)与[请求接受](../../docs/architecture/session.md#请求接受)；找回、查询和重连分别核对[请求身份与找回](../../docs/architecture/session.md#请求身份与找回)及[观察边界](../../docs/architecture/session.md#观察边界)。运行配方见[验证指南](../../docs/development/validation-guide.md)。
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [会话与 Turn](../../docs/architecture/session/README.md)、[实现模块与公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作)、[工程规范](../../docs/development/engineering.md) |
+| 提交、配置拒绝与会话设置 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md#请求接受)、[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)、[会话设置](../../docs/architecture/session/settings.md#会话设置) |
+| 找回、重连、取消与后台启停 | [重开、取消与未完成状态](../../docs/architecture/session/recovery.md)、[本地后台与访问边界](../../docs/architecture/storage.md#本地后台与访问边界) |
+| `auth` 与 `models` 子命令 | [凭据与 Sign in with ChatGPT](../../docs/architecture/llm/credentials.md#凭据命令)、[模型引用与元数据](../../docs/architecture/llm/models.md#模型候选)、[provider 配置](../../docs/architecture/llm/providers.md#endpoint-的来源) |
+| `tui` 分派 | [TUI 交互与视觉](../../docs/architecture/tui/README.md#组件接线) |
+| 场景运行与验收步骤 | [测试工程](../../docs/development/testing.md)、[验证指南](../../docs/development/validation-guide.md) |
 
-## 环境与输出边界
+## 约束
 
-- CLI 不加载工作区 `.env`，也不从环境变量读取 key、endpoint 或模型。
-- key 只从不回显的终端或标准输入读取，不作为命令行参数，不进入日志、错误、文本或 JSONL 输出；SIWC 登录只显示授权 URL 与结果。
-- `--model` 与 `--effort` 只检查写法（`<provider>/<model>` 与档位名），provider、模型与档位是否可用由后台在接受前判定。
-- 流式命令的 JSONL 只含所提交或所跟的那一轮，记录只有 `submit`、`cancel`、`head`、`entry`、`text`、`connection` 与结构化 `error` 七种，见[公开操作](../../docs/architecture/session.md#实现模块与公开操作)；stdout 不混入人类状态行。人类可读输出在一轮结束时打印一次结局摘要，等级等面向用户的文字用稳定的小写词，不用 `Debug` 输出。保留 0/1/2 退出契约；查询成功、Turn 结局和正文读取分别核验。
-- 提交前先生成请求身份（新会话还要生成 SessionId）并输出，再把请求连同用户选的 agent、模型与推理档位（`--agent`、`--model`、`--effort`，都可以不选）提交一次；找回经按 TurnId 查询，与只读查询一样只使用原持久事实，无需当前凭据。前端保留用户输入与退出选择，接受和取消交接遵循会话合同，不以重复补发代替后台接管保证。
-- 观察 idle 由客户端库管理，回执等待由 LocalTurn 管理，CLI 只消费诊断并选择退出；调整时分别核对客户端等待与产品 deadline。新增命令的只读查询使用公开读取入口，不接提交路径，不建前端执行旁路。
-- `pre-stream` 错误分类与固定正文读取失败仍须有精确退出码回归，不能只核对可见 TurnOutcome。
-- 配置拒绝的 `message` 取自 API 的 `ConfigRejection`，已经脱敏；CLI 不把它换成固定文本，也不另拼未脱敏的原始错误；退出 2。
+- CLI 保持配置与环境读取中立，把会话、凭据与模型操作经 `LocalClient` 交给后台执行；自动拉起后台时直接沿用 `LocalClient` 启动路径，见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)与 [endpoint 的来源](../../docs/architecture/llm/providers.md#endpoint-的来源)。
+- API key 只从无回显终端或标准输入读取，并在命令行解析错误处做脱敏拦截；SIWC 登录只输出授权 URL 与最终结果，使敏感材料隔离于命令行参数、日志、错误与标准输出，见[凭据命令](../../docs/architecture/llm/credentials.md#凭据命令)。
+- `--model` 与 `--effort` 在前端只校验 `<provider>/<model>` 与档位名语法；提交前先生成并输出请求身份（新会话同时生成 `SessionId`），新建会话或显式传入 `--agent`、`--model`、`--effort` 时先调用 `configure` 再发出 `submit`，找回与历史读取统一走后台公开只读查询，见[会话设置](../../docs/architecture/session/settings.md#会话设置)与[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)。
+- 流式命令的 `--json` stdout 输出当前轮的 `configure`、`submit`、`cancel`、`head`、`entry`、`text`、`connection`、`error` 八种 JSONL 记录；人类可读模式在档位被自动调整时写一行提示并在轮末打印一次结局摘要，面向用户的等级等字段使用稳定的小写词，见[实现模块与公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作)。
+- CLI 消费 `LocalClient` 的观察 idle 诊断、`LocalTurn` 的回执等待结果与 `ConfigRejection` 已脱敏的单行 `message`，精确映射 `0`/`1`/`2` 退出码（配置拒绝原样输出 `message` 并以 `2` 退出），见[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)与[输入与传输限制](../../docs/architecture/session/concurrency.md#输入与传输限制)。
+- 本 crate 之外：全屏交互界面由 `lattice-tui` 负责；profile、provider 配置、模型元数据与凭据的读取管理、连接分帧及持久 Turn 执行由 `lattice-api` 和 `lattice-llm` 负责；全系统黑盒与 release 验收由 `lattice-system-harness` 负责。
 
-## 验证入口
+## 验证
 
-- 运行 `cargo test -p lattice-cli`；改了命令时，测试要覆盖参数解析与 help 输出。
-- 改了 Turn 的渲染时，再运行 API 的流式测试与外部 harness 场景。
-- 改了配置来源的负向检查时，运行 harness 场景 `fast_env_boundary`；退出码用黑盒方式断言。
-- release 与端到端场景归外部 harness，按测试合同执行。
+| 改动 | 运行 |
+| --- | --- |
+| 任何改动 | `cargo test -p lattice-cli` |
+| 修改子命令、参数冲突或公开帮助面 | `cargo test -p lattice-cli`（常规标志类型由 `clap` 结构保证，单测锁定参数冲突与脱敏），构建 `lattice` 后运行 `cargo test -p lattice-system-harness --test fast_cli_help` |
+| 修改流前拒绝、正文读取或退出码映射 | 在 `cargo test -p lattice-cli` 中同时核对 `pre-stream` 错误分类、正文读取失败与 `TurnOutcome` 的精确 `0`/`1`/`2` 退出码 |
+| 修改环境与配置来源隔离 | 构建 `lattice` 后运行 `cargo test -p lattice-system-harness --test fast_env_boundary` |
+| 修改 Turn 流式渲染或交互流程 | `cargo test -p lattice-api`，并按影响运行对应的 `lattice-system-harness` 场景 |

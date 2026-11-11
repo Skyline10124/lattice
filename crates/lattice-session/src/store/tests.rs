@@ -3,15 +3,12 @@
 
 use super::codec::*;
 use super::*;
-use lancet_protocol::{
-    CellEvidenceTriple, CepError, CepErrorCode, CepErrorData, InvocationId, ModelAttemptKey,
-    Retriability, SessionId, TurnId,
-};
 use lattice_conversation::{
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin,
-    TokenUsage, ToolResultOutcome, UnboundToolCall,
+    CostEstimate, InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey,
+    ModelId, NativeMessage, OpaqueProviderState, Protocol, ProviderId, SessionId, TokenUsage,
+    ToolResultOutcome, TurnId, UnboundToolCall, UsageCompleteness,
 };
-use lattice_store::{ProjectStoreKey, StateLayout};
+use lattice_store::StateLayout;
 use redb::ReadableTable;
 use serde_json::{Value, json};
 use std::{fs, os::unix::fs::symlink, sync::Arc};
@@ -30,7 +27,7 @@ fn oversized_complete_replies_are_rejected_without_partial_records() {
     };
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     for registration in [true, false] {
@@ -123,7 +120,7 @@ fn reply_total_includes_names_and_ids_with_an_exact_boundary_control() {
     use lattice_conversation::MAX_TOOL_CALL_ARGUMENTS_BYTES;
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     let input = |extra| {
@@ -191,8 +188,8 @@ fn iid(n: u64) -> InvocationId {
     InvocationId::parse(&format!("00000000-0000-4000-8000-{n:012x}")).unwrap()
 }
 
-fn project(n: u8) -> ProjectStoreKey {
-    ProjectStoreKey::from_canonical_path_bytes(&[b'/', n])
+fn project(n: u8) -> ProjectPath {
+    ProjectPath::from_bytes(format!("/project-{n}")).expect("构造测试项目路径")
 }
 
 fn key(t: TurnId, s: u32, a: u32) -> ModelAttemptKey {
@@ -210,24 +207,38 @@ fn step(t: TurnId, ordinal: u32) -> StepKey {
     }
 }
 
+fn agent(name: &str) -> AgentName {
+    AgentName::parse(name).unwrap()
+}
+
+fn provider(id: &str) -> ProviderId {
+    ProviderId::parse(id).unwrap()
+}
+
+fn model(id: &str) -> ModelId {
+    ModelId::parse(id).unwrap()
+}
+
+fn timeout(secs: u64) -> TurnTimeout {
+    TurnTimeout::new(secs).unwrap()
+}
+
 fn config() -> FrozenTurnConfig {
     FrozenTurnConfig {
-        agent_name: "alpha".into(),
-        model: "model".into(),
-        provider: "openai".into(),
+        agent_name: agent("alpha"),
+        model: model("model"),
+        provider: provider("openai"),
+        effort: None,
         system_prompt: None,
-        catalog: ToolCatalogSnapshot::new(
-            "build".into(),
-            vec![ToolCatalogEntry {
-                name: "observe__workspace".into(),
-                descriptor_identity: "a".repeat(64),
-                description: "observe".into(),
-                input_schema: json!({"type":"object"}),
-            }],
-        )
+        catalog: ToolCatalogSnapshot::new(vec![ToolCatalogEntry {
+            name: "observe__workspace".into(),
+            tool_identity: "lancet-node:observe@v1".into(),
+            description: "observe".into(),
+            input_schema: json!({"type":"object"}),
+        }])
         .unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: 300,
+            timeout_secs: TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 3,
         },
@@ -235,21 +246,45 @@ fn config() -> FrozenTurnConfig {
 }
 
 fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
+    let cfg = config();
     AcceptTurn {
-        session: AcceptSession::New { id: s },
+        session_id: s,
         turn_id: t,
-        project_store_key: project(1),
+        project_path: project(1),
         input: "用户问题🌳".into(),
-        config: config(),
+        settings_version: SessionSettings::for_test(&cfg).version().unwrap(),
+        config: cfg,
         accepted_at: now(),
-        agent_selection: AgentSelection::Explicit,
     }
+}
+
+// 通用夹具在首次写入前自动创建会话并对齐当前设置版本；设置本身的校验与拒绝测试直接调用领域入口。
+fn accept_prepared(
+    db: &SessionStore,
+    lock: &SessionExecutionLock,
+    mut input: AcceptTurn,
+) -> Result<AcceptedTurn> {
+    if db.begin_read()?.find_session(input.session_id)?.is_none()
+        && db.begin_read()?.turn_node(input.turn_id)?.is_none()
+        && lock.session_id() == input.session_id
+    {
+        db.create_session(
+            lock,
+            input.project_path.clone(),
+            SessionSettings::for_test(&input.config),
+            input.accepted_at,
+        )?;
+    }
+    if let Ok(settings) = db.begin_read()?.session_settings(input.session_id) {
+        input.settings_version = settings.version()?;
+    }
+    db.accept_turn(lock, input)
 }
 
 fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "openai".into(),
+        provider_id: provider("openai"),
     }
 }
 
@@ -273,16 +308,21 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
         }));
     }
     CompleteReply {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: k,
         origin: origin(),
         usage: Some(TokenUsage {
-            prompt_tokens: 2,
-            completion_tokens: 3,
-            total_tokens: 5,
+            input: Some(2),
+            output: Some(3),
+            ..Default::default()
         }),
         message: NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(AttemptOrigin {
+                protocol: Protocol::ChatCompletions,
+                ..origin()
+            }),
             parts,
         ),
     }
@@ -290,6 +330,8 @@ fn reply(k: ModelAttemptKey, count: usize) -> CompleteReply {
 
 fn stopped(k: ModelAttemptKey, cause: StopCause) -> AttemptStopped {
     AttemptStopped {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key: k,
         origin: origin(),
         usage: None,
@@ -319,7 +361,7 @@ fn running(
     base: u64,
 ) -> (SessionExecutionLock, RegisteredCalls) {
     let lock = db.try_lock_session(s).unwrap();
-    db.accept_turn(&lock, accept(s, t)).unwrap();
+    accept_prepared(db, &lock, accept(s, t)).unwrap();
     db.start_request(&lock, key(t, 0, 0), origin(), now())
         .unwrap();
     let calls = db
@@ -333,39 +375,26 @@ fn running(
     (lock, calls)
 }
 
-fn terminal(
-    binding: &lancet_protocol::InvocationBinding,
-    code: Option<CepErrorCode>,
-) -> InvocationTerminal {
-    let receipt = match code {
-        None => Ok(json!({"secret-result":42})),
-        Some(code) => {
-            let mut e = CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "private-error",
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    operation: "internal".into(),
-                    detail: None,
-                }),
-                Retriability::Transient,
-            );
-            e.code = code;
-            Err(e)
-        }
-    };
-    prepare_terminal(
-        binding,
-        receipt,
-        CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-    )
-    .unwrap()
+fn ok_reply() -> ToolReply {
+    ToolReply::Succeeded(json!({"secret-result": 42}))
+}
+
+fn failed_reply(code: &str) -> ToolReply {
+    ToolReply::Failed(ToolError {
+        code: code.into(),
+        message: "private-error".into(),
+    })
+}
+
+fn terminal(binding: &InvocationBinding, reply: ToolReply) -> InvocationTerminal {
+    prepare_terminal(binding, reply)
 }
 
 fn finish(
     db: &SessionStore,
     lock: &SessionExecutionLock,
-    binding: &lancet_protocol::InvocationBinding,
-    code: Option<CepErrorCode>,
+    binding: &InvocationBinding,
+    reply: ToolReply,
 ) {
     let started = db.start_invocation(lock, binding, now()).unwrap();
     assert_eq!(started.binding(), binding);
@@ -373,21 +402,11 @@ fn finish(
         lock,
         TerminalInput {
             invocation_id: binding.invocation_id,
-            terminal: terminal(binding, code),
+            terminal: terminal(binding, reply),
         },
         now(),
     )
     .unwrap();
-}
-
-fn filter(p: ProjectStoreKey) -> AuditFilter {
-    AuditFilter {
-        project_store_key: p,
-        session_id: None,
-        turn_id: None,
-        method: None,
-        outcome: None,
-    }
 }
 
 fn corrupt_json(
@@ -433,6 +452,67 @@ fn structured_result_wire() {
 }
 
 #[test]
+fn domain_types_v9_wire() {
+    let settings_wire = json!({
+        "profile": {
+            "agent_name": "coder",
+            "description": "coding agent",
+            "default_model": "openai/org/gpt-5",
+            "default_effort": "medium",
+            "timeout_secs": 300,
+            "retry": {
+                "max_retries": 3,
+                "initial_delay_ms": 500,
+                "max_delay_ms": 3000
+            }
+        },
+        "system_prompt": "系统提示",
+        "model": "openai/org/gpt-5",
+        "effort": "medium"
+    });
+    let settings: SessionSettings = serde_json::from_value(settings_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&settings).unwrap(), settings_wire);
+    let encoded_settings = encode(&settings).unwrap();
+    assert_eq!(&encoded_settings[..4], &9_u32.to_be_bytes());
+    assert_eq!(
+        decode_session_settings("s1", &encoded_settings).unwrap(),
+        settings
+    );
+
+    let user_wire = json!({
+        "kind": "user_message",
+        "parent": 0,
+        "turn_id": "00000000-0000-4000-8000-000000000001",
+        "accepted_at": "2026-09-27T00:00:00Z",
+        "agent_name": "coder",
+        "model": "org/gpt-5",
+        "provider": "openai",
+        "effort": "medium",
+        "limits": {
+            "timeout_secs": 300,
+            "max_model_steps": 32,
+            "max_model_attempts": 4
+        },
+        "config_digest": "cd".repeat(32),
+        "message": {
+            "role": "user",
+            "provider_origin": null,
+            "parts": [
+                {
+                    "semantic": { "text": { "text": "hello" } },
+                    "replay_state": null
+                }
+            ]
+        }
+    });
+    let user: Node = serde_json::from_value(user_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&user).unwrap(), user_wire);
+    let encoded_user = encode(&user).unwrap();
+    assert_eq!(&encoded_user[..4], &9_u32.to_be_bytes());
+    assert!(decode::<Node>("nodes", "n1", &encoded_user).unwrap() == user);
+}
+
+#[test]
 fn creation_and_legacy() {
     let dir = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(dir.path());
@@ -441,10 +521,11 @@ fn creation_and_legacy() {
         Err(StoreError::NotInitialized { .. })
     ));
     assert!(!layout.lattice_root().exists());
-    fs::create_dir_all(layout.project_dir(&project(9))).unwrap();
+    let legacy_proj = layout.projects_dir().join("p9");
+    fs::create_dir_all(&legacy_proj).unwrap();
     let old = layout.lattice_root().join("sessions.git");
     fs::write(&old, b"old").unwrap();
-    let inv = layout.project_store(&project(9), "invocations.git");
+    let inv = legacy_proj.join("invocations.git");
     symlink("missing", &inv).unwrap();
     for create in [false, true] {
         let result = if create {
@@ -528,7 +609,7 @@ fn creation_failures() {
         );
         let db = SessionStore::create(&layout).unwrap();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         drop(lock);
         drop(db);
         let db = SessionStore::create(&layout).unwrap();
@@ -565,7 +646,7 @@ fn creation_failures() {
 fn deep_arguments_are_rejected_before_commit() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     let before = load_read(&db.begin_read().unwrap().tx).unwrap();
@@ -620,12 +701,7 @@ fn deep_results_are_rejected_before_commit() {
     for depth in [124, 80] {
         let json = format!("{}0{}", "[".repeat(depth), "]".repeat(depth));
         let value: Value = serde_json::from_str(&json).unwrap();
-        let terminal = prepare_terminal(
-            &calls.bindings[0],
-            Ok(value.clone()),
-            CellEvidenceTriple::refused_before_admission("observe__workspace"),
-        )
-        .unwrap();
+        let terminal = prepare_terminal(&calls.bindings[0], ToolReply::Succeeded(value.clone()));
         let result = db.finish_invocation(
             &lock,
             TerminalInput {
@@ -666,7 +742,7 @@ fn deep_results_are_rejected_before_commit() {
                 unreachable!()
             };
             assert!(
-                matches!(&resolve_slot(&slots[0]).0.payload, ResultPayload::Succeeded(SuccessContent::Json { value: actual, .. }) if *actual == value)
+                matches!(&resolve_slot(&slots[0]).payload, ResultPayload::Succeeded(SuccessContent::Json { value: actual, .. }) if *actual == value)
             );
         }
     }
@@ -676,18 +752,13 @@ fn deep_results_are_rejected_before_commit() {
 }
 
 #[test]
-fn payload_evidence_and_privacy() {
+fn tool_reply_mapping_and_privacy() {
     let (_dir, _layout, db) = store();
-    let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
     let binding = &calls.bindings[0];
     for (len, large) in [(65534, false), (65535, true)] {
         let value = json!("x".repeat(len));
-        let term = prepare_terminal(
-            binding,
-            Ok(value),
-            CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-        )
-        .unwrap();
+        let term = prepare_terminal(binding, ToolReply::Succeeded(value));
         match term.result.payload {
             ResultPayload::Succeeded(SuccessContent::Json { byte_length, .. }) => {
                 assert_eq!((byte_length, large), (65536, false))
@@ -695,79 +766,34 @@ fn payload_evidence_and_privacy() {
             ResultPayload::Succeeded(SuccessContent::OutputTooLarge { byte_length, .. }) => {
                 assert_eq!((byte_length, large), (65537, true))
             }
-            _ => panic!("success"),
+            _ => panic!("预期为成功结果"),
         }
     }
-    let a = prepare_terminal(
-        binding,
-        Ok(json!({"z":"树","a":1})),
-        CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-    )
-    .unwrap();
-    let b = prepare_terminal(
-        binding,
-        Ok(json!({"a":1,"z":"树"})),
-        CellEvidenceTriple::refused_before_admission(&binding.identity.method),
-    )
-    .unwrap();
+    let a = prepare_terminal(binding, ToolReply::Succeeded(json!({"z":"树","a":1})));
+    let b = prepare_terminal(binding, ToolReply::Succeeded(json!({"a":1,"z":"树"})));
     assert_eq!(a, b);
-    for case in 0..4 {
-        let mut e = CellEvidenceTriple::refused_before_admission(&binding.identity.method);
-        match case {
-            0 => e.admission.version = 2,
-            1 => e.effects.version = 2,
-            2 => e.denied.version = 2,
-            _ => e.admission.tool = "wrong".into(),
-        };
-        assert!(prepare_terminal(binding, Ok(json!(null)), e).is_err());
-    }
-    let mut ev = serde_json::to_value(CellEvidenceTriple::refused_before_admission(
-        &binding.identity.method,
-    ))
-    .unwrap();
-    ev["effects"]["future"] = json!(true);
-    let ev = serde_json::from_value(ev).unwrap();
-    assert!(prepare_terminal(binding, Ok(json!(null)), ev).is_ok());
-    for (code, payload) in [
+    for (reply, expected) in [
         (
-            CepErrorCode::ExecutionFailed,
-            ResultPayload::Failed(Box::new(CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "",
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    operation: "internal".into(),
-                    detail: None,
-                }),
-                Retriability::Transient,
-            ))),
+            ToolReply::Failed(ToolError {
+                code: "execution_failed".into(),
+                message: "private-error".into(),
+            }),
+            ResultPayload::Failed(ToolError {
+                code: "execution_failed".into(),
+                message: "private-error".into(),
+            }),
         ),
         (
-            CepErrorCode::GuardDenied,
-            ResultPayload::Failed(Box::new(CepError::new(
-                CepErrorCode::ExecutionFailed,
-                "",
-                CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                    operation: "internal".into(),
-                    detail: None,
-                }),
-                Retriability::Transient,
-            ))),
-        ),
-        (
-            CepErrorCode::CallCancelled,
+            ToolReply::Cancelled,
             ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
         ),
         (
-            CepErrorCode::OutcomeIndeterminate,
+            ToolReply::Indeterminate,
             ResultPayload::Indeterminate(IndeterminateCause::Reported),
         ),
     ] {
-        let actual = terminal(binding, Some(code)).result.payload;
-        match (&actual, &payload) {
-            // 拒绝类错误归 Failed，错误码原样保留。
-            (ResultPayload::Failed(e), ResultPayload::Failed(_)) => assert_eq!(e.code, code),
-            _ => assert_eq!(actual, payload),
-        }
+        let actual = prepare_terminal(binding, reply).result.payload;
+        assert_eq!(actual, expected);
     }
     assert_eq!(
         bound_provider_diagnostic(&"树".repeat(2049))
@@ -775,43 +801,75 @@ fn payload_evidence_and_privacy() {
             .count(),
         2048
     );
-    finish(&db, &lock, binding, None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
+    finish(
+        &db,
+        &lock,
+        &calls.bindings[1],
+        failed_reply("execution_failed"),
+    );
     let read = db.begin_read().unwrap();
-    let bytes =
-        serde_json::to_string(&read.query_audit(&filter(project(1)), None, 100).unwrap()).unwrap();
-    let detail = serde_json::to_string(&read.turn_detail(sid(1), tid(1)).unwrap()).unwrap();
-    for text in [bytes, detail] {
-        for secret in [
-            "private-input",
-            "secret-result",
-            "private-error",
-            "input_schema",
-            "profile_snapshot",
-        ] {
-            assert!(!text.contains(secret));
+    let turn = read.turn_detail(sid(1), tid(1)).unwrap();
+    assert_eq!(
+        turn.steps[0].slots[0].progress,
+        SlotState::Terminal {
+            outcome: ToolResultOutcome::Succeeded,
+            reason: None,
+            material: MaterialSummary::Available {
+                digest: lattice_conversation::tool_content_digest(r#"{"secret-result":42}"#),
+                byte_length: 20,
+            },
         }
+    );
+    assert_eq!(turn.steps[0].slots[0].reason, None);
+    assert_eq!(
+        turn.steps[0].slots[1].progress,
+        SlotState::Terminal {
+            outcome: ToolResultOutcome::Failed,
+            reason: Some(SlotReason::Failed {
+                code: "execution_failed".into(),
+            }),
+            material: MaterialSummary::NoContent,
+        }
+    );
+    assert_eq!(
+        turn.steps[0].slots[1].reason,
+        Some(SlotReason::Failed {
+            code: "execution_failed".into(),
+        })
+    );
+    let detail = serde_json::to_string(&turn).unwrap();
+    for secret in [
+        "private-input",
+        "secret-result",
+        "private-error",
+        "input_schema",
+        "profile_snapshot",
+    ] {
+        assert!(!detail.contains(secret));
     }
-    assert!(!format!("{:?}", terminal(binding, None)).contains("secret-result"));
+    assert!(!format!("{:?}", terminal(binding, ok_reply())).contains("secret-result"));
+    assert!(
+        !format!("{:?}", terminal(binding, failed_reply("execution_failed")))
+            .contains("private-error")
+    );
 }
 
 #[test]
-fn input_and_evidence_boundaries() {
+fn input_and_diagnostic_boundaries() {
     let mut c = config();
-    let base = codec::canonical(&(c.catalog.runtime_build_id.clone(), &c.catalog.entries))
-        .unwrap()
-        .len();
+    let base = codec::canonical(&c.catalog.entries).unwrap().len();
     c.catalog.entries[0]
         .description
         .push_str(&"x".repeat(MAX_CATALOG_SNAPSHOT_BYTES - base));
-    c.catalog =
-        ToolCatalogSnapshot::new(c.catalog.runtime_build_id.clone(), c.catalog.entries).unwrap();
+    c.catalog = ToolCatalogSnapshot::new(c.catalog.entries).unwrap();
     assert!(validate::config(&c).is_ok());
     let mut entries = c.catalog.entries.clone();
     entries[0].description.push('x');
-    assert!(ToolCatalogSnapshot::new(c.catalog.runtime_build_id, entries).is_err());
+    assert!(ToolCatalogSnapshot::new(entries).is_err());
     let (_d, _l, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
-    let mut receipt = terminal(&calls.bindings[0], None);
+    let mut receipt = terminal(&calls.bindings[0], ok_reply());
     db.start_invocation(&lock, &calls.bindings[0], now())
         .unwrap();
     receipt.result.name = "other".into();
@@ -826,7 +884,7 @@ fn input_and_evidence_boundaries() {
         )
         .is_err()
     );
-    let mut receipt = terminal(&calls.bindings[0], None);
+    let mut receipt = terminal(&calls.bindings[0], ok_reply());
     receipt.result.invocation_id = iid(2);
     assert!(
         db.finish_invocation(
@@ -843,7 +901,7 @@ fn input_and_evidence_boundaries() {
         &lock,
         TerminalInput {
             invocation_id: iid(1),
-            terminal: terminal(&calls.bindings[0], None),
+            terminal: terminal(&calls.bindings[0], ok_reply()),
         },
         now(),
     )
@@ -857,35 +915,6 @@ fn input_and_evidence_boundaries() {
         now(),
     )
     .unwrap();
-    let e = json!({"seq":0,"cell":{"ctx_op":"alloc","ext_impact":"none","scope":"workspace"},"scope":{"scope":"workspace","trust":"in","channel":"workspace"},"target":{"kind":"path","path":"a"},"source":"operation"});
-    let effect: lancet_protocol::evidence::ObservedEffect = serde_json::from_value(e).unwrap();
-    let mut evidence = CellEvidenceTriple::refused_before_admission("observe__workspace");
-    evidence.effects.effects.push(effect.clone());
-    let value = prepare_terminal(
-        &calls.bindings[0],
-        Err(CepError::new(
-            CepErrorCode::ExecutionFailed,
-            "failure",
-            CepErrorData::Execution(lancet_protocol::error::ExecutionErrorData {
-                operation: "internal".into(),
-                detail: None,
-            }),
-            Retriability::Transient,
-        )),
-        evidence.clone(),
-    )
-    .unwrap();
-    assert!(
-        matches!(value.evidence(),InvocationEvidence::Recorded(e) if e.effects.effects.len()==1)
-    );
-    evidence.effects.effects.push(effect);
-    assert!(prepare_terminal(&calls.bindings[0], Ok(json!({})), evidence).is_err());
-    let mut ev = serde_json::to_value(CellEvidenceTriple::refused_before_admission(
-        "observe__workspace",
-    ))
-    .unwrap();
-    ev["admission"]["max_boundary"] = json!("unknown_trust");
-    assert!(serde_json::from_value::<CellEvidenceTriple>(ev).is_err());
     let mut bad = stopped(
         key(tid(1), 1, 0),
         StopCause::ProviderError { retryable: false },
@@ -896,27 +925,6 @@ fn input_and_evidence_boundaries() {
     assert!(validate::diagnostic(&bad.cause, &bad.diagnostic).is_err());
     bad.diagnostic.provider_error = Some("界".repeat(2048));
     assert!(validate::diagnostic(&bad.cause, &bad.diagnostic).is_ok());
-    let mut f = filter(project(1));
-    f.outcome = Some(ToolResultOutcome::Succeeded);
-    assert_eq!(
-        db.begin_read()
-            .unwrap()
-            .query_audit(&f, None, 100)
-            .unwrap()
-            .rows
-            .len(),
-        1
-    );
-    f.outcome = Some(ToolResultOutcome::NotExecuted);
-    f.method = Some("other".into());
-    assert!(
-        db.begin_read()
-            .unwrap()
-            .query_audit(&f, None, 100)
-            .unwrap()
-            .rows
-            .is_empty()
-    );
 }
 
 #[test]
@@ -954,7 +962,16 @@ fn commit_failure_disables_all_writers() {
                         }
                         _ => {}
                     },
-                    || with_fault(point, || db.accept_turn(&lock, accept(sid(1), tid(1)))),
+                    || {
+                        with_fault(point, || {
+                            db.create_session(
+                                &lock,
+                                project(1),
+                                SessionSettings::for_test(&config()),
+                                now(),
+                            )
+                        })
+                    },
                 )
             });
             commit_reached
@@ -983,7 +1000,13 @@ fn commit_failure_disables_all_writers() {
                                     })
                                     .map(|_| ())
                                 } else {
-                                    db.accept_turn(&lock, accept(sid(n), tid(n))).map(|_| ())
+                                    db.create_session(
+                                        &lock,
+                                        project(1),
+                                        SessionSettings::for_test(&config()),
+                                        now(),
+                                    )
+                                    .map(|_| ())
                                 }
                             },
                         );
@@ -1039,7 +1062,7 @@ fn commit_failure_disables_all_writers() {
         assert_eq!(
             db.begin_read()
                 .unwrap()
-                .turn_node(tid(1))
+                .find_session(sid(1))
                 .unwrap()
                 .is_some(),
             point == FaultPoint::UnknownAfter
@@ -1066,14 +1089,14 @@ fn schema_and_legacy_rejection_matrix() {
         for location in 0..3 {
             let dir = tempfile::tempdir().unwrap();
             let layout = StateLayout::in_state_root(dir.path());
-            fs::create_dir_all(layout.project_dir(&project(9))).unwrap();
+            fs::create_dir_all(layout.projects_dir().join("p9")).unwrap();
             let path = if location == 0 {
                 layout.lattice_root().join("sessions.git")
             } else {
-                layout.project_store(
-                    &project(if location == 1 { 1 } else { 9 }),
-                    "invocations.git",
-                )
+                layout
+                    .projects_dir()
+                    .join(if location == 1 { "p1" } else { "p9" })
+                    .join("invocations.git")
             };
             fs::create_dir_all(path.parent().unwrap()).unwrap();
             match old_kind {
@@ -1089,7 +1112,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..6 {
+    for case in 0..10 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -1121,24 +1144,29 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
-            4 => {
+            4 | 5 | 7 | 8 | 9 => {
                 let mut meta = tx.open_table(META).unwrap();
-                // 固定的 v3 元信息与空表构成旧格式库，编码独立于当前版本常量。
-                for (key, bytes) in [
-                    (
-                        "store_kind",
-                        b"\x00\x00\x00\x03\"lattice-session\"".as_slice(),
-                    ),
-                    ("store_format_version", b"\x00\x00\x00\x033".as_slice()),
-                    ("last_change_seq", b"\x00\x00\x00\x030".as_slice()),
+                // 固定旧版元信息，独立于当前编码器核对严格打开。
+                let old_version = match case {
+                    4 => 3_u32,
+                    5 => 4_u32,
+                    7 => 6_u32,
+                    8 => 7_u32,
+                    _ => 8_u32,
+                };
+                for (key, value) in [
+                    ("store_kind", "\"lattice-session\"".to_owned()),
+                    ("store_format_version", old_version.to_string()),
                 ] {
-                    meta.insert(key, bytes).unwrap();
+                    let mut bytes = old_version.to_be_bytes().to_vec();
+                    bytes.extend(value.as_bytes());
+                    meta.insert(key, bytes.as_slice()).unwrap();
                 }
             }
             _ => {
                 tx.open_table(META)
                     .unwrap()
-                    .insert("last_change_seq", &[0u8, 0, 0, 99, 48][..])
+                    .insert("store_kind", &[0u8, 0, 0, 99, b'"', b'x', b'"'][..])
                     .unwrap();
             }
         }
@@ -1147,13 +1175,19 @@ fn schema_and_legacy_rejection_matrix() {
         let error = SessionStore::open(&layout)
             .err()
             .unwrap_or_else(|| panic!("case {case}"));
-        if case == 4 {
+        if matches!(case, 4 | 5 | 7 | 8) {
+            let expected = match case {
+                4 => 3,
+                5 => 4,
+                7 => 6,
+                _ => 7,
+            };
             let path = layout.lattice_root().join("lattice.redb");
             assert!(error.to_string().contains(&path.display().to_string()));
             assert!(matches!(
                 error,
-                StoreError::UnsupportedVersion { path: found_path, found: 3, supported: 4, .. }
-                    if found_path == path
+                StoreError::UnsupportedVersion { path: found_path, found, supported: VERSION, .. }
+                    if found_path == path && found == expected
             ));
         }
     }
@@ -1255,10 +1289,10 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x044"
+            b"\x00\x00\x00\x099"
         );
     }
-    let (_lock, calls) = running(&db, sid(1), tid(1), 1, 1);
+    let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     assert_eq!(
         decode::<SessionRecord>("sessions", "1", &encode(&r.sessions[&sid(1)]).unwrap()).unwrap(),
@@ -1290,20 +1324,73 @@ fn keys_versions_and_encoding() {
         .unwrap(),
         r.index[&iid(1)]
     );
-    let wire = serde_json::to_value(r.changes[&ChangeSeq(1)]).unwrap();
-    assert_eq!(
-        wire,
-        json!({"sequence":1,"invocation_id":calls.bindings[0].invocation_id,"stage":"registered"})
-    );
-    assert_eq!(
-        decode::<StoredInvocationChange>(
-            "invocation_changes",
-            "1",
-            &encode(&r.changes[&ChangeSeq(1)]).unwrap()
-        )
-        .unwrap(),
-        r.changes[&ChangeSeq(1)]
-    );
+    for (usage_kind, cost) in [
+        (UsageCompleteness::Partial, None),
+        (
+            UsageCompleteness::Complete,
+            Some(CostEstimate {
+                usd: 0.0,
+                exact: true,
+            }),
+        ),
+        (
+            UsageCompleteness::Partial,
+            Some(CostEstimate {
+                usd: 0.125,
+                exact: false,
+            }),
+        ),
+    ] {
+        let mut node = r.nodes[&(sid(1), NodeId(2))].clone();
+        let Node::Step { attempts, .. } = &mut node else {
+            unreachable!()
+        };
+        attempts[0].usage = Some(TokenUsage {
+            input: Some(10),
+            output: Some(2),
+            ..Default::default()
+        });
+        attempts[0].usage_kind = usage_kind;
+        attempts[0].cost = cost;
+        let bytes = encode(&node).unwrap();
+        assert_eq!(decode::<Node>("nodes", "2", &bytes).unwrap(), node);
+    }
+    for invalid_cost in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        let mut node = r.nodes[&(sid(1), NodeId(2))].clone();
+        let Node::Step { attempts, .. } = &mut node else {
+            unreachable!()
+        };
+        attempts[0].cost = Some(CostEstimate {
+            usd: invalid_cost,
+            exact: true,
+        });
+        assert!(encode(&node).is_err());
+    }
+    let mut damaged = serde_json::to_value(&r.nodes[&(sid(1), NodeId(2))]).unwrap();
+    damaged["attempts"][0]["cost"] = json!({"usd":-1.0,"exact":true});
+    let mut bytes = VERSION.to_be_bytes().to_vec();
+    bytes.extend(serde_json::to_vec(&damaged).unwrap());
+    assert!(matches!(
+        decode::<Node>("nodes", "2", &bytes),
+        Err(StoreError::Corruption { .. })
+    ));
+    for invalid in ["-1", "1.5", r#""many""#, "18446744073709551616"] {
+        let mut damaged = serde_json::to_value(&r.nodes[&(sid(1), NodeId(2))]).unwrap();
+        damaged["attempts"][0]["usage"]["input"] = json!(0);
+        // 直接写入原始数字，保留超范围整数的十进制编码。
+        let raw = serde_json::to_string(&damaged)
+            .unwrap()
+            .replace("\"input\":0", &format!("\"input\":{invalid}"));
+        let mut bytes = VERSION.to_be_bytes().to_vec();
+        bytes.extend(raw.as_bytes());
+        assert!(
+            matches!(
+                decode::<Node>("nodes", "2", &bytes),
+                Err(StoreError::Corruption { .. })
+            ),
+            "计数字段损坏未被拒绝：{invalid}"
+        );
+    }
 }
 
 #[test]
@@ -1314,7 +1401,7 @@ fn nested_unknown_fields_are_rejected() {
         &db,
         &lock,
         &calls.bindings[0],
-        Some(CepErrorCode::ExecutionFailed),
+        failed_reply("execution_failed"),
     );
     let original = serde_json::to_value(node_at(&db, 2)).unwrap();
     for pointer in [
@@ -1330,8 +1417,6 @@ fn nested_unknown_fields_are_rejected() {
         "/slots/0/binding/identity",
         "/slots/0/progress",
         "/slots/0/progress/result/payload/payload",
-        "/slots/0/progress/evidence",
-        "/slots/0/progress/evidence/value",
     ] {
         let mut v = original.clone();
         v.pointer_mut(pointer)
@@ -1359,26 +1444,9 @@ fn nested_unknown_fields_are_rejected() {
             "{pointer}"
         );
     }
-    let mut value = original.clone();
+    let mut value = original;
     value["attempts"][0]["origin"]["protocol"] = json!("unknown");
     assert!(decode::<Node>("nodes", "2", &encode(&value).unwrap()).is_err());
-    let mut extended = original;
-    extended
-        .pointer_mut("/slots/0/progress/evidence/value/admission")
-        .unwrap()["future"] = json!({"nested":true});
-    assert!(decode::<Node>("nodes", "2", &encode(&extended).unwrap()).is_ok());
-    let effect = json!({"seq":0,"cell":{"ctx_op":"alloc","ext_impact":"none","scope":"workspace"},"scope":{"scope":"workspace","trust":"in","channel":"workspace"},"target":{"kind":"path","path":"a"},"source":"operation","future":true});
-    extended
-        .pointer_mut("/slots/0/progress/evidence/value/effects/effects")
-        .unwrap()
-        .as_array_mut()
-        .unwrap()
-        .push(effect);
-    assert!(decode::<Node>("nodes", "2", &encode(&extended).unwrap()).is_ok());
-    extended
-        .pointer_mut("/slots/0/progress/evidence/value/effects/effects/0/cell")
-        .unwrap()["unknown"] = json!(true);
-    assert!(decode::<Node>("nodes", "2", &encode(&extended).unwrap()).is_err());
     for pointer in ["", "/catalog", "/catalog/entries/0"] {
         let mut v = serde_json::to_value(config().stored()).unwrap();
         v.pointer_mut(pointer).unwrap()["private-field"] = json!(true);
@@ -1396,60 +1464,46 @@ fn progress_conclusions_and_stop_precedence() {
     };
     let mut started = registered.clone();
     started.progress = SlotProgress::Started;
-    for (slot, payload, reason) in [
-        (
-            &registered,
-            ResultPayload::NotExecuted,
-            EvidenceUnavailableReason::NotDispatched,
-        ),
+    for (slot, payload) in [
+        (&registered, ResultPayload::NotExecuted),
         (
             &started,
             ResultPayload::Indeterminate(IndeterminateCause::NoResult),
-            EvidenceUnavailableReason::NoResult,
         ),
     ] {
         assert_eq!(
             resolve_slot(slot),
-            (
-                StoredToolResult {
-                    invocation_id: iid(1),
-                    name: "observe__workspace".into(),
-                    payload
-                },
-                InvocationEvidence::Unavailable { reason }
-            )
+            StoredToolResult {
+                invocation_id: iid(1),
+                name: "observe__workspace".into(),
+                payload,
+            }
         );
     }
-    for code in [
-        None,
-        Some(CepErrorCode::ExecutionFailed),
-        Some(CepErrorCode::CallCancelled),
-        Some(CepErrorCode::OutcomeIndeterminate),
+    for reply in [
+        ok_reply(),
+        failed_reply("execution_failed"),
+        ToolReply::Cancelled,
+        ToolReply::Indeterminate,
     ] {
-        let term = terminal(&calls.bindings[0], code);
+        let term = terminal(&calls.bindings[0], reply.clone());
         let slot = InvocationSlot {
             binding: calls.bindings[0].clone(),
             progress: SlotProgress::Terminal {
                 result: term.result.clone(),
-                evidence: term.evidence.clone(),
             },
         };
-        assert_eq!(
-            resolve_slot(&slot),
-            (term.result.clone(), term.evidence.clone())
-        );
+        assert_eq!(resolve_slot(&slot), term.result);
         for stop in [
             DispatchStop::Cancelled,
             DispatchStop::Deadline,
             DispatchStop::ProcessExit,
         ] {
-            let expected = match code {
-                Some(CepErrorCode::CallCancelled) => Some(StopCause::Cancelled),
-                Some(CepErrorCode::OutcomeIndeterminate) => {
-                    Some(StopCause::InvocationIndeterminate {
-                        invocation_id: iid(1),
-                    })
-                }
+            let expected = match &reply {
+                ToolReply::Cancelled => Some(StopCause::Cancelled),
+                ToolReply::Indeterminate => Some(StopCause::InvocationIndeterminate {
+                    invocation_id: iid(1),
+                }),
                 _ if stop == DispatchStop::ProcessExit => Some(StopCause::ProcessExit),
                 _ => None,
             };
@@ -1490,6 +1544,8 @@ fn progress_conclusions_and_stop_precedence() {
         );
     }
     let mut attempt = AttemptRecord {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         origin: origin(),
         usage: None,
         progress: AttemptProgress::Sent,
@@ -1526,52 +1582,73 @@ fn progress_conclusions_and_stop_precedence() {
 fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let old = node_at(&db, 2);
+    let mut beta_settings = SessionSettings::for_test(&config());
+    beta_settings.profile.agent_name = agent("beta");
+    db.update_settings(&lock, &project(1), beta_settings, now())
+        .unwrap();
     let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
-    next.config.agent_name = "beta".into();
-    db.accept_turn(&lock, next).unwrap();
+    next.config.agent_name = agent("beta");
+    accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 1);
     assert_eq!(node_at(&db, 2), old);
     assert_eq!(
-        db.begin_read()
-            .unwrap()
-            .current_agent(sid(1))
-            .unwrap()
-            .as_deref(),
-        Some("beta")
+        db.begin_read().unwrap().current_agent(sid(1)).unwrap(),
+        Some(agent("beta"))
     );
     assert!(matches!(
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now()),
         Err(StoreError::InvalidTransition { .. })
     ));
-    let mut retry = accept(sid(2), tid(1));
-    retry.config.agent_name.clear();
+    let mut retry = accept(sid(1), tid(1));
+    retry.config.agent_name = agent("ignored");
+    assert!(matches!(
+        accept_prepared(&db, &lock, retry).unwrap(),
+        AcceptedTurn::Existing(t) if t.session_id == sid(1)
+    ));
     let lock2 = db.try_lock_session(sid(2)).unwrap();
-    assert!(
-        matches!(db.accept_turn(&lock2,retry).unwrap(),AcceptedTurn::Existing(t) if t.session_id==sid(1))
-    );
     for case in 0..3 {
         let mut conflicting = accept(sid(1), tid(1));
         match case {
             0 => conflicting.input.push('!'),
-            1 => conflicting.project_store_key = project(2),
-            _ => conflicting.session = AcceptSession::Existing { id: sid(2) },
+            1 => conflicting.project_path = project(2),
+            _ => conflicting.session_id = sid(2),
         }
-        assert!(matches!(
-            db.accept_turn(if case == 2 { &lock2 } else { &lock }, conflicting),
-            Err(StoreError::Conflict { .. })
-        ));
+        assert!(
+            matches!(
+                accept_prepared(&db, if case == 2 { &lock2 } else { &lock }, conflicting),
+                Err(StoreError::Conflict { .. })
+            ),
+            "重放已有 TurnId 时输入、项目路径或会话 ID 不一致必须返回冲突（case={case}）"
+        );
     }
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    let mut wrong_project = accept(sid(1), tid(99));
+    wrong_project.project_path = project(2);
+    assert!(
+        matches!(
+            accept_prepared(&db, &lock, wrong_project),
+            Err(StoreError::BindingMismatch { .. })
+        ),
+        "向已有会话写入新 Turn 时项目路径不一致必须被拒绝"
+    );
+    let current = db.begin_read().unwrap().session(sid(1)).unwrap().current;
+    assert!(
+        matches!(
+            db.rewind(&lock, NodeId(0), &project(2), now()),
+            Err(StoreError::BindingMismatch { .. })
+        ),
+        "rewind 的项目路径不一致必须在会话库写入时被拒绝"
+    );
+    assert_eq!(
+        db.begin_read().unwrap().session(sid(1)).unwrap().current,
+        current,
+        "被拒绝的 rewind 不能移动当前位置"
+    );
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let mut next = accept(sid(1), tid(3));
-    next.session = AcceptSession::Existing { id: sid(1) };
-    next.agent_selection = AgentSelection::Inherited;
-    assert!(db.accept_turn(&lock, next.clone()).is_err());
-    next.agent_selection = AgentSelection::Explicit;
     next.config.system_prompt = Some("different".into());
-    db.accept_turn(&lock, next).unwrap();
+    accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(records(&db).configs.len(), 2);
     assert_eq!(node_at(&db, 2), old);
     assert_eq!(node_at(&db, 5).parent(), Some(NodeId(0)));
@@ -1591,32 +1668,202 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
 }
 
 #[test]
+fn timeout_bounds_preserve_frozen_limits_and_session_settings_on_reopen() {
+    for timeout_secs in [1, 300, 3600, 3601, MAX_TURN_TIMEOUT_SECS] {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        let mut first = accept(sid(1), tid(1));
+        first.config.limits.timeout_secs = timeout(timeout_secs);
+        let expected_first = first.config.clone();
+        let expected_first_settings = SessionSettings::for_test(&first.config);
+        first.settings_version = expected_first_settings.version().unwrap();
+        db.create_session(&lock, project(1), expected_first_settings.clone(), now())
+            .unwrap();
+        db.accept_turn(&lock, first)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let read = db.begin_read().unwrap();
+        assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_first);
+        assert_eq!(
+            read.session_settings(sid(1)).unwrap(),
+            expected_first_settings
+        );
+        drop(read);
+        drop(lock);
+        drop(db);
+
+        let reopened = SessionStore::open(&layout)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let lock = reopened.try_lock_session(sid(1)).unwrap();
+        let mut second = accept(sid(1), tid(2));
+        second.config.agent_name = agent("beta");
+        second.config.limits.timeout_secs = TurnTimeout::default();
+        let expected_second = second.config.clone();
+        let expected_second_settings = SessionSettings::for_test(&second.config);
+        reopened
+            .update_settings(
+                &lock,
+                &project(1),
+                expected_second_settings.clone(),
+                now() + chrono::Duration::seconds(1),
+            )
+            .unwrap();
+        second.settings_version = expected_second_settings.version().unwrap();
+        reopened.accept_turn(&lock, second).unwrap();
+        drop(lock);
+        drop(reopened);
+
+        let reopened = SessionStore::open(&layout)
+            .unwrap_or_else(|error| panic!("timeout_secs={timeout_secs}: {error}"));
+        let read = reopened.begin_read().unwrap();
+        assert_eq!(read.turn_config(sid(1), tid(1)).unwrap(), expected_first);
+        assert_eq!(read.turn_config(sid(1), tid(2)).unwrap(), expected_second);
+        assert_eq!(
+            read.session_settings(sid(1)).unwrap(),
+            expected_second_settings
+        );
+    }
+
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+    let mut second = accept(sid(1), tid(2));
+    second.config.agent_name = agent("beta");
+    db.update_settings(
+        &lock,
+        &project(1),
+        SessionSettings::for_test(&second.config),
+        now() + chrono::Duration::seconds(1),
+    )
+    .unwrap();
+    accept_prepared(&db, &lock, second).unwrap();
+    let base = records(&db);
+    drop(lock);
+    drop(db);
+    for invalid_timeout in [0, MAX_TURN_TIMEOUT_SECS + 1] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        overwrite_records(&tx, &base);
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let mut wire = serde_json::to_value(&base.nodes[&(sid(1), NodeId(1))]).unwrap();
+            wire["limits"]["timeout_secs"] = json!(invalid_timeout);
+            nodes
+                .insert(
+                    node_key(sid(1), NodeId(1)).as_slice(),
+                    encode(&wire).unwrap().as_slice(),
+                )
+                .unwrap();
+        }
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(
+            matches!(
+                SessionStore::open(&layout),
+                Err(StoreError::Corruption { .. })
+            ),
+            "invalid_timeout={invalid_timeout}"
+        );
+    }
+}
+
+#[test]
 fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    for case in 0..13 {
+    assert!(
+        matches!(
+            db.accept_turn(&lock, accept(sid(1), tid(1))),
+            Err(StoreError::NotFound {
+                kind: "session",
+                ..
+            })
+        ),
+        "不存在的会话调用 accept_turn 必须返回 NotFound"
+    );
+    assert!(records(&db).nodes.is_empty());
+
+    let mut bad_settings = SessionSettings::for_test(&config());
+    bad_settings.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1));
+    assert!(
+        matches!(
+            db.create_session(&lock, project(1), bad_settings, now()),
+            Err(StoreError::InvalidInput { .. })
+        ),
+        "设置无效时 create_session 必须拒绝且不落库"
+    );
+    assert!(records(&db).nodes.is_empty());
+
+    let base_settings = SessionSettings::for_test(&config());
+    let base_version = base_settings.version().unwrap();
+    db.create_session(&lock, project(1), base_settings.clone(), now())
+        .unwrap();
+    assert!(matches!(
+        db.create_session(&lock, project(1), base_settings, now()),
+        Err(StoreError::SessionCollision { session_id }) if session_id == sid(1)
+    ));
+    let before = records(&db);
+
+    for case in 0..8 {
         let mut a = accept(sid(1), tid(1));
-        match case {
-            0 => a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1),
-            1 => a.agent_selection = AgentSelection::Inherited,
-            2 => a.config.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1)),
-            3 => a.config.provider = "Bad_id".into(),
-            4 => a
-                .config
-                .catalog
-                .entries
-                .push(a.config.catalog.entries[0].clone()),
-            5 => a.config.limits.max_model_steps = 33,
-            6 => a.config.limits.max_model_attempts = 0,
-            7 => a.config.agent_name.clear(),
-            8 => a.config.catalog.digest = [0; 32],
-            9 => a.config.limits.timeout_secs = 0,
-            10 => a.config.limits.max_model_attempts = 12,
-            11 => a.config.model.clear(),
-            _ => a.config.catalog.entries[0].descriptor_identity = "A".repeat(64),
+        a.settings_version = base_version;
+        let expected_detail = match case {
+            0 => {
+                a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1);
+                None
+            }
+            1 => {
+                a.config.system_prompt = Some("x".repeat(2 * 1024 * 1024 + 1));
+                None
+            }
+            2 => {
+                a.config
+                    .catalog
+                    .entries
+                    .push(a.config.catalog.entries[0].clone());
+                None
+            }
+            3 => {
+                a.config.limits.max_model_steps = 33;
+                Some("invalid frozen configuration")
+            }
+            4 => {
+                a.config.limits.max_model_attempts = 0;
+                Some("invalid frozen configuration")
+            }
+            5 => {
+                a.config.catalog.digest = [0; 32];
+                None
+            }
+            6 => {
+                a.config.limits.max_model_attempts = 12;
+                Some("invalid frozen configuration")
+            }
+            7 => {
+                use sha2::{Digest, Sha256};
+                let first = a.config.catalog.entries[0].clone();
+                let mut z = first.clone();
+                z.name = "z_tool".into();
+                a.config.catalog.entries = vec![z, first];
+                let canonical = codec::canonical(&a.config.catalog.entries).unwrap();
+                let mut hasher = Sha256::new();
+                hasher.update(b"lattice-tool-catalog-snapshot-v1\0");
+                hasher.update((canonical.len() as u64).to_be_bytes());
+                hasher.update(&canonical);
+                a.config.catalog.digest = hasher.finalize().into();
+                None
+            }
+            _ => unreachable!(),
+        };
+        let result = db.accept_turn(&lock, a);
+        if let Some(expected_detail) = expected_detail {
+            assert!(
+                matches!(&result, Err(StoreError::InvalidInput { field: "config", detail }) if detail == expected_detail),
+                "{case}: {result:?}"
+            );
+        } else {
+            assert!(result.is_err(), "{case}");
         }
-        assert!(db.accept_turn(&lock, a).is_err(), "{case}");
-        assert!(records(&db).nodes.is_empty());
+        assert!(before == records(&db), "{case} 修改了持久记录");
     }
     assert!(matches!(
         db.try_lock_session(sid(1)),
@@ -1629,16 +1876,31 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
     ));
     let (_d2, _l2, db2) = store();
     assert!(matches!(
+        db2.create_session(
+            &lock,
+            project(1),
+            SessionSettings::for_test(&config()),
+            now()
+        ),
+        Err(StoreError::InvalidLockCapability)
+    ));
+    assert!(matches!(
+        db2.update_settings(
+            &lock,
+            &project(1),
+            SessionSettings::for_test(&config()),
+            now()
+        ),
+        Err(StoreError::InvalidLockCapability)
+    ));
+    assert!(matches!(
         db2.accept_turn(&lock, accept(sid(1), tid(1))),
         Err(StoreError::InvalidLockCapability)
     ));
     let mut a = accept(sid(1), tid(1));
     a.input = "x".repeat(MAX_USER_INPUT_BYTES);
+    a.settings_version = base_version;
     db.accept_turn(&lock, a).unwrap();
-    assert!(matches!(
-        db.accept_turn(&lock, accept(sid(1), tid(2))),
-        Err(StoreError::SessionCollision { .. })
-    ));
     assert_eq!(
         db.begin_read().unwrap().session(sid(1)).unwrap().current,
         NodeId(2)
@@ -1649,7 +1911,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
     for cut in 0..12 {
         let (_d, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         if cut >= 1 {
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
@@ -1695,7 +1957,11 @@ fn every_commit_reopens_with_read_only_conclusions() {
                         invocation_id: iid(1),
                         terminal: terminal(
                             &calls.bindings[0],
-                            (cut == 8).then_some(CepErrorCode::CallCancelled),
+                            if cut == 8 {
+                                ToolReply::Cancelled
+                            } else {
+                                ok_reply()
+                            },
                         ),
                     },
                     now(),
@@ -1703,7 +1969,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
                 .unwrap();
             }
             if cut >= 9 {
-                finish(&db, &lock, &calls.bindings[1], None);
+                finish(&db, &lock, &calls.bindings[1], ok_reply());
             }
             if cut == 10 {
                 db.close_step(
@@ -1799,7 +2065,7 @@ fn every_commit_reopens_with_read_only_conclusions() {
             if cut == 6 {
                 assert_eq!(
                     first.reason,
-                    Some(OperatorReason::Indeterminate(IndeterminateCause::NoResult))
+                    Some(SlotReason::Indeterminate(IndeterminateCause::NoResult))
                 );
             }
             assert_eq!(
@@ -1854,18 +2120,53 @@ fn every_commit_reopens_with_read_only_conclusions() {
         }
         read.log(sid(1)).unwrap();
         read.list(None, 10).unwrap();
-        read.query_audit(&filter(project(1)), None, 100).unwrap();
-        read.tail_audit(&filter(project(1)), ChangeSeq(0), 100)
-            .unwrap();
         assert!(before == records(&db), "read changed cut {cut}");
         drop(read);
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.rewind(&lock, NodeId(0), now()).unwrap();
-        let mut next = accept(sid(1), tid(2));
-        next.session = AcceptSession::Existing { id: sid(1) };
-        db.accept_turn(&lock, next).unwrap();
+        db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
+        let next = accept(sid(1), tid(2));
+        accept_prepared(&db, &lock, next).unwrap();
         assert_eq!(detail(&db), expected, "old turn changed at cut {cut}");
     }
+}
+
+/// 回放来源只记录协议与 provider ID：DTO、会话记录与节点记录的序列化中
+/// 都不得出现 endpoint / base_url 字段；格式版本为 7。
+#[test]
+fn replay_origin_records_no_endpoint() {
+    fn assert_no_endpoint(label: &str, text: &str) {
+        for field in ["base_url", "endpoint"] {
+            assert!(
+                !text.contains(field),
+                "{label} 不应包含 {field} 字段: {text}"
+            );
+        }
+    }
+    let dto = serde_json::to_value(origin()).unwrap();
+    assert_eq!(
+        dto,
+        json!({"protocol":"chat-completions","provider_id":"openai"}),
+        "回放来源 DTO 只含协议与 provider ID"
+    );
+    assert_no_endpoint("回放来源 DTO", &dto.to_string());
+
+    let (_d, _l, db) = store();
+    let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
+    let r = records(&db);
+    let session = encode(&r.sessions[&sid(1)]).unwrap();
+    assert_eq!(&session[..4], &9u32.to_be_bytes(), "会话记录格式版本为 9");
+    assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
+    let mut origins = 0;
+    for ((_, id), node) in &r.nodes {
+        let bytes = encode(node).unwrap();
+        assert_eq!(&bytes[..4], &9u32.to_be_bytes(), "节点 {id:?} 格式版本为 9");
+        let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
+        origins += text.matches("\"origin\"").count();
+        assert_no_endpoint(&format!("节点 {id:?}"), &text);
+    }
+    assert!(origins > 0, "至少一条节点记录写入了回放来源");
+    let detail = serde_json::to_string(&detail(&db)).unwrap();
+    assert_no_endpoint("turn 详情", &detail);
 }
 
 #[test]
@@ -1873,15 +2174,15 @@ fn attempt_sources_survive_retry_and_reopen() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut input = accept(sid(1), tid(1));
-    input.config.provider = "edge-1".into();
-    db.accept_turn(&lock, input).unwrap();
+    input.config.provider = provider("edge-1");
+    accept_prepared(&db, &lock, input).unwrap();
     let first = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "edge-1".into(),
+        provider_id: provider("edge-1"),
     };
     let second = AttemptOrigin {
-        protocol: AttemptProtocol::AnthropicMessages,
-        provider_id: "edge-1".into(),
+        protocol: AttemptProtocol::Messages,
+        provider_id: provider("edge-1"),
     };
     db.start_request(&lock, key(tid(1), 0, 0), first.clone(), now())
         .unwrap();
@@ -1890,10 +2191,40 @@ fn attempt_sources_survive_retry_and_reopen() {
         StopCause::ProviderError { retryable: true },
     );
     stop.origin = first;
+    let usage = TokenUsage {
+        input: Some(1),
+        cache_read: Some(3),
+        cache_write: Some(4),
+        output: Some(2),
+        reasoning: Some(9),
+    };
+    stop.usage = Some(usage);
+    stop.cost = Some(CostEstimate {
+        usd: 0.125,
+        exact: false,
+    });
     db.stop_attempt(&lock, stop, now()).unwrap();
     db.start_request(&lock, key(tid(1), 0, 1), second.clone(), now())
         .unwrap();
     let turn = detail(&db);
+    assert_eq!(turn.steps[0].attempts[0].usage, Some(usage));
+    assert_eq!(
+        turn.steps[0].attempts[0].cost,
+        Some(CostEstimate {
+            usd: 0.125,
+            exact: false
+        })
+    );
+    assert_eq!(
+        turn.steps[0].attempts[0].usage_kind,
+        UsageCompleteness::Partial
+    );
+    assert_eq!(
+        turn.steps[0].attempts[1].usage_kind,
+        UsageCompleteness::Partial
+    );
+    assert_eq!(turn.steps[0].attempts[1].usage, None);
+    assert_eq!(turn.steps[0].attempts[1].cost, None);
     let expected = [
         json!({"protocol":"chat-completions","provider_id":"edge-1"}),
         json!({"protocol":"anthropic-messages","provider_id":"edge-1"}),
@@ -1912,12 +2243,18 @@ fn attempt_sources_survive_retry_and_reopen() {
     assert_eq!(detail(&db), turn);
     let lock = db.try_lock_session(sid(1)).unwrap();
     let mut complete = reply(key(tid(1), 0, 1), 1);
+    complete.usage = Some(usage);
+    complete.usage_kind = UsageCompleteness::Complete;
+    complete.cost = Some(CostEstimate {
+        usd: 0.25,
+        exact: true,
+    });
     complete.origin = second;
-    complete.message.provider_origin = Some(ProviderOrigin::Anthropic);
+    complete.message.provider_origin = Some(complete.origin.clone());
     let calls = db
         .register_calls(&lock, complete, &[iid(1)], now())
         .unwrap();
-    finish(&db, &lock, &calls.bindings[0], None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
     db.close_step(
         &lock,
         CloseStep::Continue {
@@ -1928,15 +2265,43 @@ fn attempt_sources_survive_retry_and_reopen() {
     .unwrap();
     let third = AttemptOrigin {
         protocol: AttemptProtocol::GenerateContent,
-        provider_id: "edge-1".into(),
+        provider_id: provider("edge-1"),
     };
     db.start_request(&lock, key(tid(1), 1, 0), third.clone(), now())
         .unwrap();
     let mut complete = reply(key(tid(1), 1, 0), 0);
+    complete.usage = Some(TokenUsage::default());
+    complete.cost = Some(CostEstimate {
+        usd: 0.5,
+        exact: true,
+    });
     complete.origin = third.clone();
-    complete.message.provider_origin = Some(ProviderOrigin::Gemini);
+    complete.message.provider_origin = Some(complete.origin.clone());
     db.close_step(&lock, CloseStep::Finish(complete), now())
         .unwrap();
+    let final_detail = detail(&db);
+    assert_eq!(
+        final_detail.steps[0].attempts[1].cost,
+        Some(CostEstimate {
+            usd: 0.25,
+            exact: true
+        })
+    );
+    assert_eq!(
+        final_detail.steps[0].attempts[1].usage_kind,
+        UsageCompleteness::Complete
+    );
+    assert_eq!(final_detail.usage.partial_attempts, 2);
+    assert_eq!(final_detail.steps[1].attempts[0].usage, None);
+    assert_eq!(final_detail.steps[1].attempts[0].cost, None);
+    assert_eq!(
+        final_detail.usage.cost.known,
+        Some(CostEstimate {
+            usd: 0.375,
+            exact: false
+        })
+    );
+    assert_eq!(final_detail.usage.cost.unknown_attempts, 1);
     let turn = detail(&db);
     assert_eq!(turn.summary.outcome, PublicTurnOutcome::Completed);
     assert_eq!(turn.steps[1].attempts[0].origin, third);
@@ -1958,10 +2323,65 @@ fn attempt_sources_survive_retry_and_reopen() {
 }
 
 #[test]
+fn attempts_without_reply_allow_sent_and_stopped_on_reopen() {
+    for state in ["reserved", "sent", "stopped"] {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+        if state != "reserved" {
+            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+                .unwrap();
+        }
+        if state == "stopped" {
+            let mut stop = stopped(
+                key(tid(1), 0, 0),
+                StopCause::ProviderError { retryable: false },
+            );
+            stop.usage = Some(TokenUsage::default());
+            stop.cost = Some(CostEstimate {
+                usd: 0.5,
+                exact: true,
+            });
+            db.stop_attempt(&lock, stop, now()).unwrap();
+        }
+        let expected = node_at(&db, 2);
+        assert!(matches!(&expected, Node::Step { reply: None, .. }));
+        if state == "stopped" {
+            let record = serde_json::to_value(&expected).unwrap();
+            assert_eq!(record["attempts"][0]["usage"], Value::Null);
+            assert_eq!(record["attempts"][0]["cost"], Value::Null);
+        }
+        let usage = db.begin_read().unwrap().usage(sid(1)).unwrap();
+        assert_eq!(usage.turns.len(), 1);
+        assert_eq!(usage.path_total.attempts, u64::from(state != "reserved"));
+        assert_eq!(
+            usage.path_total.input.known,
+            (state == "reserved").then_some(0)
+        );
+        assert_eq!(
+            usage.path_total.cost.known,
+            (state == "reserved").then_some(CostEstimate {
+                usd: 0.0,
+                exact: true
+            })
+        );
+        assert_eq!(
+            usage.path_total.partial_attempts,
+            u64::from(state != "reserved")
+        );
+        drop(lock);
+        drop(db);
+        let reopened = SessionStore::open(&layout).unwrap();
+        assert_eq!(reopened.begin_read().unwrap().usage(sid(1)).unwrap(), usage);
+        assert_eq!(node_at(&reopened, 2), expected, "{state}");
+    }
+}
+
+#[test]
 fn provider_id_and_attempt_source_boundaries() {
     for protocol in [
         AttemptProtocol::ChatCompletions,
-        AttemptProtocol::AnthropicMessages,
+        AttemptProtocol::Messages,
         AttemptProtocol::GenerateContent,
         AttemptProtocol::Responses,
         AttemptProtocol::Interactions,
@@ -1969,12 +2389,12 @@ fn provider_id_and_attempt_source_boundaries() {
         let (_dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         let mut input = accept(sid(1), tid(1));
-        input.config.provider = "edge-1".into();
+        input.config.provider = provider("edge-1");
         let origin = AttemptOrigin {
             protocol,
             provider_id: input.config.provider.clone(),
         };
-        db.accept_turn(&lock, input).unwrap();
+        accept_prepared(&db, &lock, input).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin.clone(), now())
             .unwrap();
         drop(lock);
@@ -1984,44 +2404,32 @@ fn provider_id_and_attempt_source_boundaries() {
     }
     let (_dir, _layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    let mut input = accept(sid(1), tid(1));
-    input.config.provider = "bad_id".into();
-    assert!(matches!(
-        db.accept_turn(&lock, input),
-        Err(StoreError::InvalidInput {
-            field: "provider",
-            ..
-        })
-    ));
-    assert!(records(&db).nodes.is_empty());
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let before = records(&db);
-    for id in ["bad_id", "other-provider"] {
-        let mut source = origin();
-        source.provider_id = id.into();
-        assert!(matches!(
-            db.start_request(&lock, key(tid(1), 0, 0), source, now()),
-            Err(StoreError::InvalidInput { .. })
-        ));
-        assert!(before == records(&db));
-    }
+    let mut source = origin();
+    source.provider_id = provider("other-provider");
+    assert!(matches!(
+        db.start_request(&lock, key(tid(1), 0, 0), source, now()),
+        Err(StoreError::InvalidInput { .. })
+    ));
+    assert!(before == records(&db));
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     let before = records(&db);
     for (source, message_origin) in [
         (
             AttemptOrigin {
-                protocol: AttemptProtocol::AnthropicMessages,
+                protocol: AttemptProtocol::Messages,
                 ..origin()
             },
-            ProviderOrigin::Anthropic,
+            Protocol::Messages,
         ),
         (
             AttemptOrigin {
-                provider_id: "other-provider".into(),
+                provider_id: provider("other-provider"),
                 ..origin()
             },
-            ProviderOrigin::OpenAiCompatible,
+            Protocol::ChatCompletions,
         ),
     ] {
         let mut stop = stopped(key(tid(1), 0, 0), StopCause::Cancelled);
@@ -2029,12 +2437,46 @@ fn provider_id_and_attempt_source_boundaries() {
         assert!(db.stop_attempt(&lock, stop, now()).is_err());
         let mut complete = reply(key(tid(1), 0, 0), 0);
         complete.origin = source;
-        complete.message.provider_origin = Some(message_origin);
+        complete.message.provider_origin = Some(AttemptOrigin {
+            protocol: message_origin,
+            ..origin()
+        });
         assert!(matches!(
             db.close_step(&lock, CloseStep::Finish(complete), now()),
             Err(StoreError::InvalidInput { field: "origin", detail }) if detail == "reply source mismatch"
         ));
         assert!(before == records(&db));
+    }
+    for source in [
+        None,
+        Some(AttemptOrigin {
+            provider_id: provider("other-provider"),
+            ..origin()
+        }),
+        Some(AttemptOrigin {
+            protocol: Protocol::Messages,
+            ..origin()
+        }),
+    ] {
+        for count in [0, 1] {
+            let mut complete = reply(key(tid(1), 0, 0), count);
+            complete.message.provider_origin = source.clone();
+            let rejected = if count == 0 {
+                db.close_step(&lock, CloseStep::Finish(complete), now())
+                    .map(|_| ())
+            } else {
+                db.register_calls(&lock, complete, &[iid(9)], now())
+                    .map(|_| ())
+            };
+            assert!(matches!(
+                rejected,
+                Err(StoreError::InvalidInput {
+                    field: "origin",
+                    ..
+                })
+            ));
+            assert!(before == records(&db));
+        }
     }
 }
 
@@ -2043,7 +2485,7 @@ fn retries_usage_and_between_request_stops() {
     for cause in [StopCause::Cancelled, StopCause::Deadline] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
         let mut stop = stopped(
@@ -2056,9 +2498,9 @@ fn retries_usage_and_between_request_stops() {
         assert!(before == records(&db));
         stop.retry_delay_ms = Some(60000);
         stop.usage = Some(TokenUsage {
-            prompt_tokens: 1,
-            completion_tokens: 2,
-            total_tokens: 3,
+            input: Some(1),
+            output: Some(2),
+            ..Default::default()
         });
         assert!(matches!(
             db.stop_attempt(&lock, stop, now()).unwrap(),
@@ -2105,7 +2547,7 @@ fn retries_usage_and_between_request_stops() {
     }
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     for a in 0..3 {
         db.start_request(&lock, key(tid(1), 0, a), origin(), now())
             .unwrap();
@@ -2125,15 +2567,8 @@ fn retries_usage_and_between_request_stops() {
     assert_eq!(t.steps[0].attempts[2].retry_delay_ms, None);
     assert_eq!(node_at(&db, 2).retry_notices().unwrap().len(), 2);
     assert_eq!(
-        t.usage,
-        UsageSummary::Partial {
-            known: TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0
-            },
-            unknown_attempts: 3
-        }
+        *t.usage,
+        UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None); 3])
     );
     assert_eq!(
         t.summary.notice.unwrap(),
@@ -2152,7 +2587,7 @@ fn retries_usage_and_between_request_stops() {
 fn step_budget_reserves_and_closes_limit_node() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     for ordinal in 0..MAX_MODEL_STEPS {
         db.start_request(&lock, key(tid(1), ordinal, 0), origin(), now())
             .unwrap();
@@ -2164,7 +2599,7 @@ fn step_budget_reserves_and_closes_limit_node() {
                 now(),
             )
             .unwrap();
-        finish(&db, &lock, &calls.bindings[0], None);
+        finish(&db, &lock, &calls.bindings[0], ok_reply());
         let closed = db
             .close_step(
                 &lock,
@@ -2195,16 +2630,11 @@ fn step_budget_reserves_and_closes_limit_node() {
         db.start_request(&lock, key(tid(1), MAX_MODEL_STEPS, 0), origin(), now())
             .is_err()
     );
-    assert_eq!(
-        t.usage,
-        UsageSummary::Complete {
-            total: TokenUsage {
-                prompt_tokens: 64,
-                completion_tokens: 96,
-                total_tokens: 160
-            }
-        }
-    );
+    assert_eq!(t.usage.attempts, 32);
+    assert_eq!(t.usage.input.known, Some(64));
+    assert_eq!(t.usage.output.known, Some(96));
+    assert!(t.usage.input.complete);
+    assert_eq!(t.usage.cost.unknown_attempts, 32);
     drop(lock);
     drop(db);
     assert_eq!(detail(&SessionStore::open(&layout).unwrap()), t);
@@ -2218,7 +2648,7 @@ fn conversation_tree() -> (
 ) {
     let (dir, layout, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
-    finish(&db, &lock, &calls.bindings[0], None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
     db.close_step(
         &lock,
         CloseStep::Continue {
@@ -2231,11 +2661,14 @@ fn conversation_tree() -> (
         .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 1, 0), 0)), now())
         .unwrap();
+    let mut beta_settings = SessionSettings::for_test(&config());
+    beta_settings.profile.agent_name = agent("beta");
+    db.update_settings(&lock, &project(1), beta_settings, now())
+        .unwrap();
     for t in [tid(2), tid(3)] {
         let mut next = accept(sid(1), t);
-        next.session = AcceptSession::Existing { id: sid(1) };
-        next.config.agent_name = "beta".into();
-        db.accept_turn(&lock, next).unwrap();
+        next.config.agent_name = agent("beta");
+        accept_prepared(&db, &lock, next).unwrap();
         if t == tid(2) {
             db.start_request(&lock, key(t, 0, 0), origin(), now())
                 .unwrap();
@@ -2248,6 +2681,32 @@ fn conversation_tree() -> (
 
 fn entry_nodes(entries: &[ConversationEntry]) -> Vec<u64> {
     entries.iter().map(|entry| entry.node().0).collect()
+}
+
+#[test]
+fn last_accepted_agent_survives_rewind() {
+    let (_dir, layout, db, lock) = conversation_tree();
+    for target in [NodeId(2), NodeId(1), NodeId(0)] {
+        db.rewind(&lock, target, &project(1), now()).unwrap();
+        let read = db.begin_read().unwrap();
+        assert_eq!(read.current_agent(sid(1)).unwrap(), Some(agent("beta")));
+        assert_eq!(
+            read.view(sid(1), 10).unwrap().current_agent,
+            Some(agent("beta"))
+        );
+        assert_eq!(read.log(sid(1)).unwrap().current_agent, Some(agent("beta")));
+    }
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).unwrap();
+    assert_eq!(
+        reopened
+            .begin_read()
+            .unwrap()
+            .current_agent(sid(1))
+            .unwrap(),
+        Some(agent("beta"))
+    );
 }
 
 fn entry_ordinals(entries: &[ConversationEntry]) -> Vec<u64> {
@@ -2268,7 +2727,7 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     assert_eq!(entry_nodes(&view.entries), vec![4, 5, 6, 7]);
     assert_eq!(entry_ordinals(&view.entries), vec![2, 3]);
     assert_eq!(view.session.current, NodeId(7));
-    assert_eq!(view.current_agent.as_deref(), Some("beta"));
+    assert_eq!(view.current_agent.as_ref(), Some(&agent("beta")));
     assert!(
         matches!(&view.entries[3], ConversationEntry::Step { step, summary: Some(summary), .. }
         if step.progress == StepProgress::Reserved && summary.progress == StepProgress::Reserved)
@@ -2279,17 +2738,16 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     );
     drop(read);
     assert!(matches!(
-        db.rewind(&lock, NodeId(99), now()),
+        db.rewind(&lock, NodeId(99), &project(1), now()),
         Err(StoreError::NotFound { kind: "node", .. })
     ));
     assert_eq!(
         db.begin_read().unwrap().session(sid(1)).unwrap().current,
         NodeId(7)
     );
-    db.rewind(&lock, NodeId(2), now()).unwrap();
-    let mut branch = accept(sid(1), tid(4));
-    branch.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, branch).unwrap();
+    db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
+    let branch = accept(sid(1), tid(4));
+    accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 10).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1, 2, 8, 9]);
@@ -2304,15 +2762,15 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
         vec![2]
     );
     drop(read);
-    db.rewind(&lock, NodeId(1), now()).unwrap();
+    db.rewind(&lock, NodeId(1), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1]);
-    assert_eq!(view.current_agent.as_deref(), Some("alpha"));
-    db.rewind(&lock, NodeId(0), now()).unwrap();
+    assert_eq!(view.current_agent, Some(agent("beta")));
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
-    assert_eq!(view.current_agent, None);
+    assert_eq!(view.current_agent, Some(agent("beta")));
 }
 
 #[test]
@@ -2330,10 +2788,9 @@ fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
     assert_eq!(read.history(sid(1), NodeId(6), u32::MAX).unwrap(), both);
     assert!(read.history(sid(1), NodeId(1), 1).unwrap().is_empty());
     drop(read);
-    db.rewind(&lock, NodeId(2), now()).unwrap();
-    let mut branch = accept(sid(1), tid(4));
-    branch.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, branch).unwrap();
+    db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
+    let branch = accept(sid(1), tid(4));
+    accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
     assert_eq!(read.history(sid(1), NodeId(6), 2).unwrap(), both);
     assert_eq!(
@@ -2354,12 +2811,11 @@ fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
 fn conversation_reads_reject_invalid_boundaries_and_missing_targets() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     let other = db.try_lock_session(sid(2)).unwrap();
-    db.accept_turn(&other, accept(sid(2), tid(2))).unwrap();
-    let mut next = accept(sid(2), tid(3));
-    next.session = AcceptSession::Existing { id: sid(2) };
-    db.accept_turn(&other, next).unwrap();
+    accept_prepared(&db, &other, accept(sid(2), tid(2))).unwrap();
+    let next = accept(sid(2), tid(3));
+    accept_prepared(&db, &other, next).unwrap();
     let read = db.begin_read().unwrap();
     for before in [NodeId(0), NodeId(2), NodeId(3), NodeId(99)] {
         assert!(
@@ -2438,7 +2894,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
             "retries": [], "summary": expected.summary,
         })
     );
-    finish(&db, &lock, &calls.bindings[0], None);
+    finish(&db, &lock, &calls.bindings[0], ok_reply());
     let entry = db.begin_read().unwrap().entry(node).unwrap();
     assert!(matches!(
         entry,
@@ -2534,7 +2990,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
 fn conversation_retries_and_transaction_reads_survive_reopen() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
         .unwrap();
     db.stop_attempt(
@@ -2548,6 +3004,10 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
     .unwrap();
     let old_read = db.begin_read().unwrap();
     let view = old_read.view(sid(1), 1).unwrap();
+    let usage = old_read.usage(sid(1)).unwrap();
+    assert_eq!(usage.position, NodeId(2));
+    assert_eq!(usage.session_total, usage.path_total);
+    assert_eq!(usage.path_total.attempts, 1);
     assert_eq!(view.entries.len(), 2);
     assert!(
         matches!(&view.entries[1], ConversationEntry::Step { retries, .. }
@@ -2557,10 +3017,15 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
         .unwrap();
     db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 1), 0)), now())
         .unwrap();
-    let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, next).unwrap();
+    let next = accept(sid(1), tid(2));
+    accept_prepared(&db, &lock, next).unwrap();
     assert_eq!(old_read.view(sid(1), 1).unwrap(), view);
+    assert_eq!(old_read.usage(sid(1)).unwrap(), usage);
+    let current = db.begin_read().unwrap().usage(sid(1)).unwrap();
+    assert_eq!(current.position, NodeId(4));
+    assert_eq!(current.path_total.attempts, 2);
+    assert_eq!(current.session_total, current.path_total);
+    assert_eq!(current.turns.len(), 2);
     assert_eq!(
         old_read
             .entry(NodeRef {
@@ -2718,7 +3183,7 @@ fn observer_projections_skip_unrelated_content() {
     ] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
         db.stop_attempt(
@@ -2757,20 +3222,82 @@ fn observer_projections_skip_unrelated_content() {
 }
 
 fn edit_projection_node(db: &SessionStore, node: NodeId, edit: impl FnOnce(&mut Value)) {
-    let tx = db.db.begin_write().unwrap();
-    {
-        let mut nodes = tx.open_table(NODES).unwrap();
-        let key = node_key(sid(1), node);
-        let mut wire: Value = {
-            let value = nodes.get(key.as_slice()).unwrap().unwrap();
-            serde_json::from_slice(&value.value()[4..]).unwrap()
-        };
-        edit(&mut wire);
-        nodes
-            .insert(key.as_slice(), encode(&wire).unwrap().as_slice())
+    db.edit_test_node(
+        NodeRef {
+            session_id: sid(1),
+            node,
+        },
+        edit,
+    )
+    .unwrap();
+}
+
+#[test]
+fn usage_projection_skips_conversation_and_execution_material() {
+    for position in [NodeId(2), NodeId(0)] {
+        let (_d, _l, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
             .unwrap();
+        db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
+            .unwrap();
+        db.rewind(&lock, position, &project(1), now()).unwrap();
+        let expected = db.begin_read().unwrap().usage(sid(1)).unwrap();
+        assert_eq!(
+            expected.path_total.attempts,
+            u64::from(position != NodeId(0))
+        );
+        assert_eq!(expected.session_total.attempts, 1);
+        for (node, pointers) in [
+            (NodeId(1), &["/message", "/config_digest", "/limits"][..]),
+            (
+                NodeId(2),
+                &[
+                    "/reply",
+                    "/slots",
+                    "/progress",
+                    "/attempts/0/origin",
+                    "/attempts/0/progress",
+                ][..],
+            ),
+        ] {
+            edit_projection_node(&db, node, |wire| {
+                for pointer in pointers {
+                    *wire.pointer_mut(pointer).unwrap() = json!(false);
+                }
+            });
+        }
+        assert_eq!(db.begin_read().unwrap().usage(sid(1)).unwrap(), expected);
     }
-    tx.commit().unwrap();
+}
+
+#[test]
+fn usage_projection_rejects_damaged_metering_fields() {
+    for (node, pointer) in [
+        (NodeId(1), "/provider"),
+        (NodeId(1), "/model"),
+        (NodeId(2), "/attempts"),
+        (NodeId(2), "/attempts/0/usage"),
+        (NodeId(2), "/attempts/0/usage_kind"),
+        (NodeId(2), "/attempts/0/cost"),
+    ] {
+        let (_d, _l, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .unwrap();
+        edit_projection_node(&db, node, |wire| {
+            *wire.pointer_mut(pointer).unwrap() = json!(false);
+        });
+        assert!(
+            matches!(
+                db.begin_read().unwrap().usage(sid(1)),
+                Err(StoreError::Corruption { .. })
+            ),
+            "node={node:?} pointer={pointer}"
+        );
+    }
 }
 
 #[test]
@@ -2789,7 +3316,7 @@ fn observer_projections_reject_damaged_fields() {
         for replacement in [None, Some(json!(false))] {
             let (_d, _l, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
             edit_projection_node(&db, node, |wire| {
@@ -2822,7 +3349,7 @@ fn observer_projections_reject_damaged_fields() {
     ] {
         let (_d, _l, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         edit_projection_node(&db, node, |wire| wire[field] = value);
         let read = db.begin_read().unwrap();
         let result = if node == NodeId(2) {
@@ -2861,6 +3388,7 @@ fn conversation_counts_reject_damaged_headers() {
                 tx.commit().unwrap();
                 let read = db.begin_read().unwrap();
                 for result in [
+                    read.usage(sid(1)).map(|_| ()),
                     read.view(sid(1), 1).map(|_| ()),
                     read.history(sid(1), NodeId(6), 1).map(|_| ()),
                     read.entry(NodeRef {
@@ -2896,15 +3424,20 @@ fn conversation_counts_reject_invalid_value_versions() {
             nodes.insert(key.as_slice(), bytes.as_slice()).unwrap();
         }
         tx.commit().unwrap();
-        let result = db.begin_read().unwrap().view(sid(1), 1);
-        if let Some(version) = version {
-            assert!(
-                matches!(result, Err(StoreError::UnsupportedVersion { path, table, key, found, supported: VERSION })
+        let read = db.begin_read().unwrap();
+        for result in [
+            read.view(sid(1), 1).map(|_| ()),
+            read.usage(sid(1)).map(|_| ()),
+        ] {
+            if let Some(version) = version {
+                assert!(
+                    matches!(result, Err(StoreError::UnsupportedVersion { path, table, key, found, supported: VERSION })
                 if path == layout.lattice_root().join("lattice.redb")
                     && table == "nodes" && key == format!("{}/3", sid(1)) && found == version)
-            );
-        } else {
-            assert!(matches!(result, Err(StoreError::Corruption { .. })));
+                );
+            } else {
+                assert!(matches!(result, Err(StoreError::Corruption { .. })));
+            }
         }
     }
 }
@@ -2915,10 +3448,9 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
         for broken in [false, true] {
             let (_d, _l, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-            let mut next = accept(sid(1), tid(2));
-            next.session = AcceptSession::Existing { id: sid(1) };
-            db.accept_turn(&lock, next).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+            let next = accept(sid(1), tid(2));
+            accept_prepared(&db, &lock, next).unwrap();
             let tx = db.db.begin_write().unwrap();
             {
                 let mut nodes = tx.open_table(NODES).unwrap();
@@ -2933,6 +3465,7 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
             tx.commit().unwrap();
             let read = db.begin_read().unwrap();
             for result in [
+                read.usage(sid(1)).map(|_| ()),
                 read.view(sid(1), 1).map(|_| ()),
                 read.view(sid(1), 2).map(|_| ()),
                 read.history(sid(1), NodeId(3), 1).map(|_| ()),
@@ -2961,112 +3494,9 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
     }
 }
 
-#[test]
-fn audit_resolves_terminal_from_nodes_without_close_rows() {
-    let (_d, layout, db) = store();
-    let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
-    let before = db.begin_read().unwrap();
-    finish(
-        &db,
-        &lock,
-        &calls.bindings[0],
-        Some(CepErrorCode::CallCancelled),
-    );
-    let read = db.begin_read().unwrap();
-    let tail = read
-        .tail_audit(&filter(project(1)), ChangeSeq(0), 100)
-        .unwrap();
-    assert_eq!(tail.rows.len(), 4);
-    assert!(matches!(
-        tail.rows[0].row.state,
-        OperatorInvocationState::Registered
-    ));
-    assert!(matches!(
-        tail.rows[2].row.state,
-        OperatorInvocationState::Started
-    ));
-    assert!(matches!(
-        tail.rows[3].row.state,
-        OperatorInvocationState::Terminal {
-            outcome: ToolResultOutcome::Indeterminate,
-            ..
-        }
-    ));
-    assert_eq!(
-        before
-            .tail_audit(&filter(project(1)), ChangeSeq(0), 100)
-            .unwrap()
-            .rows
-            .len(),
-        2
-    );
-    assert!(
-        db.start_invocation(&lock, &calls.bindings[1], now())
-            .is_err()
-    );
-    db.close_step(
-        &lock,
-        CloseStep::StopExecuting {
-            key: step(tid(1), 0),
-            stop: DispatchStop::Deadline,
-        },
-        now(),
-    )
-    .unwrap();
-    assert_eq!(detail(&db).summary.outcome, PublicTurnOutcome::Cancelled);
-    assert_eq!(records(&db).last_change, ChangeSeq(4));
-    let current = db.begin_read().unwrap();
-    assert_eq!(
-        current
-            .query_audit(&filter(project(1)), None, 1)
-            .unwrap()
-            .next,
-        Some(iid(1))
-    );
-    assert_eq!(
-        current
-            .query_audit(&filter(project(1)), Some(iid(1)), 1)
-            .unwrap()
-            .rows[0]
-            .state,
-        OperatorInvocationState::Registered
-    );
-    let mut cursor = ChangeSeq(0);
-    let mut rows = Vec::new();
-    loop {
-        let p = current.tail_audit(&filter(project(1)), cursor, 1).unwrap();
-        rows.extend(p.rows);
-        cursor = p.next_after;
-        if p.done {
-            break;
-        }
-    }
-    assert_eq!(rows, tail.rows);
-    let other = filter(project(2));
-    let p = current.tail_audit(&other, ChangeSeq(0), 100).unwrap();
-    assert!(p.rows.is_empty());
-    assert!(p.done);
-    assert!(current.tail_audit(&other, ChangeSeq(5), 1).is_err());
-    assert!(current.query_audit(&other, None, 0).is_err());
-    let replay = current.replay_audit(&project(1), sid(1), tid(1)).unwrap();
-    assert_eq!(replay.calls.len(), 2);
-    assert!(matches!(
-        current.replay_audit(&project(1), sid(9), tid(1)),
-        Err(StoreError::NotFound {
-            kind: "session",
-            ..
-        })
-    ));
-    drop(current);
-    drop(read);
-    drop(before);
-    drop(lock);
-    drop(db);
-    SessionStore::open(&layout).unwrap();
-}
 fn corruptible_fixture(db: &SessionStore) -> SessionExecutionLock {
     let (lock, calls) = running(db, sid(1), tid(1), 1, 1);
-    finish(db, &lock, &calls.bindings[0], None);
+    finish(db, &lock, &calls.bindings[0], ok_reply());
     db.close_step(
         &lock,
         CloseStep::Continue {
@@ -3096,7 +3526,7 @@ fn corruptible_fixture(db: &SessionStore) -> SessionExecutionLock {
             now(),
         )
         .unwrap();
-    finish(db, &lock, &calls.bindings[0], None);
+    finish(db, &lock, &calls.bindings[0], ok_reply());
     db.start_invocation(&lock, &calls.bindings[1], now())
         .unwrap();
     lock
@@ -3116,7 +3546,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "root_missing",
         "root_extra",
         "user_parent",
-        "user_provider",
         "orphan_session",
         "node_gap",
         "parent_forward",
@@ -3136,25 +3565,23 @@ fn read_validation_rejects_broken_relations_and_shapes() {
         "executing_reply",
         "reply_binding",
         "reply_provider",
+        "reply_provider_id",
+        "reply_origin_missing",
         "attempt_provider",
         "attempt_protocol",
+        "reply_attempt_sent",
+        "reply_attempt_stopped",
         "reply_slot_count",
         "slot_turn",
+        "slot_arguments_digest",
+        "slot_tool_identity",
         "terminal_not_executed",
         "terminal_no_result",
-        "terminal_without_receipt",
         "duplicate_invocation",
-        "evidence_version",
         "result_digest",
         "index_missing",
         "index_extra",
         "index_address",
-        "index_last",
-        "change_gap",
-        "change_sequence",
-        "change_lifecycle",
-        "change_orphan",
-        "high_water",
     ] {
         let mut r = base.clone();
         match case {
@@ -3177,23 +3604,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                     unreachable!()
                 };
                 *parent = NodeId(1);
-            }
-            "user_provider" => {
-                let Node::UserMessage { provider, .. } =
-                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
-                else {
-                    unreachable!()
-                };
-                *provider = "Bad_id".into();
-                // 去掉回复上的协议标记，仍须拒绝非法的 provider 标识。
-                for n in [2, 3] {
-                    if let Node::Step {
-                        reply: Some(reply), ..
-                    } = r.nodes.get_mut(&(sid(1), NodeId(n))).unwrap()
-                    {
-                        reply.provider_origin = None;
-                    }
-                }
             }
             "orphan_session" => {
                 r.sessions.clear();
@@ -3230,16 +3640,6 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 r.index.insert(iid(99), r.index[&iid(2)].clone());
             }
             "index_address" => r.index.get_mut(&iid(2)).unwrap().address.part_ordinal = 99,
-            "index_last" => r.index.get_mut(&iid(2)).unwrap().last_change = ChangeSeq(1),
-            "change_gap" => {
-                r.changes.remove(&ChangeSeq(1));
-            }
-            "change_sequence" => r.changes.get_mut(&ChangeSeq(1)).unwrap().sequence = ChangeSeq(99),
-            "change_lifecycle" => {
-                r.changes.get_mut(&ChangeSeq(1)).unwrap().stage = InvocationStage::Started
-            }
-            "change_orphan" => r.changes.get_mut(&ChangeSeq(1)).unwrap().invocation_id = iid(99),
-            "high_water" => r.last_change = ChangeSeq(99),
             _ => {
                 let Node::Step {
                     parent,
@@ -3274,52 +3674,59 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                         call.arguments_digest = [0; 32];
                     }
                     "attempt_provider" => {
-                        attempts[0].origin.provider_id = "another-provider".into()
+                        attempts[0].origin.provider_id = provider("another-provider")
                     }
                     "attempt_protocol" => {
-                        attempts.last_mut().unwrap().origin.protocol =
-                            AttemptProtocol::AnthropicMessages
+                        attempts.last_mut().unwrap().origin.protocol = AttemptProtocol::Messages
+                    }
+                    "reply_attempt_sent" => {
+                        attempts.last_mut().unwrap().progress = AttemptProgress::Sent;
+                    }
+                    "reply_attempt_stopped" => {
+                        attempts.last_mut().unwrap().progress = AttemptProgress::Ended {
+                            end: AttemptEnd::Stopped {
+                                cause: StopCause::ProcessExit,
+                            },
+                            diagnostic: AttemptDiagnostic::default(),
+                        };
                     }
                     "reply_provider" => {
-                        reply.as_mut().unwrap().provider_origin = Some(ProviderOrigin::Gemini)
+                        reply.as_mut().unwrap().provider_origin = Some(AttemptOrigin {
+                            protocol: Protocol::GenerateContent,
+                            ..origin()
+                        })
                     }
+                    "reply_provider_id" => {
+                        reply
+                            .as_mut()
+                            .unwrap()
+                            .provider_origin
+                            .as_mut()
+                            .unwrap()
+                            .provider_id = provider("another-provider");
+                    }
+                    "reply_origin_missing" => reply.as_mut().unwrap().provider_origin = None,
                     "reply_slot_count" => {
                         slots.pop();
                     }
                     "slot_turn" => slots[0].binding.identity.turn_id = tid(99),
-                    "terminal_not_executed" | "terminal_no_result" | "terminal_without_receipt" => {
-                        let SlotProgress::Terminal { result, evidence } = &mut slots[0].progress
-                        else {
+                    "slot_arguments_digest" => slots[0].binding.identity.arguments_digest = [0; 32],
+                    "slot_tool_identity" => {
+                        slots[0].binding.identity.tool_identity = "other-tool@v2".into()
+                    }
+                    "terminal_not_executed" | "terminal_no_result" => {
+                        let SlotProgress::Terminal { result } = &mut slots[0].progress else {
                             unreachable!()
                         };
-                        result.payload = match case {
-                            "terminal_not_executed" => ResultPayload::NotExecuted,
-                            "terminal_no_result" => {
-                                ResultPayload::Indeterminate(IndeterminateCause::NoResult)
-                            }
-                            _ => ResultPayload::Indeterminate(IndeterminateCause::Reported),
-                        };
-                        *evidence = InvocationEvidence::Unavailable {
-                            reason: if case == "terminal_not_executed" {
-                                EvidenceUnavailableReason::NotDispatched
-                            } else {
-                                EvidenceUnavailableReason::NoResult
-                            },
+                        result.payload = if case == "terminal_not_executed" {
+                            ResultPayload::NotExecuted
+                        } else {
+                            ResultPayload::Indeterminate(IndeterminateCause::NoResult)
                         };
                     }
                     "duplicate_invocation" => slots[2].binding.invocation_id = iid(2),
-                    "evidence_version" => {
-                        let SlotProgress::Terminal {
-                            evidence: InvocationEvidence::Recorded(e),
-                            ..
-                        } = &mut slots[0].progress
-                        else {
-                            unreachable!()
-                        };
-                        e.effects.version += 1;
-                    }
                     "result_digest" => {
-                        let SlotProgress::Terminal { result, .. } = &mut slots[0].progress else {
+                        let SlotProgress::Terminal { result } = &mut slots[0].progress else {
                             unreachable!()
                         };
                         let ResultPayload::Succeeded(SuccessContent::Json { digest, .. }) =
@@ -3347,11 +3754,53 @@ fn read_validation_rejects_broken_relations_and_shapes() {
             "strict open missed {case}"
         );
     }
+    for case in ["user_provider", "consistent_invalid_provider"] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        overwrite_records(&tx, &base);
+        {
+            let mut nodes = tx.open_table(NODES).unwrap();
+            let user_key = node_key(sid(1), NodeId(1));
+            let mut user_wire: Value = {
+                let value = nodes.get(user_key.as_slice()).unwrap().unwrap();
+                serde_json::from_slice(&value.value()[4..]).unwrap()
+            };
+            user_wire["provider"] = json!("Bad_id");
+            nodes
+                .insert(user_key.as_slice(), encode(&user_wire).unwrap().as_slice())
+                .unwrap();
+            if case == "consistent_invalid_provider" {
+                for n in [2, 3] {
+                    let step_key = node_key(sid(1), NodeId(n));
+                    let mut step_wire: Value = {
+                        let value = nodes.get(step_key.as_slice()).unwrap().unwrap();
+                        serde_json::from_slice(&value.value()[4..]).unwrap()
+                    };
+                    for attempt in step_wire["attempts"].as_array_mut().unwrap() {
+                        attempt["origin"]["provider_id"] = json!("Bad_id");
+                    }
+                    step_wire["reply"]["provider_origin"]["provider_id"] = json!("Bad_id");
+                    nodes
+                        .insert(step_key.as_slice(), encode(&step_wire).unwrap().as_slice())
+                        .unwrap();
+                }
+            }
+        }
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(
+            matches!(
+                SessionStore::open(&layout),
+                Err(StoreError::Corruption { .. })
+            ),
+            "strict open missed {case}"
+        );
+    }
 }
 
 #[test]
 fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
-    for case in 0..7 {
+    for case in 0..6 {
         let (_d, layout, db) = store();
         let lock = corruptible_fixture(&db);
         let (_other, _calls) = running(&db, sid(2), tid(2), 1, 99);
@@ -3368,8 +3817,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
             3 => {
                 r.index.remove(&iid(2));
             }
-            4 => r.changes.get_mut(&ChangeSeq(8)).unwrap().invocation_id = iid(99),
-            5 => {
+            4 => {
                 let Node::Step { parent, .. } = r.nodes.get_mut(&(sid(1), NodeId(3))).unwrap()
                 else {
                     unreachable!()
@@ -3388,7 +3836,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
         replace_all_for_test(&tx, &r).unwrap();
         tx.commit().unwrap();
         let read = db.begin_read().unwrap();
-        if case == 6 {
+        if case == 5 {
             read.turn_detail(sid(1), tid(1)).unwrap();
         } else {
             assert!(
@@ -3406,7 +3854,7 @@ fn local_reads_detect_live_corruption_and_open_checks_unrelated_sessions() {
 
 #[test]
 fn value_versions_and_schema_rejections_name_the_database() {
-    for table in [META, SESSIONS, CONFIGS, TURN_INDEX, INDEX] {
+    for table in [META, SESSIONS, SESSION_SETTINGS, CONFIGS, TURN_INDEX, INDEX] {
         let (_d, layout, db) = store();
         let (lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
         drop(lock);
@@ -3428,22 +3876,18 @@ fn value_versions_and_schema_rejections_name_the_database() {
             matches!(SessionStore::open(&layout),Err(StoreError::UnsupportedVersion{path,found:1,supported:VERSION,..}) if path==layout.lattice_root().join("lattice.redb"))
         );
     }
-    for table in ["nodes", "invocation_changes"] {
+    {
         let (_d, layout, db) = store();
         let (lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
         drop(lock);
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
-        if table == "nodes" {
+        {
             let mut t = tx.open_table(NODES).unwrap();
             let bytes = 1u32.to_be_bytes();
             t.insert(node_key(sid(1), NodeId(0)).as_slice(), bytes.as_slice())
                 .unwrap();
-        } else {
-            let mut t = tx.open_table(CHANGES).unwrap();
-            let bytes = 1u32.to_be_bytes();
-            t.insert(1, bytes.as_slice()).unwrap();
         }
         tx.commit().unwrap();
         drop(raw);
@@ -3461,126 +3905,34 @@ fn value_versions_and_schema_rejections_name_the_database() {
 }
 
 #[test]
-fn open_rejects_invalid_invocation_lifecycle() {
-    for case in ["repeated_registered", "missing_started", "repeated_started"] {
-        let (_dir, layout, db) = store();
-        let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
-        let (_other, _) = running(&db, sid(2), tid(2), 1, 2);
-        finish(&db, &lock, &calls.bindings[0], None);
-
-        let mut selected = filter(project(1));
-        selected.session_id = Some(sid(1));
-        // 两个调用的 Registered 交错；单条分页应还原同一个调用的前态。
-        for after in 0..4 {
-            let page = db
-                .begin_read()
-                .unwrap()
-                .tail_audit(&selected, ChangeSeq(after), 1)
-                .unwrap();
-            assert_eq!(page.next_after, ChangeSeq(after + 1));
-            assert_eq!(page.rows.len(), usize::from(after != 1));
-        }
-        let tx = db.db.begin_write().unwrap();
-        let mut records = load_write(&tx).unwrap();
-        let terminal_seq = match case {
-            "repeated_registered" => {
-                records.changes.get_mut(&ChangeSeq(3)).unwrap().stage = InvocationStage::Registered;
-                4
-            }
-            "missing_started" => {
-                records.changes.remove(&ChangeSeq(3));
-                let mut terminal = records.changes.remove(&ChangeSeq(4)).unwrap();
-                terminal.sequence = ChangeSeq(3);
-                records.changes.insert(ChangeSeq(3), terminal);
-                3
-            }
-            _ => {
-                let mut terminal = records.changes.remove(&ChangeSeq(4)).unwrap();
-                terminal.sequence = ChangeSeq(5);
-                records.changes.insert(ChangeSeq(5), terminal);
-                let mut started = records.changes[&ChangeSeq(3)];
-                started.sequence = ChangeSeq(4);
-                records.changes.insert(ChangeSeq(4), started);
-                5
-            }
-        };
-        records.last_change = ChangeSeq(terminal_seq);
-        records.index.get_mut(&iid(1)).unwrap().last_change = ChangeSeq(terminal_seq);
-        replace_all_for_test(&tx, &records).unwrap();
-        tx.commit().unwrap();
-        assert!(records == load_read(&db.begin_read().unwrap().tx).unwrap());
-        drop(db);
-        assert!(matches!(
-            SessionStore::open(&layout),
-            Err(StoreError::Corruption { .. })
-        ));
-    }
-}
-
-#[test]
-fn registration_rejects_corrupt_change_high_water() {
-    for high_water in [0, 4] {
-        let (_dir, _layout, db) = store();
-        let (first, calls) = running(&db, sid(1), tid(1), 1, 1);
-        finish(&db, &first, &calls.bindings[0], None);
-
-        let lock = db.try_lock_session(sid(2)).unwrap();
-        db.accept_turn(&lock, accept(sid(2), tid(2))).unwrap();
-        db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
-            .unwrap();
-        let tx = db.db.begin_write().unwrap();
-        tx.open_table(META)
-            .unwrap()
-            .insert(
-                "last_change_seq",
-                encode(&ChangeSeq(high_water)).unwrap().as_slice(),
-            )
-            .unwrap();
-        tx.commit().unwrap();
-        let before = load_read(&db.begin_read().unwrap().tx).unwrap();
-        let result = db.register_calls(&lock, reply(key(tid(2), 0, 0), 1), &[iid(2)], now());
-        assert!(
-            matches!(result, Err(StoreError::Corruption { .. })),
-            "registration accepted corrupt high water {high_water}: {result:?}"
-        );
-        assert!(before == load_read(&db.begin_read().unwrap().tx).unwrap());
-    }
-}
-
-#[test]
-fn change_publication_rejects_occupied_sequence() {
-    let (_dir, _layout, db) = store();
-    let (_lock, _) = running(&db, sid(1), tid(1), 1, 1);
-    let original = load_read(&db.begin_read().unwrap().tx).unwrap();
-    let mut before = original.clone();
-    before.changes.clear();
-    let mut after = before.clone();
-    let mut conflicting = original.changes[&ChangeSeq(1)];
-    conflicting.invocation_id = iid(99);
-    after.changes.insert(ChangeSeq(1), conflicting);
-    let tx = db.db.begin_write().unwrap();
-    let result = persist(&tx, &before, &after);
-    assert!(
-        matches!(result, Err(StoreError::Corruption { .. })),
-        "publication accepted occupied sequence: {result:?}"
-    );
-    assert!(original == load_write(&tx).unwrap());
-    drop(tx);
-    assert!(original == load_read(&db.begin_read().unwrap().tx).unwrap());
-}
-
-#[test]
 fn transaction_failure_matrix() {
-    for phase in 0..11 {
-        for point in [FaultPoint::UnknownBefore, FaultPoint::UnknownAfter] {
+    for phase in 0..14 {
+        for point in [
+            FaultPoint::Poisoned,
+            FaultPoint::UnknownBefore,
+            FaultPoint::UnknownAfter,
+        ] {
             let (_dir, layout, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-            if phase > 0 && phase != 10 {
+            if phase == 13 {
+                let other_lock = db.try_lock_session(sid(2)).unwrap();
+                accept_prepared(&db, &other_lock, accept(sid(2), tid(20))).unwrap();
+                drop(other_lock);
+                db.create_session(
+                    &lock,
+                    project(1),
+                    SessionSettings::for_test(&config()),
+                    now(),
+                )
+                .unwrap();
+            } else if phase != 11 {
+                accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+            }
+            if phase > 0 && !matches!(phase, 10..=13) {
                 db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                     .unwrap();
             }
-            let calls = if phase >= 4 && phase != 8 && phase != 10 {
+            let calls = if phase >= 4 && !matches!(phase, 8 | 10..=13) {
                 Some(
                     db.register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
                         .unwrap(),
@@ -3588,23 +3940,23 @@ fn transaction_failure_matrix() {
             } else {
                 None
             };
-            if phase >= 5 && phase != 8 && phase != 10 {
+            if phase >= 5 && !matches!(phase, 8 | 10..=13) {
                 db.start_invocation(&lock, &calls.as_ref().unwrap().bindings[0], now())
                     .unwrap();
             }
-            if phase >= 6 && phase != 8 && phase != 10 {
+            if phase >= 6 && !matches!(phase, 8 | 10..=13) {
                 db.finish_invocation(
                     &lock,
                     TerminalInput {
                         invocation_id: iid(1),
-                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], None),
+                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], ok_reply()),
                     },
                     now(),
                 )
                 .unwrap();
             }
             if phase == 9 {
-                finish(&db, &lock, &calls.as_ref().unwrap().bindings[1], None);
+                finish(&db, &lock, &calls.as_ref().unwrap().bindings[1], ok_reply());
             }
             let read = db.begin_read().unwrap();
             let before = codec::load_read(&read.tx).unwrap();
@@ -3637,7 +3989,7 @@ fn transaction_failure_matrix() {
                     &lock,
                     TerminalInput {
                         invocation_id: iid(1),
-                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], None),
+                        terminal: terminal(&calls.as_ref().unwrap().bindings[0], ok_reply()),
                     },
                     now(),
                 ),
@@ -3651,16 +4003,11 @@ fn transaction_failure_matrix() {
                         now(),
                     )
                     .map(|_| ()),
-                10 => {
-                    let mut next = accept(sid(1), tid(2));
-                    next.session = AcceptSession::Existing { id: sid(1) };
-                    db.accept_turn(&lock, next).map(|_| ())
-                }
-                7 => db.rewind(&lock, NodeId(0), now()).map(|_| ()),
+                7 => db.rewind(&lock, NodeId(0), &project(1), now()).map(|_| ()),
                 8 => db
                     .register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
                     .map(|_| ()),
-                _ => db
+                9 => db
                     .close_step(
                         &lock,
                         CloseStep::Continue {
@@ -3669,27 +4016,99 @@ fn transaction_failure_matrix() {
                         now(),
                     )
                     .map(|_| ()),
+                10 => accept_prepared(&db, &lock, accept(sid(1), tid(2))).map(|_| ()),
+                11 => db
+                    .create_session(
+                        &lock,
+                        project(1),
+                        SessionSettings::for_test(&config()),
+                        now(),
+                    )
+                    .map(|_| ()),
+                12 => {
+                    let mut updated = SessionSettings::for_test(&config());
+                    updated.profile.agent_name = agent("beta");
+                    updated.system_prompt = Some("更新后的系统提示".into());
+                    db.update_settings(
+                        &lock,
+                        &project(1),
+                        updated,
+                        now() + chrono::Duration::seconds(10),
+                    )
+                    .map(|_| ())
+                }
+                13 => db
+                    .delete_draft(&lock, now() + chrono::Duration::seconds(1))
+                    .map(|deleted| assert!(deleted, "删除过期草稿应返回 true")),
+                _ => unreachable!(),
             });
-            assert!(matches!(
-                result,
-                Err(StoreError::CommitFailed {
-                    kind: CommitFailureKind::OutcomeUnknown,
-                    ..
-                })
-            ));
-            assert!(before == codec::load_read(&read.tx).unwrap());
+            let expected_kind = if point == FaultPoint::Poisoned {
+                CommitFailureKind::TransactionPoisoned
+            } else {
+                CommitFailureKind::OutcomeUnknown
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(StoreError::CommitFailed { kind, .. }) if kind == expected_kind
+                ),
+                "阶段 {phase} 故障点 {point:?} 应返回预期提交失败：{result:?}"
+            );
+            assert!(
+                before == codec::load_read(&read.tx).unwrap(),
+                "已打开的只读事务快照不应受失败或提交影响"
+            );
             let after = codec::load_read(&db.begin_read().unwrap().tx).unwrap();
             assert_eq!(
                 before == after,
-                point == FaultPoint::UnknownBefore,
-                "phase {phase}"
+                point != FaultPoint::UnknownAfter,
+                "阶段 {phase} 故障点 {point:?} 的提交前后状态不符合预期"
             );
+            if phase == 13 {
+                let retained = point != FaultPoint::UnknownAfter;
+                assert_eq!(
+                    after.sessions.contains_key(&sid(1)),
+                    retained,
+                    "故障点 {point:?} 下草稿 sessions 记录存在性与预期不符"
+                );
+                assert_eq!(
+                    after.nodes.contains_key(&(sid(1), NodeId(0))),
+                    retained,
+                    "故障点 {point:?} 下草稿根节点存在性与预期不符"
+                );
+                assert_eq!(
+                    after.session_settings.contains_key(&sid(1)),
+                    retained,
+                    "故障点 {point:?} 下草稿 session_settings 记录存在性与预期不符"
+                );
+                assert_eq!(
+                    after.sessions.get(&sid(2)),
+                    before.sessions.get(&sid(2)),
+                    "其他会话的 sessions 记录不应受草稿删除事务影响"
+                );
+                assert_eq!(
+                    after.session_settings.get(&sid(2)),
+                    before.session_settings.get(&sid(2)),
+                    "其他会话的 session_settings 记录不应受草稿删除事务影响"
+                );
+                assert_eq!(
+                    after.turn_index, before.turn_index,
+                    "其他会话的 turn_index 不应受草稿删除事务影响"
+                );
+                assert_eq!(
+                    after.configs, before.configs,
+                    "配置表 configs 不应受草稿删除事务影响"
+                );
+            }
             validate::records(&after).unwrap();
             drop(read);
             drop(lock);
             drop(db);
             let reopened = SessionStore::open(&layout).unwrap();
-            assert!(after == codec::load_read(&reopened.begin_read().unwrap().tx).unwrap());
+            assert!(
+                after == codec::load_read(&reopened.begin_read().unwrap().tx).unwrap(),
+                "重开会话库后的数据应与故障后快照完全一致"
+            );
         }
     }
 }
@@ -3699,11 +4118,11 @@ fn rejected_error_round_trip_and_privacy() {
     let (_dir, layout, db) = store();
     let (lock, calls) = running(&db, sid(1), tid(1), 1, 1);
     let binding = &calls.bindings[0];
-    let term = terminal(binding, Some(CepErrorCode::CapabilityNotGranted));
+    let term = terminal(binding, failed_reply("capability_denied"));
     let wire = serde_json::to_value(&term).unwrap();
     assert_eq!(
-        wire["result"]["payload"]["payload"]["message"],
-        "private-error"
+        wire["result"]["payload"]["payload"],
+        json!({"code": "capability_denied", "message": "private-error"})
     );
     let bytes = codec::encode(&term).unwrap();
     assert_eq!(
@@ -3713,7 +4132,7 @@ fn rejected_error_round_trip_and_privacy() {
     let mut bad = wire.clone();
     bad["result"]["payload"]["payload"]["unknown"] = json!(true);
     let mut bytes = VERSION.to_be_bytes().to_vec();
-    bytes.extend(lancet_protocol::canonical_json(&bad).as_bytes());
+    bytes.extend(lattice_conversation::canonical_json(&bad).as_bytes());
     assert!(codec::decode::<InvocationTerminal>("steps", "test", &bytes).is_err());
     let mut old = wire;
     old["result"]["payload"]["payload"]
@@ -3738,14 +4157,20 @@ fn rejected_error_round_trip_and_privacy() {
     let Node::Step { slots, .. } = node_at(&db, 2) else {
         unreachable!()
     };
-    assert_eq!(resolve_slot(&slots[0]), (term.result, term.evidence));
-    let operator = db
+    assert_eq!(resolve_slot(&slots[0]), term.result);
+    let turn = db
         .begin_read()
         .unwrap()
-        .operator_status(&project(1))
+        .turn_detail(sid(1), tid(1))
         .unwrap();
+    assert_eq!(
+        turn.steps[0].slots[0].reason,
+        Some(SlotReason::Failed {
+            code: "capability_denied".into(),
+        })
+    );
     assert!(
-        !serde_json::to_string(&operator)
+        !serde_json::to_string(&turn)
             .unwrap()
             .contains("private-error")
     );
@@ -3769,6 +4194,7 @@ fn overwrite_records(tx: &redb::WriteTransaction, r: &Records) {
         }};
     }
     string_table!(SESSIONS, &r.sessions);
+    string_table!(SESSION_SETTINGS, &r.session_settings);
     string_table!(TURN_INDEX, &r.turn_index);
     string_table!(INDEX, &r.index);
     {
@@ -3787,29 +4213,17 @@ fn overwrite_records(tx: &redb::WriteTransaction, r: &Records) {
                 .unwrap();
         }
     }
-    {
-        let mut t = tx.open_table(CHANGES).unwrap();
-        t.retain(|_, _| false).unwrap();
-        for (k, v) in &r.changes {
-            t.insert(k.0, bytes(v).as_slice()).unwrap();
-        }
-    }
-    tx.open_table(META)
-        .unwrap()
-        .insert("last_change_seq", bytes(&r.last_change).as_slice())
-        .unwrap();
 }
 #[test]
 fn ordinary_operations_load_only_referenced_turns() {
     let (_d, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
-    db.rewind(&lock, NodeId(0), now()).unwrap();
-    let mut next = accept(sid(1), tid(2));
-    next.session = AcceptSession::Existing { id: sid(1) };
-    db.accept_turn(&lock, next).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+    db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
+    let next = accept(sid(1), tid(2));
+    accept_prepared(&db, &lock, next).unwrap();
     let other = db.try_lock_session(sid(2)).unwrap();
-    db.accept_turn(&other, accept(sid(2), tid(3))).unwrap();
+    accept_prepared(&db, &other, accept(sid(2), tid(3))).unwrap();
     let tx = db.db.begin_write().unwrap();
     {
         let mut t = tx.open_table(NODES).unwrap();
@@ -3824,6 +4238,14 @@ fn ordinary_operations_load_only_referenced_turns() {
     let read = db.begin_read().unwrap();
     assert_eq!(read.session(sid(1)).unwrap().current, NodeId(4));
     assert_eq!(read.list(None, 1).unwrap().items.len(), 1);
+    assert_eq!(
+        read.session_ids_with_prefix("", 5).unwrap(),
+        vec![sid(1), sid(2)]
+    );
+    assert_eq!(read.session_ids_with_prefix("", 1).unwrap(), vec![sid(1)]);
+    let one = sid(1).to_string();
+    assert_eq!(read.session_ids_with_prefix(&one, 5).unwrap(), vec![sid(1)]);
+    assert!(read.session_ids_with_prefix("zzzz", 5).unwrap().is_empty());
     assert_eq!(read.turn_detail(sid(1), tid(2)).unwrap().steps.len(), 1);
     assert_eq!(
         entry_nodes(&read.view(sid(1), 1).unwrap().entries),
@@ -3865,7 +4287,7 @@ fn ordinary_operations_load_only_referenced_turns() {
 fn invocation_registration_and_transitions_are_atomic() {
     let (_d, _l, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     assert!(
         db.start_request(&lock, key(tid(1), 0, 1), origin(), now())
             .is_err()
@@ -3884,8 +4306,11 @@ fn invocation_registration_and_transitions_are_atomic() {
             0 => candidates.pop().map(|_| ()).unwrap(),
             1 => candidates[1] = iid(1),
             2 => {
-                input.origin.protocol = AttemptProtocol::AnthropicMessages;
-                input.message.provider_origin = Some(ProviderOrigin::Anthropic);
+                input.origin.protocol = AttemptProtocol::Messages;
+                input.message.provider_origin = Some(AttemptOrigin {
+                    protocol: Protocol::Messages,
+                    ..origin()
+                });
             }
             3 => input.message.role = MessageRole::User,
             4 => {
@@ -3910,8 +4335,13 @@ fn invocation_registration_and_transitions_are_atomic() {
                 };
                 call.provider_call_id = Some("call-0".into());
             }
-            9 => input.origin.provider_id = "another-provider".into(),
-            10 => input.message.provider_origin = Some(ProviderOrigin::Anthropic),
+            9 => input.origin.provider_id = provider("another-provider"),
+            10 => {
+                input.message.provider_origin = Some(AttemptOrigin {
+                    protocol: Protocol::Messages,
+                    ..origin()
+                })
+            }
             _ => {
                 input = reply(key(tid(1), 0, 0), 33);
                 candidates = (1..=33).map(iid).collect();
@@ -3958,7 +4388,7 @@ fn invocation_registration_and_transitions_are_atomic() {
             &lock,
             TerminalInput {
                 invocation_id: iid(2),
-                terminal: terminal(&calls.bindings[0], None)
+                terminal: terminal(&calls.bindings[0], ok_reply())
             },
             now()
         )
@@ -3978,7 +4408,7 @@ fn invocation_registration_and_transitions_are_atomic() {
         &db,
         &lock,
         &calls.bindings[0],
-        Some(CepErrorCode::ExecutionFailed),
+        failed_reply("execution_failed"),
     );
     assert!(
         db.start_invocation(&lock, &calls.bindings[0], now())
@@ -3989,24 +4419,19 @@ fn invocation_registration_and_transitions_are_atomic() {
             &lock,
             TerminalInput {
                 invocation_id: iid(2),
-                terminal: terminal(&calls.bindings[0], None)
+                terminal: terminal(&calls.bindings[0], ok_reply())
             },
             now()
         )
         .is_err()
     );
-    finish(
-        &db,
-        &lock,
-        &calls.bindings[1],
-        Some(CepErrorCode::GuardDenied),
-    );
+    finish(&db, &lock, &calls.bindings[1], failed_reply("guard_denied"));
     assert!(
         db.finish_invocation(
             &lock,
             TerminalInput {
                 invocation_id: iid(3),
-                terminal: terminal(&calls.bindings[1], None)
+                terminal: terminal(&calls.bindings[1], ok_reply())
             },
             now()
         )
@@ -4068,7 +4493,7 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
             let (_dir, layout, db) = store();
             let db = Arc::new(db);
             let lock = db.try_lock_session(sid(1)).unwrap();
-            db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+            accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             for index in 0..=ordinal {
                 db.start_request(&lock, key(tid(1), index, 0), origin(), now())
                     .unwrap();
@@ -4081,12 +4506,12 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
                         now(),
                     )
                     .unwrap();
-                finish(&db, &lock, &calls.bindings[0], None);
+                finish(&db, &lock, &calls.bindings[0], ok_reply());
                 finish(
                     &db,
                     &lock,
                     &calls.bindings[1],
-                    Some(CepErrorCode::ExecutionFailed),
+                    failed_reply("execution_failed"),
                 );
                 if index < ordinal {
                     db.close_step(&lock, CloseStep::Continue { key: calls.key }, now())
@@ -4163,7 +4588,7 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
                     completed
                         .slots
                         .iter()
-                        .all(|s| matches!(s.progress, OperatorInvocationState::Terminal { .. }))
+                        .all(|s| matches!(s.progress, SlotState::Terminal { .. }))
                 );
                 let last = turn.steps.last().unwrap();
                 assert_eq!(last.end, StepEnd::Stop { cause: stop.into() });
@@ -4208,70 +4633,44 @@ fn completed_batch_stop_is_atomic_and_survives_reopen() {
 
 #[test]
 fn sequence_exhaustion_aborts_transactions() {
-    for case in [
-        "accept_second_node",
-        "continue_node",
-        "stop_node",
-        "change_at_max",
-        "change_in_batch",
-    ] {
+    for case in ["accept_second_node", "continue_node", "stop_node"] {
         let (_dir, _layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
-        db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+        accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
         let calls = if matches!(case, "continue_node" | "stop_node") {
             db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                 .unwrap();
             let calls = db
                 .register_calls(&lock, reply(key(tid(1), 0, 0), 1), &[iid(1)], now())
                 .unwrap();
-            finish(&db, &lock, &calls.bindings[0], None);
+            finish(&db, &lock, &calls.bindings[0], ok_reply());
             Some(calls)
         } else {
             None
         };
-        if case.starts_with("change") {
-            db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
-                .unwrap();
-            let (_other, _) = running(&db, sid(2), tid(2), 1, 99);
-            let tx = db.db.begin_write().unwrap();
-            let mut r = load_write(&tx).unwrap();
-            let high = ChangeSeq(if case == "change_in_batch" {
-                u64::MAX - 1
-            } else {
-                u64::MAX
-            });
-            let mut change = r.changes.remove(&ChangeSeq(1)).unwrap();
-            change.sequence = high;
-            r.changes.insert(high, change);
-            r.index.get_mut(&iid(99)).unwrap().last_change = high;
-            r.last_change = high;
-            replace_all_for_test(&tx, &r).unwrap();
-            tx.commit().unwrap();
+        // 压缩可分配的序号空间，保持根、Turn 内相邻节点和索引关系；分配器仍走真实领域事务。
+        let tip = NodeId(if case == "accept_second_node" {
+            u64::MAX - 1
         } else {
-            // 压缩可分配的序号空间，保持根、Turn 内相邻节点和索引关系；分配器仍走真实领域事务。
-            let tip = NodeId(if case == "accept_second_node" {
-                u64::MAX - 1
-            } else {
-                u64::MAX
-            });
-            let user_id = NodeId(tip.0 - 1);
-            let tx = db.db.begin_write().unwrap();
-            let mut r = load_write(&tx).unwrap();
-            let user = r.nodes.remove(&(sid(1), NodeId(1))).unwrap();
-            let mut step_node = r.nodes.remove(&(sid(1), NodeId(2))).unwrap();
-            let Node::Step { parent, .. } = &mut step_node else {
-                unreachable!()
-            };
-            *parent = user_id;
-            r.nodes.insert((sid(1), user_id), user);
-            r.nodes.insert((sid(1), tip), step_node);
-            r.turn_index.get_mut(&tid(1)).unwrap().node = user_id;
-            r.sessions.get_mut(&sid(1)).unwrap().current = tip;
-            replace_all_for_test(&tx, &r).unwrap();
-            tx.commit().unwrap();
-        }
+            u64::MAX
+        });
+        let user_id = NodeId(tip.0 - 1);
+        let tx = db.db.begin_write().unwrap();
+        let mut r = load_write(&tx).unwrap();
+        let user = r.nodes.remove(&(sid(1), NodeId(1))).unwrap();
+        let mut step_node = r.nodes.remove(&(sid(1), NodeId(2))).unwrap();
+        let Node::Step { parent, .. } = &mut step_node else {
+            unreachable!()
+        };
+        *parent = user_id;
+        r.nodes.insert((sid(1), user_id), user);
+        r.nodes.insert((sid(1), tip), step_node);
+        r.turn_index.get_mut(&tid(1)).unwrap().node = user_id;
+        r.sessions.get_mut(&sid(1)).unwrap().current = tip;
+        replace_all_for_test(&tx, &r).unwrap();
+        tx.commit().unwrap();
+
         let mut input = accept(sid(1), tid(3));
-        input.session = AcceptSession::Existing { id: sid(1) };
         input.config.system_prompt = Some("new config must not survive exhaustion".into());
         let new_digest = input.config.digest().unwrap();
         let before = records(&db);
@@ -4284,8 +4683,8 @@ fn sequence_exhaustion_aborts_transactions() {
                 }
             },
             || match case {
-                "accept_second_node" => db.accept_turn(&lock, input).map(|_| ()),
-                "continue_node" | "stop_node" => db
+                "accept_second_node" => accept_prepared(&db, &lock, input).map(|_| ()),
+                _ => db
                     .close_step(
                         &lock,
                         if case == "stop_node" {
@@ -4301,18 +4700,10 @@ fn sequence_exhaustion_aborts_transactions() {
                         now(),
                     )
                     .map(|_| ()),
-                _ => db
-                    .register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
-                    .map(|_| ()),
             },
         );
-        let expected_kind = if case.starts_with("change") {
-            "change"
-        } else {
-            "node"
-        };
         assert!(
-            matches!(result, Err(StoreError::SequenceExhausted { kind }) if kind == expected_kind),
+            matches!(result, Err(StoreError::SequenceExhausted { kind: "node" })),
             "{case}: {result:?}"
         );
         assert!(
@@ -4323,17 +4714,6 @@ fn sequence_exhaustion_aborts_transactions() {
         assert!(before == after, "{case}: partial transaction survived");
         assert!(!after.turn_index.contains_key(&tid(3)));
         assert!(!after.configs.contains_key(&new_digest));
-        if case.starts_with("change") {
-            for id in [iid(1), iid(2)] {
-                assert!(!after.index.contains_key(&id));
-                assert!(
-                    !after
-                        .changes
-                        .values()
-                        .any(|change| change.invocation_id == id)
-                );
-            }
-        }
     }
 }
 
@@ -4350,7 +4730,7 @@ fn ordered_terminal_causes() {
             &db,
             &lock,
             &calls.bindings[0],
-            Some(CepErrorCode::ExecutionFailed),
+            failed_reply("execution_failed"),
         );
         db.close_step(
             &lock,
@@ -4369,22 +4749,22 @@ fn ordered_terminal_causes() {
         assert_eq!(first_stopping_cause(&slots).unwrap(), None);
         for slot in &slots[1..] {
             assert_eq!(slot.progress, SlotProgress::Registered);
-            assert_eq!(resolve_slot(slot).0.payload, ResultPayload::NotExecuted);
+            assert_eq!(resolve_slot(slot).payload, ResultPayload::NotExecuted);
         }
     }
-    let (_dir, _layout, db) = store();
-    let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
-    finish(
-        &db,
-        &lock,
-        &calls.bindings[0],
-        Some(CepErrorCode::CallCancelled),
-    );
-    assert!(
-        db.start_invocation(&lock, &calls.bindings[1], now())
-            .is_err()
-    );
-    assert_eq!(detail(&db).summary.outcome, PublicTurnOutcome::Cancelled);
+    for (reply, expected_outcome) in [
+        (ToolReply::Cancelled, PublicTurnOutcome::Cancelled),
+        (ToolReply::Indeterminate, PublicTurnOutcome::Failed),
+    ] {
+        let (_dir, _layout, db) = store();
+        let (lock, calls) = running(&db, sid(1), tid(1), 2, 1);
+        finish(&db, &lock, &calls.bindings[0], reply);
+        assert!(
+            db.start_invocation(&lock, &calls.bindings[1], now())
+                .is_err()
+        );
+        assert_eq!(detail(&db).summary.outcome, expected_outcome);
+    }
 }
 
 #[test]
@@ -4394,12 +4774,7 @@ fn json_payload_field_names_are_not_store_records() {
     let value = json!({"evidence":{"kind":"recorded","value":{"custom":true},"custom":true}});
     db.start_invocation(&lock, &calls.bindings[0], now())
         .unwrap();
-    let terminal = prepare_terminal(
-        &calls.bindings[0],
-        Ok(value.clone()),
-        CellEvidenceTriple::refused_before_admission("observe__workspace"),
-    )
-    .unwrap();
+    let terminal = prepare_terminal(&calls.bindings[0], ToolReply::Succeeded(value.clone()));
     db.finish_invocation(
         &lock,
         TerminalInput {
@@ -4422,7 +4797,7 @@ fn json_payload_field_names_are_not_store_records() {
 
 #[test]
 fn strict_open_rejects_corruption() {
-    for field in ["store_kind", "store_format_version", "last_change_seq"] {
+    for field in ["store_kind", "store_format_version"] {
         let (_dir, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -4440,7 +4815,7 @@ fn strict_open_rejects_corruption() {
     }
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
-    db.accept_turn(&lock, accept(sid(1), tid(1))).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
     drop(lock);
     drop(db);
     corrupt_json(&layout, SESSIONS, &sid(1).to_string(), |v| {
@@ -4485,11 +4860,740 @@ fn local_reads_reject_broken_references() {
         );
         assert!(
             matches!(
-                db.rewind(&lock, NodeId(0), now()),
+                db.rewind(&lock, NodeId(0), &project(1), now()),
                 Err(StoreError::Corruption { .. })
             ),
             "rewind accepted {case}"
         );
         assert!(before == records(&db), "rewind changed {case}");
     }
+}
+
+#[test]
+fn draft_session_reopens_with_readable_projections_and_empty_configs() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    let mut draft_settings = SessionSettings::for_test(&config());
+    draft_settings.system_prompt = Some("草稿内联系统提示".into());
+    draft_settings.model = None;
+    draft_settings.effort = None;
+    let created = db
+        .create_session(&lock, project(1), draft_settings.clone(), now())
+        .expect("创建草稿会话");
+    assert_eq!(created.session_id, sid(1), "草稿会话 ID 应一致");
+    assert_eq!(created.current, NodeId(0), "草稿当前位置应为根节点 0");
+    assert_eq!(created.created_at, now(), "created_at 应等于传入时间");
+    assert_eq!(created.updated_at, now(), "updated_at 应等于 created_at");
+    assert!(
+        records(&db).configs.is_empty(),
+        "草稿的系统提示内联保存，configs 表不能产生新条目"
+    );
+    drop(lock);
+    drop(db);
+
+    let reopened = SessionStore::open(&layout).expect("草稿会话应能通过严格打开");
+    assert!(
+        records(&reopened).configs.is_empty(),
+        "重开后 configs 表仍应为空"
+    );
+    let read = reopened.begin_read().expect("开启只读事务");
+    let head_record = read.session(sid(1)).expect("读取草稿 SessionRecord");
+    assert_eq!(head_record, created, "重开后草稿会话头记录应保持一致");
+    assert_eq!(
+        read.path_node(sid(1), head_record.current)
+            .expect("读取草稿当前路径根节点"),
+        Node::Root,
+        "草稿当前路径节点应为根节点"
+    );
+    assert_eq!(
+        read.session_settings(sid(1)).expect("读取草稿会话设置"),
+        draft_settings,
+        "重开后草稿会话设置应保持一致"
+    );
+    let view = read.view(sid(1), 10).expect("读取草稿会话视图");
+    assert_eq!(view.session, created);
+    assert_eq!(view.current_agent, Some(agent("alpha")));
+    assert!(view.entries.is_empty(), "草稿视图的对话条目应为空");
+
+    let listed = read.list(None, 10).expect("读取草稿列表投影");
+    assert_eq!(
+        listed.items,
+        vec![SessionListRow {
+            session_id: sid(1),
+            project_path: project(1),
+            current: NodeId(0),
+            node_count: 1,
+            unclosed_turn: None,
+            updated_at: now(),
+        }],
+        "列表应包含仅有 1 个根节点的草稿"
+    );
+
+    let log = read.log(sid(1)).expect("读取草稿日志投影");
+    assert_eq!(log.session, created);
+    assert_eq!(log.current_agent, Some(agent("alpha")));
+    assert_eq!(log.unclosed_turn, None);
+    assert_eq!(
+        log.nodes,
+        vec![LogRow {
+            node: NodeHeader {
+                id: NodeId(0),
+                parent: None,
+                turn_id: None,
+                kind: NodeKind::Root,
+            },
+            current: true,
+            turn_start: None,
+        }],
+        "日志投影应只包含当前根节点"
+    );
+
+    assert!(
+        matches!(
+            read.history(sid(1), NodeId(0), 10),
+            Err(StoreError::InvalidInput {
+                field: "before",
+                ..
+            })
+        ),
+        "草稿在根节点分页应按非用户消息边界返回 InvalidInput 而非损坏"
+    );
+
+    let usage = read.usage(sid(1)).expect("读取草稿用量投影");
+    assert_eq!(usage.session_id, sid(1));
+    assert_eq!(usage.position, NodeId(0));
+    assert!(usage.turns.is_empty(), "草稿没有轮次用量");
+    assert_eq!(usage.path_total.attempts, 0);
+    assert_eq!(usage.session_total.attempts, 0);
+}
+
+#[test]
+fn update_settings_preserves_frozen_turn_configs() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    let mut first_cfg = config();
+    first_cfg.system_prompt = Some("第一轮冻结系统提示".into());
+    first_cfg.effort = Some(lattice_conversation::Effort::Medium);
+    let initial_settings = SessionSettings::for_test(&first_cfg);
+    db.create_session(&lock, project(1), initial_settings.clone(), now())
+        .expect("创建会话");
+    let mut first_turn = accept(sid(1), tid(1));
+    first_turn.config = first_cfg.clone();
+    first_turn.settings_version = initial_settings.version().expect("计算初始设置版本");
+    db.accept_turn(&lock, first_turn).expect("接受第一轮");
+
+    let later = now() + chrono::Duration::seconds(30);
+    let mut updated_settings = SessionSettings::for_test(&first_cfg);
+    updated_settings.profile.agent_name = agent("beta");
+    updated_settings.profile.description = Some("新 agent 描述".into());
+    updated_settings.profile.timeout_secs = timeout(900);
+    updated_settings.system_prompt = Some("修改后的下一轮系统提示".into());
+    updated_settings.model = None;
+    updated_settings.effort = None;
+
+    assert!(
+        matches!(
+            db.update_settings(&lock, &project(2), updated_settings.clone(), later),
+            Err(StoreError::BindingMismatch { session_id }) if session_id == sid(1)
+        ),
+        "项目绑定不一致时 update_settings 必须返回 BindingMismatch"
+    );
+
+    let updated_record = db
+        .update_settings(&lock, &project(1), updated_settings.clone(), later)
+        .expect("更新会话设置");
+    assert_eq!(updated_record.created_at, now(), "created_at 必须保持不变");
+    assert_eq!(
+        updated_record.updated_at, later,
+        "update_settings 必须刷新 updated_at"
+    );
+    assert_eq!(
+        records(&db).configs.len(),
+        1,
+        "update_settings 不能向 configs 表追加配置条目"
+    );
+    drop(lock);
+    drop(db);
+
+    let reopened = SessionStore::open(&layout).expect("修改设置与最后一轮不同时仍可通过严格打开");
+    let read = reopened.begin_read().expect("开启只读事务");
+    assert_eq!(
+        read.session_settings(sid(1)).expect("读取更新后的设置"),
+        updated_settings,
+        "重开后会话设置应为更新后的值"
+    );
+    assert_eq!(
+        read.current_agent(sid(1)).expect("读取当前 agent"),
+        Some(agent("beta")),
+        "当前 agent 应取自更新后的会话设置"
+    );
+    assert_eq!(
+        read.turn_config(sid(1), tid(1))
+            .expect("读取第一轮冻结配置"),
+        first_cfg,
+        "已有轮次的冻结配置不能受 update_settings 影响"
+    );
+    assert_eq!(
+        read.turn_detail(sid(1), tid(1))
+            .expect("读取第一轮详情")
+            .agent_name,
+        agent("alpha"),
+        "已有轮次节点上的 agent_name 必须保持第一轮冻结值"
+    );
+}
+
+#[test]
+fn accept_turn_rejects_mismatched_settings_version_without_writing_nodes() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    let initial_settings = SessionSettings::for_test(&config());
+    db.create_session(&lock, project(1), initial_settings.clone(), now())
+        .expect("创建草稿会话");
+
+    let mut other_settings = initial_settings.clone();
+    other_settings.effort = Some(lattice_conversation::Effort::High);
+    let wrong_version = other_settings.version().expect("计算不同设置版本");
+
+    let before_draft = records(&db);
+    let mut stale_on_draft = accept(sid(1), tid(1));
+    stale_on_draft.settings_version = wrong_version;
+    let draft_err = db
+        .accept_turn(&lock, stale_on_draft)
+        .expect_err("草稿会话上版本不符应拒绝接受");
+    assert!(
+        matches!(draft_err, StoreError::SettingsChanged { session_id } if session_id == sid(1)),
+        "预期返回 SettingsChanged，实际为 {draft_err:?}"
+    );
+    assert!(
+        before_draft == records(&db),
+        "草稿上 SettingsChanged 不能写入任何节点或配置"
+    );
+
+    let mut valid_first = accept(sid(1), tid(1));
+    valid_first.settings_version = initial_settings.version().expect("计算初始版本");
+    db.accept_turn(&lock, valid_first.clone())
+        .expect("版本匹配时应正常接受第一轮");
+
+    let later = now() + chrono::Duration::seconds(5);
+    db.update_settings(&lock, &project(1), other_settings.clone(), later)
+        .expect("更新会话设置");
+    let before_second = records(&db);
+
+    // 同一 TurnId 重放优先于设置版本核对，仍返回 Existing。
+    assert!(
+        matches!(
+            db.accept_turn(&lock, valid_first),
+            Ok(AcceptedTurn::Existing(detail)) if detail.turn_id == tid(1)
+        ),
+        "已接受 TurnId 重放在设置更新后仍应返回 Existing"
+    );
+    assert!(before_second == records(&db), "重放不能修改持久记录");
+
+    let mut stale_second = accept(sid(1), tid(2));
+    stale_second.settings_version = initial_settings.version().expect("计算旧版本");
+    let second_err = db
+        .accept_turn(&lock, stale_second)
+        .expect_err("设置更新后携带旧版本应返回 SettingsChanged");
+    assert!(
+        matches!(second_err, StoreError::SettingsChanged { session_id } if session_id == sid(1)),
+        "预期返回 SettingsChanged，实际为 {second_err:?}"
+    );
+    assert!(
+        before_second == records(&db),
+        "SettingsChanged 不能写入任何新节点或索引"
+    );
+
+    drop(lock);
+    drop(db);
+    assert!(
+        before_second == records(&SessionStore::open(&layout).expect("重开会话库")),
+        "重开后记录与拒绝前完全一致"
+    );
+}
+
+#[test]
+fn session_settings_strict_open_checks_shape_draft_and_bounds() {
+    // 只有根节点的会话应当通过严格打开。
+    {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+        let mut draft = SessionSettings::for_test(&config());
+        draft.model = None;
+        draft.effort = None;
+        db.create_session(&lock, project(1), draft.clone(), now())
+            .expect("创建只有根节点的会话");
+        let expected = records(&db);
+        drop(lock);
+        drop(db);
+        let reopened = SessionStore::open(&layout).expect("只有根节点的会话必须通过严格打开");
+        assert!(expected == records(&reopened));
+    }
+
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).expect("获取会话执行锁");
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).expect("接受基准轮次");
+    let base = records(&db);
+    drop(lock);
+    drop(db);
+
+    for case in ["missing", "orphan", "oversized_prompt"] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        let mut changed = base.clone();
+        match case {
+            "missing" => {
+                changed.session_settings.remove(&sid(1));
+            }
+            "orphan" => {
+                changed
+                    .session_settings
+                    .insert(sid(2), base.session_settings[&sid(1)].clone());
+            }
+            "oversized_prompt" => {
+                changed
+                    .session_settings
+                    .get_mut(&sid(1))
+                    .unwrap()
+                    .system_prompt = Some("a".repeat(2 * 1024 * 1024 + 1));
+            }
+            _ => unreachable!(),
+        }
+        overwrite_records(&tx, &changed);
+        tx.commit().unwrap();
+        drop(raw);
+        assert!(
+            matches!(
+                SessionStore::open(&layout),
+                Err(StoreError::Corruption { .. })
+            ),
+            "严格打开必须拒绝损坏或自身无效的设置（case={case}）"
+        );
+    }
+
+    for case in [
+        "unknown",
+        "legacy_profile_field",
+        "effort",
+        "agent_name",
+        "default_model",
+        "timeout_secs",
+        "retry",
+        "model",
+        "version",
+        "key",
+        "canonical",
+        "truncated",
+        "table",
+    ] {
+        let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+        let tx = raw.begin_write().unwrap();
+        overwrite_records(&tx, &base);
+        if case == "table" {
+            tx.delete_table(SESSION_SETTINGS).unwrap();
+        } else {
+            let mut table = tx.open_table(SESSION_SETTINGS).unwrap();
+            let mut value = serde_json::to_value(&base.session_settings[&sid(1)]).unwrap();
+            match case {
+                "unknown" => value["unknown"] = json!(true),
+                "legacy_profile_field" => value["profile"]["enabled_tools"] = json!(["observe"]),
+                "effort" => value["effort"] = json!("default"),
+                "agent_name" => value["profile"]["agent_name"] = json!("../bad"),
+                "default_model" => value["profile"]["default_model"] = json!("missing-slash"),
+                "timeout_secs" => value["profile"]["timeout_secs"] = json!(0),
+                "retry" => value["profile"]["retry"]["max_retries"] = json!(11),
+                "model" => value["model"] = json!("Bad_id/gpt-5"),
+                _ => {}
+            }
+            let mut bytes = encode(&value).unwrap();
+            if case == "version" {
+                bytes[..4].copy_from_slice(&7_u32.to_be_bytes());
+            }
+            if case == "canonical" {
+                bytes.push(b' ');
+            }
+            if case == "truncated" {
+                bytes.truncate(3);
+            }
+            table
+                .insert(sid(1).to_string().as_str(), bytes.as_slice())
+                .unwrap();
+            if case == "key" {
+                table
+                    .insert("invalid", encode(&value).unwrap().as_slice())
+                    .unwrap();
+            }
+        }
+        tx.commit().unwrap();
+        drop(raw);
+        let reopened = SessionStore::open(&layout).map(|_| ());
+        if case == "version" {
+            assert!(
+                matches!(
+                    reopened,
+                    Err(StoreError::UnsupportedVersion {
+                        found: 7,
+                        supported: VERSION,
+                        ..
+                    })
+                ),
+                "{case}: {reopened:?}"
+            );
+        } else {
+            assert!(
+                matches!(reopened, Err(StoreError::Corruption { .. })),
+                "{case}: {reopened:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn non_hex_tool_identity_catalog_digest_and_binding_mismatch() {
+    use sha2::{Digest, Sha256};
+
+    let entries = vec![
+        ToolCatalogEntry {
+            name: "z_write".into(),
+            tool_identity: "".into(),
+            description: "empty identity".into(),
+            input_schema: json!({"type": "object"}),
+        },
+        ToolCatalogEntry {
+            name: "observe__workspace".into(),
+            tool_identity: "mcp:filesystem/read_file@v2#非十六进制".into(),
+            description: "opaque identity".into(),
+            input_schema: json!({"type": "object"}),
+        },
+    ];
+    let snapshot = ToolCatalogSnapshot::new(entries).expect("非十六进制 tool_identity 应当合法");
+    assert_eq!(snapshot.entries[0].name, "observe__workspace");
+    assert_eq!(snapshot.entries[1].name, "z_write");
+
+    // 确认目录摘要只对 entries 规范 JSON 编码计算，不含 runtime_build_id。
+    let canonical_entries =
+        lattice_conversation::canonical_json(&serde_json::to_value(&snapshot.entries).unwrap());
+    let mut hasher = Sha256::new();
+    hasher.update(b"lattice-tool-catalog-snapshot-v1\0");
+    hasher.update((canonical_entries.len() as u64).to_be_bytes());
+    hasher.update(canonical_entries.as_bytes());
+    let expected_digest: [u8; 32] = hasher.finalize().into();
+    assert_eq!(
+        snapshot.digest, expected_digest,
+        "目录摘要应仅由条目列表决定"
+    );
+
+    let mut wire_snapshot = serde_json::to_value(&snapshot).unwrap();
+    assert!(
+        wire_snapshot.get("runtime_build_id").is_none(),
+        "序列化目录不应含 runtime_build_id"
+    );
+    wire_snapshot["runtime_build_id"] = json!("build-1");
+    assert!(
+        serde_json::from_value::<ToolCatalogSnapshot>(wire_snapshot).is_err(),
+        "反序列化目录必须拒绝旧字段 runtime_build_id"
+    );
+
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let mut turn_accept = accept(sid(1), tid(1));
+    turn_accept.config.catalog = snapshot.clone();
+    let settings = SessionSettings::for_test(&turn_accept.config);
+    turn_accept.settings_version = settings.version().unwrap();
+    db.create_session(&lock, turn_accept.project_path.clone(), settings, now())
+        .expect("创建测试会话");
+    db.accept_turn(&lock, turn_accept)
+        .expect("接受含非十六进制 tool_identity 的 Turn");
+
+    let k = key(tid(1), 0, 0);
+    db.start_request(&lock, k, origin(), now()).unwrap();
+    let registered = db
+        .register_calls(&lock, reply(k, 1), &[iid(1)], now())
+        .expect("登记非十六进制 tool_identity 的工具调用");
+    assert_eq!(
+        registered.bindings[0].identity.tool_identity,
+        "mcp:filesystem/read_file@v2#非十六进制"
+    );
+
+    let started = db
+        .start_invocation(&lock, &registered.bindings[0], now())
+        .unwrap();
+    assert_eq!(
+        started.binding().identity.tool_identity,
+        "mcp:filesystem/read_file@v2#非十六进制"
+    );
+    let receipt = terminal(&registered.bindings[0], ok_reply());
+    db.finish_invocation(
+        &lock,
+        TerminalInput {
+            invocation_id: iid(1),
+            terminal: receipt,
+        },
+        now(),
+    )
+    .unwrap();
+
+    {
+        let read = db.begin_read().unwrap();
+        let stored_cfg = read.turn_config(sid(1), tid(1)).unwrap();
+        assert_eq!(stored_cfg.catalog, snapshot);
+        let Node::Step { slots, .. } = read
+            .node(NodeRef {
+                session_id: sid(1),
+                node: NodeId(2),
+            })
+            .unwrap()
+        else {
+            panic!("预期 Step 节点");
+        };
+        assert_eq!(
+            slots[0].binding.identity.tool_identity,
+            "mcp:filesystem/read_file@v2#非十六进制"
+        );
+        assert_eq!(
+            read.turn_detail(sid(1), tid(1)).unwrap().steps[0]
+                .slots
+                .len(),
+            1
+        );
+    }
+
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).expect("重开含非十六进制 tool_identity 的会话库");
+
+    // 篡改持久槽位的绑定参数摘要后，只读投影与严格重开均必须报错。
+    reopened
+        .edit_test_node(
+            NodeRef {
+                session_id: sid(1),
+                node: NodeId(2),
+            },
+            |wire| {
+                wire["slots"][0]["binding"]["identity"]["arguments_digest"] =
+                    json!("00".repeat(32));
+            },
+        )
+        .unwrap();
+    {
+        let read = reopened.begin_read().unwrap();
+        assert!(
+            matches!(
+                read.node(NodeRef {
+                    session_id: sid(1),
+                    node: NodeId(2),
+                }),
+                Err(StoreError::Corruption { .. })
+            ),
+            "读取节点时绑定参数摘要失配必须报错"
+        );
+        assert!(
+            matches!(
+                read.turn_detail(sid(1), tid(1)),
+                Err(StoreError::Corruption { .. })
+            ),
+            "读取轮次详情时绑定参数摘要失配必须报错"
+        );
+    }
+    drop(reopened);
+    assert!(
+        matches!(
+            SessionStore::open(&layout),
+            Err(StoreError::Corruption { .. })
+        ),
+        "重开会话库时绑定参数摘要失配必须报错"
+    );
+}
+
+#[test]
+fn non_utf8_project_path_persists_across_reopen() {
+    let (_dir, layout, db) = store();
+    let non_utf8 = ProjectPath::from_bytes(b"/tmp/proj-\xff\xfe/sub".as_slice())
+        .expect("构造非 UTF-8 项目路径");
+    let lock = db.try_lock_session(sid(1)).expect("获取会话锁");
+    let mut input = accept(sid(1), tid(1));
+    input.project_path = non_utf8.clone();
+    accept_prepared(&db, &lock, input).expect("写入非 UTF-8 项目路径会话");
+    drop(lock);
+    drop(db);
+
+    let reopened = SessionStore::open(&layout).expect("重新打开会话库");
+    let read = reopened.begin_read().expect("开启只读事务");
+    let session = read.session(sid(1)).expect("读取会话记录");
+    assert_eq!(
+        session.project_path, non_utf8,
+        "重开后读取 SessionRecord 的非 UTF-8 项目路径应保持不变"
+    );
+    let listed = read.list(None, 10).expect("列出会话");
+    assert_eq!(
+        listed.items[0].project_path, non_utf8,
+        "重开后会话列表投影中的非 UTF-8 项目路径应保持不变"
+    );
+    let log = read.log(sid(1)).expect("读取会话日志");
+    assert_eq!(
+        log.session.project_path, non_utf8,
+        "重开后会话日志中的非 UTF-8 项目路径应保持不变"
+    );
+}
+
+#[test]
+fn delete_draft_checks_strict_cutoff_and_passes_reopen_validation() {
+    let (_dir, layout, db) = store();
+    let cutoff = now() + chrono::Duration::hours(24);
+    let settings = SessionSettings::for_test(&config());
+
+    let lock_expired = db.try_lock_session(sid(1)).expect("锁定过期草稿");
+    db.create_session(
+        &lock_expired,
+        project(1),
+        settings.clone(),
+        cutoff - chrono::Duration::seconds(1),
+    )
+    .expect("创建严格早于截止时间的草稿");
+
+    let lock_equal = db.try_lock_session(sid(2)).expect("锁定等于截止时间的草稿");
+    db.create_session(&lock_equal, project(1), settings.clone(), cutoff)
+        .expect("创建等于截止时间的草稿");
+
+    let lock_newer = db.try_lock_session(sid(3)).expect("锁定晚于截止时间的草稿");
+    db.create_session(
+        &lock_newer,
+        project(1),
+        settings,
+        cutoff + chrono::Duration::seconds(1),
+    )
+    .expect("创建晚于截止时间的草稿");
+
+    let lock_missing = db.try_lock_session(sid(4)).expect("锁定不存在的会话");
+
+    assert_eq!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .expired_drafts(cutoff)
+            .expect("扫描过期草稿"),
+        vec![sid(1)],
+        "只读扫描应仅返回 updated_at 严格早于截止时间的草稿"
+    );
+
+    assert!(
+        !db.delete_draft(&lock_missing, cutoff)
+            .expect("删除不存在的草稿不应报错"),
+        "不存在的会话调用 delete_draft 应返回 false"
+    );
+    assert!(
+        db.delete_draft(&lock_expired, cutoff)
+            .expect("删除严格早于截止时间的草稿"),
+        "updated_at 严格早于截止时间的草稿应被删除"
+    );
+    assert!(
+        !db.delete_draft(&lock_equal, cutoff)
+            .expect("检查等于截止时间的草稿"),
+        "updated_at 等于截止时间的草稿应保留"
+    );
+    assert!(
+        !db.delete_draft(&lock_newer, cutoff)
+            .expect("检查晚于截止时间的草稿"),
+        "updated_at 晚于截止时间的草稿应保留"
+    );
+
+    let lock_file = layout.session_lock(&format!("{}.lock", sid(1)));
+    drop(lock_expired);
+    drop(lock_equal);
+    drop(lock_newer);
+    drop(lock_missing);
+    drop(db);
+
+    assert!(lock_file.exists(), "删除草稿不应删除会话锁文件");
+
+    let reopened = SessionStore::open(&layout).expect("删除草稿后重新打开会话库应通过严格校验");
+    let read = reopened.begin_read().expect("开启只读事务");
+    assert!(
+        read.find_session(sid(1)).expect("查询已删草稿").is_none(),
+        "已删草稿不应再有 Session 记录"
+    );
+    assert!(
+        matches!(
+            read.session_settings(sid(1)),
+            Err(StoreError::NotFound { .. })
+        ),
+        "已删草稿不应再有会话设置记录"
+    );
+    let listed: Vec<SessionId> = read
+        .list(None, 10)
+        .expect("列出会话")
+        .items
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![sid(2), sid(3)],
+        "会话列表中应不再包含已删草稿且保留等于或晚于截止时间的草稿"
+    );
+}
+
+#[test]
+fn delete_draft_keeps_sessions_with_turns_even_after_rewind_to_root() {
+    let (_dir, layout, db) = store();
+    let cutoff = now() + chrono::Duration::hours(24);
+    let lock = db.try_lock_session(sid(1)).expect("锁定会话");
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).expect("接受首轮");
+
+    assert!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .expired_drafts(cutoff)
+            .expect("扫描过期草稿")
+            .is_empty(),
+        "有轮次的会话不应出现在过期草稿扫描结果中"
+    );
+    assert!(
+        !db.delete_draft(&lock, cutoff)
+            .expect("有轮次的会话调用 delete_draft"),
+        "有轮次的会话不应被作为草稿删除"
+    );
+
+    db.rewind(
+        &lock,
+        NodeId(0),
+        &project(1),
+        now() + chrono::Duration::seconds(1),
+    )
+    .expect("回退到根节点");
+    assert_eq!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .session(sid(1))
+            .expect("读取回退后的会话")
+            .current,
+        NodeId(0),
+        "回退后当前位置应在根节点"
+    );
+    assert!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .expired_drafts(cutoff)
+            .expect("回退到根节点后扫描过期草稿")
+            .is_empty(),
+        "回退到根节点后整棵树仍有轮次节点，不应被扫描为草稿"
+    );
+    assert!(
+        !db.delete_draft(&lock, cutoff)
+            .expect("回退到根节点后调用 delete_draft"),
+        "rewind 0 后当前位置在根节点的会话仍不应被删除"
+    );
+
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).expect("重开会话库应通过严格校验");
+    assert_eq!(
+        reopened
+            .begin_read()
+            .expect("开启只读事务")
+            .log(sid(1))
+            .expect("读取会话日志")
+            .nodes
+            .len(),
+        3,
+        "回退到根节点的会话整棵树节点应完整保留"
+    );
 }

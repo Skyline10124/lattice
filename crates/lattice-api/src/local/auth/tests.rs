@@ -1,17 +1,60 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use crate::local::{self, AuthState, LocalClient, LocalErrorKind, Request, Response, ipc};
+use crate::local::{
+    self, Availability, ConfigurationRequirement, LocalClient, LocalErrorKind, Request, Response,
+    ipc,
+};
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
 const KEY: &str = "auth-ipc-test-secret-9E82";
+
+#[tokio::test]
+async fn stop_cancels_browser_login_and_releases_the_backend_instance() {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(directory.path());
+    let server = tokio::spawn(local::serve_for_test(
+        layout.clone(),
+        Some(directory.path().into()),
+    ));
+    let client = LocalClient::new(layout);
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while client.status().await.is_err() {
+            tokio::task::yield_now().await;
+        }
+        let mut login = client.auth_login("chatgpt").await.unwrap();
+        assert!(matches!(
+            login.next().await.unwrap(),
+            Some(local::AuthLoginEvent::Authorization(_))
+        ));
+        let (stopped, outcome) = tokio::join!(client.stop(), login.next());
+        assert!(stopped.unwrap().stopping);
+        assert!(matches!(
+            outcome.unwrap(),
+            Some(local::AuthLoginEvent::Finished(
+                local::AuthLoginOutcome::Cancelled {}
+            ))
+        ));
+        server.await.unwrap().unwrap();
+        assert!(
+            tokio::net::TcpListener::bind("127.0.0.1:1455")
+                .await
+                .is_ok()
+        );
+    })
+    .await
+    .unwrap();
+}
 
 #[tokio::test]
 async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(directory.path());
     let config = directory.path().join(".lattice");
-    let server = tokio::spawn(local::serve(layout.clone(), Some(directory.path().into())));
+    let server = tokio::spawn(local::serve_for_test(
+        layout.clone(),
+        Some(directory.path().into()),
+    ));
     let client = LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.status().await.is_err() {
@@ -26,11 +69,13 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
             .into_iter()
             .find(|row| row.provider == provider)
             .unwrap()
-            .status
+            .availability
     };
     assert_eq!(
         state(client.auth_status().await.unwrap(), "openai"),
-        AuthState::Missing
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::ApiKey
+        }
     );
     client.auth_set("openai", KEY.into()).await.unwrap();
     for key in ["".into(), "bad\nkey".into(), "k".repeat(16_385)] {
@@ -46,7 +91,7 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).unwrap();
     assert_eq!(denied.unwrap_err().kind, LocalErrorKind::Permission);
     let status = client.auth_status().await.unwrap();
-    assert_eq!(state(status.clone(), "openai"), AuthState::Ready);
+    assert_eq!(state(status.clone(), "openai"), Availability::Ready);
     assert!(!serde_json::to_string(&status).unwrap().contains(KEY));
     assert!(!format!("{status:?}").contains(KEY));
     for provider in ["not-registered", "ollama", "chatgpt"] {
@@ -54,15 +99,57 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
         assert_eq!(error.kind, LocalErrorKind::BadRequest);
         assert!(!format!("{error:?}").contains(KEY));
     }
+    let removed = client.auth_remove("chatgpt").await.unwrap();
+    assert!(!removed.removed);
+    assert_eq!(removed.revocation, Some(local::RevocationStatus::NotNeeded));
+    let host = "urn:uuid:2fde08e4-7b61-47cc-adde-8fb8b05f5b31";
+    let registration = serde_json::json!({"type":"chatgpt", "host_id":host,
+        "client_id":"registered-client", "account":{"subject":"subject", "email":"user@example.com"}});
+    let auth_path = config.join("auth.json");
+    fs::write(
+        &auth_path,
+        serde_json::json!({"version":1,"providers":{
+            "openai":{"type":"api_key","key":KEY}, "chatgpt":registration.clone()
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let cache = config.join("cache/chatgpt-models.json");
+    fs::create_dir_all(cache.parent().unwrap()).unwrap();
+    fs::write(&cache, r#"{"models":[{"id":"synthetic-model"}]}"#).unwrap();
     assert_eq!(
-        client.auth_remove("chatgpt").await.unwrap_err().kind,
-        LocalErrorKind::BadRequest
+        client.auth_logout("chatgpt").await.unwrap(),
+        local::RevocationStatus::NotNeeded
     );
-    assert!(client.auth_remove("openai").await.unwrap());
-    assert!(!client.auth_remove("openai").await.unwrap());
+    let document: serde_json::Value =
+        serde_json::from_slice(&fs::read(&auth_path).unwrap()).unwrap();
+    for field in ["host_id", "client_id", "account"] {
+        assert_eq!(document["providers"]["chatgpt"][field], registration[field]);
+    }
+    assert_eq!(
+        fs::read_to_string(&cache).unwrap(),
+        r#"{"models":[{"id":"synthetic-model"}]}"#
+    );
+    let removed = client.auth_remove("chatgpt").await.unwrap();
+    assert!(removed.removed);
+    assert_eq!(removed.revocation, Some(local::RevocationStatus::NotNeeded));
+    let document: serde_json::Value =
+        serde_json::from_slice(&fs::read(&auth_path).unwrap()).unwrap();
+    assert_eq!(document["providers"]["chatgpt"]["host_id"], host);
+    for field in ["client_id", "account", "tokens"] {
+        assert!(document["providers"]["chatgpt"][field].is_null());
+    }
+    assert!(!cache.exists());
+    let removed = client.auth_remove("chatgpt").await.unwrap();
+    assert!(!removed.removed);
+    assert_eq!(removed.revocation, Some(local::RevocationStatus::NotNeeded));
+    assert!(client.auth_remove("openai").await.unwrap().removed);
+    assert!(!client.auth_remove("openai").await.unwrap().removed);
     assert_eq!(
         state(client.auth_status().await.unwrap(), "openai"),
-        AuthState::Missing
+        Availability::Unconfigured {
+            requirement: ConfigurationRequirement::ApiKey
+        }
     );
     fs::write(
         config.join("providers.toml"),
@@ -72,7 +159,7 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     client.auth_set("custom", KEY.into()).await.unwrap();
     assert_eq!(
         state(client.auth_status().await.unwrap(), "custom"),
-        AuthState::Ready
+        Availability::Ready
     );
     fs::write(config.join("providers.toml"), "[providers.custom]\nprotocol = 'generate-content'\nbase_url = 'http://localhost:8000'\nauth = 'none'\n").unwrap();
     assert_eq!(
@@ -89,8 +176,11 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     )
     .unwrap();
     let status = client.auth_status().await.unwrap();
-    assert_eq!(state(status.clone(), "openai"), AuthState::Invalid);
-    assert_eq!(state(status.clone(), "custom"), AuthState::Ready);
+    assert!(matches!(
+        state(status.clone(), "openai"),
+        Availability::Invalid { .. }
+    ));
+    assert_eq!(state(status.clone(), "custom"), Availability::Ready);
     assert!(!serde_json::to_string(&status).unwrap().contains(KEY));
     assert_eq!(
         client
@@ -118,8 +208,8 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
             .to_string(),
     )
     .unwrap();
-    assert!(client.auth_remove("openai").await.unwrap());
-    assert!(!client.auth_remove("openai").await.unwrap());
+    assert!(client.auth_remove("openai").await.unwrap().removed);
+    assert!(!client.auth_remove("openai").await.unwrap().removed);
     client.stop().await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), server)
         .await
@@ -139,7 +229,7 @@ async fn invalid_home_only_rejects_operations_that_need_configuration() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let layout = crate::StateLayout::in_state_root(directory.path());
-        let server = tokio::spawn(local::serve(layout.clone(), home));
+        let server = tokio::spawn(local::serve_for_test(layout.clone(), home));
         let client = LocalClient::new(layout);
         tokio::time::timeout(Duration::from_secs(5), async {
             while client.status().await.is_err() {
@@ -198,8 +288,17 @@ async fn auth_frames_round_trip_without_changing_existing_frame_shape() {
             serde_json::json!({"response":"auth_updated"}),
         ),
         (
-            Response::AuthRemoved { removed: false },
+            Response::AuthRemoved(local::AuthRemoval {
+                removed: false,
+                revocation: None,
+            }),
             serde_json::json!({"response":"auth_removed","value":{"removed":false}}),
+        ),
+        (
+            Response::AuthLoggedOut(local::AuthLoggedOut {
+                revocation: local::RevocationStatus::Confirmed,
+            }),
+            serde_json::json!({"response":"auth_logged_out","value":{"revocation":"confirmed"}}),
         ),
     ] {
         let mut writer = ipc::ResponseWriter::default();
@@ -209,5 +308,11 @@ async fn auth_frames_round_trip_without_changing_existing_frame_shape() {
             .await
             .unwrap();
         assert_eq!(serde_json::to_value(received).unwrap(), expected);
+    }
+    for wire in [
+        serde_json::json!({"response":"auth_removed","value":{"removed":false,"extra":true}}),
+        serde_json::json!({"response":"auth_logged_out","value":{"revocation":"confirmed","extra":true}}),
+    ] {
+        assert!(serde_json::from_value::<Response>(wire).is_err());
     }
 }

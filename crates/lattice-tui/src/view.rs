@@ -19,7 +19,12 @@ mod comments;
 pub(crate) use comments::CommentNavigation;
 mod dock;
 mod statusline;
-pub(crate) use dock::{Dock, DockIntent, DockState, Panel};
+pub(crate) use dock::{Dock, DockIntent, DockState, ModelQuery, Panel, PanelChoice};
+
+#[cfg(test)]
+pub(crate) fn statusline_text(app: &App, width: usize) -> String {
+    statusline::line(app, width).to_string()
+}
 
 pub(crate) const SIDEBAR_W: u16 = 40;
 pub(crate) const SIDEBAR_ASPECT: u16 = 3;
@@ -903,10 +908,26 @@ mod tests {
     use ratatui::backend::TestBackend;
 
     pub(super) fn test_app() -> App {
+        let session_id =
+            lattice_api::local::SessionId::parse("11111111111141118111111111111111").unwrap();
         App::new(
             SessionContext {
-                session_id: None,
-                active_agent: "agent".into(),
+                session_id,
+                initial_head: lattice_api::local::SessionHead {
+                    session_id,
+                    position: lattice_api::local::NodeId(0),
+                    agent: "unused".into(),
+                    model: None,
+                    provider: None,
+                    effort: None,
+                    settings_version: serde_json::from_value(serde_json::json!("11".repeat(32)))
+                        .unwrap(),
+                    turn_id: None,
+                    owner: false,
+                    diagnostic: None,
+                    path_replaced: false,
+                },
+                initial_adjustment: None,
             },
             false,
             std::path::Path::new("/nonexistent-tui-test-history"),
@@ -978,10 +999,10 @@ mod tests {
                 let mut app = test_app();
                 app.input.set_text("draft");
                 match top {
-                    "panel" => app.dock.open_panel(Panel {
-                        title: "HELP",
-                        lines: vec!["/help  显示本帮助".into(), "Enter  提交".into()],
-                    }),
+                    "panel" => app.dock.open_panel(Panel::Help(vec![
+                        "/help  显示本帮助".into(),
+                        "Enter  提交".into(),
+                    ])),
                     level => {
                         let status = Status {
                             level: if level == "warn" {

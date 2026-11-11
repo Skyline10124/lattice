@@ -9,7 +9,7 @@ status: accepted
 - 修订：部分取代 ADR 0006 第 4、10 节与 ADR 0007 第 8 节，范围见[与 ADR 0006、ADR 0007 的关系](#与-adr-0006adr-0007-的关系)
 - 依赖：ADR 0007
 - 实施跟踪：GitHub #294（已完成，实现见 #296；设计讨论见 #288）
-- 部分被取代：ADR 0010（第 10 节中由客户端读取 profile、系统提示与连接凭据的规则；范围见 ADR 0010 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)）
+- 部分被取代：ADR 0009（第 1 节与第 9 节中的 `audit` 查询及 `--json` 说明；范围见 ADR 0009 的[与其他 ADR 的关系](0009-remove-legacy-lancet-tool-executor.md#与其他-adr-的关系)）；ADR 0010（第 10 节中由客户端读取 profile、系统提示与连接凭据的规则；范围见 ADR 0010 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)）；ADR 0012（第 6 节中 `submit` 区分 `New`/`Existing` 移入 `configure`，第 7、9 节补充 `configure` 的幂等找回与 `--json` 记录；范围见 ADR 0012 的[与其他 ADR 的关系](0012-backend-owns-session-settings.md#与其他-adr-的关系)）
 
 ## 背景
 
@@ -132,6 +132,8 @@ TurnId 由 TurnId 索引和准入状态唯一定位，`session_id` 只是核对�
 - `list`、`log`、`turn`、`audit` 的 `--json` 不变。
 
 ### 10. 客户端保留的部分
+
+> 修订：本节中“读取 profile、系统提示与连接凭据，加载好之后提交一次。凭据来自前端进程的环境与 `.env`，`FrozenConfiguration::from_env` 不得由后台调用。”已由 [ADR 0010](0010-protocol-adapters-and-configured-providers.md) 第 4、13 节取代。客户端只提交消息、工作区与选择，配置与凭据由后台读取。范围见该 ADR 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)。
 
 - 连接后台，后台未运行时启动它。
 - 读取 profile、系统提示与连接凭据，加载好之后提交一次。凭据来自前端进程的环境与 `.env`，`FrozenConfiguration::from_env` 不得由后台调用。

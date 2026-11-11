@@ -3,27 +3,21 @@
 
 //! Linux `flock` primitives with a per-process registry (ADR 0005 §5).
 //!
-//! Repository write locks and both operation locks (`SessionExecutionLock`,
-//! `WorkspaceOperationLock`) are ordinary `flock(2)` locks on files under the
-//! XDG state layout. There is no PID file, heartbeat, timeout, mtime, lock
-//! steal, or stale-owner protocol: process exit releases the lock in the
-//! kernel.
+//! 会话执行锁（`SessionExecutionLock`）与会话库首次创建锁都是 XDG 状态布局下普通文件上的
+//! `flock(2)` 锁。没有 PID 文件、心跳、超时、mtime、抢锁或陈旧持有者协议：进程退出时由内核
+//! 释放锁。
 //!
 //! ## Two same-process semantics
 //!
 //! `flock` conflicts with itself across two open file descriptions *even in
 //! one process*, so the registry mediates every acquisition:
 //!
-//! - [`acquire_flock`] is the **independent operation lock**: an acquisition
-//!   made without an existing guard is a new operation, even in this process.
-//!   Shared operations may coexist; an exclusive operation conflicts with any
-//!   existing operation. Ownership is never inferred from a thread or task identity.
-//! - [`acquire_flock_strict`] is the **strict mutex**: first-create locks and
-//!   repository write locks must serialize even two independent operations in
-//!   one process, so a second acquisition waits on a condvar (blocking) or
-//!   returns `Busy` (non-blocking) instead of nesting. Blocking strict waiters
-//!   are served **FIFO** by ticket, so a hot writer cannot barge back in ahead
-//!   of the peers already queued behind it.
+//! - [`acquire_flock`] 是**独立操作锁**，供会话执行锁使用：没有现成 guard 的获取就是一次新
+//!   操作，同一进程内也是如此。共享操作可以并存，独占操作与任何现有操作冲突；所有权从不由
+//!   线程或任务身份推定。
+//! - [`acquire_flock_strict`] 是**严格互斥锁**，供会话库首次创建锁使用：同一进程内两个独立
+//!   操作也必须串行，第二次获取在 condvar 上等待（阻塞）或返回 `Busy`（非阻塞），不会嵌套。
+//!   阻塞的严格等待者按票号 **FIFO** 获锁，刚释放锁的写者不能插到已排队的等待者前面。
 //!
 //! In both modes the OS lock is taken once per process hold and released when
 //! the last guard drops. The registry is keyed by the lock path as
@@ -175,10 +169,8 @@ pub fn acquire_flock(
     })
 }
 
-/// Acquire a strict exclusive `flock` on `path`: same-process acquisitions
-/// serialize (wait / `Busy`) instead of nesting. Used for first-create locks
-/// and repository write locks, where two independent operations in one
-/// process must never overlap.
+/// 在 `path` 上取得严格独占 `flock`：同进程的多次获取串行（等待或 `Busy`），不嵌套。用于
+/// 会话库首次创建锁，保证同进程内两个独立创建操作不会重叠。
 ///
 /// Waiting is **FIFO**. A blocking acquisition takes a ticket and is granted
 /// strictly in arrival order, so a thread that just released cannot barge back

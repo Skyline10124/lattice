@@ -3,11 +3,10 @@
 
 use super::local::Selection;
 use super::*;
-use lancet_protocol::{
-    BindingIdentity, InvocationBinding, InvocationId, ModelAttemptKey, ModelMessageAddress,
-    ToolCallAddress,
+use lattice_conversation::{
+    InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey, ModelMessageAddress,
+    NativeMessage, ToolCallAddress,
 };
-use lattice_conversation::{MessagePart, MessageRole, MessageSemantic, NativeMessage};
 use redb::ReadableTable;
 use std::collections::BTreeSet;
 
@@ -67,6 +66,7 @@ impl Records {
             agent_name,
             model,
             provider,
+            effort,
             limits,
             config_digest,
             ..
@@ -89,6 +89,7 @@ impl Records {
             agent_name: agent_name.clone(),
             model: model.clone(),
             provider: provider.clone(),
+            effort: *effort,
             system_prompt: stored.system_prompt.clone(),
             catalog: stored.catalog.clone(),
             limits: *limits,
@@ -186,26 +187,6 @@ impl Records {
         Ok((node_id, config, step))
     }
 
-    fn change(&mut self, slot: &InvocationSlot) -> Result<()> {
-        self.last_change = ChangeSeq(next_sequence(self.last_change.0, "change")?);
-        self.index.insert(
-            slot.binding.invocation_id,
-            InvocationIndexEntry {
-                address: slot.binding.identity.address(),
-                last_change: self.last_change,
-            },
-        );
-        self.changes.insert(
-            self.last_change,
-            StoredInvocationChange {
-                sequence: self.last_change,
-                invocation_id: slot.binding.invocation_id,
-                stage: validate::stage(&slot.progress),
-            },
-        );
-        Ok(())
-    }
-
     fn closed_step(
         &self,
         s: SessionId,
@@ -250,7 +231,7 @@ impl SessionStore {
     ) -> Result<T> {
         self.check_lock(lock, lock.session_id)?;
         // 必须在 begin_write 前取得健康锁；commit 释放 redb 写者后仍不能让等待者抢跑。
-        let mut disabled = self.execution_health()?;
+        let disabled = self.execution_health()?;
         let mut tx = self.db.begin_write()?;
         tx.set_durability(redb::Durability::Immediate)?;
         let (before, scope) =
@@ -262,6 +243,15 @@ impl SessionStore {
             return Ok(value);
         }
         codec::attach_path(&self.path, codec::persist(&tx, &before, &after))?;
+        self.commit_write(disabled, tx, value)
+    }
+
+    fn commit_write<T>(
+        &self,
+        mut disabled: std::sync::MutexGuard<'_, bool>,
+        tx: redb::WriteTransaction,
+        value: T,
+    ) -> Result<T> {
         #[cfg(test)]
         write_probe(WriteStage::BeforeCommit);
         #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
@@ -302,12 +292,89 @@ impl SessionStore {
         }
     }
 
+    pub fn create_session(
+        &self,
+        lock: &SessionExecutionLock,
+        project_path: ProjectPath,
+        settings: SessionSettings,
+        now: Timestamp,
+    ) -> Result<SessionRecord> {
+        self.check_lock(lock, lock.session_id)?;
+        settings.validate()?;
+        self.write(lock, Selection::Session, |r, _| {
+            let s = lock.session_id;
+            if r.sessions.contains_key(&s) {
+                return Err(StoreError::SessionCollision { session_id: s });
+            }
+            let record = SessionRecord {
+                session_id: s,
+                project_path,
+                current: NodeId(0),
+                created_at: now,
+                updated_at: now,
+            };
+            r.sessions.insert(s, record.clone());
+            r.nodes.insert((s, NodeId(0)), Node::Root);
+            r.session_settings.insert(s, settings);
+            Ok(record)
+        })
+    }
+
+    pub fn update_settings(
+        &self,
+        lock: &SessionExecutionLock,
+        project_path: &ProjectPath,
+        settings: SessionSettings,
+        now: Timestamp,
+    ) -> Result<SessionRecord> {
+        self.check_lock(lock, lock.session_id)?;
+        settings.validate()?;
+        self.write(lock, Selection::Session, |r, _| {
+            let s = lock.session_id;
+            let session = r
+                .sessions
+                .get_mut(&s)
+                .ok_or_else(|| missing("session", s))?;
+            check_binding(session, project_path)?;
+            session.updated_at = now;
+            let record = session.clone();
+            r.session_settings.insert(s, settings);
+            Ok(record)
+        })
+    }
+
+    pub fn delete_draft(&self, lock: &SessionExecutionLock, cutoff: Timestamp) -> Result<bool> {
+        let s = lock.session_id;
+        self.check_lock(lock, s)?;
+        let disabled = self.execution_health()?;
+        let mut tx = self.db.begin_write()?;
+        tx.set_durability(redb::Durability::Immediate)?;
+        let (before, scope) =
+            codec::attach_path(&self.path, local::write(&tx, s, Selection::Session))?;
+        validate::local(&before, &scope)?;
+        let Some(session) = before.sessions.get(&s) else {
+            return Ok(false);
+        };
+        // 按节点范围的最大键判断整棵树只有根节点，不看局部加载条数或 current == 0。
+        if before.node_tip != Some(NodeId(0)) || session.updated_at >= cutoff {
+            return Ok(false);
+        }
+        let mut after = before;
+        after.sessions.remove(&s);
+        after.nodes.remove(&(s, NodeId(0)));
+        after.session_settings.remove(&s);
+        after.node_tip = None;
+        validate::local(&after, &scope)?;
+        codec::attach_path(&self.path, codec::delete_draft(&tx, s))?;
+        self.commit_write(disabled, tx, true)
+    }
+
     pub fn accept_turn(
         &self,
         lock: &SessionExecutionLock,
         input: AcceptTurn,
     ) -> Result<AcceptedTurn> {
-        self.check_lock(lock, input.session.id())?;
+        self.check_lock(lock, input.session_id)?;
         self.write(lock, Selection::Accept(input.turn_id), |r, _| {
             if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
                 let s = node_ref.session_id;
@@ -316,9 +383,9 @@ impl SessionStore {
                     .get(&s)
                     .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
                 let existing_input = r.turn_input(s, input.turn_id)?;
-                if existing_input != input.input
-                    || existing_session.project_store_key != input.project_store_key
-                    || matches!(input.session, AcceptSession::Existing { id } if id != s)
+                if s != input.session_id
+                    || existing_input != input.input
+                    || existing_session.project_path != input.project_path
                 {
                     return Err(StoreError::Conflict {
                         turn_id: input.turn_id,
@@ -330,34 +397,25 @@ impl SessionStore {
                 return Err(invalid("input", "user input exceeds byte bound"));
             }
             validate::config(&input.config)?;
-            let s = input.session.id();
-            if matches!(input.session, AcceptSession::New { .. }) {
-                if r.sessions.contains_key(&s) {
-                    return Err(StoreError::SessionCollision { session_id: s });
-                }
-                if input.agent_selection != AgentSelection::Explicit {
-                    return Err(invalid("agent", "new session requires explicit agent"));
-                }
-                r.sessions.insert(
-                    s,
-                    SessionRecord {
-                        session_id: s,
-                        project_store_key: input.project_store_key,
-                        current: NodeId(0),
-                        created_at: input.accepted_at,
-                        updated_at: input.accepted_at,
-                    },
-                );
-                r.nodes.insert((s, NodeId(0)), Node::Root);
-            }
+            let s = input.session_id;
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
-            if session.project_store_key != input.project_store_key {
-                return Err(invalid("project", "session binding mismatch"));
-            }
-            if input.agent_selection == AgentSelection::Inherited
-                && r.current_agent(s)?.as_deref() != Some(input.config.agent_name.as_str())
-            {
-                return Err(invalid("agent", "agent does not match current node"));
+            check_binding(session, &input.project_path)?;
+            let current_settings = r.session_settings.get(&s).ok_or_else(|| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "missing session settings",
+                )
+            })?;
+            current_settings.validate().map_err(|_| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "invalid session settings",
+                )
+            })?;
+            if current_settings.version()? != input.settings_version {
+                return Err(StoreError::SettingsChanged { session_id: s });
             }
             let parent = session.current;
             let user_node = r.next_node(s)?;
@@ -376,6 +434,7 @@ impl SessionStore {
                     agent_name: input.config.agent_name,
                     model: input.config.model,
                     provider: input.config.provider,
+                    effort: input.config.effort,
                     limits: input.config.limits,
                     config_digest,
                     message: NativeMessage::new(
@@ -456,6 +515,8 @@ impl SessionStore {
             attempts.push(AttemptRecord {
                 origin,
                 usage: None,
+                usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                cost: None,
                 progress: AttemptProgress::Sent,
                 retry_delay_ms: None,
             });
@@ -502,7 +563,8 @@ impl SessionStore {
             if input.origin != last.origin {
                 return Err(invalid("origin", "attempt source mismatch"));
             }
-            last.usage = input.usage;
+            (last.usage, last.cost) = close::reported_usage(input.usage, input.cost);
+            last.usage_kind = input.usage_kind;
             last.progress = AttemptProgress::Ended {
                 end: AttemptEnd::Stopped {
                     cause: input.cause.clone(),
@@ -554,7 +616,7 @@ impl SessionStore {
             {
                 return Err(invalid("origin", "reply source mismatch"));
             }
-            validate::reply_protocol(&reply.origin, &reply.message)?;
+            validate::reply_origin(&reply.origin, &reply.message)?;
             let mut seen = BTreeSet::new();
             let index = tx.open_table(codec::INDEX).map_err(codec::table_error)?;
             let mut collisions = Vec::new();
@@ -599,7 +661,7 @@ impl SessionStore {
                                 model_step_ordinal: reply.key.model_step_ordinal,
                                 part_ordinal,
                                 method: bound.name.clone(),
-                                descriptor_identity: entry.descriptor_identity.clone(),
+                                tool_identity: entry.tool_identity.clone(),
                                 arguments_digest: bound.arguments_digest,
                             },
                         });
@@ -621,7 +683,12 @@ impl SessionStore {
                 })
                 .collect();
             for slot in &new_slots {
-                r.change(slot)?;
+                r.index.insert(
+                    slot.binding.invocation_id,
+                    InvocationIndexEntry {
+                        address: slot.binding.identity.address(),
+                    },
+                );
             }
             let Node::Step {
                 progress,
@@ -678,7 +745,7 @@ impl SessionStore {
             if slots[..position].iter().any(|s| {
                 matches!(
                     &s.progress,
-                    SlotProgress::Terminal { result, .. } if close::stops_batch(&result.payload)
+                    SlotProgress::Terminal { result } if close::stops_batch(&result.payload)
                 )
             }) || slots[position].binding != *binding
                 || !matches!(slots[position].progress, SlotProgress::Registered)
@@ -686,7 +753,6 @@ impl SessionStore {
                 return Err(transition(key.turn_id, "invocation cannot start"));
             }
             slots[position].progress = SlotProgress::Started;
-            r.change(&slots[position])?;
             *updated_at = now;
             r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)?;
@@ -724,7 +790,6 @@ impl SessionStore {
                 .find(|s| s.binding.invocation_id == input.invocation_id)
                 .ok_or_else(|| transition(key.turn_id, "invocation not in step"))?;
             if !matches!(slot.progress, SlotProgress::Started)
-                || !matches!(input.terminal.evidence, InvocationEvidence::Recorded(_))
                 || matches!(
                     input.terminal.result.payload,
                     ResultPayload::NotExecuted
@@ -733,25 +798,13 @@ impl SessionStore {
             {
                 return Err(transition(
                     key.turn_id,
-                    "receipt requires a started invocation",
+                    "terminal requires a started invocation",
                 ));
             }
-            // 错误码到结局的映射在写入入口检查，读取直接使用已保存的结局。
-            if matches!(&input.terminal.result.payload, ResultPayload::Failed(e)
-                if matches!(e.code, lancet_protocol::CepErrorCode::CallCancelled | lancet_protocol::CepErrorCode::OutcomeIndeterminate))
-            {
-                return Err(invalid("terminal", "error belongs to a different outcome"));
-            }
-            validate::terminal(
-                &slot.binding,
-                &input.terminal.result,
-                &input.terminal.evidence,
-            )?;
+            validate::terminal(&slot.binding, &input.terminal.result)?;
             slot.progress = SlotProgress::Terminal {
                 result: input.terminal.result,
-                evidence: input.terminal.evidence,
             };
-            r.change(slot)?;
             *updated_at = now;
             r.nodes.insert((lock.session_id, node_id), step);
             r.touch(lock.session_id, now)
@@ -781,7 +834,7 @@ impl SessionStore {
                 {
                     return Err(invalid("origin", "reply source mismatch"));
                 }
-                validate::reply_protocol(&reply.origin, &reply.message)?;
+                validate::reply_origin(&reply.origin, &reply.message)?;
                 let completed = close::completed(&reply);
                 let message = reply
                     .message
@@ -843,7 +896,7 @@ impl SessionStore {
                 if close::first_stopping_cause(slots)?.is_some()
                     || slots
                         .iter()
-                        .any(|s| close::stops_batch(&close::resolve_slot(s).0.payload))
+                        .any(|s| close::stops_batch(&close::resolve_slot(s).payload))
                 {
                     return Err(transition(key.turn_id, "cannot continue stopping calls"));
                 }
@@ -926,6 +979,7 @@ impl SessionStore {
         &self,
         lock: &SessionExecutionLock,
         target: NodeId,
+        project_path: &ProjectPath,
         now: Timestamp,
     ) -> Result<SessionRecord> {
         self.write(lock, Selection::Node(target), |r, _| {
@@ -933,6 +987,7 @@ impl SessionStore {
                 .sessions
                 .get_mut(&lock.session_id)
                 .ok_or_else(|| missing("session", lock.session_id))?;
+            check_binding(s, project_path)?;
             if !r.nodes.contains_key(&(lock.session_id, target)) {
                 return Err(missing("node", target.0));
             }
@@ -941,6 +996,17 @@ impl SessionStore {
                 s.updated_at = now;
             }
             Ok(s.clone())
+        })
+    }
+}
+
+/// 会话库写入时再核对一次项目绑定（ADR 0012 第 8 节）；后台在写入之前已按同一规则核对过。
+fn check_binding(session: &SessionRecord, project_path: &ProjectPath) -> Result<()> {
+    if session.project_path == *project_path {
+        Ok(())
+    } else {
+        Err(StoreError::BindingMismatch {
+            session_id: session.session_id,
         })
     }
 }

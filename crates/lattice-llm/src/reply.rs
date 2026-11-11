@@ -6,8 +6,8 @@
 use crate::types::ProviderFailure;
 use lattice_conversation::{
     AttemptAssembly, AttemptInterruption, AttemptRejection, MAX_OPAQUE_REPLAY_STATE_BYTES,
-    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, ProviderOrigin,
-    RawToolCall, ToolCallValidation, UnboundToolCall, canonical_json, validate_tool_call_batch,
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, OpaqueProviderState, RawToolCall,
+    ReplayOrigin, ToolCallValidation, UnboundToolCall, canonical_json, validate_tool_call_batch,
 };
 use std::collections::BTreeMap;
 
@@ -93,6 +93,11 @@ pub enum ProtocolEvent {
         finish_reason: String,
     },
     Failed(StreamStop),
+    /// 保留 Responses 错误码，在传输边界统一分类并生成诊断。
+    ResponsesError {
+        code: Option<String>,
+        message: String,
+    },
     /// 原始类型名只在协议边界内传递，先脱敏再生成有界的公开错误。
     UnsupportedContentBlock {
         protocol: &'static str,
@@ -216,7 +221,7 @@ enum State {
 }
 
 pub(crate) struct ReplyAccumulator {
-    origin: Option<ProviderOrigin>,
+    origin: Option<ReplayOrigin>,
     parts: Vec<PendingPart>,
     positions: BTreeMap<usize, usize>,
     current_text: Option<usize>,
@@ -232,7 +237,7 @@ fn sequence(index: usize, detail: &'static str) -> ReplyStop {
 }
 
 impl ReplyAccumulator {
-    pub(crate) fn new(origin: Option<ProviderOrigin>) -> Self {
+    pub(crate) fn new(origin: Option<ReplayOrigin>) -> Self {
         Self {
             origin,
             parts: Vec::new(),
@@ -477,7 +482,7 @@ impl ReplyAccumulator {
         ReplyOutcome::Complete {
             message: AccumulatedReply(NativeMessage::new(
                 MessageRole::Assistant,
-                self.origin,
+                self.origin.clone(),
                 ready,
             )),
         }
@@ -523,7 +528,7 @@ fn rejected(validation: ToolCallValidation) -> ReplyOutcome {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_conversation::{MessageSemantic, ProviderOrigin};
+    use lattice_conversation::{MessageSemantic, Protocol};
 
     fn call(reply: &mut ReplyAccumulator, index: usize, id: Option<&str>, arguments: &str) {
         reply
@@ -803,7 +808,9 @@ mod tests {
 
     #[test]
     fn replay_fragments_preserve_signed_and_empty_part_boundaries() {
-        let mut reply = ReplyAccumulator::new(Some(ProviderOrigin::Gemini));
+        let mut reply = ReplyAccumulator::new(Some(crate::test_reply::replay_origin(
+            Protocol::GenerateContent,
+        )));
         for index in [0, 1] {
             reply
                 .push(PartDelta::Begin {
@@ -994,7 +1001,9 @@ mod tests {
 
     #[test]
     fn interleaved_parts_keep_first_positions_and_match_live_projection() {
-        let mut reply = ReplyAccumulator::new(Some(ProviderOrigin::OpenAiCompatible));
+        let mut reply = ReplyAccumulator::new(Some(crate::test_reply::replay_origin(
+            Protocol::ChatCompletions,
+        )));
         let mut live = Vec::new();
         for delta in [
             PartDelta::Begin {

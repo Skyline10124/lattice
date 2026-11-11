@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{
-    cep::{ProductionTurnDepsInput, build_production_turn_deps},
     coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
     observer::ObserverSink,
+    tools::{TurnTools, default_tool_executor},
     types::*,
 };
 use crate::{
@@ -12,8 +12,8 @@ use crate::{
     session::{ApiError, RequestConflict, Result, SessionApi},
 };
 use futures::FutureExt;
-use lancet_protocol::{SessionId, TurnId};
-use lattice_session::{StateLayout, store::*};
+use lattice_conversation::{SessionId, TurnId};
+use lattice_session::store::*;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -24,40 +24,81 @@ pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
 
 pub(crate) struct ExecutionInput {
     pub session: SessionApi,
-    pub layout: StateLayout,
     pub turn_id: TurnId,
     pub workspace: LocalWorkspaceRoot,
     pub request: RunTurnRequest,
-    pub connection: Option<Arc<lattice_llm::LlmConnection>>,
+    pub prepared_model: Option<PreparedModel>,
+    pub prepared_settings: Option<(SessionSettings, SettingsVersion)>,
+    pub io: Option<CoordinatorStoreIo>,
     pub shutdown: Arc<AtomicBool>,
     pub observer: Arc<ObserverSink>,
-    /// 新会话身份由提交方在执行开始前给定。
-    pub new_session: Option<SessionId>,
+}
+
+pub(crate) struct PreparedModel {
+    target: lattice_llm::ModelTarget,
+    execution: super::saga::ModelExecution,
+}
+
+impl PreparedModel {
+    /// 在接受前按会话设置完成单次准入与严格档位校验；同一 Turn 随后沿用这个网关句柄。
+    pub(crate) async fn resolve(
+        gateway: &Arc<lattice_llm::RequestGateway>,
+        settings: &SessionSettings,
+    ) -> Result<Self> {
+        let auth = gateway.auth_store();
+        let chosen_model = require_settings_model(settings, Some(&auth))?;
+        let turn = gateway.open_turn();
+        let resolved = turn
+            .prepare(
+                &chosen_model,
+                lattice_llm::EffortPolicy::Strict(settings.effort),
+            )
+            .await
+            .map_err(|error| prepare_rejection(&error, Some(&auth)))?;
+        Ok(Self {
+            target: resolved.target().clone(),
+            execution: super::saga::ModelExecution::gateway(turn, &resolved),
+        })
+    }
+}
+
+pub(crate) fn require_settings_model(
+    settings: &SessionSettings,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> Result<crate::ModelRef> {
+    settings.model.clone().ok_or_else(|| {
+        ApiError::Configuration(crate::ConfigRejection::new(
+            "session has no model selected; choose one with /model or --model",
+            auth,
+        ))
+    })
+}
+
+fn prepare_rejection(
+    error: &lattice_llm::PrepareError,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> ApiError {
+    let message = crate::configure::EffortSource::SessionSettings.format_unsupported(error);
+    ApiError::Configuration(crate::ConfigRejection::new(&message, auth))
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
 pub fn start_turn(
     session: SessionApi,
-    layout: StateLayout,
     turn_id: TurnId,
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
-    connection: Option<Arc<lattice_llm::LlmConnection>>,
 ) -> TurnExecution {
-    let new_session = request
-        .session_id
-        .is_none()
-        .then(crate::local::new_session_id);
     start_execution(ExecutionInput {
         session,
-        layout,
         turn_id,
         workspace,
         request,
-        connection,
+        prepared_model: None,
+        prepared_settings: None,
+        io: None,
         shutdown: Arc::default(),
         observer: Arc::default(),
-        new_session,
     })
 }
 
@@ -113,16 +154,17 @@ async fn execute_owned(
 ) -> Result<TurnCompletion> {
     let ExecutionInput {
         session,
-        layout,
         turn_id,
         workspace,
-        request,
-        connection,
+        mut request,
+        prepared_model,
+        prepared_settings,
+        io,
         shutdown,
         observer,
-        new_session,
     } = input;
-    let project = workspace.store_key();
+    let tools = request.tools.take().unwrap_or_else(default_tool_executor);
+    let project = workspace.project_path();
     if session
         .read(move |read| read.turn_node(turn_id))
         .await?
@@ -130,90 +172,76 @@ async fn execute_owned(
     {
         return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
     }
-    let session_id = request
-        .session_id
-        .or(new_session)
-        .ok_or_else(|| ApiError::BadRequest("explicit SessionId required".into()))?;
-    let io = CoordinatorStoreIo::acquire_api(session.clone(), session_id).await?;
+    let session_id = request.session_id;
+    let io = match io {
+        Some(io) => io,
+        None => CoordinatorStoreIo::acquire_api(session.clone(), session_id).await?,
+    };
     let coordinator = TurnCoordinator::new(io, Arc::new(RandomIdSource));
-    if request.session_id.is_some() {
-        let record = coordinator
-            .io
-            .read(move |read| read.session(session_id))
-            .await?;
-        if record.project_store_key != project {
-            return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
-        }
-    }
-    let selected = match &request.agent {
-        Some(name) if !name.trim().is_empty() => name.clone(),
-        Some(_) => return Err(ApiError::BadRequest("agent name must not be blank".into())),
-        None if request.session_id.is_some() => coordinator
-            .io
-            .read(move |read| read.current_agent(session_id))
-            .await?
-            .ok_or_else(|| ApiError::BadRequest("root requires explicit agent".into()))?,
+    let (settings, settings_version) = match prepared_settings {
+        Some(prepared) => prepared,
         None => {
-            return Err(ApiError::BadRequest(
-                "new Session requires explicit agent".into(),
-            ));
+            let expected = request.expected_settings;
+            let check_project = project.clone();
+            let (record, settings) = coordinator
+                .io
+                .read(move |read| {
+                    let record = read.session(session_id)?;
+                    let settings = read.session_settings(session_id)?;
+                    Ok((record, settings))
+                })
+                .await?;
+            if record.project_path != check_project {
+                return Err(ApiError::Conflict(RequestConflict::BindingMismatch));
+            }
+            let version = settings.version()?;
+            if let Some(expected) = expected
+                && expected != version
+            {
+                return Err(ApiError::Conflict(RequestConflict::SettingsChanged));
+            }
+            (settings, version)
         }
     };
-    let loaded = request
-        .loaded_profile
-        .as_ref()
-        .ok_or_else(|| ApiError::BadRequest("frozen configuration required".into()))?;
-    if loaded.profile.agent.name != selected {
-        return Err(ApiError::BadRequest(
-            "loaded agent differs from selection".into(),
-        ));
-    }
-    if let Some(connection) = &connection
-        && connection.model().alias != loaded.profile.agent.model
-    {
-        return Err(ApiError::BadRequest(
-            "connection model differs from profile".into(),
-        ));
-    }
-    let (llm, provider): (Arc<dyn lattice_agent::LlmClient>, _) =
-        match (request.injected_llm(), &connection) {
-            (Some((client, provider)), _) => (client, provider),
-            (_, Some(connection)) => (
-                Arc::new(super::llm::RealLlmClient(connection.clone())),
-                connection.model().provider.clone(),
-            ),
-            _ => return Err(ApiError::BadRequest("frozen connection required".into())),
-        };
+    let (target, model) = match prepared_model {
+        Some(PreparedModel { target, execution }) => (target, execution),
+        None => match request.injected_llm() {
+            Some((client, protocol, supported)) => {
+                let chosen_model = require_settings_model(&settings, None)?;
+                let policy = lattice_llm::EffortPolicy::Strict(settings.effort);
+                let effort = lattice_llm::select_effort(&policy, &supported).map_err(|effort| {
+                    prepare_rejection(
+                        &lattice_llm::PrepareError::UnsupportedEffort {
+                            model: chosen_model.clone(),
+                            effort,
+                        },
+                        None,
+                    )
+                })?;
+                let mut target = lattice_llm::ModelTarget::new(chosen_model);
+                target.effort = effort;
+                let origin = lattice_session::store::AttemptOrigin {
+                    provider_id: target.model.provider().clone(),
+                    protocol,
+                };
+                (
+                    target,
+                    super::saga::ModelExecution::Injected {
+                        driver: Arc::new(lattice_agent::ModelStepDriver::new(client)),
+                        origin,
+                    },
+                )
+            }
+            None => {
+                return Err(ApiError::BadRequest("prepared model required".into()));
+            }
+        },
+    };
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
-    if request.session_id.is_none() {
-        let layout = layout.clone();
-        tokio::task::spawn_blocking(move || {
-            lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
-                layout, project,
-            ))
-            .map_err(|_| ApiError::StoreUnavailable("workspace history creation failed".into()))
-        })
-        .await
-        .map_err(|_| ApiError::WorkerFailed)??;
-    }
-    let root = workspace
-        .canonical_path()
-        .to_str()
-        .ok_or_else(|| ApiError::BadRequest("runtime workspace requires UTF-8".into()))?;
-    let deps = build_production_turn_deps(ProductionTurnDepsInput {
-        request: &request,
-        project_root: root,
-        project_store_key: project,
-        state_layout: layout,
-        enabled_tools: &loaded.profile.tools.enabled,
-        tls_roots_der: connection.as_ref().map_or(&[], |c| c.tls_roots_der()),
-        llm,
-        lancet: Some(&loaded.profile.lancet),
-    })
-    .await?;
-    let config = super::live::freeze_config(&request, &provider, &deps.tool_catalog)?;
+    let turn_tools: Arc<dyn TurnTools> = Arc::from(tools.open_turn(session_id, &workspace).await?);
+    let config = super::live::freeze_config(&settings, &target, turn_tools.specs())?;
     let timeout = config.limits.timeout_secs;
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
@@ -233,27 +261,31 @@ async fn execute_owned(
     let result = coordinator
         .io
         .accept(AcceptTurn {
-            session: if request.session_id.is_some() {
-                AcceptSession::Existing { id: session_id }
-            } else {
-                AcceptSession::New { id: session_id }
-            },
+            session_id,
             turn_id,
-            project_store_key: project,
+            project_path: project,
             input: request.input,
             config,
             accepted_at: chrono::Utc::now(),
-            agent_selection: if request.agent.is_some() {
-                AgentSelection::Explicit
-            } else {
-                AgentSelection::Inherited
-            },
+            settings_version,
         })
         .await;
     let result = match result {
         Ok(result) => result,
         Err(error) => {
-            let error = ApiError::from(error);
+            let error = match ApiError::from(error) {
+                ApiError::Store(store_error) => match store_error.as_ref() {
+                    StoreError::Conflict { .. } => ApiError::Conflict(RequestConflict::TurnIdUsed),
+                    StoreError::BindingMismatch { .. } => {
+                        ApiError::Conflict(RequestConflict::BindingMismatch)
+                    }
+                    StoreError::SettingsChanged { .. } => {
+                        ApiError::Conflict(RequestConflict::SettingsChanged)
+                    }
+                    _ => ApiError::Store(store_error),
+                },
+                other => other,
+            };
             if error.outcome_unknown() {
                 accept(
                     accepted,
@@ -270,7 +302,7 @@ async fn execute_owned(
         return Err(ApiError::Conflict(RequestConflict::TurnIdUsed));
     }
     *accepted_session = Some(session_id);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.as_secs());
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(&coordinator.io, turn_id, "turn_accepted", None, None).await?;
     #[cfg(test)]
@@ -314,15 +346,13 @@ async fn execute_owned(
         &coordinator,
         turn_id,
         super::saga::LiveExecution {
-            provider,
-            driver: Arc::new(deps.model_driver),
-            runtime: Arc::new(deps.runtime),
-            events: deps.events,
+            model,
+            tools: turn_tools,
             observer,
             cancel: request.cancel_flag.expect("cancel carrier initialized"),
             shutdown,
             deadline,
-            retry: loaded.profile.llm.retry.clone(),
+            retry: settings.profile.retry,
         },
     )
     .await?;
@@ -332,20 +362,11 @@ async fn execute_owned(
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn run_turn(
     session: SessionApi,
-    layout: StateLayout,
+    workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
 ) -> Result<RunTurnResult> {
-    let root = request
-        .test_project_root
-        .clone()
-        .ok_or_else(|| ApiError::BadRequest("explicit test workspace required".into()))?;
-    let workspace = tokio::task::spawn_blocking(move || {
-        LocalWorkspaceRoot::from_path(std::path::Path::new(&root))
-    })
-    .await
-    .map_err(|_| ApiError::WorkerFailed)??;
     let id = TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("UUID v4");
-    let execution = start_turn(session, layout, id, workspace, request, None);
+    let execution = start_turn(session, id, workspace, request);
     execution
         .acceptance
         .await
@@ -360,7 +381,53 @@ pub async fn run_turn(
             turn_id: id,
         },
         summary: detail.summary,
-        usage: detail.usage,
+        usage: *detail.usage,
         steps: detail.steps,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lattice_conversation::Effort::Off;
+
+    #[test]
+    fn admission_requires_model_and_attributes_unsupported_effort_to_session_settings() {
+        let modeless = SessionSettings {
+            profile: EffectiveProfile {
+                agent_name: crate::AgentName::parse("test").unwrap(),
+                description: None,
+                default_model: None,
+                default_effort: None,
+                timeout_secs: crate::TurnTimeout::default(),
+                retry: crate::RetryPolicy::default(),
+            },
+            system_prompt: None,
+            model: None,
+            effort: None,
+        };
+        let Err(ApiError::Configuration(missing_model)) = require_settings_model(&modeless, None)
+        else {
+            panic!("模型为空的会话设置应在准入时返回配置拒绝");
+        };
+        let missing_text = missing_model.to_string();
+        assert!(
+            missing_text.contains("/model") && missing_text.contains("--model"),
+            "缺少模型的拒绝应提示 /model 与 --model，实际为 {missing_text:?}"
+        );
+
+        let unsupported = lattice_llm::PrepareError::UnsupportedEffort {
+            model: crate::ModelRef::parse("openai/gpt-5").unwrap(),
+            effort: Off,
+        };
+        let ApiError::Configuration(rejection) = prepare_rejection(&unsupported, None) else {
+            panic!("预期配置拒绝");
+        };
+        let message = rejection.to_string();
+        assert!(
+            message.contains(&unsupported.to_string())
+                && message.contains("(from session settings)"),
+            "提交准入的档位拒绝必须归因为会话设置: {message}"
+        );
+    }
 }

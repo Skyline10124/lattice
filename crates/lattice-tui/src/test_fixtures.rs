@@ -9,15 +9,52 @@ pub(super) const SESSION: &str = "11111111111141118111111111111111";
 const AT: &str = "2026-01-01T00:00:00Z";
 const DIGEST: &str = "5fd582703776c899a2ecb12f3d699bd7244dff1f443ef5ae3f0067bcf3ce279e";
 
+pub(super) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let mut text = String::new();
+    for row in buffer.content.chunks(usize::from(buffer.area.width).max(1)) {
+        let mut column = 0;
+        while column < row.len() {
+            let symbol = row[column].symbol();
+            text.push_str(symbol);
+            column += symbol.width().max(1);
+        }
+        text.push('\n');
+    }
+    text
+}
+
+pub(super) fn model_candidate(
+    provider: &str,
+    model: &str,
+    efforts: &[lattice_api::Effort],
+) -> lattice_api::ModelCandidate {
+    lattice_api::ModelCandidate {
+        provider: lattice_api::ProviderId::parse(provider).unwrap(),
+        model: lattice_api::ModelId::parse(model).unwrap(),
+        name: None,
+        context: None,
+        output: None,
+        supported_efforts: efforts.to_vec(),
+        cost: None,
+        availability: lattice_api::Availability::Ready,
+    }
+}
+
 pub(super) fn sid() -> SessionId {
     SessionId::parse(SESSION).unwrap()
 }
 
-pub(super) fn test_app(existing: bool) -> App {
+pub(super) fn settings_version(byte: u8) -> lattice_api::local::SettingsVersion {
+    serde_json::from_value(json!(format!("{byte:02x}").repeat(32))).unwrap()
+}
+
+pub(super) fn test_app(_existing: bool) -> App {
     App::new(
         SessionContext {
-            session_id: existing.then(sid),
-            active_agent: "unused".into(),
+            session_id: sid(),
+            initial_head: head(0, None, false),
+            initial_adjustment: None,
         },
         false,
         Path::new("/nonexistent-tui-test-history"),
@@ -26,9 +63,13 @@ pub(super) fn test_app(existing: bool) -> App {
 
 pub(super) fn head(position: u64, turn_id: Option<TurnId>, owner: bool) -> SessionHead {
     SessionHead {
+        model: Some(ModelId::parse("model-a").unwrap()),
+        provider: Some(ProviderId::parse("openai").unwrap()),
+        effort: None,
+        settings_version: settings_version(0x11),
         session_id: sid(),
         position: NodeId(position),
-        agent: Some("unused".into()),
+        agent: "unused".into(),
         turn_id,
         owner,
         diagnostic: None,
@@ -195,7 +236,7 @@ impl StepEntry {
     pub(super) fn sent(mut self) -> Self {
         self.attempts.push(
             json!({"origin":{"protocol":"chat-completions","provider_id":"openai"},
-                "usage":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
+                "usage":null,"usage_kind":"partial","cost":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
         );
         self
     }
@@ -204,24 +245,59 @@ impl StepEntry {
         let attempt = self.attempts.len();
         self.attempts.push(json!({
             "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage":null,"retry_delay_ms":100,
+            "usage":null,"usage_kind":"partial","cost":null,"retry_delay_ms":100,
             "progress":{"progress":"ended","end":{"end":"stopped","cause":{"cause":"provider_error","retryable":true}},"diagnostic":diagnostic()}
         }));
         self.retries
             .push(json!({"attempt":attempt,"delay_ms":100,"notice":{"level":level,"text":text}}));
         self
     }
-    pub(super) fn completed_attempt(mut self, total_tokens: u64) -> Self {
+    pub(super) fn completed_attempt(mut self, context_tokens: u64) -> Self {
         self.attempts.push(json!({
             "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":total_tokens},"retry_delay_ms":null,
+            "usage_kind":"partial","cost":null,"usage":{"input":context_tokens,"output":0,"cache_read":null,"cache_write":null,"reasoning":null},"retry_delay_ms":null,
             "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":diagnostic()}
         }));
         self
     }
+    /// 最近一次尝试保存的计量与判定；缺失字段保持未报告。
+    pub(super) fn metering(
+        mut self,
+        usage: Value,
+        usage_kind: lattice_api::local::UsageCompleteness,
+        cost: Option<(f64, bool)>,
+    ) -> Self {
+        let attempt = self.attempts.last_mut().expect("已有尝试");
+        attempt["usage"] = usage;
+        attempt["usage_kind"] = json!(usage_kind);
+        attempt["cost"] =
+            json!(cost.map(|(usd, exact)| lattice_api::local::CostEstimate { usd, exact }));
+        self
+    }
     /// 回复末尾加一个工具调用；`terminal` 时槽位已有成功结果，否则停在 Started。
-    pub(super) fn tool(mut self, n: u32, terminal: bool) -> Self {
+    pub(super) fn tool(self, n: u32, terminal: bool) -> Self {
         let id = invocation(n);
+        let progress = if terminal {
+            json!({"progress":"terminal","result":{
+                "invocation_id":id,"name":"observe__workspace",
+                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,
+                    "digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
+            }})
+        } else {
+            json!({"progress":"started"})
+        };
+        self.push_tool_slot(n, id, progress)
+    }
+    /// 回复末尾加一个以 `ToolError` 终结的失败工具调用。
+    pub(super) fn failed_tool(self, n: u32, code: &str, message: &str) -> Self {
+        let id = invocation(n);
+        let progress = json!({"progress":"terminal","result":{
+            "invocation_id":id,"name":"observe__workspace",
+            "payload":{"outcome":"failed","payload":{"code":code,"message":message}}
+        }});
+        self.push_tool_slot(n, id, progress)
+    }
+    fn push_tool_slot(mut self, n: u32, id: String, progress: Value) -> Self {
         let parts = self.parts.get_or_insert_with(Vec::new);
         let part = parts.len();
         parts.push(json!({"semantic":{"tool_call":{"call":{
@@ -229,19 +305,10 @@ impl StepEntry {
             "arguments":{"path":"a.txt"},"arguments_digest":DIGEST,
             "address":{"message":{"session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal},"part_ordinal":part}
         }}}}));
-        let progress = if terminal {
-            json!({"progress":"terminal","result":{
-                "invocation_id":id,"name":"observe__workspace",
-                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,
-                    "digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
-            },"evidence":{"kind":"unavailable","value":{"reason":"no_result"}}})
-        } else {
-            json!({"progress":"started"})
-        };
         self.slots.push(json!({
             "binding":{"invocation_id":id,"identity":{
                 "session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal,"part_ordinal":part,
-                "method":"observe__workspace","descriptor_identity":"observe__workspace","arguments_digest":DIGEST}},
+                "method":"observe__workspace","tool_identity":"observe__workspace","arguments_digest":DIGEST}},
             "progress":progress
         }));
         self
@@ -328,7 +395,7 @@ pub(super) fn turn_view(turn_id: TurnId) -> lattice_api::local::TurnView {
     serde_json::from_value(json!({
         "session_id":SESSION,"turn_id":turn_id,"user_node":1,"agent_name":"unused",
         "accepted_at":AT,"ended_at":AT,"summary":summary("failed", json!({"progress":"reserved"})),
-        "usage":{"kind":"partial","known":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0},"unknown_attempts":1}
+        "usage":lattice_api::UsageSummary::from_attempts([])
     }))
     .unwrap()
 }

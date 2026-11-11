@@ -12,13 +12,10 @@ jobs:
     # Linux is LATTICE's sole supported host. Do not add a platform matrix;
     # expanding the host contract requires a separate architecture decision.
     runs-on: ubuntu-latest
-    # Drop debuginfo for every step in this job. Debug test binaries here are
-    # ~430 MB each (wasmtime, aws-lc-sys, gix, rusqlite all link in) across ~68
-    # test targets, which overruns the hosted runner's ~14 GB of free disk. lld
-    # mmaps its output, so writing past a full disk raises SIGBUS rather than
-    # ENOSPC — surfacing as `ld terminated with signal 7 [Bus error]` on three
-    # consecutive runs. Measured effect on one crate: 24.4 MB -> 2.0 MB.
-    # Backtraces keep function names; only line numbers are lost.
+    # 本 job 的所有步骤都关闭调试信息。曾测得这里的调试测试二进制每个约 430 MB、共约 68 个
+    # 测试目标，超出托管 runner 约 14 GB 的可用磁盘；lld 以 mmap 写输出，磁盘写满时触发
+    # SIGBUS 而不是 ENOSPC，连续三次表现为 `ld terminated with signal 7 [Bus error]`。
+    # 关闭后单个 crate 的产物从 24.4 MB 降到 2.0 MB；backtrace 保留函数名，只缺行号。
     #
     # Job-level (not per-step) so clippy/build/test share one profile: a debug
     # setting that differs between steps invalidates the cache and forces a full
@@ -31,10 +28,9 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           fetch-depth: 2
-      # A PR that changes only Markdown skips every Rust step below; the job
-      # still runs and passes, so `check` reports on every PR. A failed diff
-      # fails the job instead of skipping checks. main push skips this step,
-      # and the empty output keeps every step enabled.
+      # 只改 Markdown 的 PR 运行文档链接检查，跳过之后的 Rust 步骤；job 照常给出结论，
+      # 所以每个 PR 都有 `check` 结果。diff 失败时 job 失败。push 到 main 时不运行这一步，
+      # 输出为空，所有步骤都运行。
       - name: Detect docs-only PR
         id: changes
         if: github.event_name == 'pull_request'
@@ -45,12 +41,12 @@ jobs:
           else
             echo code=false >> "$GITHUB_OUTPUT"
           fi
+      # 文档链接检查由 xtask 执行，所以工具链与缓存对每个 PR 都准备。
       - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
-        if: steps.changes.outputs.code != 'false'
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-        if: steps.changes.outputs.code != 'false'
+      - run: cargo xtask docs-check
       - run: cargo fmt --all --check
         if: steps.changes.outputs.code != 'false'
       - run: cargo clippy --workspace --all-targets -- -D warnings
@@ -67,12 +63,17 @@ jobs:
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
-      # Crash-barrier scenarios need a product binary built with the barrier
-      # feature. It overwrites target/debug/lattice, so it runs after the
-      # ordinary test step that uses the plain binary.
-      - run: cargo build -p lattice-cli --bin lattice --features test-crash-barriers
+      # 第二轮：先检查测试专用 feature 的编译与 clippy，再用带测试 feature 的产物覆盖
+      # target/debug/lattice（LATTICE_BIN 路径不变），运行假执行器单元测试、假工具场景与崩溃屏障。
+      - run: cargo clippy -p lattice-api -p lattice-cli --all-targets --features test-fake-tools,test-crash-barriers -- -D warnings
         if: steps.changes.outputs.code != 'false'
-      - run: cargo test -p lattice-system-harness --features crash-barriers --test direct_crash_barriers
+      - run: cargo clippy -p lattice-system-harness --all-targets --features fake-tools,crash-barriers -- -D warnings
+        if: steps.changes.outputs.code != 'false'
+      - run: cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers
+        if: steps.changes.outputs.code != 'false'
+      - run: cargo test -p lattice-api --features test-fake-tools,test-crash-barriers
+        if: steps.changes.outputs.code != 'false'
+      - run: cargo test -p lattice-system-harness --features fake-tools,crash-barriers
         if: steps.changes.outputs.code != 'false'
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
@@ -80,10 +81,6 @@ jobs:
       # Dependency / architecture boundary checks (same contracts `cargo
       # xtask ci` runs locally).
       - run: cargo xtask harness-boundary
-        if: steps.changes.outputs.code != 'false'
-      - run: cargo xtask lancet-boundary
-        if: steps.changes.outputs.code != 'false'
-      - run: cargo xtask tool-codegen --check
         if: steps.changes.outputs.code != 'false'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()

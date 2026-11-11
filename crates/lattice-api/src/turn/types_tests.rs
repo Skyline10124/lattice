@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::types::{TurnEvent, TurnRef};
-use lancet_protocol::{SessionId, TurnId};
+use lattice_conversation::{SessionId, TurnId};
 use lattice_session::store::*;
 
 #[test]
@@ -77,18 +77,33 @@ fn terminal_events_round_trip_the_persistent_summary_and_step() {
 }
 
 #[test]
-fn usage_summary_preserves_totals_and_unknown_attempts() {
-    let summary = UsageSummary::Partial {
-        known: lattice_conversation::TokenUsage {
-            prompt_tokens: 1,
-            completion_tokens: 2,
-            total_tokens: 3,
-        },
-        unknown_attempts: 2,
-    };
+fn usage_summary_preserves_token_totals_and_unknown_costs() {
+    let summary = UsageSummary::from_attempts(
+        [(
+            Some(lattice_conversation::TokenUsage {
+                input: Some(1),
+                output: Some(2),
+                ..Default::default()
+            }),
+            lattice_conversation::UsageCompleteness::Partial,
+            None,
+        )]
+        .into_iter()
+        .chain(std::iter::repeat_n(
+            (None, lattice_conversation::UsageCompleteness::Partial, None),
+            2,
+        )),
+    );
     let value = serde_json::to_value(&summary).unwrap();
-    assert_eq!(value["known"]["total_tokens"], 3);
-    assert_eq!(value["unknown_attempts"], 2);
+    assert_eq!(
+        value["input"],
+        serde_json::json!({"known":1,"complete":false,"overflowed":false})
+    );
+    assert_eq!(value["partial_attempts"], 3);
+    assert_eq!(
+        value["cost"],
+        serde_json::json!({"known":null,"unknown_attempts":3,"overflowed":false})
+    );
     assert_eq!(
         serde_json::from_value::<UsageSummary>(value).unwrap(),
         summary

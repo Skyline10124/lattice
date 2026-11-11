@@ -8,8 +8,14 @@ use std::fmt;
 pub struct ConfigRejection(String);
 
 impl ConfigRejection {
-    pub fn new(message: &str, known_secrets: &[&str]) -> Self {
-        Self(crate::redact::redact(message, known_secrets))
+    pub fn new(message: &str, auth: Option<&lattice_llm::auth::AuthStore>) -> Self {
+        let reason = auth
+            .and_then(|auth| {
+                auth.with_credential_values(|known| crate::redact::redact(message, known))
+                    .ok()
+            })
+            .unwrap_or_else(|| crate::redact::redact(message, &[]));
+        Self(reason)
     }
 }
 
@@ -17,16 +23,6 @@ impl fmt::Display for ConfigRejection {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(&self.0)
     }
-}
-
-/// 仅用于提交端配置加载；后台不能用自己的环境代替本 Turn 的凭据。
-pub(crate) fn client_configuration_error(message: &str) -> crate::ApiError {
-    let secrets: Vec<String> = lattice_llm::credential_env_vars()
-        .iter()
-        .filter_map(|name| std::env::var(name).ok())
-        .collect();
-    let known: Vec<&str> = secrets.iter().map(String::as_str).collect();
-    crate::ApiError::Configuration(ConfigRejection::new(message, &known))
 }
 
 #[cfg(test)]

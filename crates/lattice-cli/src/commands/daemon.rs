@@ -18,7 +18,8 @@ pub enum DaemonAction {
     },
     /// Query the running daemon without starting one.
     Status,
-    /// Stop accepting new work and wait for taken-over work and durable closure to finish.
+    /// Stop accepting new work, wait for taken-over work and durable closure to finish,
+    /// then wait for the daemon to remove its socket and release the instance lock.
     Stop,
 }
 

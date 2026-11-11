@@ -41,8 +41,9 @@ fn first_prompt_is_the_only_session_creation_and_request() {
         );
         let sid = result.accepted_session_id().expect("accepted SID");
         let tid = result.accepted_turn_id().expect("accepted TurnId");
-        // CLI 在发出请求前生成并输出身份，写明新建；接受事务建立的就是这个 Session。
-        assert_eq!(result.sending(), Some((tid, sid, true)));
+        // CLI 在发出请求前生成并输出身份，先经 `configure(New)` 建立草稿再提交本轮。
+        assert_eq!(result.sending(), Some((tid, sid)));
+        assert_eq!(result.configures().count(), 1);
         let list = send.run_command(&["--json", "session", "list"]).unwrap();
         evidence.record_command("session list", &list);
         let list: Value = serde_json::from_slice(&list.stdout).unwrap();
@@ -87,6 +88,7 @@ fn first_prompt_is_the_only_session_creation_and_request() {
 
 mod support;
 
+#[cfg(feature = "fake-tools")]
 fn cli_json(
     world: &ScenarioWorld,
     spec: &ScenarioSpec,
@@ -100,6 +102,7 @@ fn cli_json(
 }
 
 /// 经公开视图读取当前路径上的对话：当前位置与开头给出的条目（不超过最近 10 轮）。
+#[cfg(feature = "fake-tools")]
 fn current_history(world: &ScenarioWorld, spec: &ScenarioSpec, sid: &str) -> Value {
     let mut watcher = support::Watcher::open(world, spec.step_timeout(), sid);
     let view = watcher.initial();
@@ -109,27 +112,49 @@ fn current_history(world: &ScenarioWorld, spec: &ScenarioSpec, sid: &str) -> Val
     })
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
     use serde_json::json;
-    let (world, spec) =
-        support::direct_world("tree-two-agents", "alpha", "[\"mutate__create\"]", "");
+    let (world, spec) = support::direct_world("tree-two-agents", "alpha", "");
+    world.set_env("LATTICE_TEST_TOOLS", "write_marker");
     let model = ProviderFixture::chat_completions("beta")
         .model_ref()
         .unwrap();
-    world.write_project_file(".lattice/agents/beta/agent.toml",
-        &format!("schema_version = 1\n[agent]\nname = \"beta\"\nmodel = \"{model}\"\n[prompt]\nsystem = \"Beta isolated prompt.\"\n[tools]\nenabled = [\"mutate__create\"]\n")).unwrap();
+    world
+        .write_project_file(
+            ".lattice/agents/beta/agent.toml",
+            &format!(
+                "schema_version = 1\n[agent]\nname = \"beta\"\nmodel = \"{model}\"\n[prompt]\nsystem = \"Beta isolated prompt.\"\n"
+            ),
+        )
+        .unwrap();
+    let kept_path = world.project_dir().join("kept.txt").display().to_string();
+    let cancelled_path = world
+        .project_dir()
+        .join("cancelled.txt")
+        .display()
+        .to_string();
+    let create_args = serde_json::to_string(&json!({
+        "action": "append_marker",
+        "path": kept_path,
+        "line": "kept\n",
+    }))
+    .unwrap();
+    let cancel_args = serde_json::to_string(&json!({
+        "action": "append_marker",
+        "path": cancelled_path,
+        "line": "survives cancel\n",
+    }))
+    .unwrap();
     let mut server = support::wire_fake_llm(
         &world,
         "alpha",
         support::sequence(vec![
-            support::tool_call(
-                "create",
-                "mutate__create",
-                r#"{"path":"kept.txt","content":"kept\n","create_parents":false}"#,
-            ),
+            support::tool_call("create", "write_marker", &create_args),
             SseScript::plain("old final"),
-            SseScript::plain("alpha fork"),
+            SseScript::plain("beta fork"),
+            SseScript::plain("beta inherited root"),
             SseScript::plain("beta root"),
         ]),
     );
@@ -154,7 +179,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         for step in original["steps"].as_array().unwrap() {
             assert_eq!(
                 step["attempts"][0]["origin"],
-                json!({"protocol":"chat-completions","provider_id":"openai-compatible"})
+                json!({"protocol":"chat-completions","provider_id":"local"})
             );
         }
         let original_history = current_history(&world, &spec, sid);
@@ -163,11 +188,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &world,
             "beta",
             support::sequence(vec![
-                support::tool_call(
-                    "beta-create",
-                    "mutate__create",
-                    r#"{"path":"cancelled.txt","content":"survives cancel\n","create_parents":false}"#,
-                ),
+                support::tool_call("beta-create", "write_marker", &cancel_args),
                 SseScript::plain("must not arrive"),
             ]),
         );
@@ -277,21 +298,6 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
                 FAKE_API_KEY,
             )
             .unwrap();
-        let history_snapshot = || {
-            let path = std::fs::read_dir(world.session_store_dir().join("projects"))
-                .unwrap()
-                .map(|entry| entry.unwrap().path().join("workspace-history.git"))
-                .find(|path| path.is_dir())
-                .unwrap();
-            let repo = gix::open_opts(path, gix::open::Options::isolated()).unwrap();
-            let current = repo
-                .find_reference("refs/lattice/workspace-history/current")
-                .unwrap();
-            let tip = current.target().try_id().unwrap().to_owned();
-            let commit = repo.find_commit(tip).unwrap();
-            json!({"tip":tip.to_string(),"message":commit.message_raw_sloppy().to_string()})
-        };
-        let history_before = history_snapshot();
         let before = cli_json(
             &world,
             &spec,
@@ -332,7 +338,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &spec,
             &["--json", "session", "send", "fork", "--session", sid],
         );
-        evidence.record_command("fork inherits alpha at target node", &fork);
+        evidence.record_command("fork inherits latest beta copy", &fork);
         assert!(fork.is_clean_exit(0), "{}", fork.summary());
         support::parse_send_stdout(&fork.stdout, fork.exit_code());
         let tree = cli_json(
@@ -344,7 +350,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(tree["nodes"].as_array().unwrap().len(), 9);
         assert_eq!(tree["nodes"][7]["node"]["id"], 7);
         assert_eq!(tree["nodes"][7]["node"]["parent"], 2);
-        assert_eq!(tree["current_agent"], "alpha");
+        assert_eq!(tree["current_agent"], "beta");
         assert_eq!(
             cli_json(
                 &world,
@@ -378,7 +384,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(returned["current_agent"], "alpha");
+        assert_eq!(returned["current_agent"], "beta");
         assert_eq!(returned["nodes"].as_array().unwrap().len(), 9);
         assert_eq!(current_history(&world, &spec, sid), original_history);
         assert_eq!(
@@ -399,29 +405,23 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert!(at_root["current_agent"].is_null());
-        let refused = support::cli(
+        assert_eq!(at_root["current_agent"], "beta");
+        let inherited = support::cli(
             &world,
             &spec,
             &["--json", "session", "send", "no agent", "--session", sid],
         );
-        evidence.record_command("root rejects missing agent", &refused);
-        assert!(refused.is_clean_exit(2));
-        let refusal = support::parse_send_stdout(&refused.stdout, refused.exit_code());
-        assert_eq!(
-            refusal.rejection().map(|error| error.message.as_str()),
-            Some("agent required at root")
+        evidence.record_command("root inherits beta copy", &inherited);
+        assert!(inherited.is_clean_exit(0), "{}", inherited.summary());
+        let inherited = support::parse_send_stdout(&inherited.stdout, inherited.exit_code());
+        assert_eq!(inherited.heads().last().unwrap().agent, "beta");
+        assert_eq!(server.captured_requests().len(), 4);
+        cli_json(
+            &world,
+            &spec,
+            &mut evidence,
+            &["--json", "session", "rewind", sid, "0"],
         );
-        assert_eq!(
-            cli_json(
-                &world,
-                &spec,
-                &mut evidence,
-                &["--json", "session", "log", sid]
-            ),
-            at_root
-        );
-        assert_eq!(server.captured_requests().len(), 3);
         let root = support::cli(
             &world,
             &spec,
@@ -445,10 +445,10 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &mut evidence,
             &["--json", "session", "log", sid],
         );
-        assert_eq!(after["nodes"].as_array().unwrap().len(), 11);
-        assert_eq!(after["nodes"][9]["node"]["id"], 9);
-        assert_eq!(after["nodes"][9]["node"]["parent"], 0);
-        assert_eq!(after["session"]["current"], 10);
+        assert_eq!(after["nodes"].as_array().unwrap().len(), 13);
+        assert_eq!(after["nodes"][11]["node"]["id"], 11);
+        assert_eq!(after["nodes"][11]["node"]["parent"], 0);
+        assert_eq!(after["session"]["current"], 12);
         assert_eq!(after["current_agent"], "beta");
         assert_eq!(
             cli_json(
@@ -476,68 +476,53 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             std::fs::read_to_string(world.project_dir().join("cancelled.txt")).unwrap(),
             "survives cancel\n"
         );
-        assert_eq!(history_snapshot(), history_before);
         let captures = server.captured_requests();
         let mut all_captures = captures[..2].to_vec();
         all_captures.extend(beta_requests);
         all_captures.extend_from_slice(&captures[2..]);
         evidence.record_captures(all_captures);
-        assert_eq!(captures.len(), 4);
-        assert_eq!(captures[2].raw["model"], "alpha");
+        assert_eq!(captures.len(), 5);
+        assert_eq!(captures[2].raw["model"], "beta");
         assert_eq!(captures[3].raw["model"], "beta");
         // 固定夹具的规定投影：来源是公开历史；不导入产品投影器，也不使用上一请求作 oracle。
         let step = &fork_history["entries"][1]["content"];
         let call = &step["reply"]["parts"][0]["semantic"]["tool_call"]["call"];
         assert_eq!(call["provider_call_id"], "create");
-        assert_eq!(call["name"], "mutate__create");
+        assert_eq!(call["name"], "write_marker");
         assert_eq!(
             call["arguments"],
-            json!({"content":"kept\n","create_parents":false,"path":"kept.txt"})
+            json!({"action":"append_marker","line":"kept\n","path":kept_path})
         );
         assert_eq!(
             step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"],
-            json!({"bytes_written":5,"path":"kept.txt"})
+            json!({"appended":true})
         );
         let expected = json!([
-            {"role":"system","content":"You are a concise test agent."},
+            {"role":"system","content":"Beta isolated prompt."},
             {"role":"user","content":fork_history["entries"][0]["content"]["message"]["parts"][0]["semantic"]["text"]["text"]},
             {"role":"assistant","content":null,"tool_calls":[{"id":"create","type":"function","function":{
-                "name":"mutate__create","arguments":serde_json::to_string(&call["arguments"]).unwrap()}}]},
+                "name":"write_marker","arguments":serde_json::to_string(&call["arguments"]).unwrap()}}]},
             {"role":"tool","tool_call_id":"create","content":serde_json::to_string(&step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"]).unwrap()},
             {"role":"user","content":"fork"},
         ]);
         assert_eq!(captures[2].raw["messages"], expected);
         assert_eq!(
-            captures[3].raw["messages"],
+            captures[4].raw["messages"],
             json!([{"role":"system","content":"Beta isolated prompt."},{"role":"user","content":"root input"}])
         );
         for request in &captures {
             let tools = request.raw["tools"].as_array().unwrap();
             assert_eq!(tools.len(), 1);
-            assert_eq!(tools[0]["function"]["name"], "mutate__create");
+            assert_eq!(tools[0]["function"]["name"], "write_marker");
             assert_eq!(
                 tools[0]["function"]["parameters"],
-                json!({"type":"object","additionalProperties":false,
-                "properties":{"content":{"type":"string"},"create_parents":{"type":"boolean"},"path":{"type":"string","minLength":1}},
-                "required":["path","content"]})
+                json!({"type":"object","additionalProperties":true})
             );
         }
         for args in [
             vec!["session", "log", sid],
             vec!["session", "turn", tid],
             vec!["--json", "session", "list"],
-            vec!["--json", "audit"],
-            vec!["--json", "audit", "--tail", "--since", "0"],
-            vec!["--json", "audit", "replay", "--session", sid, "--turn", tid],
-            vec![
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                sid,
-                "--turn",
-                beta_turn,
-            ],
         ] {
             let out = support::cli(&world, &spec, &args);
             evidence.record_command(args.join(" "), &out);
@@ -549,16 +534,10 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         evidence
             .record_json("expected-fork-projection", &expected)
             .unwrap();
-        evidence
-            .record_json(
-                "workspace-history",
-                &json!({"before_rewind":history_before,"after_root_fork":history_snapshot()}),
-            )
-            .unwrap();
         evidence.record_json("state-summary", &json!({"original":original,"cancelled":beta_closed,"tree":after,
             "state_root":world.session_store_dir().parent(),"daemon_pids":world.daemon_pids().unwrap(),
             "files":(["kept.txt","cancelled.txt"].map(|path| json!({"path":path,"blake3":blake3::hash(&std::fs::read(world.project_dir().join(path)).unwrap()).to_hex().to_string()}))),
-            "provider_requests":6,"script":"alpha create kept.txt then final; beta create cancelled.txt then cancel at request2; alpha fork; beta root"})).unwrap();
+            "provider_requests":7,"script":"alpha append_marker kept.txt then final; beta append_marker cancelled.txt then cancel at request2; beta fork; beta inherited root; beta explicit root"})).unwrap();
         server.shutdown(spec.step_timeout()).unwrap();
     }));
     support::finish_recorded(evidence, result);
@@ -602,7 +581,7 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
     let invocation =
         "projects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/invocations.git";
     for relatives in [vec![session], vec![invocation], vec![session, invocation]] {
-        let (world, spec) = support::direct_world("legacy-store-refusal", "reader", "[]", "");
+        let (world, spec) = support::direct_world("legacy-store-refusal", "reader", "");
         let mut server =
             support::wire_fake_llm(&world, "reader", SseScript::plain("must not dispatch"));
         let mut legacies: Vec<_> = relatives
@@ -620,7 +599,6 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
             for args in [
                 vec!["--json", "session", "send", "input", "--agent", "reader"],
                 vec!["--json", "session", "list"],
-                vec!["--json", "audit", "query"],
             ] {
                 let out = support::cli(&world, &spec, &args);
                 evidence.record_command(args.join(" "), &out);

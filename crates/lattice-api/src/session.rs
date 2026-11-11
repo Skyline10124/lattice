@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 当前代会话库的短期门面；不自行打开、创建或替换数据库。
-use lancet_protocol::SessionId;
-use lattice_session::store::{SessionRead, SessionRecord, SessionStore, StoreError};
+use lattice_conversation::SessionId;
+use lattice_session::store::{SessionRead, SessionRecord, SessionStore, SessionUsage, StoreError};
 use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -12,6 +12,7 @@ pub enum RequestConflict {
     TurnIdUsed,
     SessionExists,
     BindingMismatch,
+    SettingsChanged,
 }
 
 impl std::fmt::Display for RequestConflict {
@@ -20,6 +21,7 @@ impl std::fmt::Display for RequestConflict {
             Self::TurnIdUsed => "TurnId is already in use",
             Self::SessionExists => "session already exists",
             Self::BindingMismatch => "session is bound to another workspace",
+            Self::SettingsChanged => "session settings changed",
         })
     }
 }
@@ -161,48 +163,44 @@ impl SessionApi {
         self.blocking(move |api| resolve_session(&api.store.begin_read()?, &prefix))
             .await
     }
+
+    pub async fn usage(&self, prefix: String) -> Result<SessionUsage> {
+        self.blocking(move |api| {
+            let read = api.store.begin_read()?;
+            let id = resolve_session_id(&read, &prefix)?;
+            Ok(read.usage(id)?)
+        })
+        .await
+    }
 }
 
-/// 精确身份优先；同一读事务分页查全，歧义诊断最多五项。
-fn resolve_session(read: &SessionRead, prefix: &str) -> Result<SessionRecord> {
+/// 歧义诊断最多列出的会话数。
+const AMBIGUOUS_LIMIT: usize = 5;
+
+/// 精确身份优先；否则在同一读事务里按前缀做一次范围读取。两条路径都只读身份键，不解码会话记录。
+fn resolve_session_id(read: &SessionRead, prefix: &str) -> Result<SessionId> {
     let prefix = prefix.trim();
     if prefix.is_empty() {
         return Err(ApiError::BadRequest("session ID must not be empty".into()));
     }
-    if let Ok(id) = SessionId::parse(prefix) {
-        match read.session(id) {
-            Ok(record) => return Ok(record),
-            Err(StoreError::NotFound { .. }) => {}
-            Err(error) => return Err(error.into()),
-        }
+    // 完整身份按规范形式只做键查找；同长度的其他键不可能以它为前缀。
+    if let Ok(id) = SessionId::parse(prefix)
+        && read.session_ids_with_prefix(&id.to_string(), 1)? == [id]
+    {
+        return Ok(id);
     }
     if prefix.len() < 4 {
         return Err(ApiError::BadRequest(
             "session prefix requires at least four characters".into(),
         ));
     }
-    let mut after = None;
-    let mut matches = Vec::new();
-    let mut count = 0;
-    loop {
-        let page = read.list(after, 256)?;
-        for row in page.items {
-            if row.session_id.to_string().starts_with(prefix) {
-                count += 1;
-                if matches.len() < 5 {
-                    matches.push(row.session_id);
-                }
-            }
-        }
-        let Some(next) = page.next else {
-            break;
-        };
-        after = Some(next);
-    }
-    match count {
-        0 => Err(ApiError::NotFound(prefix.into())),
-        1 => Ok(read.session(matches[0])?),
-        _ => Err(ApiError::BadRequest(format!(
+    match read
+        .session_ids_with_prefix(prefix, AMBIGUOUS_LIMIT)?
+        .as_slice()
+    {
+        [] => Err(ApiError::NotFound(prefix.into())),
+        [id] => Ok(*id),
+        matches => Err(ApiError::BadRequest(format!(
             "ambiguous session prefix: {}; use more characters",
             matches
                 .iter()
@@ -211,6 +209,10 @@ fn resolve_session(read: &SessionRead, prefix: &str) -> Result<SessionRecord> {
                 .join(", ")
         ))),
     }
+}
+
+fn resolve_session(read: &SessionRead, prefix: &str) -> Result<SessionRecord> {
+    Ok(read.session(resolve_session_id(read, prefix)?)?)
 }
 
 #[cfg(test)]
@@ -225,6 +227,7 @@ mod tests {
                 RequestConflict::BindingMismatch,
                 "session is bound to another workspace",
             ),
+            (RequestConflict::SettingsChanged, "session settings changed"),
         ] {
             assert_eq!(
                 ApiError::Conflict(reason).to_string(),

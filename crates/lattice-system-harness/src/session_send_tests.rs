@@ -32,20 +32,33 @@ fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply:
     let mut entry = json!({"type":"entry","kind":"step","node":node,"retries":[],
         "content":{"kind":"step","parent":node - 1,"turn_id":"t","step_ordinal":ordinal,"progress":progress,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z",
-            "reply":{"role":"assistant","parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
+            "reply":{"role":"assistant","provider_origin":{"protocol":"chat-completions","provider_id":"primary"},"parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
         "step":{"node":node,"key":{"turn_id":"t","ordinal":ordinal},"progress":progress,"end":end,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z"}});
+    if reply.is_empty() {
+        entry["content"]["reply"] = Value::Null;
+    } else {
+        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,"usage_kind":"partial","cost":null,
+            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null}, "retry_delay_ms":null});
+        entry["content"]["attempts"] = json!([attempt]);
+        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"usage_kind":"partial","cost":null,
+            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
+            "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":ordinal}},"retry_delay_ms":null}]);
+    }
     if let Some(summary) = summary {
         entry["summary"] = summary;
     }
     entry
 }
+fn settings_version() -> String {
+    "11".repeat(32)
+}
 fn head(owner: bool) -> Value {
-    json!({"type":"head","session_id":"s","position":3,"agent":"reader","turn_id":"t","owner":owner,
+    json!({"type":"head","session_id":"s","position":3,"agent":"reader","model":"m","provider":"p","effort":null,"settings_version":settings_version(),"turn_id":"t","owner":owner,
         "diagnostic":null,"path_replaced":false})
 }
 fn sending() -> Value {
-    json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true})
+    json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s"})
 }
 fn accepted() -> Value {
     json!({"type":"submit","stage":"receipt","turn_id":"t","result":"accepted","recovered":false,
@@ -287,7 +300,7 @@ fn exit_code_follows_the_latest_value_of_the_last_step() {
     );
     let parsed = parse(&with(vec![continued, last]));
     assert_eq!(parsed.closed_result(), Some(("s", "t", "completed")));
-    assert_eq!(parsed.sending(), Some(("t", "s", true)));
+    assert_eq!(parsed.sending(), Some(("t", "s")));
     assert_eq!(parsed.accepted_session_id(), Some("s"));
     assert_eq!(parsed.reply_text(), "firstanswer");
 }
@@ -491,7 +504,7 @@ fn view_state_appends_text_and_rejects_regression() {
 #[test]
 fn view_state_keeps_written_facts_and_allows_repeated_values() {
     let executing = json!({"progress":"executing"});
-    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,
+    let attempt = json!({"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"usage_kind":"partial","cost":null,
         "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
         "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":0}},"retry_delay_ms":null});
     let slot = |id: &str, state: &str, outcome: &str| {
@@ -505,22 +518,101 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         Some(summary("failed", &executing)),
         "reply",
     );
-    base["content"]["attempts"] = json!([{}]);
     base["step"]["attempts"] = json!([attempt]);
     base["step"]["slots"] = json!([
         slot("a", "terminal", "succeeded"),
         slot("b", "registered", "not_executed")
     ]);
-    for origin in [
-        json!(null),
-        json!({"provider_id":"primary"}),
-        json!({"protocol":"chat-completions"}),
-        json!({"protocol":"unknown","provider_id":"primary"}),
-        json!({"protocol":"chat-completions","provider_id":"Bad_id"}),
+    for exact in [true, false] {
+        let mut metered = base.clone();
+        metered["step"]["attempts"][0]["usage_kind"] = json!("complete");
+        metered["step"]["attempts"][0]["cost"] = json!({"usd":0.125,"exact":exact});
+        assert!(parse_record(&metered).is_ok(), "{metered}");
+    }
+    for (field, value, error) in [
+        ("usage_kind", json!("unknown"), "invalid usage_kind"),
+        ("cost", json!({"usd":-1.0,"exact":true}), "invalid cost"),
+        ("cost", json!({"usd":0.0,"exact":"yes"}), "invalid cost"),
     ] {
         let mut invalid = base.clone();
-        invalid["step"]["attempts"][0]["origin"] = origin;
-        assert!(parse_record(&invalid).is_err());
+        invalid["step"]["attempts"][0][field] = value;
+        assert_eq!(parse_record(&invalid).unwrap_err(), error);
+    }
+    let invalid_origins = [
+        (json!(null), "`protocol` must be a string"),
+        (json!("open_ai_compatible"), "`protocol` must be a string"),
+        (
+            json!({"provider_id":"primary"}),
+            "`protocol` must be a string",
+        ),
+        (
+            json!({"protocol":"chat-completions"}),
+            "`provider_id` must be a string",
+        ),
+        (
+            json!({"protocol":"unknown","provider_id":"primary"}),
+            "unknown attempt protocol",
+        ),
+        (
+            json!({"protocol":"chat-completions","provider_id":"Bad_id"}),
+            "invalid attempt provider id",
+        ),
+    ];
+    let mut without_reply = step(
+        2,
+        0,
+        stop("process_exit"),
+        Some(summary("failed", &stop("process_exit"))),
+        "",
+    );
+    let stopped = json!({"progress":"ended","end":{"end":"stopped","cause":{"cause":"process_exit"}},"diagnostic":null});
+    without_reply["content"]["attempts"] = base["content"]["attempts"].clone();
+    without_reply["step"]["attempts"] = base["step"]["attempts"].clone();
+    without_reply["content"]["attempts"][0]["progress"] = stopped.clone();
+    without_reply["step"]["attempts"][0]["progress"] = stopped;
+    without_reply["step"]["attempts"][0]["end"] =
+        json!({"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null});
+    assert!(parse_record(&without_reply).is_ok());
+    for (origin, error) in &invalid_origins {
+        let mut invalid = without_reply.clone();
+        invalid["content"]["attempts"][0]["origin"] = origin.clone();
+        invalid["step"]["attempts"][0]["origin"] = origin.clone();
+        assert_eq!(parse_record(&invalid).unwrap_err(), *error, "{origin}");
+
+        let mut invalid = base.clone();
+        invalid["content"]["reply"]["provider_origin"] = origin.clone();
+        invalid["content"]["attempts"][0]["origin"] = origin.clone();
+        invalid["step"]["attempts"][0]["origin"] = origin.clone();
+        assert_eq!(parse_record(&invalid).unwrap_err(), *error, "{origin}");
+    }
+    for origin in [
+        json!({"protocol":"chat-completions","provider_id":"other"}),
+        json!({"protocol":"anthropic-messages","provider_id":"primary"}),
+    ] {
+        let mut invalid = base.clone();
+        invalid["content"]["reply"]["provider_origin"] = origin;
+        assert_eq!(
+            parse_record(&invalid).unwrap_err(),
+            "reply source differs from the completed attempt"
+        );
+    }
+    for progress in [
+        json!({"progress":"sent"}),
+        without_reply["step"]["attempts"][0]["progress"].clone(),
+    ] {
+        for location in ["content", "step"] {
+            let mut invalid = base.clone();
+            invalid[location]["attempts"][0]["progress"] = progress.clone();
+            if location == "step" && progress["progress"] == "ended" {
+                invalid["step"]["attempts"][0]["end"] =
+                    without_reply["step"]["attempts"][0]["end"].clone();
+            }
+            assert_eq!(
+                parse_record(&invalid).unwrap_err(),
+                "reply requires a completed attempt",
+                "{location}: {progress}"
+            );
+        }
     }
     let parsed = |value: &Value| parse_record(value).unwrap();
     // 记录去掉 `type` 后就是历史查询给出的同一个 Entry。
@@ -601,7 +693,8 @@ fn receipt_violations_preserve_command_evidence() {
 
 #[test]
 fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
-    let sending = serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s","new":true});
+    let sending =
+        serde_json::json!({"type":"submit","stage":"sending","turn_id":"t","session_id":"s"});
     let receipt = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"t","result":"not_accepted","recovered":false});
     let other = serde_json::json!({"type":"submit","stage":"receipt","turn_id":"other","result":"unknown","recovered":false});
     for (records, error) in [
@@ -660,4 +753,101 @@ fn json_output_requires_exactly_one_receipt_for_the_sending_identity() {
         assert!(partial.malformed_lines.is_empty());
         assert_eq!(partial.receipt_error, None);
     }
+}
+
+#[test]
+fn configure_records_head_settings_version_and_settings_changed_conflict_parse() {
+    let draft_head = json!({
+        "session_id": "s",
+        "position": 0,
+        "agent": "reader",
+        "model": null,
+        "provider": null,
+        "effort": null,
+        "settings_version": settings_version(),
+        "turn_id": null,
+        "owner": false,
+        "diagnostic": null,
+        "path_replaced": false
+    });
+    let configured = json!({
+        "type": "configure",
+        "session_id": "s",
+        "result": "configured",
+        "head": draft_head,
+        "adjustment": {"from": "high", "to": null}
+    });
+    assert_eq!(
+        parse_record(&configured).expect("解析 configured 记录"),
+        SendRecord::Configure(ConfigureRecord {
+            session_id: "s".into(),
+            result: ConfigureResult::Configured {
+                head: Box::new(Head {
+                    session_id: "s".into(),
+                    position: 0,
+                    agent: "reader".into(),
+                    model: None,
+                    provider: None,
+                    effort: None,
+                    settings_version: settings_version(),
+                    turn_id: None,
+                    owner: false,
+                    diagnostic: None,
+                    path_replaced: false,
+                }),
+                adjustment: Some(EffortAdjustment {
+                    from: Some("high".into()),
+                    to: None,
+                }),
+            },
+        })
+    );
+
+    let cfg_rejected = json!({
+        "type": "configure",
+        "session_id": "s",
+        "result": "rejected",
+        "error": {"kind": "bad_request", "message": "bad profile"}
+    });
+    let seq = parse(&[sending(), cfg_rejected, rejected("bad_request", None)]);
+    assert!(seq.malformed_lines.is_empty(), "{:?}", seq.malformed_lines);
+    assert_eq!(seq.type_sequence(), vec!["submit", "configure", "submit"]);
+    assert_eq!(
+        seq.rejection().map(|e| e.kind.as_str()),
+        Some("bad_request"),
+        "带 configure 记录的拒绝序列也应提取拒绝错误"
+    );
+
+    let cfg_unknown = json!({
+        "type": "configure",
+        "session_id": "s",
+        "result": "unknown",
+        "error": {"kind": "transport", "message": "eof"}
+    });
+    assert!(matches!(
+        parse_record(&cfg_unknown).expect("解析 unknown configure 记录"),
+        SendRecord::Configure(ConfigureRecord {
+            result: ConfigureResult::Unknown(Some(_)),
+            ..
+        })
+    ));
+
+    let settings_changed = parse(&[sending(), rejected("conflict", Some("settings_changed"))]);
+    assert!(
+        settings_changed.malformed_lines.is_empty(),
+        "settings_changed 应是合法冲突原因：{:?}",
+        settings_changed.malformed_lines
+    );
+    assert_eq!(
+        settings_changed
+            .rejection()
+            .and_then(|e| e.conflict.as_deref()),
+        Some("settings_changed")
+    );
+
+    // model 与 provider 必须同时为字符串或同时为 null。
+    let mut half_model = draft_head;
+    half_model["type"] = json!("head");
+    half_model["model"] = json!("m");
+    assert!(parse_record(&half_model).is_err());
 }

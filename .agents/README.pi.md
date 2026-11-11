@@ -22,4 +22,4 @@ Pi 在项目信任后发现 `.agents/skills/`。通过当前安装版本的 skil
 
 先遵循根及目标路径的 `AGENTS.md`，领域资料的读取顺序见[领域文档指引](../docs/agents/domain.md)。源工作流中的 `CONTEXT.md` 操作统一由项目 domain-modeling skill 适配到 `docs/reference/glossary.md`。
 
-中文写作、文档归属和状态遵循[文档生命周期](../docs/governance/document-lifecycle.md)。源模板中的自动提交、发布、长篇报告或任务账本要求不扩大当前授权；权限与凭据边界遵循[Agent 身份与权限](../docs/governance/agent-permissions.md)。
+中文写作、文档位置和状态遵循[文档写作](../docs/governance/writing.md)。提交、推送、发布与凭据的处理遵循[Agent 身份与权限](../docs/governance/agent-permissions.md)，源模板中的同类要求以它为准。

@@ -13,10 +13,59 @@ fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
 }
 
-/// Public subcommands the `lattice --help` surface must advertise.
-const EXPECTED_PUBLIC_COMMANDS: &[&str] = &[
-    "auth", "models", "resolve", "session", "audit", "lancet", "tui",
-];
+/// `lattice --help` 必须列出的公开子命令。
+const EXPECTED_PUBLIC_COMMANDS: &[&str] = &["run", "daemon", "auth", "models", "session", "tui"];
+const REMOVED_PUBLIC_COMMANDS: &[&str] = &["audit", "lancet"];
+
+#[test]
+fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
+    let spec = ScenarioSpec::fast("models-refresh-help");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    let driver = driver();
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let result = (|| {
+        for args in [
+            vec!["models", "--help"],
+            vec!["models", "refresh", "--help"],
+        ] {
+            let output = driver
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: args.iter().map(|arg| (*arg).into()).collect(),
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .unwrap();
+            evidence.record_command("models help", &output);
+            assert_exit_code(&output, 0).map_err(|error| error.to_string())?;
+            assert_stdout_contains_all(&output, &["refresh"]).map_err(|error| error.to_string())?;
+        }
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: vec!["--json", "models", "--auth", "refresh"]
+                        .into_iter()
+                        .map(String::from)
+                        .collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        evidence.record_command("models refresh filters rejected", &output);
+        assert_exit_code(&output, 2).map_err(|error| error.to_string())?;
+        let error: serde_json::Value =
+            serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
+        if error["kind"] != "bad_request" {
+            return Err("refresh filters must be a usage error".into());
+        }
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
+}
 
 #[test]
 fn fast_home_xdg_isolated_from_developer_home() {
@@ -42,9 +91,131 @@ fn fast_cli_help_lists_public_commands() {
     // previously only the exit-success branch was wired to capture, and the
     // public-commands loop below panicked without writing any artifacts.
     let result = assert_exit_success(&output)
-        .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS));
+        .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS))
+        .and_then(|_| {
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for removed in REMOVED_PUBLIC_COMMANDS {
+                if stdout.split_whitespace().any(|token| token == *removed) {
+                    return Err(lattice_system_harness::AssertError::StdoutMissing {
+                        expected: format!("已移除的子命令 `{removed}` 不得再出现在 --help 中"),
+                    });
+                }
+            }
+            Ok(())
+        });
     finalize_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
         .unwrap_or_else(|report| panic!("help exits 0 and lists all public commands\n{report}"));
+
+    for (args, expected) in [
+        (vec!["session", "--help"], vec!["usage"]),
+        (
+            vec!["run", "--help"],
+            vec![
+                "--model",
+                "--effort",
+                "<provider>/<model>",
+                "inherit",
+                "off, minimal, low, medium, high, xhigh, max",
+            ],
+        ),
+        (
+            vec!["session", "send", "--help"],
+            vec![
+                "--model",
+                "--effort",
+                "<provider>/<model>",
+                "inherit",
+                "off, minimal, low, medium, high, xhigh, max",
+            ],
+        ),
+        (
+            vec!["session", "usage", "--help"],
+            vec![
+                "SESSION_ID",
+                "current path",
+                "whole-session totals",
+                "Unknown counts and costs are shown as '-'",
+                "--json",
+            ],
+        ),
+    ] {
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: args.iter().map(|arg| (*arg).into()).collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        let result = assert_exit_code(&output, 0)
+            .and_then(|_| assert_stdout_contains_all(&output, &expected));
+        finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
+            .unwrap_or_else(|report| panic!("session usage help\n{report}"));
+    }
+    for args in [vec!["session", "usage"], vec!["session", "usage", "--json"]] {
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: args.iter().map(|arg| (*arg).into()).collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        let result = assert_exit_code(&output, 2).and_then(|_| {
+            if args.contains(&"--json") {
+                assert_stdout_contains_all(
+                    &output,
+                    &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
+                )
+            } else {
+                assert_stderr_contains(&output, "SESSION_ID")
+            }
+        });
+        finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
+            .unwrap_or_else(|report| panic!("usage requires a session ID\n{report}"));
+    }
+    for command in [vec!["run"], vec!["session", "send"]] {
+        for json in [false, true] {
+            for (flag, value) in [("--model", "invalid"), ("--effort", "none")] {
+                let mut args = Vec::new();
+                if json {
+                    args.push("--json");
+                }
+                args.extend(command.clone());
+                args.extend(["hello", "--agent", "reader", flag, value]);
+                let output = driver
+                    .run(
+                        &world,
+                        &LatticeCommand {
+                            args: args.iter().map(|arg| (*arg).into()).collect(),
+                            timeout: Some(spec.step_timeout()),
+                        },
+                    )
+                    .unwrap();
+                let result = assert_exit_code(&output, 2).and_then(|_| {
+                    if json {
+                        assert_stdout_contains_all(
+                            &output,
+                            &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
+                        )
+                    } else {
+                        assert_stderr_contains(&output, "invalid value")
+                    }
+                });
+                finalize_with_failure_artifacts(
+                    &world,
+                    &spec.name,
+                    &args.join(" "),
+                    &output,
+                    &[],
+                    result,
+                )
+                .unwrap();
+            }
+        }
+    }
 }
 
 #[test]

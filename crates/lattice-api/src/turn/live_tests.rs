@@ -7,45 +7,132 @@ use lattice_agent::testing::FakeStreamingLlmClient;
 use lattice_session::store::*;
 use std::sync::Arc;
 
-fn id() -> lancet_protocol::TurnId {
-    lancet_protocol::TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap()
+fn id() -> lattice_conversation::TurnId {
+    lattice_conversation::TurnId::parse(&uuid::Uuid::new_v4().to_string()).unwrap()
 }
-fn seed(fixture: &TestFixture) -> (lancet_protocol::SessionId, lancet_protocol::TurnId) {
+fn seed(
+    fixture: &TestFixture,
+) -> (
+    lattice_conversation::SessionId,
+    lattice_conversation::TurnId,
+) {
     let sid =
-        lancet_protocol::SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).unwrap();
+        lattice_conversation::SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).unwrap();
     let turn = id();
+    let lock = fixture.store.try_lock_session(sid).unwrap();
+    let config = FrozenTurnConfig {
+        effort: None,
+        agent_name: crate::AgentName::parse("test").unwrap(),
+        model: crate::ModelId::parse("old-model").unwrap(),
+        provider: crate::ProviderId::parse("openai-compatible").unwrap(),
+        system_prompt: None,
+        catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
+        limits: TurnExecutionLimits {
+            timeout_secs: crate::TurnTimeout::default(),
+            max_model_steps: 32,
+            max_model_attempts: 1,
+        },
+    };
+    let settings = SessionSettings::for_test(&config);
+    let settings_version = settings.version().unwrap();
+    fixture
+        .store
+        .create_session(
+            &lock,
+            fixture.root.project_path(),
+            settings,
+            chrono::Utc::now(),
+        )
+        .unwrap();
     fixture
         .store
         .accept_turn(
-            &fixture.store.try_lock_session(sid).unwrap(),
+            &lock,
             AcceptTurn {
-                session: AcceptSession::New { id: sid },
+                session_id: sid,
                 turn_id: turn,
-                project_store_key: fixture.root.store_key(),
+                project_path: fixture.root.project_path(),
                 input: "old request".into(),
                 accepted_at: chrono::Utc::now(),
-                agent_selection: AgentSelection::Explicit,
-                config: FrozenTurnConfig {
-                    agent_name: "test".into(),
-                    model: "old-model".into(),
-                    provider: "openai-compatible".into(),
-                    system_prompt: None,
-                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                    limits: TurnExecutionLimits {
-                        timeout_secs: 300,
-                        max_model_steps: 32,
-                        max_model_attempts: 1,
-                    },
-                },
+                config,
+                settings_version,
             },
         )
         .unwrap();
-    lancet_api::WorkspaceHistory::create(lancet_api::WorkspaceHistoryBacking::for_key(
-        fixture.layout.clone(),
-        fixture.root.store_key(),
-    ))
-    .unwrap();
     (sid, turn)
+}
+
+#[tokio::test]
+async fn projection_failures_use_a_generic_non_retryable_diagnostic() {
+    use lattice_llm::protocol::projection::ProjectionError;
+
+    struct FailingProjection(ProjectionError);
+    #[async_trait::async_trait]
+    impl lattice_agent::LlmClient for FailingProjection {
+        async fn stream_chat(
+            &self,
+            _request: lattice_llm::ChatRequest,
+            _control: lattice_llm::StreamControl,
+        ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
+        {
+            Err(Box::new(lattice_llm::LlmError::Projection(self.0.clone())))
+        }
+    }
+    let error = ProjectionError::InvalidStep {
+        detail: "private-call-detail",
+    };
+    let fixture = setup_fixture(Arc::new(FailingProjection(error)), &[]);
+    let (detail, _) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(detail.summary.outcome, PublicTurnOutcome::Failed);
+    let step = &detail.steps[0];
+    assert_eq!(step.attempts.len(), 1);
+    assert!(step.slots.is_empty());
+    let AttemptEndDetail::Stopped { cause, diagnostic } = &step.attempts[0].end else {
+        panic!("projection failure must stop the attempt");
+    };
+    assert_eq!(*cause, StopCause::ProviderError { retryable: false });
+    assert_eq!(
+        diagnostic.as_deref(),
+        Some("provider request projection failed")
+    );
+}
+
+#[tokio::test]
+async fn injected_turn_strictly_enforces_session_settings_effort() {
+    use lattice_conversation::Effort::{High, Low};
+    let llm = Arc::new(
+        FakeStreamingLlmClient::builder()
+            .push_events(happy_events())
+            .build(),
+    );
+    let mut fixture = setup_fixture(llm.clone(), &[]);
+    fixture.update_settings(|s| {
+        s.profile.default_effort = Some(Low);
+        s.effort = Some(High);
+    });
+    fixture.request.test_llm.as_mut().unwrap().2 = vec![Low, High];
+    let (preserved, _) = fixture.run(fixture.request.clone()).await;
+    assert_eq!(
+        fixture
+            .store
+            .begin_read()
+            .unwrap()
+            .turn_config(preserved.session_id, preserved.turn_id)
+            .unwrap()
+            .effort,
+        Some(High)
+    );
+    let mut rejected_req = fixture.request.clone();
+    rejected_req.test_llm.as_mut().unwrap().2 = vec![Low];
+    let (execution, _) = fixture.start(rejected_req);
+    let Err(ApiError::Configuration(rej)) = execution.acceptance.await.unwrap() else {
+        panic!("expected strict effort rejection from session settings");
+    };
+    assert!(
+        rej.to_string().contains("(from session settings)"),
+        "实际诊断：{rej}"
+    );
+    assert_eq!(llm.call_count(), 1);
 }
 
 #[tokio::test]
@@ -67,14 +154,12 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
     let sentinel = elsewhere.path().join("sentinel");
     std::fs::write(&sentinel, "untouched").unwrap();
     let mut request = fixture.request.clone();
-    request.session_id = Some(sid);
+    request.session_id = sid;
     let execution = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         id(),
         crate::LocalWorkspaceRoot::from_path(elsewhere.path()).unwrap(),
         request,
-        None,
     );
     assert!(matches!(
         execution.acceptance.await.unwrap(),
@@ -95,7 +180,7 @@ async fn wrong_workspace_is_rejected_before_acceptance_or_provider() {
 }
 
 #[tokio::test]
-async fn existing_session_requires_its_workspace_history_before_accepting_new_turn() {
+async fn session_turns_do_not_create_or_require_workspace_history() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
@@ -103,24 +188,18 @@ async fn existing_session_requires_its_workspace_history_before_accepting_new_tu
             .build(),
     );
     let fixture = setup_fixture(llm.clone(), &[]);
+    let projects_dir = fixture.layout.projects_dir();
     let (first, _) = fixture.run(fixture.request.clone()).await;
-    std::fs::remove_dir_all(fixture.layout.project_store(
-        &fixture.root.store_key(),
-        lancet_runtime::history::HISTORY_REPO_DIR,
-    ))
-    .unwrap();
+    assert!(!projects_dir.exists(), "新建会话不应创建 projects/ 目录");
     let mut request = fixture.request.clone();
-    request.session_id = Some(first.session_id);
-    let (execution, _) = fixture.start(request);
-    assert!(execution.acceptance.await.unwrap().is_err());
-    assert!(execution.completion.await.unwrap().is_err());
-    assert_eq!(llm.call_count(), 1);
-    let read = fixture.store.begin_read().unwrap();
-    assert_eq!(
-        read.turn_detail(first.session_id, first.turn_id).unwrap(),
-        first
+    request.session_id = first.session_id;
+    let (second, _) = fixture.run(request).await;
+    assert_eq!(second.summary.outcome, PublicTurnOutcome::Completed);
+    assert!(
+        !projects_dir.exists(),
+        "续写会话不应创建或依赖 projects/ 目录"
     );
-    assert_eq!(read.log(first.session_id).unwrap().nodes.len(), 3);
+    assert_eq!(llm.call_count(), 2);
 }
 
 #[tokio::test]
@@ -139,8 +218,7 @@ async fn orphaned_turn_allows_send_without_mutating_old_facts_or_events() {
         .unwrap();
     assert_eq!(before.summary.progress, StepProgress::Reserved);
     let mut request = fixture.request.clone();
-    request.session_id = Some(sid);
-    request.agent = None;
+    request.session_id = sid;
     let (new, events) = fixture.run(request).await;
     assert_ne!(new.turn_id, old);
     let read = fixture.store.begin_read().unwrap();
@@ -170,16 +248,12 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     let fixture = setup_fixture(llm.clone(), &[]);
     let (first, _) = fixture.run(fixture.request.clone()).await;
     let mut retry = fixture.request.clone();
-    retry.loaded_profile = None;
-    retry.agent = None;
     retry.test_llm = None;
     let execution = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         first.turn_id,
         fixture.root.clone(),
         retry.clone(),
-        None,
     );
     assert!(matches!(
         execution.acceptance.await.unwrap(),
@@ -191,11 +265,9 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     retry.input.push(' ');
     let conflict = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         first.turn_id,
         fixture.root.clone(),
         retry,
-        None,
     );
     assert!(matches!(
         conflict.acceptance.await.unwrap(),
@@ -206,7 +278,7 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
     assert!(conflict.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 1);
     let mut independent = fixture.request.clone();
-    independent.session_id = Some(first.session_id);
+    independent.session_id = first.session_id;
     let (second, _) = fixture.run(independent).await;
     assert_ne!(second.turn_id, first.turn_id);
     assert_eq!(llm.call_count(), 2);
@@ -222,22 +294,18 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
     let fixture = setup_fixture(llm.clone(), &[]);
     let mut invalid = fixture.request.clone();
     invalid.session_id =
-        Some(lancet_protocol::SessionId::parse("00000000000000000000000000000001").unwrap());
+        lattice_conversation::SessionId::parse("00000000000000000000000000000001").unwrap();
     let (execution, _) = fixture.start(invalid);
     assert!(
         matches!(execution.acceptance.await.unwrap(), Err(ApiError::Store(error)) if matches!(error.as_ref(), StoreError::NotFound { .. }))
     );
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(llm.call_count(), 0);
-    let other = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(other.path());
     let execution = start_turn(
         fixture.api.clone(),
-        layout.clone(),
         id(),
         fixture.root.clone(),
         fixture.request.clone(),
-        None,
     );
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("accepted")
@@ -253,13 +321,6 @@ async fn absent_session_fails_before_startup_and_injected_store_remains_authorit
             .nodes
             .len(),
         3
-    );
-    assert!(
-        matches!(
-            SessionStore::open(&layout),
-            Err(StoreError::NotInitialized { .. })
-        ),
-        "the execution must not silently reopen a layout-default SessionStore"
     );
     assert_eq!(llm.call_count(), 1);
 }
@@ -294,7 +355,10 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
     for _ in 0..MAX_MODEL_STEPS {
         let message = NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(lattice_conversation::ReplayOrigin {
+                protocol: Protocol::ChatCompletions,
+                provider_id: crate::ProviderId::parse("local").unwrap(),
+            }),
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {
                     provider_call_id: Some("read".into()),
@@ -345,13 +409,16 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
 }
 
 #[tokio::test]
-async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist() {
+async fn raced_existing_turn_conflicts_across_distinct_sessions() {
     let llm = Arc::new(
         FakeStreamingLlmClient::builder()
             .push_events(happy_events())
             .build(),
     );
     let fixture = setup_fixture(llm.clone(), &[]);
+    let loser_session = fixture.create_session();
+    let mut loser_request = fixture.request.clone();
+    loser_request.session_id = loser_session;
     let turn_id = id();
     let observer = Arc::new(super::observer::ObserverSink::default());
     let (entered, entry) = tokio::sync::oneshot::channel();
@@ -359,27 +426,25 @@ async fn raced_existing_turn_conflicts_even_when_readback_session_does_not_exist
     *observer.before_accept.lock().unwrap() = Some((entered, resume));
     let execution = super::execute::start_execution(super::execute::ExecutionInput {
         session: fixture.api.clone(),
-        layout: fixture.layout.clone(),
         turn_id,
         workspace: fixture.root.clone(),
-        request: fixture.request.clone(),
-        connection: None,
+        request: loser_request,
+        prepared_model: None,
+        prepared_settings: None,
+        io: None,
         shutdown: Arc::default(),
         observer,
-        new_session: Some(crate::local::new_session_id()),
     });
     tokio::time::timeout(std::time::Duration::from_secs(10), entry)
         .await
         .unwrap()
         .unwrap();
-    // 另一个 Session 的提交在前置查重之后获胜；输家 Session 尚未创建，读回必定失败。
+    // 另一个 Session 的提交在前置查重之后获胜；输家事务内命中 TurnId 查重并返回冲突。
     let winner = start_turn(
         fixture.api.clone(),
-        fixture.layout.clone(),
         turn_id,
         fixture.root.clone(),
         fixture.request.clone(),
-        None,
     );
     assert!(matches!(
         winner.acceptance.await.unwrap().unwrap(),

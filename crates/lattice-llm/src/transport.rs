@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use reqwest::header::HeaderMap;
 
 use crate::stub::LlmError;
+use crate::types::ProviderFailure;
 
 /// 生成诊断的字符上限。146 条真实 provider 错误消息加上前缀后，整行 P90 为 252 字符（#265）。
 pub const MAX_DIAGNOSTIC_CHARS: usize = 256;
@@ -51,8 +52,18 @@ fn seconds(value: &str, unit: f64) -> Option<Duration> {
 }
 
 /// 非 2xx 响应的类型化错误：一行诊断、是否可重试、建议等待。
-pub(crate) fn status_error(status: u16, headers: &HeaderMap, body: &str) -> LlmError {
-    let (label, message) = error_body(body);
+/// 正文与请求标识由 client 在调用前按凭据脱敏。
+pub(crate) fn status_error(
+    status: u16,
+    headers: &HeaderMap,
+    body: &str,
+    request_id: Option<&str>,
+) -> LlmError {
+    let ErrorBody {
+        code,
+        label,
+        message,
+    } = error_body(body);
     let mut head = format!("HTTP {status}");
     if let Some(label) = &label {
         head.push(' ');
@@ -63,14 +74,24 @@ pub(crate) fn status_error(status: u16, headers: &HeaderMap, body: &str) -> LlmE
         head.push_str(&message);
     }
     let retry_after = retry_after(headers, SystemTime::now());
-    let suffix = retry_after.map(|wait| format!(" (retry after {})", wait_text(wait)));
-    let suffix = suffix.unwrap_or_default();
-    let mut line = truncate_chars(&head, MAX_DIAGNOSTIC_CHARS - suffix.chars().count());
-    line.push_str(&suffix);
+    let usage_limit = status == 429 && subscription_usage_limit(code.as_deref());
+    let line = if usage_limit {
+        usage_limit_diagnostic(&head, request_id)
+    } else {
+        let suffix = retry_after.map(|wait| format!(" (retry after {})", wait_text(wait)));
+        let suffix = suffix.unwrap_or_default();
+        let mut line = truncate_chars(&head, MAX_DIAGNOSTIC_CHARS - suffix.chars().count());
+        line.push_str(&suffix);
+        line
+    };
     let should_retry = headers
         .get("x-should-retry")
         .and_then(|value| value.to_str().ok());
-    let retryable = if label.as_deref() == Some("insufficient_quota") {
+    let retryable = if usage_limit
+        || matches!(
+            label.as_deref(),
+            Some("insufficient_quota" | "quota_exceeded")
+        ) {
         false
     } else {
         match should_retry {
@@ -87,6 +108,49 @@ pub(crate) fn status_error(status: u16, headers: &HeaderMap, body: &str) -> LlmE
     }
 }
 
+fn subscription_usage_limit(code: Option<&str>) -> bool {
+    code == Some("subscription_sharing_usage_limit_exceeded")
+}
+
+pub(crate) fn responses_error(
+    code: Option<&str>,
+    message: &str,
+    status: Option<u16>,
+    request_id: Option<&str>,
+) -> ProviderFailure {
+    let head = format!(
+        "Responses {}: {}",
+        one_line(code.unwrap_or("error")),
+        one_line(message),
+    );
+    let message = if subscription_usage_limit(code) {
+        let head = if let Some(status) = status {
+            format!("HTTP {status} {head}")
+        } else {
+            head
+        };
+        usage_limit_diagnostic(&head, request_id)
+    } else {
+        bound_diagnostic(&head)
+    };
+    ProviderFailure {
+        message,
+        retryable: matches!(code, Some("server_error" | "rate_limit_exceeded")),
+    }
+}
+
+fn usage_limit_diagnostic(head: &str, request_id: Option<&str>) -> String {
+    let mut suffix = "; 请到 ChatGPT 设置查看用量".to_owned();
+    if let Some(id) = request_id {
+        let id = truncate_chars(id, 128);
+        suffix.push_str(&format!(" (request ID: {id})"));
+    }
+    // 为恢复提示与请求标识预留空间，长正文不会把它们截掉。
+    let mut line = truncate_chars(head, MAX_DIAGNOSTIC_CHARS - suffix.chars().count());
+    line.push_str(&suffix);
+    line
+}
+
 fn wait_text(wait: Duration) -> String {
     if wait.subsec_millis() == 0 {
         format!("{}s", wait.as_secs())
@@ -98,7 +162,13 @@ fn wait_text(wait: Duration) -> String {
 /// 三家 provider 的错误信封：OpenAI `{"error":{"code","type","message"}}`、
 /// Anthropic `{"type":"error","error":{"type","message"}}`、Gemini `[{"error":{"status","message"}}]`。
 /// 取类型或代码与消息；不是这些形状时取正文开头。两者都来自 provider，统一压成一行，见 [`one_line`]。
-fn error_body(body: &str) -> (Option<String>, String) {
+struct ErrorBody {
+    code: Option<String>,
+    label: Option<String>,
+    message: String,
+}
+
+fn error_body(body: &str) -> ErrorBody {
     let parsed: Option<serde_json::Value> = serde_json::from_str(body).ok();
     let error = parsed.as_ref().and_then(|value| {
         let root = value
@@ -107,18 +177,22 @@ fn error_body(body: &str) -> (Option<String>, String) {
             .unwrap_or(value);
         root.get("error")
     });
-    let (label, message) = match error {
-        Some(serde_json::Value::String(message)) => (None, message.as_str()),
+    let (code, label, message) = match error {
+        Some(serde_json::Value::String(message)) => (None, None, message.as_str()),
         Some(error) if error.is_object() => {
             let text = |key: &str| error.get(key).and_then(|value| value.as_str());
             let label = text("code")
                 .or_else(|| text("status"))
                 .or_else(|| text("type"));
-            (label, text("message").unwrap_or_default())
+            (text("code"), label, text("message").unwrap_or_default())
         }
-        _ => (None, body),
+        _ => (None, None, body),
     };
-    (label.map(one_line), one_line(message))
+    ErrorBody {
+        code: code.map(str::to_owned),
+        label: label.map(one_line),
+        message: one_line(message),
+    }
 }
 
 /// 诊断要进日志、notice 和终端：控制字符（含 ESC、NUL）换成空格，空白折成单个空格。
@@ -244,7 +318,7 @@ mod tests {
             " ".repeat(600)
         );
         assert_eq!(
-            status_error(400, &HeaderMap::new(), &padded).to_string(),
+            status_error(400, &HeaderMap::new(), &padded, None).to_string(),
             "HTTP 400: quota exhausted"
         );
         for (name, status, pairs, body, line, retryable, wait) in [
@@ -264,6 +338,51 @@ mod tests {
                 r#"{"error":{"message":"You exceeded your current quota","type":"insufficient_quota","code":"insufficient_quota"}}"#.into(),
                 "HTTP 429 insufficient_quota: You exceeded your current quota".into(),
                 false,
+                None,
+            ),
+            (
+                "interactions daily quota is final even with retry hint",
+                429,
+                vec![("x-should-retry", "true")],
+                r#"{"error":{"message":"Daily quota exhausted","code":"quota_exceeded"}}"#.into(),
+                "HTTP 429 quota_exceeded: Daily quota exhausted".into(),
+                false,
+                None,
+            ),
+            (
+                "subscription usage limit is final even with retry hint",
+                429,
+                vec![("x-should-retry", "true"), ("retry-after", "2"), ("x-request-id", "req-limit")],
+                r#"{"error":{"message":"limit reached","code":"subscription_sharing_usage_limit_exceeded"}}"#.into(),
+                "HTTP 429 subscription_sharing_usage_limit_exceeded: limit reached; 请到 ChatGPT 设置查看用量 (request ID: req-limit)".into(),
+                false,
+                Some(Duration::from_secs(2)),
+            ),
+            (
+                "other subscription codes use status rules",
+                503,
+                vec![],
+                r#"{"error":{"message":"try later","code":"subscription_sharing_usage_unavailable"}}"#.into(),
+                "HTTP 503 subscription_sharing_usage_unavailable: try later".into(),
+                true,
+                None,
+            ),
+            (
+                "subscription usage limit requires HTTP 429",
+                500,
+                vec![],
+                r#"{"error":{"message":"limit reached","code":"subscription_sharing_usage_limit_exceeded"}}"#.into(),
+                "HTTP 500 subscription_sharing_usage_limit_exceeded: limit reached".into(),
+                true,
+                None,
+            ),
+            (
+                "subscription usage limit requires an error code",
+                429,
+                vec![],
+                r#"{"error":{"message":"limit reached","type":"subscription_sharing_usage_limit_exceeded"}}"#.into(),
+                "HTTP 429 subscription_sharing_usage_limit_exceeded: limit reached".into(),
+                true,
                 None,
             ),
             (
@@ -351,21 +470,23 @@ mod tests {
                 None,
             ),
         ] {
-            let error = status_error(status, &headers(&pairs), &body);
+            let headers = headers(&pairs);
+            let request_id = provider_request_id(&headers);
+            let error = status_error(status, &headers, &body, request_id.as_deref());
             assert_eq!(error.to_string(), line, "{name}");
             assert_eq!(error.retryable(), retryable, "{name}");
             assert_eq!(error.retry_after(), wait, "{name}");
             assert_eq!(error.status_code(), Some(status), "{name}");
         }
 
-        let gateway = status_error(502, &HeaderMap::new(), &html).to_string();
+        let gateway = status_error(502, &HeaderMap::new(), &html, None).to_string();
         assert!(
             gateway.starts_with("HTTP 502: <html> <head><title>502 Bad Gateway</title></head>")
         );
         assert_eq!(gateway.chars().count(), MAX_DIAGNOSTIC_CHARS);
         assert!(gateway.ends_with('…'));
 
-        let bounded = status_error(429, &headers(&[("retry-after", "7")]), &long).to_string();
+        let bounded = status_error(429, &headers(&[("retry-after", "7")]), &long, None).to_string();
         assert_eq!(bounded.chars().count(), MAX_DIAGNOSTIC_CHARS);
         assert!(bounded.ends_with("… (retry after 7s)"), "{bounded}");
     }

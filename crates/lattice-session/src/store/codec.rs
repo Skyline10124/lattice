@@ -2,19 +2,20 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{InvocationId, SessionId, TurnId};
+use lattice_conversation::{InvocationId, SessionId, TurnId};
 use redb::{ReadableTable, TableDefinition};
 use serde::{Serialize, de::DeserializeOwned};
 use std::collections::BTreeMap;
 
 pub(super) const META: TableDefinition<&str, &[u8]> = TableDefinition::new("meta");
 pub(super) const SESSIONS: TableDefinition<&str, &[u8]> = TableDefinition::new("sessions");
+pub(super) const SESSION_SETTINGS: TableDefinition<&str, &[u8]> =
+    TableDefinition::new("session_settings");
 pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("nodes");
 pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
-pub(super) const CHANGES: TableDefinition<u64, &[u8]> = TableDefinition::new("invocation_changes");
-pub(super) const VERSION: u32 = 4;
+pub(super) const VERSION: u32 = 9;
 
 pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
     result.map_err(|err| match err {
@@ -37,7 +38,7 @@ pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Resul
 
 pub(super) fn canonical<T: Serialize>(value: &T) -> Result<Vec<u8>> {
     serde_json::to_value(value)
-        .map(|v| lancet_protocol::canonical_json(&v).into_bytes())
+        .map(|v| lattice_conversation::canonical_json(&v).into_bytes())
         .map_err(|_| invalid("record", "serialization failed"))
 }
 pub(super) fn encode<T: Serialize + DeserializeOwned>(value: &T) -> Result<Vec<u8>> {
@@ -83,6 +84,18 @@ pub(super) fn decode<T: DeserializeOwned + Serialize>(
     Ok(record)
 }
 
+pub(super) fn decode_session_settings(key: &str, bytes: &[u8]) -> Result<SessionSettings> {
+    let settings: SessionSettings = decode("session_settings", key, bytes)?;
+    if canonical(&settings)? != payload("session_settings", key, bytes)? {
+        return Err(corrupt(
+            "session_settings",
+            key,
+            "noncanonical session settings",
+        ));
+    }
+    Ok(settings)
+}
+
 // 复用类型的 Deserialize 不一定 deny_unknown_fields（包括内部 tag 缓冲后的结构）。
 // 对照该类型实际序列化的字段树，拒绝被悄悄丢弃的字段；JSON 内容自身保留全部键。
 fn retains_fields(wire: &serde_json::Value, known: &serde_json::Value) -> bool {
@@ -93,50 +106,11 @@ fn retains_fields(wire: &serde_json::Value, known: &serde_json::Value) -> bool {
     }
     match (wire, known) {
         (Value::Object(w), Value::Object(k)) => w.iter().all(|(name, value)| {
-            let Some(expected) = k.get(name) else {
-                return false;
-            };
-            if name == "evidence"
-                && expected.get("kind").and_then(Value::as_str) == Some("recorded")
-            {
-                // docs/architecture/cell.md「内容与版本边界」允许版本化证据结构扩展，
-                // 不包括 store envelope、三元组包装或其中引用的闭合 Cell 模型。
-                return value.as_object().is_some_and(|fields| {
-                    fields.iter().all(|(f, v)| match f.as_str() {
-                        "kind" => true,
-                        "value" => v.as_object().is_some_and(|roots| {
-                            roots.iter().all(|(root, v)| {
-                                expected["value"]
-                                    .get(root)
-                                    .is_some_and(|k| evidence_fields(v, k))
-                            })
-                        }),
-                        _ => false,
-                    })
-                });
-            }
-            retains_fields(value, expected)
+            k.get(name)
+                .is_some_and(|expected| retains_fields(value, expected))
         }),
         (Value::Array(w), Value::Array(k)) => {
             w.len() == k.len() && w.iter().zip(k).all(|(w, k)| retains_fields(w, k))
-        }
-        _ => true,
-    }
-}
-fn evidence_fields(wire: &serde_json::Value, known: &serde_json::Value) -> bool {
-    use serde_json::Value;
-    match (wire, known) {
-        (Value::Object(w), Value::Object(k)) => w.iter().all(|(name, value)| {
-            k.get(name).is_none_or(|expected| {
-                if name == "cell" {
-                    retains_fields(value, expected)
-                } else {
-                    evidence_fields(value, expected)
-                }
-            })
-        }),
-        (Value::Array(w), Value::Array(k)) => {
-            w.len() == k.len() && w.iter().zip(k).all(|(w, k)| evidence_fields(w, k))
         }
         _ => true,
     }
@@ -185,15 +159,14 @@ pub(super) struct Records {
     // 局部工作集只保留节点范围末键，不为分配序号装载历史正文。
     pub node_tip: Option<NodeId>,
     pub sessions: BTreeMap<SessionId, SessionRecord>,
+    pub session_settings: BTreeMap<SessionId, SessionSettings>,
     pub nodes: BTreeMap<(SessionId, NodeId), Node>,
     pub configs: BTreeMap<[u8; 32], StoredTurnConfig>,
     pub turn_index: BTreeMap<TurnId, NodeRef>,
     pub index: BTreeMap<InvocationId, InvocationIndexEntry>,
-    pub changes: BTreeMap<ChangeSeq, StoredInvocationChange>,
-    pub last_change: ChangeSeq,
 }
 
-// 两种事务的 open_table 返回类型不同；宏仅共用固定的七表读取，避免暴露通用存储接口。
+// 两种事务的 open_table 返回类型不同；宏共用固定的领域表读取。
 macro_rules! load_records {
     ($tx:expr) => {{
         let meta = $tx.open_table(META).map_err(table_error)?;
@@ -222,16 +195,24 @@ macro_rules! load_records {
                 supported: VERSION,
             });
         }
-        let mut r = Records {
-            last_change: decode("meta", "last_change_seq", &read_meta("last_change_seq")?)?,
-            ..Default::default()
-        };
+        let mut r = Records::default();
         for entry in $tx.open_table(SESSIONS).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
             let id = SessionId::parse(k.value())
                 .map_err(|_| corrupt("sessions", "key", "invalid session id"))?;
             r.sessions
                 .insert(id, decode("sessions", k.value(), v.value())?);
+        }
+        for entry in $tx
+            .open_table(SESSION_SETTINGS)
+            .map_err(table_error)?
+            .iter()?
+        {
+            let (key, value) = entry?;
+            let id = SessionId::parse(key.value())
+                .map_err(|_| corrupt("session_settings", "key", "invalid session id"))?;
+            r.session_settings
+                .insert(id, decode_session_settings(key.value(), value.value())?);
         }
         for entry in $tx.open_table(NODES).map_err(table_error)?.iter()? {
             let (k, v) = entry?;
@@ -261,13 +242,6 @@ macro_rules! load_records {
             r.index
                 .insert(id, decode("invocation_index", k.value(), v.value())?);
         }
-        for entry in $tx.open_table(CHANGES).map_err(table_error)?.iter()? {
-            let (k, v) = entry?;
-            r.changes.insert(
-                ChangeSeq(k.value()),
-                decode("invocation_changes", &k.value().to_string(), v.value())?,
-            );
-        }
         Ok(r)
     }};
 }
@@ -287,14 +261,13 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
             encode(&String::from("lattice-session"))?.as_slice(),
         )?;
         meta.insert("store_format_version", encode(&VERSION)?.as_slice())?;
-        meta.insert("last_change_seq", encode(&ChangeSeq(0))?.as_slice())?;
     }
     tx.open_table(SESSIONS).map_err(table_error)?;
+    tx.open_table(SESSION_SETTINGS).map_err(table_error)?;
     tx.open_table(NODES).map_err(table_error)?;
     tx.open_table(CONFIGS).map_err(table_error)?;
     tx.open_table(TURN_INDEX).map_err(table_error)?;
     tx.open_table(INDEX).map_err(table_error)?;
-    tx.open_table(CHANGES).map_err(table_error)?;
     Ok(())
 }
 
@@ -309,6 +282,14 @@ pub(super) fn persist(
         for (k, v) in &after.sessions {
             if before.sessions.get(k) != Some(v) {
                 t.insert(k.to_string().as_str(), encode(v)?.as_slice())?;
+            }
+        }
+    }
+    {
+        let mut table = tx.open_table(SESSION_SETTINGS).map_err(table_error)?;
+        for (key, value) in &after.session_settings {
+            if before.session_settings.get(key) != Some(value) {
+                table.insert(key.to_string().as_str(), encode(value)?.as_slice())?;
             }
         }
     }
@@ -347,31 +328,30 @@ pub(super) fn persist(
             }
         }
     }
-    {
-        let mut t = tx.open_table(CHANGES).map_err(table_error)?;
-        for (k, v) in &after.changes {
-            if before.changes.get(k) != Some(v) {
-                if t.get(k.0)?.is_some() {
-                    return Err(corrupt(
-                        "invocation_changes",
-                        &k.0.to_string(),
-                        "change sequence already exists",
-                    ));
-                }
-                t.insert(k.0, encode(v)?.as_slice())?;
-            }
-        }
-    }
-    if before.last_change != after.last_change {
-        tx.open_table(META)
-            .map_err(table_error)?
-            .insert("last_change_seq", encode(&after.last_change)?.as_slice())?;
-    }
     Ok(())
 }
+
+pub(super) fn delete_draft(tx: &redb::WriteTransaction, session: SessionId) -> Result<()> {
+    // 草稿清理只删这三张表中的单会话记录，不扩展成通用差量删除。
+    let id = session.to_string();
+    tx.open_table(SESSIONS)
+        .map_err(table_error)?
+        .remove(id.as_str())?;
+    tx.open_table(NODES)
+        .map_err(table_error)?
+        .remove(node_key(session, NodeId(0)).as_slice())?;
+    tx.open_table(SESSION_SETTINGS)
+        .map_err(table_error)?
+        .remove(id.as_str())?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> Result<()> {
     tx.open_table(SESSIONS)
+        .map_err(table_error)?
+        .retain(|_, _| false)?;
+    tx.open_table(SESSION_SETTINGS)
         .map_err(table_error)?
         .retain(|_, _| false)?;
     tx.open_table(NODES)
@@ -384,9 +364,6 @@ pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> 
         .map_err(table_error)?
         .retain(|_, _| false)?;
     tx.open_table(INDEX)
-        .map_err(table_error)?
-        .retain(|_, _| false)?;
-    tx.open_table(CHANGES)
         .map_err(table_error)?
         .retain(|_, _| false)?;
     persist(tx, &Records::default(), r)

@@ -6,14 +6,14 @@
 
 mod auth;
 mod client;
-mod config;
-mod ipc;
+pub(crate) mod ipc;
+mod metadata;
 mod operation;
 mod server;
 mod types;
 
+pub use auth::login::{AuthCatalogOutcome, AuthLoginEvent, AuthLoginOutcome, LocalAuthLogin};
 pub use client::{LocalClient, LocalWatch};
-pub use config::FrozenConfiguration;
 pub use lattice_conversation::{
     BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ToolResultOutcome,
 };
@@ -22,12 +22,20 @@ pub fn new_session_id() -> SessionId {
     SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).expect("generated SessionId")
 }
 pub use server::serve;
+#[cfg(any(test, feature = "test-utils"))]
+pub use server::serve_for_test;
 /// 身份在发送之前分配，与输入文本无关；调用者负责保存并显示它。
 pub fn new_turn_id() -> TurnId {
     TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("generated canonical UUID")
 }
 
 pub use types::*;
+
+#[cfg(any(test, feature = "test-utils"))]
+pub mod test_support {
+    /// 当前 Local IPC 帧魔数。测试替身用它收发帧，协议升级时不必手改字面量。
+    pub const FRAME_MAGIC: &[u8; 8] = super::ipc::MAGIC;
+}
 
 #[cfg(test)]
 mod tests;

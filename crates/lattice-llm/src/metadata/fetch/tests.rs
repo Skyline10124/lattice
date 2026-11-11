@@ -1,15 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::{
-    future::Future,
-    io,
-    process::{Command, Stdio},
-    sync::{Arc, LazyLock},
-};
+use std::{future::Future, sync::Arc};
 
 use futures::FutureExt;
-use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -19,150 +13,9 @@ use tokio_rustls::{TlsAcceptor, server::TlsStream};
 
 use super::*;
 use crate::metadata::Metadata;
+use crate::test_tls::TLS;
 
 const PREVIOUS: &[u8] = br#"{"openai":{"models":{"old":{"id":"old"}}}}"#;
-
-struct TestTls {
-    ca_der: Vec<u8>,
-    server: Arc<rustls::ServerConfig>,
-}
-
-static TLS: LazyLock<TestTls> =
-    LazyLock::new(|| generate_tls().expect("generate temporary metadata test certificates"));
-
-/// 只在本进程生成一次两天期证书；载入后立即删除临时目录中的私钥文件。
-fn generate_tls() -> io::Result<TestTls> {
-    let deadline = std::time::Instant::now() + Duration::from_secs(30);
-    let dir = tempfile::tempdir()?;
-    std::fs::write(
-        dir.path().join("leaf.ext"),
-        "basicConstraints=critical,CA:FALSE\n\
-         keyUsage=critical,digitalSignature\n\
-         extendedKeyUsage=serverAuth\n\
-         subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1\n",
-    )?;
-    let ec = [
-        "-newkey",
-        "ec",
-        "-pkeyopt",
-        "ec_paramgen_curve:P-256",
-        "-nodes",
-    ];
-    let ca = ["req", "-x509"]
-        .into_iter()
-        .chain(ec)
-        .chain([
-            "-config",
-            "/dev/null",
-            "-keyout",
-            "ca-key.pem",
-            "-out",
-            "ca.pem",
-            "-days",
-            "2",
-            "-subj",
-            "/CN=LATTICE metadata test CA",
-            "-addext",
-            "basicConstraints=critical,CA:TRUE",
-            "-addext",
-            "keyUsage=critical,keyCertSign,cRLSign",
-        ])
-        .collect::<Vec<_>>();
-    let leaf = ["req", "-new"]
-        .into_iter()
-        .chain(ec)
-        .chain([
-            "-config",
-            "/dev/null",
-            "-keyout",
-            "key.pem",
-            "-out",
-            "leaf.csr",
-            "-subj",
-            "/CN=localhost",
-        ])
-        .collect::<Vec<_>>();
-    for args in [
-        ca,
-        leaf,
-        vec![
-            "x509",
-            "-req",
-            "-in",
-            "leaf.csr",
-            "-CA",
-            "ca.pem",
-            "-CAkey",
-            "ca-key.pem",
-            "-CAcreateserial",
-            "-out",
-            "cert.pem",
-            "-days",
-            "2",
-            "-extfile",
-            "leaf.ext",
-        ],
-    ] {
-        if std::time::Instant::now() >= deadline {
-            return Err(io::Error::new(
-                io::ErrorKind::TimedOut,
-                "TLS certificate generation exceeded 30 seconds",
-            ));
-        }
-        let mut child = Command::new("openssl")
-            .args(&args)
-            .current_dir(dir.path())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        loop {
-            match child.try_wait() {
-                Ok(Some(_)) => break,
-                Ok(None) if std::time::Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                result => {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return Err(result.err().unwrap_or_else(|| {
-                        io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "TLS certificate generation exceeded 30 seconds",
-                        )
-                    }));
-                }
-            }
-        }
-        let output = child.wait_with_output()?;
-        if !output.status.success() {
-            return Err(io::Error::other(format!(
-                "openssl {}: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&output.stderr)
-            )));
-        }
-    }
-    let ca_der = CertificateDer::from_pem_file(dir.path().join("ca.pem"))
-        .map_err(io::Error::other)?
-        .as_ref()
-        .to_vec();
-    let cert =
-        CertificateDer::from_pem_file(dir.path().join("cert.pem")).map_err(io::Error::other)?;
-    let key = PrivateKeyDer::from_pem_file(dir.path().join("key.pem")).map_err(io::Error::other)?;
-    let server = rustls::ServerConfig::builder_with_provider(Arc::new(
-        rustls::crypto::aws_lc_rs::default_provider(),
-    ))
-    .with_safe_default_protocol_versions()
-    .map_err(io::Error::other)?
-    .with_no_client_auth()
-    .with_single_cert(vec![cert], key)
-    .map_err(io::Error::other)?;
-    Ok(TestTls {
-        ca_der,
-        server: Arc::new(server),
-    })
-}
 
 struct Server {
     url: String,
@@ -222,9 +75,170 @@ fn roots() -> Vec<Vec<u8>> {
 
 fn prior_cache() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
     std::fs::create_dir(dir.path().join("cache")).unwrap();
     std::fs::write(dir.path().join("cache/models.json"), PREVIOUS).unwrap();
     dir
+}
+
+#[tokio::test]
+async fn refresh_creates_a_private_configuration_directory_and_preserves_existing_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".lattice");
+    let registry = ProviderRegistry::builtins();
+    for mode in [None, Some(0o755)] {
+        if let Some(mode) = mode {
+            std::fs::set_permissions(&config, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+        let server =
+            Server::response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()).await;
+        let result = refresh_cancellable(
+            &config,
+            &registry,
+            &server.url,
+            &roots(),
+            Arc::new(MetadataRefreshControl::default()),
+        )
+        .await;
+        if mode.is_none() {
+            result.unwrap();
+            assert_eq!(
+                std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+                0o700
+            );
+            crate::auth::AuthStore::new(config.clone())
+                .set("anthropic", "local-test-key")
+                .unwrap();
+        } else {
+            assert!(matches!(result, Err(MetadataError::Configuration(_))));
+            assert_eq!(
+                std::fs::metadata(&config).unwrap().permissions().mode() & 0o777,
+                0o755
+            );
+        }
+    }
+}
+
+#[test]
+fn cancellation_before_publication_keeps_the_previous_cache() {
+    let dir = prior_cache();
+    let temporary = tempfile::NamedTempFile::new_in(dir.path().join("cache")).unwrap();
+    let control = MetadataRefreshControl::default();
+    control.cancel();
+    let result = write_and_replace_cancellable(
+        temporary,
+        &dir.path().join("cache/models.json"),
+        b"new",
+        &control,
+        None,
+    );
+    assert!(matches!(result, Err(MetadataError::Cancelled)));
+    assert_previous(dir.path());
+}
+
+#[test]
+fn cancellation_return_marks_the_final_cache_and_prevents_later_replacement() {
+    use std::sync::mpsc;
+    let dir = prior_cache();
+    let destination = dir.path().join("cache/models.json");
+    let temporary = tempfile::NamedTempFile::new_in(dir.path().join("cache")).unwrap();
+    let control = Arc::new(MetadataRefreshControl::default());
+    let (checked, passed_check) = mpsc::channel();
+    let (release, released) = mpsc::channel();
+    let publisher = std::thread::spawn({
+        let control = control.clone();
+        let destination = destination.clone();
+        move || {
+            write_and_replace_cancellable(
+                temporary,
+                &destination,
+                b"new cache",
+                &control,
+                Some(&|| {
+                    checked.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                }),
+            )
+        }
+    });
+    passed_check.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert!(control.cancelled.try_lock().is_err());
+    assert_eq!(std::fs::read(&destination).unwrap(), PREVIOUS);
+    let (stopped, stop_returned) = mpsc::channel();
+    let stopper = std::thread::spawn({
+        let control = control.clone();
+        let destination = destination.clone();
+        move || {
+            control.cancel();
+            stopped.send(std::fs::read(destination).unwrap()).unwrap();
+        }
+    });
+    release.send(()).unwrap();
+    let cache_when_stopped = stop_returned.recv_timeout(Duration::from_secs(5)).unwrap();
+    publisher.join().unwrap().unwrap();
+    stopper.join().unwrap();
+    assert_eq!(cache_when_stopped, b"new cache");
+    assert_eq!(std::fs::read(&destination).unwrap(), cache_when_stopped);
+    let temporary = tempfile::NamedTempFile::new_in(dir.path().join("cache")).unwrap();
+    assert!(matches!(
+        write_and_replace_cancellable(temporary, &destination, b"late cache", &control, None),
+        Err(MetadataError::Cancelled)
+    ));
+    assert_eq!(std::fs::read(destination).unwrap(), cache_when_stopped);
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("cache")).unwrap().count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn drain_waits_for_blocking_publication_after_the_async_waiter_is_aborted() {
+    let dir = prior_cache();
+    let control = Arc::new(MetadataRefreshControl::default());
+    let (entered, publication_started) = oneshot::channel();
+    let (release, released) = std::sync::mpsc::channel();
+    let task = tokio::spawn({
+        let directory = dir.path().to_owned();
+        let control = control.clone();
+        async move {
+            publish_cancellable(
+                &directory,
+                "models.json",
+                b"published".to_vec(),
+                control,
+                move |temporary, destination| {
+                    entered.send(()).unwrap();
+                    released.recv_timeout(Duration::from_secs(5)).unwrap();
+                    persist(temporary, destination)
+                },
+            )
+            .await
+        }
+    });
+    publication_started.await.unwrap();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    let draining = control.drain();
+    tokio::pin!(draining);
+    assert!(draining.as_mut().now_or_never().is_none());
+    assert_eq!(
+        std::fs::read(dir.path().join("cache/models.json")).unwrap(),
+        PREVIOUS
+    );
+    release.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(5), draining)
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(dir.path().join("cache/models.json")).unwrap(),
+        b"published"
+    );
+    assert_eq!(
+        std::fs::read_dir(dir.path().join("cache")).unwrap().count(),
+        1
+    );
 }
 
 fn assert_previous(dir: &Path) {
@@ -291,7 +305,14 @@ async fn refresh_filters_and_replaces_cache_only_after_a_complete_https_response
     let config_dir = dir.path().to_owned();
     let url = server.url.clone();
     let refresh = tokio::spawn(async move {
-        refresh(&config_dir, &ProviderRegistry::builtins(), &url, &roots()).await
+        refresh_cancellable(
+            &config_dir,
+            &ProviderRegistry::builtins(),
+            &url,
+            &roots(),
+            Arc::new(MetadataRefreshControl::default()),
+        )
+        .await
     });
     started_rx.await.unwrap();
     assert_previous(dir.path());
@@ -357,9 +378,15 @@ async fn refresh_keeps_builtin_and_configured_catalogs_and_missing_entries_are_e
     let before = Metadata::load(dir.path());
     assert!(before.merge(custom).is_empty());
     assert!(before.merge(missing).is_empty());
-    refresh(dir.path(), &registry, &server.url, &roots())
-        .await
-        .unwrap();
+    refresh_cancellable(
+        dir.path(),
+        &registry,
+        &server.url,
+        &roots(),
+        Arc::new(MetadataRefreshControl::default()),
+    )
+    .await
+    .unwrap();
     let cached: serde_json::Value =
         serde_json::from_slice(&std::fs::read(dir.path().join("cache/models.json")).unwrap())
             .unwrap();
@@ -386,6 +413,53 @@ async fn refresh_keeps_builtin_and_configured_catalogs_and_missing_entries_are_e
 }
 
 #[tokio::test]
+async fn cancelling_a_stalled_refresh_closes_http_without_waiting_for_the_deadline() {
+    let (started, ready) = oneshot::channel();
+    let (closed, connection_closed) = oneshot::channel();
+    let server = Server::start(move |mut stream, _| async move {
+        stream
+            .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{")
+            .await
+            .unwrap();
+        stream.flush().await.unwrap();
+        started.send(()).unwrap();
+        let mut byte = [0];
+        let _ = stream.read(&mut byte).await;
+        let _ = closed.send(());
+    })
+    .await;
+    let dir = prior_cache();
+    let cancel = Arc::new(MetadataRefreshControl::default());
+    let task = tokio::spawn({
+        let directory = dir.path().to_owned();
+        let url = server.url.clone();
+        let cancel = cancel.clone();
+        async move {
+            refresh_cancellable(
+                &directory,
+                &ProviderRegistry::builtins(),
+                &url,
+                &roots(),
+                cancel,
+            )
+            .await
+        }
+    });
+    tokio::time::timeout(Duration::from_secs(5), ready)
+        .await
+        .unwrap()
+        .unwrap();
+    cancel.cancel();
+    task.abort();
+    assert!(task.await.unwrap_err().is_cancelled());
+    tokio::time::timeout(Duration::from_secs(5), connection_closed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_previous(dir.path());
+}
+
+#[tokio::test]
 async fn failed_fetch_or_parse_keeps_the_previous_cache() {
     let registry = ProviderRegistry::parse(
         "providers.toml",
@@ -408,9 +482,15 @@ async fn failed_fetch_or_parse_keeps_the_previous_cache() {
         let server = Server::response(response.to_vec()).await;
         let dir = prior_cache();
         assert!(
-            refresh(dir.path(), &registry, &server.url, &roots())
-                .await
-                .is_err()
+            refresh_cancellable(
+                dir.path(),
+                &registry,
+                &server.url,
+                &roots(),
+                Arc::new(MetadataRefreshControl::default()),
+            )
+            .await
+            .is_err()
         );
         assert_previous(dir.path());
     }
@@ -434,7 +514,16 @@ fn cache_write_and_rename_failures_keep_the_old_file_and_remove_temporary_files(
             // 目标的父路径是现有缓存文件，rename 会失败，临时文件仍可正常删除。
             (temporary, cache_dir.join("models.json/blocked"))
         };
-        assert!(write_and_replace(temporary, &destination, b"new cache").is_err());
+        assert!(
+            write_and_replace_cancellable(
+                temporary,
+                &destination,
+                b"new cache",
+                &MetadataRefreshControl::default(),
+                None,
+            )
+            .is_err()
+        );
         assert_previous(dir.path());
     }
 }
@@ -448,11 +537,12 @@ async fn redirects_are_rejected_before_contacting_the_target() {
     );
     let server = Server::response(response.into_bytes()).await;
     let dir = prior_cache();
-    let error = refresh(
+    let error = refresh_cancellable(
         dir.path(),
         &ProviderRegistry::builtins(),
         &server.url,
         &roots(),
+        Arc::new(MetadataRefreshControl::default()),
     )
     .await
     .unwrap_err();
@@ -472,9 +562,15 @@ async fn redirects_are_rejected_before_contacting_the_target() {
 async fn tls_trust_is_limited_to_the_supplied_roots() {
     let server = Server::response(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}".to_vec()).await;
     let dir = prior_cache();
-    let error = refresh(dir.path(), &ProviderRegistry::builtins(), &server.url, &[])
-        .await
-        .unwrap_err();
+    let error = refresh_cancellable(
+        dir.path(),
+        &ProviderRegistry::builtins(),
+        &server.url,
+        &[],
+        Arc::new(MetadataRefreshControl::default()),
+    )
+    .await
+    .unwrap_err();
     assert!(matches!(error, MetadataError::Http(_)));
     assert_previous(dir.path());
 }
@@ -493,9 +589,15 @@ async fn unsafe_urls_are_rejected_without_changing_cache() {
         "https://localhost/api.json?key=value",
         "https://localhost/api.json#fragment",
     ] {
-        let error = refresh(dir.path(), &ProviderRegistry::builtins(), url, &roots())
-            .await
-            .unwrap_err();
+        let error = refresh_cancellable(
+            dir.path(),
+            &ProviderRegistry::builtins(),
+            url,
+            &roots(),
+            Arc::new(MetadataRefreshControl::default()),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(
                 error,
@@ -516,11 +618,12 @@ async fn declared_or_streamed_responses_above_32_mib_are_abandoned() {
     let server = Server::response(header.into_bytes()).await;
     let dir = prior_cache();
     assert!(matches!(
-        refresh(
+        refresh_cancellable(
             dir.path(),
             &ProviderRegistry::builtins(),
             &server.url,
-            &roots()
+            &roots(),
+            Arc::new(MetadataRefreshControl::default()),
         )
         .await,
         Err(MetadataError::TooLarge)
@@ -544,11 +647,12 @@ async fn declared_or_streamed_responses_above_32_mib_are_abandoned() {
         })
         .await;
         let dir = prior_cache();
-        let result = refresh(
+        let result = refresh_cancellable(
             dir.path(),
             &ProviderRegistry::builtins(),
             &server.url,
             &roots(),
+            Arc::new(MetadataRefreshControl::default()),
         )
         .await;
         if size == 32 * 1024 * 1024 {
@@ -583,7 +687,14 @@ async fn an_incomplete_body_is_abandoned_at_the_total_deadline() {
     tokio::time::pause();
     let deadline = tokio::time::Instant::now() + Duration::from_secs(30);
     let mut refresh = tokio::spawn(async move {
-        refresh(&config_dir, &ProviderRegistry::builtins(), &url, &roots()).await
+        refresh_cancellable(
+            &config_dir,
+            &ProviderRegistry::builtins(),
+            &url,
+            &roots(),
+            Arc::new(MetadataRefreshControl::default()),
+        )
+        .await
     });
     ready_without_advancing_time(started_rx).await.unwrap();
     advance_to(tokio::time::Instant::now()).await;
@@ -630,7 +741,14 @@ async fn ongoing_body_data_does_not_extend_the_30_second_deadline() {
     tokio::time::pause();
     let started = tokio::time::Instant::now();
     let mut refresh = tokio::spawn(async move {
-        refresh(&config_dir, &ProviderRegistry::builtins(), &url, &roots()).await
+        refresh_cancellable(
+            &config_dir,
+            &ProviderRegistry::builtins(),
+            &url,
+            &roots(),
+            Arc::new(MetadataRefreshControl::default()),
+        )
+        .await
     });
     ready_without_advancing_time(started_rx).await.unwrap();
     advance_to(started).await;

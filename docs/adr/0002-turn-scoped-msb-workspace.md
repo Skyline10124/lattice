@@ -7,7 +7,7 @@ status: superseded
 - Status: Superseded by ADR 0003
 - Date: 2026-07-16
 - Supersedes: ADR 0001
-- 历史状态：本 ADR 已由 ADR 0003 取代，MSB 镜像、保存点与同步方案不再作为当前规范。现行执行与恢复规则见[工作区合同](../architecture/workspace.md)，术语见[领域术语表](../reference/glossary.md)。原文保留供追溯。
+- 历史状态：本 ADR 已由 ADR 0003 取代，MSB 镜像、保存点与同步方案不再作为当前规范。现行执行与恢复规则见[工作区合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/workspace.md)，术语见[领域术语表](../reference/glossary.md)。原文保留供追溯。
 
 ## Context
 

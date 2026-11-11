@@ -14,7 +14,6 @@ path = "src/main.rs"
 lattice-api = { workspace = true }
 lattice-session = { workspace = true }
 lattice-tui = { workspace = true }
-lancet-api = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
@@ -38,3 +37,4 @@ tempfile = { workspace = true }
 [features]
 default = []
 test-crash-barriers = ["lattice-api/test-crash-barriers"]
+test-fake-tools = ["lattice-api/test-fake-tools"]

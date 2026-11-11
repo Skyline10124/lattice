@@ -4,6 +4,7 @@
 //! 全局同步会话库。事务调用由组合层置于阻塞执行边界。
 //! 句柄独占文件；提交错误后停止所有写入，调用方必须释放读视图并关闭重开。
 
+mod binding;
 mod close;
 mod codec;
 mod config;
@@ -11,19 +12,22 @@ mod hex_digest;
 mod local;
 mod open;
 mod read;
+mod settings;
 mod types;
 mod validate;
 mod write;
+pub use binding::{BindingIdentity, InvocationBinding};
 pub use close::{
     bound_provider_diagnostic, first_stopping_cause, prepare_terminal, resolve_attempt,
     resolve_slot, resolve_step, retry_notices, step_stop_cause, stops_batch,
 };
 use codec::Records;
-use lancet_protocol::{SessionId, TurnId};
+use lattice_conversation::{SessionId, TurnId};
 use lattice_store::{FlockGuard, StateLayout};
 pub use open::detect_legacy_stores;
 #[cfg(feature = "test-utils")]
 pub use open::with_test_creation_sync_probe;
+pub use settings::*;
 use std::{path::PathBuf, sync::Mutex};
 pub use types::*;
 
@@ -50,6 +54,33 @@ impl SessionExecutionLock {
 }
 
 impl SessionStore {
+    /// 测试在已打开的库中注入节点编码损坏，核验读取投影的实际依赖。
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn edit_test_node(
+        &self,
+        node: NodeRef,
+        edit: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<()> {
+        use redb::ReadableTable;
+
+        let tx = self.db.begin_write()?;
+        {
+            let mut nodes = tx.open_table(codec::NODES).map_err(codec::table_error)?;
+            let key = codec::node_key(node.session_id, node.node);
+            let mut wire: serde_json::Value = codec::decode(
+                "nodes",
+                &node.node.0.to_string(),
+                nodes
+                    .get(key.as_slice())?
+                    .ok_or_else(|| missing("node", node.node.0))?
+                    .value(),
+            )?;
+            edit(&mut wire);
+            nodes.insert(key.as_slice(), codec::encode(&wire)?.as_slice())?;
+        }
+        tx.commit().map_err(commit_error)
+    }
+
     /// 在提交健康锁内同步交接已经准备好的执行责任。
     /// 回调只能交给现有监督任务，不得 I/O、await 或等待其他锁。
     pub fn with_execution_start<T>(&self, start: impl FnOnce() -> T) -> Result<T> {

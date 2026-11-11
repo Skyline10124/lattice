@@ -5,6 +5,9 @@ use std::path::PathBuf;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ProfileError {
+    #[error("{path}: {reason}")]
+    Protection { path: PathBuf, reason: String },
+
     #[error("I/O error at {path}: {source}")]
     Io {
         path: PathBuf,
@@ -24,19 +27,11 @@ pub enum ProfileError {
     UnsupportedSchemaVersion { path: PathBuf, found: u64 },
 
     #[error(
-        "forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [tools], [llm]"
+        "forbidden top-level section [{section}] at {path}: {reason}. Allowed sections: schema_version, [agent], [prompt], [llm]"
     )]
     ForbiddenSection {
         path: PathBuf,
         section: String,
-        reason: String,
-    },
-
-    #[error("forbidden field `{field}` in [{section}] at {path}: {reason}")]
-    ForbiddenField {
-        path: PathBuf,
-        section: String,
-        field: String,
         reason: String,
     },
 
@@ -84,13 +79,6 @@ pub enum ProfileError {
         given: String,
     },
 
-    #[error("prompt.system_path `{given}` ({resolved}) at {profile_path} is not a file")]
-    SystemPathNotAFile {
-        profile_path: PathBuf,
-        given: String,
-        resolved: PathBuf,
-    },
-
     #[error("prompt.system_path `{given}` at {profile_path}: file not found ({source})")]
     SystemPathNotFound {
         profile_path: PathBuf,
@@ -107,9 +95,4 @@ pub enum ProfileError {
         project_path: PathBuf,
         global_path: PathBuf,
     },
-
-    #[error(
-        "no default agent profile found: create {dir}/agent.toml, or specify an agent with `--agent <name>`"
-    )]
-    MissingDefault { dir: PathBuf, template: String },
 }

@@ -3,7 +3,7 @@
 
 //! External system harness for the `lattice` binary.
 //!
-//! This crate must not depend on any `lattice-*`, `lancet-*`, or workspace product
+//! This crate must not depend on any `lattice-*` or workspace product
 //! crate. It only drives a pre-built binary from `LATTICE_BIN`.
 
 pub mod artifacts;
@@ -12,7 +12,6 @@ pub mod cli;
 mod daemon;
 pub mod driver;
 pub mod fake_llm;
-pub mod fixture_http;
 pub mod provider;
 pub mod pty_tui;
 pub mod scenario;
@@ -36,19 +35,18 @@ pub use driver::{
     ProcessInspectionOperation, ProcessTermination, RunningCommand,
 };
 pub use fake_llm::{
-    CapturedRequest, FAKE_API_KEY, FakeLlmServer, ResponseGate, ServeError, SseScript,
+    CapturedRequest, FAKE_API_KEY, FakeLlmServer, NativeUsage, ResponseGate, ServeError, SseScript,
 };
-pub use fixture_http::{CapturedHttpRequest, FixtureHttpError, FixtureHttpServer, HttpFixture};
 pub use provider::{ProviderFixture, ProviderProtocol, ProviderTarget};
 pub use pty_tui::{PtyError, PtyTuiDriver};
 pub use scenario::{ScenarioBudget, ScenarioError, ScenarioLayer, ScenarioSpec};
 pub use session_send::{
-    AttemptState, CancelRecord, CancelStatus, ConnectionStatus, Entry, EntryContent, Head,
-    LocalError, MalformedJsonLine, Outcome, Receipt, ReceiptResult, RetryNotice, Segment,
-    SegmentKind, SendExecution, SendExitCode, SendOutcome, SendRecord, SessionSendDriver, Slot,
-    SlotOutcome, SlotState, StepEnd, StepEntry, StepProgress, SubmissionReceiptError, Submit,
-    TextChunk, TurnSummary, ViewState, derive_send_exit_code, merge_segments, parse_entry,
-    parse_record, parse_send_stdout, push_segment,
+    AttemptState, CancelRecord, CancelStatus, ConfigureRecord, ConfigureResult, ConnectionStatus,
+    EffortAdjustment, Entry, EntryContent, Head, LocalError, MalformedJsonLine, Outcome, Receipt,
+    ReceiptResult, RetryNotice, Segment, SegmentKind, SendExecution, SendExitCode, SendOutcome,
+    SendRecord, SessionSendDriver, Slot, SlotOutcome, SlotState, StepEnd, StepEntry, StepProgress,
+    SubmissionReceiptError, Submit, TextChunk, TurnSummary, ViewState, derive_send_exit_code,
+    merge_segments, parse_entry, parse_record, parse_send_stdout, push_segment,
 };
 pub use tls::TlsIdentity;
 pub use tui_mock::{TuiMockError, TuiMockScenario, run_tui_mock};

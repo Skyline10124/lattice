@@ -12,6 +12,16 @@ use crate::provider::{Auth, config::ProviderRegistry};
 
 mod file;
 mod format;
+mod siwc;
+
+pub use siwc::{
+    ChatgptAuth, ChatgptLogin, LoginError, RemoveChatgptResult, RevocationStatus, SensitiveLoginUrl,
+};
+
+/// 元数据缓存与凭据共用配置目录的创建和安全检查，不读取凭据文件。
+pub(crate) fn ensure_configuration_directory(path: &std::path::Path) -> Result<(), AuthError> {
+    file::Directory::open(path, true).map(|_| ())
+}
 
 const MAX_KEY_BYTES: usize = 16_384;
 const MAX_FILE_BYTES: usize = 1_048_576;
@@ -43,8 +53,6 @@ pub enum AuthError {
     UnknownProvider { provider: String, available: String },
     #[error("provider does not accept API keys; auth must be bearer, x-api-key or x-goog-api-key")]
     UnsupportedAuth,
-    #[error("ChatGPT credential removal is not supported")]
-    ChatgptRemoval,
 }
 
 impl AuthError {
@@ -56,28 +64,11 @@ impl AuthError {
     }
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum AuthState {
-    Ready,
-    Missing,
-    Invalid,
-}
-
-impl fmt::Display for AuthState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(match self {
-            Self::Ready => "ready",
-            Self::Missing => "missing",
-            Self::Invalid => "invalid",
-        })
-    }
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
 pub struct ProviderAuthStatus {
     pub provider: String,
-    pub status: AuthState,
+    pub availability: crate::Availability,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
@@ -86,13 +77,14 @@ pub struct ProviderAuthStatus {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AuthStatus {
+    pub providers_path: PathBuf,
     pub providers: Vec<ProviderAuthStatus>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub error: Option<String>,
 }
 
 /// 凭据值仅用于内部序列化；Debug 不展示内容，释放时清零。
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
+#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop, PartialEq, Eq)]
 #[serde(transparent)]
 struct Secret(String);
 
@@ -115,9 +107,85 @@ pub struct AuthStore {
     directory: PathBuf,
 }
 
+enum UpdateError {
+    Conflict,
+    Storage(AuthError),
+}
+
+impl From<AuthError> for UpdateError {
+    fn from(error: AuthError) -> Self {
+        Self::Storage(error)
+    }
+}
+
 impl AuthStore {
     pub fn new(directory: PathBuf) -> Self {
         Self { directory }
+    }
+
+    pub(crate) fn load(&self) -> Result<Credentials, AuthError> {
+        let document = file::Directory::open(&self.directory, false)?.map_or_else(
+            || Ok(format::Document::default()),
+            |directory| directory.read(),
+        )?;
+        Ok(Credentials(document))
+    }
+
+    /// 重读整份文档，仅在 ChatGPT 项仍匹配时修改，保留并发写入的其他凭据。
+    fn update_chatgpt(
+        &self,
+        expected: &Credentials,
+        update: impl FnOnce(&mut format::Credential) -> bool,
+    ) -> Result<Credentials, UpdateError> {
+        let _writer = WRITER
+            .lock()
+            .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
+        let directory = file::Directory::open(&self.directory, false)?;
+        let mut document = directory
+            .as_ref()
+            .map_or_else(|| Ok(format::Document::default()), file::Directory::read)?;
+        if document.providers.get("chatgpt") != expected.0.providers.get("chatgpt") {
+            return Err(UpdateError::Conflict);
+        }
+        if let Some(entry) = document.providers.get_mut("chatgpt")
+            && update(entry)
+        {
+            directory
+                .ok_or(AuthError::Internal("configuration directory disappeared"))?
+                .write(&document)?;
+        }
+        Ok(Credentials(document))
+    }
+
+    /// 首次插入或替换 ChatGPT 项，发布前由生命周期所有者再次核对取消与代次。
+    fn replace_chatgpt<G>(
+        &self,
+        expected: &Credentials,
+        replacement: format::Credential,
+        before_publish: impl FnOnce() -> Result<G, UpdateError>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<Credentials, UpdateError> {
+        let _writer = WRITER
+            .lock()
+            .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
+        let directory = file::Directory::open(&self.directory, true)?
+            .ok_or(AuthError::Internal("configuration directory disappeared"))?;
+        let mut document = directory.read()?;
+        if document.providers.get("chatgpt") != expected.0.providers.get("chatgpt") {
+            return Err(UpdateError::Conflict);
+        }
+        document.providers.insert("chatgpt".into(), replacement);
+        directory.write_guarded(&document, before_publish, published)?;
+        Ok(Credentials(document))
+    }
+
+    /// 临时借用当前凭据值供后台处理，回调结束即释放快照，不复制凭据内容。
+    pub fn with_credential_values<T>(
+        &self,
+        operation: impl FnOnce(&[&str]) -> T,
+    ) -> Result<T, AuthError> {
+        let credentials = self.load()?;
+        Ok(operation(&credentials.0.values()))
     }
 
     fn registry(&self) -> Result<ProviderRegistry, AuthError> {
@@ -162,7 +230,7 @@ impl AuthStore {
             .ok_or(AuthError::Internal("configuration directory disappeared"))?;
         let mut document = directory.read()?;
         document.providers.insert(
-            provider.id.clone(),
+            provider.id.as_str().to_owned(),
             format::Credential::ApiKey {
                 key: Secret(key.to_owned()),
             },
@@ -170,7 +238,7 @@ impl AuthStore {
         directory.write(&document)
     }
 
-    pub fn remove(&self, provider: &str) -> Result<bool, AuthError> {
+    pub fn remove_api_key(&self, provider: &str) -> Result<bool, AuthError> {
         let _writer = WRITER
             .lock()
             .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
@@ -186,7 +254,7 @@ impl AuthStore {
                 Some(format::Credential::Chatgpt { .. })
             )
         {
-            return Err(AuthError::ChatgptRemoval);
+            return Err(AuthError::UnsupportedAuth);
         }
         let removed = document.providers.remove(provider).is_some();
         if removed {
@@ -198,53 +266,71 @@ impl AuthStore {
     }
 
     pub fn status(&self) -> Result<AuthStatus, AuthError> {
+        let providers_path = self.directory.join("providers.toml");
         let registry = self.registry()?;
-        let document = file::Directory::open(&self.directory, false).and_then(|directory| {
-            directory.map_or_else(
-                || Ok(format::Document::default()),
-                |directory| directory.read(),
-            )
-        });
-        let error = document.as_ref().err().map(ToString::to_string);
+        let credentials = self.load();
+        let error = credentials.as_ref().err().map(ToString::to_string);
         let providers = registry
             .iter()
-            .map(|provider| {
-                let mut row = ProviderAuthStatus {
-                    provider: provider.id.clone(),
-                    status: AuthState::Missing,
-                    email: None,
-                    expires_at: None,
-                };
-                if provider.auth == Auth::None {
-                    row.status = AuthState::Ready;
-                } else if let Ok(document) = &document {
-                    match document.providers.get(&provider.id) {
-                        Some(format::Credential::ApiKey { .. })
-                            if provider.auth != Auth::OauthChatgpt =>
-                        {
-                            row.status = AuthState::Ready
-                        }
-                        Some(format::Credential::Chatgpt {
-                            account, tokens, ..
-                        }) if provider.auth == Auth::OauthChatgpt => {
-                            row.email = account.as_ref().map(|account| account.email.clone());
-                            row.expires_at =
-                                tokens.as_ref().map(|tokens| tokens.expires_at.clone());
-                            if tokens.is_some() {
-                                row.status = AuthState::Ready;
-                            }
-                        }
-                        _ => {}
-                    }
-                } else {
-                    row.status = AuthState::Invalid;
-                }
-                row
-            })
+            .map(|provider| provider_status(provider, credentials.as_ref()))
             .collect();
-        Ok(AuthStatus { providers, error })
+        Ok(AuthStatus {
+            providers_path,
+            providers,
+            error,
+        })
+    }
+}
+
+pub(crate) fn provider_status(
+    provider: &crate::provider::Provider,
+    credentials: Result<&Credentials, &AuthError>,
+) -> ProviderAuthStatus {
+    let mut email = None;
+    let mut expires_at = None;
+    if provider.auth == Auth::OauthChatgpt
+        && let Ok(credentials) = credentials
+        && let Some(format::Credential::Chatgpt {
+            account, tokens, ..
+        }) = credentials.0.providers.get("chatgpt")
+    {
+        email = account.as_ref().map(|account| account.email.clone());
+        expires_at = tokens.as_ref().map(|tokens| tokens.expires_at.clone());
+    }
+    ProviderAuthStatus {
+        provider: provider.id.as_str().to_owned(),
+        availability: crate::availability::provider_availability(provider, credentials),
+        email,
+        expires_at,
+    }
+}
+
+/// 一次请求使用的凭据快照；已知值只供内部认证与诊断脱敏。
+#[derive(Default)]
+pub(crate) struct Credentials(format::Document);
+
+impl Credentials {
+    pub(crate) fn chatgpt_logged_in(&self) -> bool {
+        matches!(
+            self.0.providers.get("chatgpt"),
+            Some(format::Credential::Chatgpt {
+                tokens: Some(_),
+                ..
+            })
+        )
+    }
+
+    pub(crate) fn api_key(&self, provider: &str) -> Option<&str> {
+        match self.0.providers.get(provider) {
+            Some(format::Credential::ApiKey { key }) => Some(&key.0),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn redact(&self, message: &str) -> String {
+        self.0.redact(message)
     }
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

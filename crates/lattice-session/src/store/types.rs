@@ -1,23 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+use super::binding::{BindingIdentity, InvocationBinding};
 use super::hex_digest;
-use lancet_protocol::{
-    BindingIdentity, CellEvidenceTriple, CepErrorCode, InvocationBinding, InvocationId,
-    ModelAttemptKey, ModelMessageAddress, Retriability, SessionId, ToolCallAddress, TurnId,
-};
+pub use crate::model::{AgentName, ProjectPath, ProjectPathError, RetryPolicy, TurnTimeout};
 use lattice_conversation::{
-    BoundToolCall, NativeMessage, TokenUsage, ToolCallValidation, ToolResultOutcome,
-    UnboundToolCall,
+    BoundToolCall, InvocationId, ModelAttemptKey, ModelId, ModelMessageAddress, NativeMessage,
+    ProviderId, SessionId, TokenUsage, ToolCallAddress, ToolCallValidation, ToolResultOutcome,
+    TurnId, UnboundToolCall,
 };
-use lattice_store::ProjectStoreKey;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
 pub use super::config::{
     FrozenTurnConfig, MAX_CATALOG_SNAPSHOT_BYTES, MAX_MODEL_ATTEMPTS, MAX_MODEL_STEPS,
-    MAX_USER_INPUT_BYTES, StoredTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot,
-    TurnExecutionLimits,
+    MAX_TURN_TIMEOUT_SECS, MAX_USER_INPUT_BYTES, StoredTurnConfig, ToolCatalogEntry,
+    ToolCatalogSnapshot, TurnExecutionLimits,
 };
 pub use lattice_conversation::MAX_TOOL_CONTENT_BYTES;
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
@@ -31,11 +29,6 @@ macro_rules! redacted_debug { ($($ty:ty),+ $(,)?) => {$ (
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct NodeId(pub u64);
-#[derive(
-    Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
-#[serde(transparent)]
-pub struct ChangeSeq(pub u64);
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepKey {
@@ -57,9 +50,10 @@ pub enum Node {
         parent: NodeId,
         turn_id: TurnId,
         accepted_at: Timestamp,
-        agent_name: String,
-        model: String,
-        provider: String,
+        agent_name: AgentName,
+        model: ModelId,
+        provider: ProviderId,
+        effort: Option<lattice_conversation::Effort>,
         limits: TurnExecutionLimits,
         #[serde(with = "hex_digest")]
         config_digest: [u8; 32],
@@ -98,10 +92,7 @@ impl Node {
                 ..
             } => Some(StepContent {
                 assistant: assistant.clone(),
-                results: slots
-                    .iter()
-                    .map(|slot| super::close::resolve_slot(slot).0)
-                    .collect(),
+                results: slots.iter().map(super::close::resolve_slot).collect(),
             }),
             _ => None,
         }
@@ -118,7 +109,7 @@ impl Node {
 #[serde(deny_unknown_fields)]
 pub struct SessionRecord {
     pub session_id: SessionId,
-    pub project_store_key: ProjectStoreKey,
+    pub project_path: ProjectPath,
     pub current: NodeId,
     pub created_at: Timestamp,
     pub updated_at: Timestamp,
@@ -176,17 +167,7 @@ pub struct RetryNotice {
     pub delay_ms: u64,
     pub notice: Notice,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum UsageSummary {
-    Complete {
-        total: TokenUsage,
-    },
-    Partial {
-        known: TokenUsage,
-        unknown_attempts: u32,
-    },
-}
+pub use lattice_conversation::UsageSummary;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
@@ -206,25 +187,12 @@ impl StepProgress {
 pub struct AttemptRecord {
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub progress: AttemptProgress,
     pub retry_delay_ms: Option<u64>,
 }
-/// 尝试实际使用的协议与 provider 标识。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct AttemptOrigin {
-    pub protocol: AttemptProtocol,
-    pub provider_id: String,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum AttemptProtocol {
-    ChatCompletions,
-    Responses,
-    AnthropicMessages,
-    GenerateContent,
-    Interactions,
-}
+pub use lattice_conversation::{Protocol as AttemptProtocol, ReplayOrigin as AttemptOrigin};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "progress", rename_all = "snake_case", deny_unknown_fields)]
 pub enum AttemptProgress {
@@ -264,104 +232,47 @@ pub struct InvocationSlot {
 pub enum SlotProgress {
     Registered,
     Started,
-    Terminal {
-        result: StoredToolResult,
-        evidence: InvocationEvidence,
-    },
+    Terminal { result: StoredToolResult },
 }
-/// 真实 receipt 只能经 `prepare_terminal` 构造，调用方不能伪造摘要或缺失证据。
+/// 真实终态结果只能经 `prepare_terminal` 构造，调用方不能伪造摘要。
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationTerminal {
     pub(super) result: StoredToolResult,
-    pub(super) evidence: InvocationEvidence,
 }
 impl InvocationTerminal {
     pub fn result(&self) -> &StoredToolResult {
         &self.result
     }
-    pub fn evidence(&self) -> &InvocationEvidence {
-        &self.evidence
-    }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(
-    tag = "kind",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub enum InvocationEvidence {
-    Recorded(Box<CellEvidenceTriple>),
-    Unavailable { reason: EvidenceUnavailableReason },
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum EvidenceUnavailableReason {
-    /// 调用从未交给 LANCET（NotExecuted）。
-    NotDispatched,
-    /// 已 Started 但未取得结果（Indeterminate NoResult）。
-    NoResult,
+/// 工具执行器返回给协调层并可写入会话槽位终态的答复。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ToolReply {
+    Succeeded(serde_json::Value),
+    Failed(ToolError),
+    Cancelled,
+    Indeterminate,
 }
 pub use lattice_conversation::{
-    IndeterminateCause, ResultPayload, StepContent, StoredToolResult, SuccessContent,
+    IndeterminateCause, ResultPayload, StepContent, StoredToolResult, SuccessContent, ToolError,
 };
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct InvocationIndexEntry {
     pub address: ToolCallAddress,
-    pub last_change: ChangeSeq,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum InvocationStage {
-    Registered,
-    Started,
-    Terminal,
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct StoredInvocationChange {
-    pub sequence: ChangeSeq,
-    pub invocation_id: InvocationId,
-    pub stage: InvocationStage,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct InvocationChange {
-    pub sequence: ChangeSeq,
-    pub project_store_key: ProjectStoreKey,
-    pub row: OperatorInvocation,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AcceptSession {
-    New { id: SessionId },
-    Existing { id: SessionId },
-}
-impl AcceptSession {
-    pub fn id(&self) -> SessionId {
-        match self {
-            Self::New { id } | Self::Existing { id } => *id,
-        }
-    }
-}
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum AgentSelection {
-    Explicit,
-    Inherited,
-}
 #[derive(Clone)]
 pub struct AcceptTurn {
-    pub session: AcceptSession,
+    pub session_id: SessionId,
     pub turn_id: TurnId,
-    pub project_store_key: ProjectStoreKey,
+    pub project_path: ProjectPath,
     pub input: String,
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
-    pub agent_selection: AgentSelection,
+    pub settings_version: super::SettingsVersion,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AcceptedTurn {
     Accepted(TurnDetail),
     Existing(TurnDetail),
@@ -371,6 +282,8 @@ pub struct AttemptStopped {
     pub key: ModelAttemptKey,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub cause: StopCause,
     pub diagnostic: AttemptDiagnostic,
     pub retry_delay_ms: Option<u64>,
@@ -380,6 +293,8 @@ pub struct CompleteReply {
     pub key: ModelAttemptKey,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub message: NativeMessage<UnboundToolCall>,
 }
 #[derive(Clone)]
@@ -401,7 +316,7 @@ pub struct RegisteredCalls {
 /// ```
 ///
 /// ```compile_fail
-/// fn forge(binding: lancet_protocol::InvocationBinding) {
+/// fn forge(binding: lattice_session::store::InvocationBinding) {
 ///     let _ = lattice_session::store::StartedInvocation { binding };
 /// }
 /// ```
@@ -442,7 +357,7 @@ pub enum CloseStep {
     StopExecuting { key: StepKey, stop: DispatchStop },
     StopBetweenRequests { turn_id: TurnId, cause: StopCause },
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClosedStep {
     pub step: StepDetail,
     pub next_node: Option<NodeRef>,
@@ -458,7 +373,7 @@ pub enum AttemptStopResult {
 #[serde(deny_unknown_fields)]
 pub struct SessionListRow {
     pub session_id: SessionId,
-    pub project_store_key: ProjectStoreKey,
+    pub project_path: ProjectPath,
     pub current: NodeId,
     pub node_count: u64,
     pub unclosed_turn: Option<TurnId>,
@@ -491,30 +406,48 @@ pub struct LogRow {
 pub struct TurnLogSummary {
     pub turn_id: TurnId,
     pub summary: TurnSummary,
-    pub agent_name: String,
+    pub agent_name: AgentName,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SessionLog {
     pub session: SessionRecord,
-    pub current_agent: Option<String>,
+    pub current_agent: Option<AgentName>,
     pub unclosed_turn: Option<TurnId>,
     pub nodes: Vec<LogRow>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SessionUsage {
+    pub session_id: SessionId,
+    pub position: NodeId,
+    pub turns: Vec<TurnUsageRow>,
+    pub path_total: UsageSummary,
+    pub session_total: UsageSummary,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnUsageRow {
+    pub turn_id: TurnId,
+    pub ordinal: u64,
+    pub provider: ProviderId,
+    pub model: ModelId,
+    pub usage: UsageSummary,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TurnDetail {
     pub turn_id: TurnId,
     pub session_id: SessionId,
     pub user_node: NodeId,
-    pub agent_name: String,
+    pub agent_name: AgentName,
     pub accepted_at: Timestamp,
     pub ended_at: Timestamp,
     pub summary: TurnSummary,
-    pub usage: UsageSummary,
+    pub usage: Box<UsageSummary>,
     pub steps: Vec<StepDetail>,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepDetail {
     pub node: NodeId,
@@ -525,12 +458,14 @@ pub struct StepDetail {
     pub slots: Vec<SlotDetail>,
     pub updated_at: Timestamp,
 }
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct AttemptDetail {
     pub attempt: u32,
     pub origin: AttemptOrigin,
     pub usage: Option<TokenUsage>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
     pub progress: AttemptProgressDetail,
     pub end: AttemptEndDetail,
     pub retry_delay_ms: Option<u64>,
@@ -560,11 +495,10 @@ pub enum AttemptEndDetail {
 pub struct SlotDetail {
     pub invocation_id: InvocationId,
     pub binding: BindingIdentity,
-    pub progress: OperatorInvocationState,
+    pub progress: SlotState,
     pub outcome: ToolResultOutcome,
-    pub reason: Option<OperatorReason>,
+    pub reason: Option<SlotReason>,
     pub material: MaterialSummary,
-    pub evidence: InvocationEvidence,
 }
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
@@ -593,7 +527,7 @@ impl ConversationEntry {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SessionView {
     pub session: SessionRecord,
-    pub current_agent: Option<String>,
+    pub current_agent: Option<AgentName>,
     pub entries: Vec<ConversationEntry>,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -602,31 +536,15 @@ pub struct Page<T, C> {
     pub next: Option<C>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AuditFilter {
-    pub project_store_key: ProjectStoreKey,
-    pub session_id: Option<SessionId>,
-    pub turn_id: Option<TurnId>,
-    pub method: Option<String>,
-    pub outcome: Option<ToolResultOutcome>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct OperatorInvocation {
-    pub invocation_id: InvocationId,
-    pub binding: BindingIdentity,
-    pub state: OperatorInvocationState,
-}
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "state", rename_all = "snake_case", deny_unknown_fields)]
-pub enum OperatorInvocationState {
+pub enum SlotState {
     Registered,
     Started,
     Terminal {
         outcome: ToolResultOutcome,
-        reason: Option<OperatorReason>,
+        reason: Option<SlotReason>,
         material: MaterialSummary,
-        evidence: InvocationEvidence,
     },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -636,11 +554,8 @@ pub enum OperatorInvocationState {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-pub enum OperatorReason {
-    Failed {
-        code: CepErrorCode,
-        retriability: Retriability,
-    },
+pub enum SlotReason {
+    Failed { code: String },
     Indeterminate(IndeterminateCause),
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -657,31 +572,6 @@ pub enum MaterialSummary {
         byte_length: u64,
     },
     NoContent,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditPage {
-    pub latest_change: ChangeSeq,
-    pub rows: Vec<OperatorInvocation>,
-    pub next: Option<InvocationId>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditTailPage {
-    pub latest_change: ChangeSeq,
-    pub rows: Vec<InvocationChange>,
-    pub next_after: ChangeSeq,
-    pub done: bool,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AuditReplay {
-    pub session_id: SessionId,
-    pub turn_id: TurnId,
-    pub latest_change: ChangeSeq,
-    pub calls: Vec<OperatorInvocation>,
-}
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct OperatorStatus {
-    pub latest_change: ChangeSeq,
-    pub recent: Vec<OperatorInvocation>,
 }
 
 redacted_debug!(
@@ -738,10 +628,12 @@ pub enum StoreError {
     InvocationCollision { ids: Vec<InvocationId> },
     #[error("session already exists: {session_id}")]
     SessionCollision { session_id: SessionId },
+    #[error("session project binding mismatch: {session_id}")]
+    BindingMismatch { session_id: SessionId },
+    #[error("session settings changed: {session_id}")]
+    SettingsChanged { session_id: SessionId },
     #[error("sequence exhausted: {kind}")]
     SequenceExhausted { kind: &'static str },
-    #[error("invalid read cursor")]
-    InvalidCursor,
     #[error("writes disabled; close and reopen the database")]
     WriteDisabled,
     #[error("commit failed ({kind:?}); close and reopen the database: {source}")]

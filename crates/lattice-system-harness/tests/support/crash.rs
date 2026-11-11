@@ -25,18 +25,12 @@ pub(crate) fn start(
             )
             .expect("stop previous scenario daemon");
         assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
-        let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));
-        while owners.iter().any(|pid| {
-            !lattice_system_harness::processes_in_pgid(*pid)
-                .unwrap()
-                .is_empty()
-        }) {
-            assert!(
-                Instant::now() < deadline,
-                "previous daemon did not drain within scenario budget"
-            );
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // stop 返回即须已放开实例（锁与 socket 立即核验）；旧后台组退出另做有界等待。
+        // 此处停的是先前经归属识别的后台，进程组等待覆盖它。随后场景显式启动的 `daemon serve`
+        // 参数同样符合归属识别，之后 stop 时也受进程组等待约束。
+        world
+            .daemon_departed()
+            .expect("daemon stop returned before the previous backend departed");
     }
     budget.check(&spec.name);
     let daemon = super::driver()

@@ -2,12 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI 消费提交回执与会话视图，执行与取消交接由 LocalTurn 管理。
 use anyhow::Result;
-use lattice_api::LoadedAgentProfile;
 use lattice_api::local::*;
-use std::{
-    io::Write,
-    path::{Path, PathBuf},
-};
+use std::io::Write;
 
 #[derive(Default)]
 struct RunRenderState {
@@ -232,11 +228,36 @@ fn render_update(
                 writeln!(err, "observation error: {}", error.message)?
             }
         },
+        LocalUpdate::Configure { session_id, result } => match result {
+            ConfigureResult::Configured {
+                adjustment: Some(adjustment),
+                ..
+            } => writeln!(
+                err,
+                "session {session_id}: reasoning effort adjusted from {} to {}",
+                effort_label(adjustment.from),
+                effort_label(adjustment.to),
+            )?,
+            ConfigureResult::Unknown { error } => writeln!(
+                err,
+                "session {session_id}: configuration outcome unknown{}",
+                error
+                    .as_ref()
+                    .map_or_else(String::new, |e| format!(": {}", e.message))
+            )?,
+            ConfigureResult::Configured {
+                adjustment: None, ..
+            }
+            | ConfigureResult::Rejected { .. } => {}
+        },
         LocalUpdate::Error { error } => writeln!(err, "error: {}", error.message)?,
     }
     out.flush()?;
     err.flush()?;
     Ok(())
+}
+fn effort_label(effort: Option<lattice_api::Effort>) -> &'static str {
+    effort.map_or("none", lattice_api::Effort::as_str)
 }
 pub async fn run_session_prompt(
     api: &LocalClient,
@@ -244,9 +265,29 @@ pub async fn run_session_prompt(
     verbose: bool,
     json: bool,
 ) -> Result<std::process::ExitCode> {
-    let session = match &args.session_id {
-        Some(prefix) => SubmitSession::Existing(api.resolve_session(prefix).await?.session_id),
-        None => SubmitSession::New(lattice_api::local::new_session_id()),
+    run_session_prompt_with_io(
+        api,
+        args,
+        verbose,
+        json,
+        None,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+    .await
+}
+pub(super) async fn run_session_prompt_with_io(
+    api: &LocalClient,
+    args: super::session::SendArgs,
+    verbose: bool,
+    json: bool,
+    workspace_override: Option<std::path::PathBuf>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<std::process::ExitCode> {
+    let session_id = match &args.session_id {
+        Some(prefix) => api.resolve_session(prefix).await?.session_id,
+        None => lattice_api::local::new_session_id(),
     };
     let id = lattice_api::local::new_turn_id();
     let mut state = RunRenderState::default();
@@ -254,49 +295,28 @@ pub async fn run_session_prompt(
         &LocalUpdate::Submit {
             update: SubmissionUpdate::Sending {
                 turn_id: id,
-                session_id: session.id(),
-                new: session.is_new(),
+                session_id,
             },
         },
         &mut state,
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
+        out,
+        err,
         verbose,
         json,
     )?;
     let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let requested_agent = args.agent.clone();
     let prepare = async {
+        if let Some(path) = workspace_override {
+            return Ok::<_, LocalError>(path);
+        }
         let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root)
             .await
-            .map_err(|_| local_error("configuration worker failed"))?
+            .map_err(|_| local_error("workspace worker failed"))?
             .map_err(LocalError::from)?;
-        let agent = match args.agent {
-            Some(name) => name,
-            None => api
-                .session_head(session.id())
-                .await?
-                .agent
-                .ok_or_else(|| LocalError {
-                    kind: LocalErrorKind::BadRequest,
-                    message: "agent required at root".into(),
-                    conflict: None,
-                    recovery: None,
-                    store: None,
-                })?,
-        };
-        let path = root.canonical_path().to_path_buf();
-        let name = agent.clone();
-        let configuration = tokio::task::spawn_blocking(move || {
-            let loaded = load_named_profile(&name, root.canonical_path())?;
-            FrozenConfiguration::from_env(loaded, &root)
-        })
-        .await
-        .map_err(|_| local_error("configuration worker failed"))??;
-        Ok::<_, LocalError>((path, configuration))
+        Ok::<_, LocalError>(root.canonical_path().to_path_buf())
     };
     let prepared = tokio::select! {biased;_=signal.recv()=>None,result=prepare=>Some(result)};
-    let (workspace, configuration) = match prepared {
+    let workspace = match prepared {
         Some(Ok(value)) => value,
         result => {
             let result = match result {
@@ -313,33 +333,109 @@ pub async fn run_session_prompt(
                     }),
                 },
                 &mut state,
-                &mut std::io::stdout(),
-                &mut std::io::stderr(),
+                out,
+                err,
                 verbose,
                 json,
             )?;
             return Ok(code);
         }
     };
+    let configure_session = if args.session_id.is_none() {
+        Some(ConfigureSession::New(session_id))
+    } else if args.agent.is_some() || args.model.is_some() || args.effort.is_some() {
+        Some(ConfigureSession::Existing(session_id))
+    } else {
+        None
+    };
+    if let Some(session) = configure_session {
+        let configure_req = ConfigureRequest {
+            session,
+            workspace: workspace.clone(),
+            agent: args.agent,
+            model: args.model,
+            effort: args.effort,
+        };
+        let configure_result = configure_once_or_interrupt(api, configure_req, &mut signal).await;
+        render_update(
+            &LocalUpdate::Configure {
+                session_id,
+                result: configure_result.clone(),
+            },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        )?;
+        match configure_result {
+            ConfigureResult::Configured { .. } => {}
+            ConfigureResult::Rejected { error } => {
+                let result = SubmissionResult::Rejected { error };
+                let code = receipt_exit(&result);
+                render_update(
+                    &LocalUpdate::Submit {
+                        update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                            turn_id: id,
+                            result,
+                            recovered: false,
+                        }),
+                    },
+                    &mut state,
+                    out,
+                    err,
+                    verbose,
+                    json,
+                )?;
+                return Ok(code);
+            }
+            ConfigureResult::Unknown { .. } => {
+                render_update(
+                    &LocalUpdate::Submit {
+                        update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                            turn_id: id,
+                            result: SubmissionResult::NotAccepted,
+                            recovered: false,
+                        }),
+                    },
+                    &mut state,
+                    out,
+                    err,
+                    verbose,
+                    json,
+                )?;
+                return Ok(std::process::ExitCode::from(1));
+            }
+        }
+    }
     let request = TurnRequest {
         turn_id: id,
-        session,
+        session: session_id,
         workspace,
         input: args.prompt,
-        agent: requested_agent,
+        expected_settings: None,
     };
-    let turn = api.start_turn(request, Ok(configuration));
-    consume(
-        turn,
-        None,
-        state,
-        verbose,
-        json,
-        signal,
-        &mut std::io::stdout(),
-        &mut std::io::stderr(),
-    )
-    .await
+    let turn = api.start_turn(request);
+    consume(turn, None, state, verbose, json, signal, out, err).await
+}
+async fn configure_once_or_interrupt(
+    api: &LocalClient,
+    request: ConfigureRequest,
+    signal: &mut tokio::signal::unix::Signal,
+) -> ConfigureResult {
+    let outcome = tokio::select! {
+        biased;
+        _ = signal.recv() => return ConfigureResult::Unknown { error: None },
+        outcome = api.configure_once(request) => outcome,
+    };
+    match outcome {
+        ConfigureOutcome::Configured(reply) => ConfigureResult::Configured {
+            head: reply.head,
+            adjustment: reply.adjustment,
+        },
+        ConfigureOutcome::Rejected(error) => ConfigureResult::Rejected { error },
+        ConfigureOutcome::Unknown(error) => ConfigureResult::Unknown { error: Some(error) },
+    }
 }
 pub(super) async fn follow_with_output(
     api: &LocalClient,
@@ -524,27 +620,13 @@ fn finish_human(
         if let Some(head) = &state.head {
             writeln!(err, "session: {}", head.session_id)?;
         }
-        let mut known = None;
-        let mut unknown_attempts = 0;
-        for attempt in state.steps.values().flat_map(|s| &s.attempts) {
-            match attempt.usage {
-                Some(usage) => {
-                    known = Some(match known {
-                        Some(total) => usage.saturating_add(total),
-                        None => usage,
-                    })
-                }
-                None => unknown_attempts += 1,
-            }
-        }
-        let known = known.map(serde_json::to_value).transpose()?.unwrap_or_else(
-            || serde_json::json!({"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}),
+        let usage = lattice_api::UsageSummary::from_attempts(
+            state
+                .steps
+                .values()
+                .flat_map(|step| &step.attempts)
+                .map(|attempt| (attempt.usage, attempt.usage_kind, attempt.cost)),
         );
-        let usage = if unknown_attempts == 0 {
-            serde_json::json!({"kind":"complete","total":known})
-        } else {
-            serde_json::json!({"kind":"partial","known":known,"unknown_attempts":unknown_attempts})
-        };
         writeln!(err, "usage: {}", serde_json::to_string(&usage)?)?;
         if !state.results.is_empty() {
             writeln!(err, "tools: {} results", state.results.len())?;
@@ -601,33 +683,6 @@ pub fn report_error(error: &anyhow::Error, json: bool) -> std::process::ExitCode
 fn submission_error(error: LocalError) -> anyhow::Error {
     anyhow::Error::new(error).context("Turn submission")
 }
-pub(crate) fn load_named_profile(
-    agent_name: &str,
-    project_root: &Path,
-) -> Result<LoadedAgentProfile, lattice_api::ApiError> {
-    let global_agents_dir = safe_agents_dir(None)?;
-    lattice_api::resolve_named_agent_profile(agent_name, project_root, &global_agents_dir)
-}
-pub(crate) fn agents_dir(override_path: Option<&str>) -> PathBuf {
-    if let Some(path) = override_path {
-        PathBuf::from(path)
-    } else if let Ok(dir) = std::env::var("LATTICE_AGENTS_DIR") {
-        PathBuf::from(dir)
-    } else if let Ok(home) = std::env::var("HOME") {
-        PathBuf::from(home).join(".lattice/agents")
-    } else {
-        PathBuf::from(".lattice/agents")
-    }
-}
-pub(crate) fn safe_agents_dir(
-    override_path: Option<&str>,
-) -> Result<PathBuf, lattice_api::ApiError> {
-    let path = agents_dir(override_path);
-    validate_agents_dir(&path)?;
-    Ok(path)
-}
-pub(crate) use lattice_api::validate_agents_dir;
-
 #[cfg(test)]
 #[path = "config_error_tests.rs"]
 mod config_error_tests;

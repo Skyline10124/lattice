@@ -49,9 +49,28 @@ pub struct SendArgs {
     /// Existing session to continue, by ID or unique prefix; omit to start a new session.
     #[arg(long = "session")]
     pub session_id: Option<String>,
-    /// Agent to use. Required for a new session, and for an existing session positioned at the root node.
+    /// Agent to use. Required for a new session; selecting it updates session settings.
     #[arg(long, required_unless_present = "session_id")]
-    pub agent: Option<String>,
+    pub agent: Option<lattice_api::AgentName>,
+    #[arg(
+        long,
+        help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend."
+    )]
+    pub model: Option<lattice_api::ModelRef>,
+    #[arg(
+        long,
+        help = effort_help()
+    )]
+    pub effort: Option<lattice_api::Effort>,
+}
+
+fn effort_help() -> String {
+    let efforts = lattice_api::Effort::ALL
+        .into_iter()
+        .map(lattice_api::Effort::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Reasoning effort: {efforts}. Omit to inherit; off explicitly disables reasoning.")
 }
 
 pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, String> {
@@ -66,7 +85,7 @@ pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, S
 
 #[derive(Subcommand)]
 pub enum SessionAction {
-    /// Submit a request; without --session the session is created in the acceptance transaction.
+    /// Submit a request; without --session a new session is created via configure.
     Send(SendArgs),
     /// Move the conversation position to node N only; the original fork is kept and files are not rolled back.
     Rewind {
@@ -78,6 +97,10 @@ pub enum SessionAction {
     List,
     /// Show the full session tree, including the root node.
     Log { session_id: String },
+    /// Show per-turn usage on the current path, with current-path and whole-session totals.
+    ///
+    /// Costs are in USD. Unknown counts and costs are shown as '-'.
+    Usage { session_id: String },
     /// Show every Step of a Turn by TurnId; --follow keeps observing.
     Turn {
         #[arg(value_parser = parse_turn_id)]
@@ -130,7 +153,7 @@ pub async fn run(
                     println!(
                         "{} project={} current={} nodes={} unclosed_turn={} owner={} updated={}",
                         display_id(&row.session.session_id.to_string()),
-                        row.session.project_store_key,
+                        row.session.project_path.to_string_lossy(),
                         row.session.current.0,
                         row.session.node_count,
                         row.session
@@ -149,6 +172,14 @@ pub async fn run(
                 println!("{}", serde_json::to_string(&log)?);
             } else {
                 print!("{}", render_log(&log));
+            }
+        }
+        SessionAction::Usage { session_id } => {
+            let usage = api.usage(&session_id).await?;
+            if json {
+                println!("{}", serde_json::to_string(&usage)?);
+            } else {
+                print!("{}", render_usage(&usage));
             }
         }
         SessionAction::Rewind { session_id, target } => {
@@ -264,7 +295,10 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
         "session {} current={} agent={} unclosed_turn={}\n",
         log.session.session_id,
         log.session.current.0,
-        summarize(log.current_agent.as_deref().unwrap_or("none"), 120),
+        summarize(
+            log.current_agent.as_ref().map_or("none", |a| a.as_str()),
+            120
+        ),
         log.unclosed_turn
             .map_or_else(|| "none".into(), |id| id.to_string())
     );
@@ -307,6 +341,68 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
         }
     }
     text
+}
+
+fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
+    use std::fmt::Write;
+    let mut text = format!(
+        "session {} position={}\n",
+        usage.session_id, usage.position.0
+    );
+    text.push_str("#\tTURN\tPROVIDER/MODEL\tATTEMPTS\tINPUT\tCACHE_READ\tCACHE_WRITE\tOUTPUT\tREASONING\tCOST USD\n");
+    for turn in &usage.turns {
+        let _ = writeln!(
+            text,
+            "{}\t{}\t{}/{}\t{}",
+            turn.ordinal,
+            turn.turn_id,
+            turn.provider,
+            summarize(turn.model.as_str(), 120),
+            render_usage_values(&turn.usage)
+        );
+    }
+    for (label, total) in [
+        ("当前路径合计", &usage.path_total),
+        ("全会话合计", &usage.session_total),
+    ] {
+        let _ = writeln!(text, "{label}\t-\t-\t{}", render_usage_values(total));
+    }
+    text
+}
+
+fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
+    let tokens = [
+        &usage.input,
+        &usage.cache_read,
+        &usage.cache_write,
+        &usage.output,
+        &usage.reasoning,
+    ]
+    .map(|metric| render_metric(metric.known, metric.overflowed, |value| value.to_string()));
+    let cost = render_metric(usage.cost.known, usage.cost.overflowed, |value| {
+        let prefix = if value.exact { "" } else { "≈" };
+        if value.usd > 0.0 && value.usd < 0.01 {
+            format!("{prefix}<$0.01")
+        } else {
+            format!("{prefix}${:.2}", value.usd)
+        }
+    });
+    format!("{}\t{}\t{cost}", usage.attempts, tokens.join("\t"))
+}
+
+fn render_metric<T: Copy>(
+    known: Option<T>,
+    overflowed: bool,
+    format_value: impl FnOnce(T) -> String,
+) -> String {
+    let Some(known) = known else {
+        return "-".into();
+    };
+    let mut value = format_value(known);
+    if overflowed {
+        value.push_str(" (overflow)");
+    }
+    value
 }
 
 pub(super) fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
@@ -389,11 +485,65 @@ fn summarize(text: &str, max: usize) -> String {
 mod session_cli {
     use super::*;
     use clap::{CommandFactory, Parser};
+    use lattice_api::local::{CostEstimate, UsageCompleteness};
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
         action: SessionAction,
     }
+    #[test]
+    fn saturated_usage_is_not_presented_as_an_exact_total() {
+        let mut usage = lattice_api::UsageSummary::from_attempts([]);
+        usage.input = lattice_api::local::TokenSummary {
+            known: Some(u64::MAX),
+            complete: false,
+            overflowed: true,
+        };
+        usage.kind = UsageCompleteness::Partial;
+        let text = render_usage_values(&usage);
+        let fields: Vec<_> = text.split('\t').collect();
+        assert_eq!(fields[1], format!("{} (overflow)", u64::MAX));
+        assert_eq!(fields[6], "$0.00");
+    }
+
+    #[test]
+    fn complete_usage_rows_keep_exact_approximate_and_unknown_costs_distinct() {
+        for (cost, expected) in [
+            (Some((0.0, true)), "$0.00"),
+            (Some((0.0, false)), "≈$0.00"),
+            (Some((0.000001, true)), "<$0.01"),
+            (Some((0.004, true)), "<$0.01"),
+            (Some((0.004, false)), "≈<$0.01"),
+            (Some((0.009999, true)), "<$0.01"),
+            (Some((0.01, true)), "$0.01"),
+            (Some((0.01, false)), "≈$0.01"),
+            (Some((0.016, true)), "$0.02"),
+            (None, "-"),
+        ] {
+            let usage = lattice_api::UsageSummary::from_attempts([(
+                Some(lattice_llm::TokenUsage {
+                    input: Some(1),
+                    ..Default::default()
+                }),
+                UsageCompleteness::Complete,
+                cost.map(|(usd, exact)| CostEstimate { usd, exact }),
+            )]);
+            let text = render_usage_values(&usage);
+            let fields: Vec<_> = text.split('\t').collect();
+            assert_eq!(&fields[2..6], &["-"; 4]);
+            assert_eq!(fields[6], expected, "{text}");
+            assert_eq!(fields.len(), 7);
+        }
+    }
+
+    #[test]
+    fn partial_usage_keeps_unknown_cost_cell_unadorned() {
+        let usage =
+            lattice_api::UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
+        let text = render_usage_values(&usage);
+        assert_eq!(text.split('\t').next_back(), Some("-"));
+    }
+
     #[test]
     fn session_surface_and_numeric_nodes() {
         let command = TestCli::command();
@@ -402,7 +552,7 @@ mod session_cli {
                 .get_subcommands()
                 .map(|c| c.get_name())
                 .collect::<Vec<_>>(),
-            ["send", "rewind", "list", "log", "turn", "cancel"]
+            ["send", "rewind", "list", "log", "usage", "turn", "cancel"]
         );
         for n in ["0", "18446744073709551615"] {
             assert!(TestCli::try_parse_from(["session", "rewind", "abcd", n]).is_ok());
@@ -443,7 +593,7 @@ mod session_cli {
     #[test]
     fn tree_output_keeps_root_branches_current_and_notice() {
         let log: lattice_api::local::SessionLog = serde_json::from_value(serde_json::json!({
-            "session": {"session_id":"11111111111111111111111111111111", "project_store_key":"a".repeat(64), "current":4, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
+            "session": {"session_id":"11111111111111111111111111111111", "project_path": b"/test-project".as_slice(), "current":4, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
             "current_agent":"beta", "unclosed_turn":"20000000-0000-4000-8000-000000000002",
             "nodes":[
                 {"node":{"id":0,"parent":null,"turn_id":null,"kind":{"kind":"root"}},"current":false,"turn_start":null},
@@ -471,7 +621,7 @@ mod session_cli {
             "user_node":1,"agent_name":"alpha",
             "accepted_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:00:01Z",
             "summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}},
-            "usage":{"kind":"complete","total":{"prompt_tokens":0,"completion_tokens":0,"total_tokens":0}},
+            "usage":lattice_api::UsageSummary::from_attempts([]),
             "steps":[{"node":2,"key":{"turn_id":"10000000-0000-4000-8000-000000000001","ordinal":0},"progress":{"progress":"reserved"},"end":{"end":"stop","cause":{"cause":"process_exit"}},"attempts":[],"slots":[],"updated_at":"2026-09-27T00:00:01Z"}]
         })).unwrap();
         let text = render_turn(&turn);
@@ -480,5 +630,82 @@ mod session_cli {
         assert!(text.contains("\"progress\":\"reserved\""), "{text}");
         assert!(text.contains("process_exit"), "{text}");
         assert!(text.contains("process exited"), "{text}");
+    }
+
+    #[test]
+    fn turn_slot_output_uses_slot_state_reason_and_tool_identity_without_evidence() {
+        let slot_json = serde_json::json!({
+            "invocation_id": "10000000-0000-4000-8000-000000000001",
+            "binding": {
+                "session_id": "11111111111141118111111111111111",
+                "turn_id": "10000000-0000-4000-8000-000000000001",
+                "model_step_ordinal": 0,
+                "part_ordinal": 0,
+                "method": "observe__workspace",
+                "tool_identity": "fake-observe-v1",
+                "arguments_digest": "00".repeat(32)
+            },
+            "progress": {
+                "state": "terminal",
+                "outcome": "failed",
+                "reason": {"kind": "failed", "value": {"code": "execution_failed"}},
+                "material": {"kind": "no_content"}
+            },
+            "outcome": "failed",
+            "reason": {"kind": "failed", "value": {"code": "execution_failed"}},
+            "material": {"kind": "no_content"}
+        });
+        let mut legacy = slot_json.clone();
+        legacy["evidence"] = serde_json::json!({"kind": "unavailable"});
+        assert!(
+            serde_json::from_value::<lattice_session::store::SlotDetail>(legacy).is_err(),
+            "SlotDetail 必须拒绝旧 evidence 字段"
+        );
+
+        let turn: lattice_api::local::TurnDetail = serde_json::from_value(serde_json::json!({
+            "session_id": "11111111111141118111111111111111",
+            "turn_id": "10000000-0000-4000-8000-000000000001",
+            "user_node": 1,
+            "agent_name": "alpha",
+            "accepted_at": "2026-09-27T00:00:00Z",
+            "ended_at": "2026-09-27T00:00:01Z",
+            "summary": {
+                "outcome": "completed",
+                "progress": {"progress": "closed", "end": {"end": "finish"}},
+                "notice": null
+            },
+            "usage": lattice_api::UsageSummary::from_attempts([]),
+            "steps": [{
+                "node": 2,
+                "key": {"turn_id": "10000000-0000-4000-8000-000000000001", "ordinal": 0},
+                "progress": {"progress": "closed", "end": {"end": "finish"}},
+                "end": {"end": "finish"},
+                "attempts": [],
+                "slots": [slot_json],
+                "updated_at": "2026-09-27T00:00:01Z"
+            }]
+        }))
+        .expect("解析包含新结构 SlotDetail 的 TurnDetail");
+
+        let text = render_turn(&turn);
+        assert!(
+            text.contains("  slot 10000000-0000-4000-8000-000000000001: "),
+            "{text}"
+        );
+        assert!(
+            text.contains("\"tool_identity\":\"fake-observe-v1\""),
+            "{text}"
+        );
+        assert!(text.contains("\"state\":\"terminal\""), "{text}");
+        assert!(text.contains("\"code\":\"execution_failed\""), "{text}");
+        assert!(!text.contains("evidence"), "{text}");
+        assert!(!text.contains("descriptor_identity"), "{text}");
+
+        let encoded = serde_json::to_value(&turn).expect("序列化 TurnDetail");
+        assert_eq!(
+            encoded["steps"][0]["slots"][0]["binding"]["tool_identity"],
+            "fake-observe-v1"
+        );
+        assert!(encoded["steps"][0]["slots"][0].get("evidence").is_none());
     }
 }

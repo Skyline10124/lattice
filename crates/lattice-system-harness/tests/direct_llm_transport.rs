@@ -7,15 +7,16 @@
 
 mod support;
 
+#[cfg(feature = "fake-tools")]
 use std::time::{Duration, Instant};
 
-use lattice_system_harness::{
-    AssertError, CapturedRequest, FAKE_API_KEY, FakeLlmServer, SendExecution, SessionSendDriver,
-    SseScript,
-};
+#[cfg(feature = "fake-tools")]
+use lattice_system_harness::{AssertError, CapturedRequest, FAKE_API_KEY, FakeLlmServer};
+use lattice_system_harness::{SendExecution, SessionSendDriver, SseScript};
 use serde_json::Value;
 use support::*;
 
+#[cfg(feature = "fake-tools")]
 const ACCEPT: &str = "text/event-stream, application/json";
 const RETRY_FAST: &str = "[llm.retry]\nmax_retries = 3\ninitial_delay_ms = 1\nmax_delay_ms = 1\n";
 
@@ -38,6 +39,7 @@ fn diagnostic(attempt: &Value) -> String {
         .to_string()
 }
 
+#[cfg(feature = "fake-tools")]
 fn http(status: u16, content_type: &str, headers: &[(&str, &str)], body: &str) -> SseScript {
     SseScript::HttpResponse {
         status,
@@ -51,6 +53,7 @@ fn http(status: u16, content_type: &str, headers: &[(&str, &str)], body: &str) -
 }
 
 /// 请求按冻结配置标识 LATTICE 与本 Session，并声明可接受 SSE 与 JSON 错误正文。
+#[cfg(feature = "fake-tools")]
 fn assert_identity(captures: &[CapturedRequest], session: &str) -> Result<(), AssertError> {
     for (index, capture) in captures.iter().enumerate() {
         let agent = capture.headers.get("user-agent").map(String::as_str);
@@ -80,28 +83,18 @@ fn assert_identity(captures: &[CapturedRequest], session: &str) -> Result<(), As
     Ok(())
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn retry_after_is_honoured_and_requests_identify_lattice() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-retry-after",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
-    world
-        .write_project_file("notes.txt", "transport-sentinel\n")
-        .unwrap();
+    let (world, spec) = direct_world("direct-transport-retry-after", "transport", RETRY_FAST);
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let server = wire_fake_llm(
         &world,
         "transport",
         // 第一个 Step 正常执行工具；限流落在第二个 Step。
         sequence(vec![
-            tool_call(
-                "call-1",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-            ),
+            tool_call("call-1", "read_note", r#"{"action":"read"}"#),
             http(
                 429,
                 "application/json",
@@ -157,6 +150,7 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
     );
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
     let driver = driver();
@@ -168,20 +162,15 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
         let (world, spec) = direct_world(
             &format!("direct-transport-long-retry-{case}"),
             "transport",
-            r#"["observe__workspace"]"#,
             &format!("{limits}{RETRY_FAST}"),
         );
-        world.write_project_file("notes.txt", "quota\n").unwrap();
+        world.set_env("LATTICE_TEST_TOOLS", "read_note");
         // 第一个 Step 正常执行工具，限流落在第二个 Step。
         let server = wire_fake_llm(
             &world,
             "transport",
             sequence(vec![
-                tool_call(
-                    "call-1",
-                    "observe__workspace",
-                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-                ),
+                tool_call("call-1", "read_note", r#"{"action":"read"}"#),
                 http(
                     429,
                     "application/json",
@@ -231,11 +220,13 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
     }
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     let driver = driver();
     let spec = lattice_system_harness::ScenarioSpec::direct_local("direct-transport-overload");
     let world = lattice_system_harness::ScenarioWorld::new(&spec.name).expect("world");
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let provider = lattice_system_harness::ProviderFixture {
         protocol: lattice_system_harness::ProviderProtocol::AnthropicMessages,
         target: lattice_system_harness::ProviderTarget::Builtin("anthropic"),
@@ -248,12 +239,10 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
             &format!(
                 "schema_version = 1\n\n[agent]\nname = \"overload\"\nmodel = \"{model}\"\n\n\
              [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-             [tools]\nenabled = [\"observe__workspace\"]\n\n\
              [llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n"
             ),
         )
         .unwrap();
-    world.write_project_file("notes.txt", "load\n").unwrap();
     world.init_git_project().unwrap();
     let gateway_page = format!(
         "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>{}</body></html>",
@@ -261,11 +250,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     );
     // 第一个 Step 正常执行工具；第二个 Step 先 529 再 502，用尽一次重试后以 502 结束 Turn。
     let server = FakeLlmServer::start(sequence(vec![
-        tool_call(
-            "call-1",
-            "observe__workspace",
-            r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-        ),
+        tool_call("call-1", "read_note", r#"{"action":"read"}"#),
         http(
             529,
             "application/json",
@@ -338,12 +323,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
 #[test]
 fn unauthorized_request_fails_without_retry_notice() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-unauthorized",
-        "transport",
-        "[]",
-        RETRY_FAST,
-    );
+    let (world, spec) = direct_world("direct-transport-unauthorized", "transport", RETRY_FAST);
     let server = wire_fake_llm(
         &world,
         "transport",
@@ -390,27 +370,19 @@ fn unauthorized_request_fails_without_retry_notice() {
     );
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn stream_cut_before_completion_is_retried() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-cut",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
-    world.write_project_file("notes.txt", "cut\n").unwrap();
+    let (world, spec) = direct_world("direct-transport-cut", "transport", RETRY_FAST);
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     // 第二个 Step 先遇到正常结束却没有结束事件的流，再遇到读到一半被
     // `RST_STREAM(INTERNAL_ERROR)` 重置的流，第三次成功。
     let server = wire_fake_llm(
         &world,
         "transport",
         sequence(vec![
-            tool_call(
-                "call-1",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-            ),
+            tool_call("call-1", "read_note", r#"{"action":"read"}"#),
             SseScript::Disconnect {
                 chunks_before_drop: vec!["partial".into()],
             },
@@ -469,31 +441,26 @@ fn stream_cut_before_completion_is_retried() {
     );
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-reuse",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
-    world.write_project_file("a.txt", "alpha\n").unwrap();
-    world.write_project_file("b.txt", "beta\n").unwrap();
+    let (world, spec) = direct_world("direct-transport-reuse", "transport", RETRY_FAST);
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let server = wire_fake_llm(
         &world,
         "transport",
         sequence(vec![
             tool_call(
                 "call-1",
-                "observe__workspace",
-                r#"{"request":{"mode":"read_file","path":"a.txt"}}"#,
+                "read_note",
+                r#"{"action":"read","value":{"item":"alpha"}}"#,
             ),
             SseScript::CloseAfter {
                 script: Box::new(tool_call(
                     "call-2",
-                    "observe__workspace",
-                    r#"{"request":{"mode":"read_file","path":"b.txt"}}"#,
+                    "read_note",
+                    r#"{"action":"read","value":{"item":"beta"}}"#,
                 )),
             },
             SseScript::plain("both read"),
@@ -539,6 +506,7 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
 
 /// HTTP/2 下 provider 明确未处理的请求（GOAWAY 的最后流号小于它，或 `REFUSED_STREAM`）
 /// 由传输层重发，归在同一次尝试里：provider 收到两次，持久记录只有一条尝试。
+#[cfg(feature = "fake-tools")]
 #[test]
 fn unprocessed_requests_are_resent_inside_one_attempt() {
     for (case, refusal) in [
@@ -550,20 +518,15 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
         let (world, spec) = direct_world(
             &format!("direct-transport-unprocessed-{case}"),
             "transport",
-            r#"["observe__workspace"]"#,
             "[llm.retry]\nmax_retries = 0\n",
         );
-        world.write_project_file("notes.txt", "nack\n").unwrap();
+        world.set_env("LATTICE_TEST_TOOLS", "read_note");
         // 第一个 Step 正常执行工具；第二个 Step 的请求先被拒绝，紧接着的重发得到回答。
         let server = wire_fake_llm(
             &world,
             "transport",
             sequence(vec![
-                tool_call(
-                    "call-1",
-                    "observe__workspace",
-                    r#"{"request":{"mode":"read_file","path":"notes.txt"}}"#,
-                ),
+                tool_call("call-1", "read_note", r#"{"action":"read"}"#),
                 refusal,
                 SseScript::plain("answered after resend"),
             ]),
@@ -622,22 +585,17 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
 /// 本地 provider（Ollama 一类）走明文 HTTP/1.1：多 Step 的 Turn 完成，服务忙的 503 按可重试处理，
 /// 请求头与 HTTPS provider 相同。分块响应的结尾晚于结束事件到达，整个 Turn 仍只用一条连接：
 /// 产品交付结束事件前读完了响应体，连接才能回到连接池。
+#[cfg(feature = "fake-tools")]
 #[test]
 fn plaintext_local_provider_over_http1() {
     let driver = driver();
-    let (world, spec) = direct_world(
-        "direct-transport-local-http1",
-        "transport",
-        r#"["observe__workspace"]"#,
-        RETRY_FAST,
-    );
-    world.write_project_file("a.txt", "alpha\n").unwrap();
-    world.write_project_file("b.txt", "beta\n").unwrap();
+    let (world, spec) = direct_world("direct-transport-local-http1", "transport", RETRY_FAST);
+    world.set_env("LATTICE_TEST_TOOLS", "read_note");
     let server = FakeLlmServer::start_plain_http1(sequence(vec![
         tool_call(
             "call-1",
-            "observe__workspace",
-            r#"{"request":{"mode":"read_file","path":"a.txt"}}"#,
+            "read_note",
+            r#"{"action":"read","value":{"item":"alpha"}}"#,
         ),
         SseScript::HttpError {
             status: 503,
@@ -645,8 +603,8 @@ fn plaintext_local_provider_over_http1() {
         },
         tool_call(
             "call-2",
-            "observe__workspace",
-            r#"{"request":{"mode":"read_file","path":"b.txt"}}"#,
+            "read_note",
+            r#"{"action":"read","value":{"item":"beta"}}"#,
         ),
         SseScript::plain("local answer"),
     ]))

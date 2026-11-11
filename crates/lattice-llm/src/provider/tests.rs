@@ -3,8 +3,6 @@
 
 use std::{collections::BTreeSet, fs};
 
-use lattice_conversation::{MAX_PROVIDER_ID_BYTES, validate_provider_id};
-
 use crate::protocol::{
     Cache, ChatCompletionsFeatures, EffortParam, Features, MessagesFeatures, Protocol,
     ReasoningReplay, ThinkingBudget, ThinkingToggle,
@@ -12,7 +10,6 @@ use crate::protocol::{
 
 use super::{
     config::{MAX_MODELS_PER_PROVIDER, MAX_PROVIDERS, MAX_PROVIDERS_FILE_BYTES, ProviderRegistry},
-    model_ref::MAX_MODEL_ID_BYTES,
     *,
 };
 
@@ -21,7 +18,6 @@ const CHAT_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'chat-completions'\nbase_url = 'http://localhost'";
 const MESSAGES_PROVIDER: &str =
     "[providers.custom]\nprotocol = 'anthropic-messages'\nbase_url = 'http://localhost'";
-
 fn parse(source: &str) -> ProviderRegistry {
     ProviderRegistry::parse(PATH, source).unwrap()
 }
@@ -49,7 +45,6 @@ fn assert_invalid(source: &str, line: usize, reason: &str) {
 fn builtins_obey_provider_invariants() {
     let mut ids = BTreeSet::new();
     for provider in builtins::providers() {
-        validate_provider_id(&provider.id).unwrap();
         assert!(
             ids.insert(provider.id.clone()),
             "duplicate id: {}",
@@ -76,8 +71,51 @@ fn builtins_obey_provider_invariants() {
 }
 
 #[test]
+fn builtin_protocols_match_their_endpoints_and_auth() {
+    let registry = ProviderRegistry::builtins();
+    for (id, features, url, auth, catalog) in [
+        (
+            "openai",
+            Features::Responses,
+            "https://api.openai.com/v1",
+            Auth::Bearer,
+            "openai",
+        ),
+        (
+            "xai",
+            Features::Responses,
+            "https://api.x.ai/v1",
+            Auth::Bearer,
+            "xai",
+        ),
+        (
+            "google",
+            Features::Interactions,
+            "https://generativelanguage.googleapis.com/v1beta",
+            Auth::XGoogApiKey,
+            "google",
+        ),
+        (
+            "chatgpt",
+            Features::Responses,
+            "https://api.openai.com/v1",
+            Auth::OauthChatgpt,
+            "openai",
+        ),
+    ] {
+        let provider = registry.get(id).unwrap();
+        assert_eq!(provider.features, features, "{id}");
+        assert_eq!(provider.protocol, features.protocol(), "{id}");
+        assert_eq!(provider.base_url, url, "{id}");
+        assert_eq!(provider.auth, auth, "{id}");
+        assert_eq!(provider.catalog.as_deref(), Some(catalog), "{id}");
+    }
+}
+
+#[test]
 fn merges_fields_and_model_features_without_losing_metadata_presence() {
     let builtin = ProviderRegistry::builtins();
+    assert!(builtin.iter().all(|provider| !provider.declared));
     let original = builtin.get("deepseek").unwrap();
     let registry = parse(
         r#"
@@ -88,12 +126,15 @@ thinking_toggle = "enable-thinking"
 [providers.deepseek.models."deepseek-v4-flash"]
 context = 131072
 output = 8192
+reasoning = true
 effort = ["off", "minimal", "low", "medium", "high", "xhigh", "max"]
 tools = false
 cost = { input = 1, output = 2.5, cache_read = 0.1, cache_write = 0.5 }
 [providers.deepseek.models."deepseek-v4-flash".features]
 reasoning_replay = "none"
 [providers.deepseek.models."no-metadata"]
+[providers.groq]
+[providers.xai.models."only-subtable"]
 [providers.my-vllm]
 protocol = "chat-completions"
 base_url = "http://localhost:8000/v1"
@@ -102,6 +143,7 @@ catalog = "custom-catalog"
 "#,
     );
     let provider = registry.get("deepseek").unwrap();
+    assert!(provider.declared);
     assert_eq!(provider.base_url, "https://gateway.invalid/deepseek");
     assert_eq!(
         (provider.protocol, provider.auth, &provider.catalog),
@@ -114,8 +156,8 @@ catalog = "custom-catalog"
     assert_eq!(chat(provider.features), expected_features);
     let model = &provider.models["deepseek-v4-flash"];
     assert_eq!(
-        (model.context, model.output, model.tools),
-        (Some(131072), Some(8192), Some(false))
+        (model.context, model.output, model.reasoning, model.tools),
+        (Some(131072), Some(8192), Some(true), Some(false))
     );
     assert_eq!(
         model.effort.as_deref(),
@@ -153,25 +195,40 @@ catalog = "custom-catalog"
         (
             absent.context,
             absent.output,
+            absent.reasoning,
             &absent.effort,
             absent.tools,
             &absent.cost
         ),
-        (None, None, &None, None, &None)
+        (None, None, None, &None, None, &None)
     );
     assert_eq!(absent.features, provider.features);
     let custom = registry.get("my-vllm").unwrap();
+    assert!(custom.declared);
     assert_eq!(
         (custom.auth, custom.catalog.as_deref()),
         (Auth::None, Some("custom-catalog"))
     );
+    assert!(registry.get("groq").unwrap().declared);
+    assert!(registry.get("xai").unwrap().declared);
+    assert!(
+        registry
+            .get("xai")
+            .unwrap()
+            .models
+            .contains_key("only-subtable")
+    );
     assert!(registry.get("missing").is_none());
+    assert!(!registry.get("anthropic").unwrap().declared);
     assert_eq!(registry.get("anthropic"), builtin.get("anthropic"));
 }
 
 #[test]
 fn builtin_protocol_key_is_rejected_even_when_the_value_is_unchanged() {
     for (id, protocol) in [
+        ("openai", "responses"),
+        ("xai", "responses"),
+        ("google", "interactions"),
         ("deepseek", "chat-completions"),
         ("deepseek", "anthropic-messages"),
         ("chatgpt", "responses"),
@@ -181,6 +238,34 @@ fn builtin_protocol_key_is_rejected_even_when_the_value_is_unchanged() {
             2,
             "to use another protocol, create a new provider id",
         );
+    }
+}
+
+#[test]
+fn responses_builtins_reject_chat_features_at_provider_and_model_levels() {
+    for id in ["openai", "xai"] {
+        for level in ["features", "models.example.features"] {
+            for feature in [
+                "effort_param = 'reasoning-effort'",
+                "thinking_toggle = 'thinking-type'",
+                "thinking_budget = 'thinking-budget'",
+                "reasoning_replay = 'reasoning-content'",
+                "cache_markers = true",
+            ] {
+                assert_invalid(
+                    &format!("[providers.{id}.{level}]\n{feature}"),
+                    2,
+                    "unknown feature",
+                );
+                let custom = parse(&format!(
+                    "{CHAT_PROVIDER}\n[providers.custom.{level}]\n{feature}"
+                ));
+                assert_eq!(
+                    custom.get("custom").unwrap().protocol,
+                    Protocol::ChatCompletions
+                );
+            }
+        }
     }
 }
 
@@ -222,6 +307,10 @@ fn chatgpt_allows_only_handwritten_model_metadata() {
 fn strict_errors_report_path_line_and_reason() {
     for (source, line, reason) in [
         ("\nunknown = true", 2, "unknown field"),
+        ("metadata = []", 1, "table"),
+        ("[metadata]\nunknown = true", 2, "unknown field"),
+        ("[metadata]\nauto_refresh = 'false'", 2, "invalid type"),
+        ("[metadata]\nauto_refresh = 0", 2, "invalid type"),
         ("providers = []", 1, "invalid type"),
         ("[providers]\nopenai = []", 2, "table"),
         (
@@ -301,6 +390,16 @@ fn strict_errors_report_path_line_and_reason() {
             "invalid type",
         ),
         (
+            "[providers.openai.models.test]\nreasoning = 'true'",
+            2,
+            "invalid type",
+        ),
+        (
+            "[providers.openai.models.test]\nreasoning = 1",
+            2,
+            "invalid type",
+        ),
+        (
             "[providers.openai.models.test]\ncost = 1",
             2,
             "invalid type",
@@ -342,6 +441,32 @@ fn strict_errors_report_path_line_and_reason() {
         4,
         "unknown field",
     );
+}
+
+#[test]
+fn metadata_auto_refresh_defaults_to_true_and_loads_current_strict_configuration() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("providers.toml");
+    assert!(crate::metadata_auto_refresh_enabled(directory.path()).unwrap());
+    for source in ["", "[metadata]", "[metadata]\nauto_refresh = true"] {
+        fs::write(&path, source).unwrap();
+        assert!(crate::metadata_auto_refresh_enabled(directory.path()).unwrap());
+    }
+    fs::write(&path, "[metadata]\nauto_refresh = false").unwrap();
+    assert!(!crate::metadata_auto_refresh_enabled(directory.path()).unwrap());
+    assert_eq!(
+        parse("[metadata]\nauto_refresh = false").iter().count(),
+        ProviderRegistry::builtins().iter().count()
+    );
+    fs::write(
+        &path,
+        "[metadata]\nauto_refresh = false\n[providers.openai]\nunknown = true",
+    )
+    .unwrap();
+    assert!(matches!(
+        crate::metadata_auto_refresh_enabled(directory.path()),
+        Err(crate::MetadataError::Configuration(_))
+    ));
 }
 
 #[test]
@@ -449,6 +574,7 @@ fn every_feature_value_parses_to_the_closed_type() {
 
 #[test]
 fn feature_defaults_match_standard_protocol_behavior() {
+    assert_eq!(Features::defaults(Protocol::Responses), Features::Responses);
     assert_eq!(
         Features::defaults(Protocol::ChatCompletions),
         Features::ChatCompletions(ChatCompletionsFeatures {
@@ -462,13 +588,35 @@ fn feature_defaults_match_standard_protocol_behavior() {
     assert_eq!(
         Features::defaults(Protocol::Messages),
         Features::Messages(MessagesFeatures {
-            cache: Cache::Automatic
+            cache: Cache::Automatic,
         })
     );
 }
 
 #[test]
 fn rejects_unknown_feature_values_types_and_features_from_other_protocols() {
+    for level in ["features", "models.test.features"] {
+        for protocol in [
+            "responses",
+            "chat-completions",
+            "anthropic-messages",
+            "generate-content",
+            "interactions",
+        ] {
+            for (feature, value) in [
+                ("thinking_display", "summarized"),
+                ("reasoning_summary", "auto"),
+            ] {
+                assert_invalid(
+                    &format!(
+                        "[providers.custom]\nprotocol = '{protocol}'\nbase_url = 'http://localhost'\n[providers.custom.{level}]\n{feature} = '{value}'"
+                    ),
+                    5,
+                    &format!("unknown feature `{feature}`"),
+                );
+            }
+        }
+    }
     for name in [
         "effort_param",
         "thinking_toggle",
@@ -630,53 +778,4 @@ fn file_loading_applies_overrides_and_reports_invalid_input() {
         (error.path.as_path(), error.line, error.reason.as_str()),
         (path.as_path(), 2, "providers.toml must be UTF-8")
     );
-}
-
-#[test]
-fn model_reference_splits_once_and_round_trips() {
-    let source = "openrouter/anthropic/claude-sonnet-4.6";
-    let model: ModelRef = source.parse().unwrap();
-    assert_eq!(
-        (model.provider(), model.model()),
-        ("openrouter", "anthropic/claude-sonnet-4.6")
-    );
-    assert_eq!(model.to_string(), source);
-}
-
-#[test]
-fn model_reference_preserves_provider_id_validation_errors() {
-    assert_eq!(
-        ModelRef::parse("bad_id/model").unwrap_err().to_string(),
-        "provider id must contain only [a-z0-9-]"
-    );
-}
-
-#[test]
-fn model_reference_rejects_missing_parts_invalid_provider_and_control_characters() {
-    for source in [
-        "",
-        "openai",
-        "/model",
-        "openai/",
-        "openai/m\0",
-        "openai/m\u{7f}",
-        "openai/m\u{85}",
-    ] {
-        assert!(ModelRef::parse(source).is_err(), "{source:?}");
-    }
-    // 空格、Unicode 与后续斜杠都是不透明模型名的一部分，不属于控制字符。
-    assert_eq!(
-        ModelRef::parse("openai/ 模型 /suffix").unwrap().model(),
-        " 模型 /suffix"
-    );
-}
-
-#[test]
-fn model_reference_model_byte_limit_is_independent_of_provider_length() {
-    let provider = "a".repeat(MAX_PROVIDER_ID_BYTES);
-    let model = "é".repeat(MAX_MODEL_ID_BYTES / 2);
-    let reference = format!("{provider}/{model}");
-    assert_eq!(reference.len(), MAX_PROVIDER_ID_BYTES + 1 + 4_096);
-    ModelRef::parse(&reference).unwrap();
-    assert!(ModelRef::parse(&format!("{reference}a")).is_err());
 }

@@ -12,13 +12,17 @@ anyhow         = { workspace = true }
 futures        = { workspace = true }
 tokio          = { workspace = true }
 ratatui        = { workspace = true }
-crossterm      = { workspace = true, features = ["event-stream"] }
+# use-dev-tty：crossterm 默认的 mio 后端在同一批 epoll 事件里遇到 SIGWINCH 时会丢掉 tty 的就绪通知
+# （crossterm-rs/crossterm#1126），按键会卡住直到下一次输入。use-dev-tty 改用电平触发的 poll 后端。
+# 上游修复后移除这个 feature。
+crossterm      = { workspace = true, features = ["event-stream", "use-dev-tty"] }
 unicode-width  = { workspace = true }
 pulldown-cmark = { workspace = true }
 syntect       = { workspace = true }
 two-face      = { workspace = true }
 
 [dev-dependencies]
+lattice-api = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 # `test-util` (paused clock) is not part of tokio's `full`; it is what lets the

@@ -4,7 +4,7 @@
 //! 视图推送、历史查询与回执的消费：条目按 NodeId 维护，状态消息按是否新到进入 Dock 或对话记录。
 use super::fixtures::*;
 use super::*;
-use lattice_api::local::LocalErrorKind;
+use lattice_api::local::{CostEstimate, LocalErrorKind, UsageCompleteness::*};
 
 fn turn(n: u64) -> TurnId {
     numbered_turn(n)
@@ -75,9 +75,175 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     // 状态消息出现后不移动：第 2 步原位更新，第 3 步接在提示之后。
     assert!(row(&app, "draft answer final") < row(&app, "between"));
     assert!(row(&app, "between") < row(&app, "second step"));
-    assert_eq!(app.model.as_deref(), Some("model-a"));
-    assert_eq!(app.provider.as_deref(), Some("openai"));
+    assert_eq!(
+        app.current_head().model.as_ref().map(ModelId::as_str),
+        Some("model-a")
+    );
+    assert_eq!(
+        app.current_head().provider.as_ref().map(ProviderId::as_str),
+        Some("openai")
+    );
     assert_eq!(app.context_tokens, Some(1234));
+    assert_eq!(app.turn_usage.as_ref().unwrap().attempts, 2);
+    assert_eq!(app.turn_usage.as_ref().unwrap().input.known, Some(1234));
+    assert!(!app.turn_usage.as_ref().unwrap().input.complete);
+    assert_eq!(app.turn_usage.as_ref().unwrap().partial_attempts, 2);
+    let mut cache_only = step(3, t, 1).completed_attempt(0).entry();
+    if let ConversationEntry::Step {
+        content: Node::Step { attempts, .. },
+        ..
+    } = &mut cache_only
+    {
+        let usage = serde_json::from_value(serde_json::json!({"input":null,"cache_read":5,"cache_write":null,"output":null,"reasoning":null})).unwrap();
+        attempts[0].usage = usage;
+    }
+    app.apply_view(entry_update(cache_only));
+    assert_eq!(
+        app.context_tokens, None,
+        "最近报告的输入与输出均未知时不回退到旧上下文"
+    );
+}
+
+#[test]
+fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
+    use serde_json::json;
+    let mut app = test_app(true);
+    let current = step(4, turn(2), 0)
+        .completed_attempt(0)
+        .metering(
+            json!({"input":900,"output":90,"cache_read":600}),
+            Complete,
+            Some((0.03, true)),
+        )
+        .finished()
+        .entry();
+    // 条目的两份尝试投影都携带同一计量；本轮只消费节点中的一份。
+    let mut projected = serde_json::to_value(&current).unwrap();
+    projected["step"]["attempts"] = json!([{
+        "attempt":0,"origin":{"protocol":"chat-completions","provider_id":"openai"},
+        "usage":projected["content"]["attempts"][0]["usage"],"usage_kind":"complete","cost":{"usd":0.03,"exact":true},
+        "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
+        "end":{"end":"completed","step":{"session_id":SESSION,"turn_id":turn(2),"model_step_ordinal":0}},
+        "retry_delay_ms":null
+    }]);
+    let current: ConversationEntry = serde_json::from_value(projected).unwrap();
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(turn(2)), false)));
+    app.apply_view(entry_update(user(3, turn(2), 2, "recent")));
+    assert!(
+        app.turn_usage.is_none(),
+        "初始条目尚未到齐，不能显示无请求或完整小计"
+    );
+    app.apply_view(entry_update(current.clone()));
+    let original = app.turn_usage.clone().unwrap();
+    assert_eq!(original.attempts, 1);
+    assert_eq!(original.input.known, Some(900));
+    assert_eq!(app.context_tokens, Some(990));
+
+    let older = step(2, turn(1), 0)
+        .completed_attempt(0)
+        .metering(
+            json!({"input":300,"output":30}),
+            Complete,
+            Some((0.02, true)),
+        )
+        .finished()
+        .entry();
+    app.apply_older(
+        OlderRequest {
+            session_id: sid(),
+            before: NodeId(3),
+            epoch: app.epoch,
+        },
+        Ok(LocalHistory {
+            entries: vec![user(1, turn(1), 1, "older"), older.clone()],
+        }),
+    );
+    assert_eq!(app.turn_usage.as_ref(), Some(&original));
+    assert_eq!(app.context_tokens, Some(990));
+
+    open_view(
+        &mut app,
+        head(4, Some(turn(2)), false),
+        vec![
+            user(1, turn(1), 1, "older"),
+            older.clone(),
+            user(3, turn(2), 2, "recent"),
+            current,
+        ],
+    );
+    assert_eq!(
+        app.turn_usage.as_ref(),
+        Some(&original),
+        "重连从初始条目重建"
+    );
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(2, Some(turn(1)), false)
+    }));
+    assert!(app.turn_usage.is_none());
+    assert_eq!(app.context_tokens, None);
+    app.apply_view(entry_update(user(1, turn(1), 1, "older")));
+    assert!(app.turn_usage.is_none());
+    app.apply_view(entry_update(older));
+    assert_eq!(app.turn_usage.as_ref().unwrap().input.known, Some(300));
+    assert_eq!(app.context_tokens, Some(330));
+
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(1, Some(turn(1)), false)
+    }));
+    app.apply_view(entry_update(user(1, turn(1), 1, "older")));
+    let empty = app.turn_usage.as_ref().unwrap();
+    assert_eq!(empty.attempts, 0);
+    assert_eq!(
+        empty.cost.known,
+        Some(CostEstimate {
+            usd: 0.0,
+            exact: true
+        })
+    );
+    assert_eq!(app.context_tokens, None);
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        ..head(0, None, false)
+    }));
+    assert!(app.turn_usage.is_none());
+}
+
+#[test]
+fn context_uses_the_latest_normalized_report_without_overflow_or_fallback() {
+    use serde_json::json;
+    let mut app = test_app(true);
+    let id = turn(1);
+    open_view(
+        &mut app,
+        head(3, Some(id), true),
+        vec![
+            user(1, id, 1, "prompt"),
+            step(2, id, 0).completed_attempt(1234).continued().entry(),
+            step(3, id, 1).sent().entry(),
+        ],
+    );
+    for (usage, context) in [
+        (json!({"input":7}), Some(7)),
+        (json!({"cache_read":5}), None),
+        (json!({"input":u64::MAX,"output":1}), None),
+    ] {
+        app.apply_view(entry_update(
+            step(3, id, 1)
+                .completed_attempt(0)
+                .metering(usage, Partial, None)
+                .entry(),
+        ));
+        assert_eq!(app.context_tokens, context);
+    }
+    app.apply_view(entry_update(step(3, id, 1).sent().entry()));
+    assert_eq!(
+        app.context_tokens,
+        Some(1234),
+        "没有报告的在途尝试不替换最近报告"
+    );
 }
 
 #[test]
@@ -87,7 +253,7 @@ fn own_submission_user_block_is_replaced_by_its_user_message() {
     app.input.set_text("hello there");
     assert_eq!(app.submit().as_deref(), Some("hello there"));
     let (t, session) = app.submission_identity().unwrap();
-    assert_eq!(session, SubmitSession::Existing(sid()));
+    assert_eq!(session, sid());
     let user_line = |app: &App| {
         transcript(app)
             .lines()
@@ -209,73 +375,6 @@ fn steps_after_an_unaccepted_user_block_get_their_own_assistant_title() {
 }
 
 #[test]
-fn recovery_not_found_is_an_error_and_returns_the_input() {
-    for keep_draft in [false, true] {
-        let mut app = test_app(false);
-        app.input.set_text("first");
-        app.submit().unwrap();
-        let (first, _) = app.submission_identity().unwrap();
-        app.apply_submission(receipt(first, SubmissionResult::Unknown { error: None }));
-        app.input.set_text("second");
-        app.submit().unwrap();
-        let (second, _) = app.submission_identity().unwrap();
-        app.apply_submission(receipt(
-            second,
-            SubmissionResult::Rejected {
-                error: LocalError {
-                    conflict: Some(lattice_api::local::ConflictReason::SessionExists),
-                    ..local_error(LocalErrorKind::Conflict, "session exists")
-                },
-            },
-        ));
-        assert_eq!(app.recover_request.take(), Some(first));
-        // 第二条被拒后已放回输入区；用户清空时第一条才放回。
-        assert_eq!(app.input.text(), "second");
-        if !keep_draft {
-            app.input.clear();
-        }
-        app.apply_recovery(first, Err(local_error(LocalErrorKind::NotFound, "no turn")));
-        let error = app.dock.message().unwrap();
-        assert_eq!(error.level, NoticeLevel::Error);
-        assert!(
-            error.text.contains("未被接受") && error.text.contains(&first.to_string()),
-            "{}",
-            error.text
-        );
-        if keep_draft {
-            assert_eq!(app.input.text(), "second", "不覆盖输入区已有的内容");
-            assert!(error.text.contains("Ctrl+↑"), "{}", error.text);
-        } else {
-            assert_eq!(app.input.text(), "first", "提交确定未被接受，输入保留");
-            assert!(error.text.contains("输入已保留"), "{}", error.text);
-        }
-        assert_eq!(app.phase, TurnPhase::Idle);
-        // 查无此请求的一次没有建立会话：之后的提交再遇到会话已存在，不再找回它。
-        app.submit().unwrap();
-        let (third, _) = app.submission_identity().unwrap();
-        app.apply_submission(receipt(
-            third,
-            SubmissionResult::Rejected {
-                error: LocalError {
-                    conflict: Some(lattice_api::local::ConflictReason::SessionExists),
-                    ..local_error(LocalErrorKind::Conflict, "session exists")
-                },
-            },
-        ));
-        assert_eq!(app.recover_request, None);
-        // 再次查到它不存在时已没有可归还的输入，提示不写输入的去向。
-        app.apply_recovery(first, Err(local_error(LocalErrorKind::NotFound, "no turn")));
-        let error = app.dock.message().unwrap();
-        assert!(error.text.contains("未被接受"), "{}", error.text);
-        assert!(
-            !error.text.contains("输入已保留") && !error.text.contains("Ctrl+↑"),
-            "{}",
-            error.text
-        );
-    }
-}
-
-#[test]
 fn unknown_submission_is_dropped_once_the_result_is_definite() {
     let handoff = |id, result| DetachReport {
         session_id: sid(),
@@ -291,7 +390,7 @@ fn unknown_submission_is_dropped_once_the_result_is_definite() {
         head: None,
         summary: None,
     };
-    for how in 0..5 {
+    for how in 0..4 {
         let mut app = test_app(true);
         open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
         app.input.set_text("mine");
@@ -302,8 +401,7 @@ fn unknown_submission_is_dropped_once_the_result_is_definite() {
         match how {
             0 => app.apply_submission(receipt(id, accepted(id))),
             1 => app.apply_view(entry_update(user(3, id, 2, "mine"))),
-            2 => app.apply_recovery(id, Ok(turn_detail(id))),
-            3 => app.apply_handoff(handoff(id, accepted(id))),
+            2 => app.apply_handoff(handoff(id, accepted(id))),
             _ => app.apply_handoff(handoff(
                 id,
                 SubmissionResult::Rejected {
@@ -1140,5 +1238,384 @@ fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
         detach_lines(headless(), Viewed::Ended)
             .join("\n")
             .contains(&outcome)
+    );
+}
+
+#[test]
+fn current_model_comes_from_head_after_rewind_and_root() {
+    let mut app = test_app(true);
+    let mut current = head(2, Some(turn(1)), false);
+    current.agent = "latest-copy-agent".into();
+    current.model = Some(ModelId::parse("latest-copy-model").unwrap());
+    current.provider = Some(ProviderId::parse("latest-provider").unwrap());
+    current.effort = Some(lattice_api::Effort::Low);
+    open_view(&mut app, current.clone(), turns(1..=1));
+    assert_eq!(
+        app.current_target()
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("latest-provider/latest-copy-model")
+    );
+    assert_eq!(app.current_effort(), Some(lattice_api::Effort::Low));
+    assert_eq!(app.current_agent(), "latest-copy-agent");
+    current.position = NodeId(0);
+    current.turn_id = None;
+    current.path_replaced = true;
+    app.apply_view(LocalUpdate::Head(current));
+    assert_eq!(
+        app.current_target()
+            .as_ref()
+            .map(ToString::to_string)
+            .as_deref(),
+        Some("latest-provider/latest-copy-model")
+    );
+    assert_eq!(app.current_effort(), Some(lattice_api::Effort::Low));
+    app.apply_submission(receipt(turn(1), accepted(turn(1))));
+    assert_eq!(
+        app.current_agent(),
+        "latest-copy-agent",
+        "迟到回执不覆盖会话头的当前身份"
+    );
+}
+
+#[test]
+fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
+    use lattice_api::{Effort::Low, ModelCandidateQuery, ModelCandidates, ModelRef};
+    let mut app = test_app(false);
+    app.apply_builtin("/model");
+    let closed = app.model_query.take().unwrap();
+    assert_eq!(
+        closed.query,
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true
+        }
+    );
+    app.apply_action(KeyAction::Clear);
+    app.apply_models(
+        closed.clone(),
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "stale", &[])],
+            warnings: vec![],
+        }),
+    );
+    assert!(app.dock.shows_input(), "迟到成功不能重开面板");
+    app.apply_builtin("/model");
+    let current = app.model_query.take().unwrap();
+    assert_eq!(
+        current.query,
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true
+        }
+    );
+    app.apply_models(
+        current,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "fresh", &[Low])],
+            warnings: vec![],
+        }),
+    );
+    app.apply_models(
+        closed.clone(),
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "stale", &[])],
+            warnings: vec![],
+        }),
+    );
+    app.apply_models(
+        closed,
+        Err(local_error(LocalErrorKind::Transport, "stale failure")),
+    );
+    assert!(app.dock.message_id().is_none(), "迟到失败不能发 Warn");
+    app.apply_action(KeyAction::Submit);
+    let pending = app
+        .configure_request
+        .take()
+        .expect("选定新候选应发出 configure 请求");
+    assert_eq!(
+        pending.model,
+        Some(ModelRef::parse("p/fresh").unwrap()),
+        "旧响应不能取代新候选"
+    );
+    let mut configured = head(0, None, false);
+    configured.provider = Some(ProviderId::parse("p").unwrap());
+    configured.model = Some(ModelId::parse("fresh").unwrap());
+    app.apply_configure(
+        pending.generation,
+        Ok(ConfigureReply {
+            head: configured,
+            adjustment: None,
+        }),
+    );
+    app.apply_builtin("/effort");
+    let old_effort = app.model_query.take().unwrap();
+    assert_eq!(
+        old_effort.query,
+        ModelCandidateQuery::Target(ModelRef::parse("p/fresh").unwrap())
+    );
+    app.apply_action(KeyAction::Clear);
+    // 已有会话当前模型不在普通列表也可以精确查询。
+    let mut current = head(0, None, false);
+    current.model = Some(ModelId::parse("deprecated").unwrap());
+    app.apply_view(LocalUpdate::Head(current));
+    app.apply_builtin("/effort");
+    let current = app.model_query.take().unwrap();
+    assert_eq!(
+        current.query,
+        ModelCandidateQuery::Target(ModelRef::parse("openai/deprecated").unwrap())
+    );
+    let mut changed = head(0, None, false);
+    changed.provider = Some(ProviderId::parse("other").unwrap());
+    changed.model = Some(ModelId::parse("unknown/model").unwrap());
+    app.apply_view(LocalUpdate::Head(changed));
+    let changed = app.model_query.take().unwrap();
+    assert_eq!(
+        changed.query,
+        ModelCandidateQuery::Target(ModelRef::parse("other/unknown/model").unwrap())
+    );
+    app.apply_models(
+        current,
+        Err(local_error(
+            LocalErrorKind::Transport,
+            "wrong model failure",
+        )),
+    );
+    app.apply_models(
+        old_effort,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "fresh", &[Low])],
+            warnings: vec![],
+        }),
+    );
+    assert!(app.dock.message_id().is_none());
+    app.apply_models(
+        changed,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("other", "unknown/model", &[])],
+            warnings: vec![],
+        }),
+    );
+    assert!(app.apply_action(KeyAction::Submit).is_none());
+    assert!(!app.dock.shows_input(), "无可选档位的说明不能被选定");
+    app.apply_action(KeyAction::Clear);
+    app.apply_builtin("/model");
+    let failed = app.model_query.take().unwrap();
+    app.apply_models(
+        failed,
+        Err(local_error(LocalErrorKind::Transport, "current failure")),
+    );
+    assert!(docked(&app).contains("current failure"));
+    app.apply_action(KeyAction::Insert(' '));
+    assert!(app.dock.shows_input());
+}
+
+#[test]
+fn failed_tool_renders_tool_error_message() {
+    let mut app = test_app(true);
+    let t = turn(1);
+    open_view(
+        &mut app,
+        head(2, Some(t), false),
+        vec![
+            user(1, t, 1, "check file"),
+            step(2, t, 0)
+                .failed_tool(1, "permission_denied", "工作区路径被策略拒绝")
+                .finished()
+                .entry(),
+        ],
+    );
+    assert_eq!(
+        tool_states(&app),
+        vec![ToolState::Failed {
+            output_len: 0,
+            error: Some("工作区路径被策略拒绝".into()),
+        }],
+        "工具失败块应保存 ToolError.message"
+    );
+    let text = transcript(&app);
+    assert!(
+        text.contains("工作区路径被策略拒绝"),
+        "对话记录应展开显示 ToolError.message：{text}"
+    );
+}
+
+#[test]
+fn configure_adjustment_shows_info_and_busy_shows_warn() {
+    use lattice_api::{
+        Effort::{High, Low, Medium},
+        ModelCandidates,
+    };
+    let mut startup = App::new(
+        SessionContext {
+            session_id: sid(),
+            initial_head: head(0, None, false),
+            initial_adjustment: Some(lattice_api::local::EffortAdjustment {
+                from: Some(High),
+                to: Some(Medium),
+            }),
+        },
+        false,
+        Path::new("/nonexistent-tui-test-history"),
+    );
+    assert!(
+        startup.dock.message().is_none(),
+        "启动时的 adjustment 是 Info，不暂驻 Dock"
+    );
+    assert!(
+        transcript(&startup).contains("由 high 改为 medium"),
+        "启动时的 adjustment 应进入对话记录：{}",
+        transcript(&startup)
+    );
+
+    let choose_model = |app: &mut App| -> u64 {
+        app.apply_builtin("/model");
+        let q = app.model_query.take().unwrap();
+        app.apply_models(
+            q,
+            Ok(ModelCandidates {
+                models: vec![model_candidate("p", "next", &[Low])],
+                warnings: vec![],
+            }),
+        );
+        app.apply_action(KeyAction::Submit);
+        app.configure_request
+            .take()
+            .expect("选定模型应生成 configure 请求")
+            .generation
+    };
+
+    let g1 = choose_model(&mut startup);
+    let mut updated = head(0, None, false);
+    updated.provider = Some(ProviderId::parse("p").unwrap());
+    updated.model = Some(ModelId::parse("next").unwrap());
+    updated.effort = Some(Low);
+    startup.apply_configure(
+        g1,
+        Ok(ConfigureReply {
+            head: updated,
+            adjustment: Some(lattice_api::local::EffortAdjustment {
+                from: Some(Medium),
+                to: Some(Low),
+            }),
+        }),
+    );
+    assert!(
+        startup.dock.message().is_none(),
+        "configure 回复中的 adjustment 是 Info，不暂驻 Dock"
+    );
+    assert!(
+        transcript(&startup).contains("由 medium 改为 low"),
+        "adjustment 应写入 Info 状态行：{}",
+        transcript(&startup)
+    );
+
+    let g2 = choose_model(&mut startup);
+    startup.apply_configure(
+        g2,
+        Err(local_error(LocalErrorKind::Busy, "session is busy")),
+    );
+    let busy = startup.dock.message().expect("Busy 应作为 Warn 暂驻 Dock");
+    assert_eq!(busy.level, NoticeLevel::Warn);
+    assert!(
+        busy.text.contains("执行中不能修改设置"),
+        "Busy 应说明执行中不能修改设置：{}",
+        busy.text
+    );
+    startup.dock.release();
+
+    let g3 = choose_model(&mut startup);
+    startup.apply_configure(
+        g3,
+        Err(local_error(
+            LocalErrorKind::BadRequest,
+            "unsupported effort",
+        )),
+    );
+    let err = startup
+        .dock
+        .message()
+        .expect("配置拒绝应作为 Error 暂驻 Dock");
+    assert_eq!(err.level, NoticeLevel::Error);
+    assert!(err.text.contains("unsupported effort"), "{}", err.text);
+}
+
+#[test]
+fn settings_changed_rejection_restores_input_and_pauses_queue() {
+    let settings_changed = || LocalError {
+        conflict: Some(lattice_api::local::ConflictReason::SettingsChanged),
+        ..local_error(
+            LocalErrorKind::Conflict,
+            "session settings changed before turn acceptance",
+        )
+    };
+
+    // 手动立即发送遇到 SettingsChanged：归还输入、暂停队列并显示说明。
+    let mut manual = test_app(true);
+    let running = turn(1);
+    open_view(
+        &mut manual,
+        head(2, Some(running), true),
+        vec![
+            user(1, running, 1, "first"),
+            step(2, running, 0).sent().entry(),
+        ],
+    );
+    manual.input.set_text("queued later");
+    assert!(manual.submit().is_none());
+    assert!(!manual.queue.is_paused());
+    finish(&mut manual, running, "first");
+    // 先把自动发送取消或先在干净会话测试手动发送：这里在第二个有排队的会话上直接测试手动与自动。
+    let mut direct = test_app(true);
+    open_view(&mut direct, head(0, None, false), Vec::new());
+    direct.input.set_text("manual prompt");
+    assert_eq!(direct.submit().as_deref(), Some("manual prompt"));
+    let (manual_turn, _) = direct.submission_identity().unwrap();
+    direct.apply_submission(receipt(
+        manual_turn,
+        SubmissionResult::Rejected {
+            error: settings_changed(),
+        },
+    ));
+    assert_eq!(
+        direct.input.text(),
+        "manual prompt",
+        "手动提交被拒后保留输入"
+    );
+    assert!(direct.queue.is_paused(), "SettingsChanged 应暂停队列");
+    let msg = direct.dock.message().expect("SettingsChanged 应暂驻 Error");
+    assert_eq!(msg.level, NoticeLevel::Error);
+    assert!(
+        msg.text.contains("会话设置已变更"),
+        "应说明会话设置已变更：{}",
+        msg.text
+    );
+
+    // 自动发送排队消息遇到 SettingsChanged：消息回到队首、不覆盖草稿、暂停队列并显示说明。
+    manual.input.set_text("user draft");
+    let auto_prompt = manual.auto_submit().expect("上一轮完成后自动发送队首");
+    assert_eq!(auto_prompt, "queued later");
+    let (auto_turn, _) = manual.submission_identity().unwrap();
+    manual.apply_submission(receipt(
+        auto_turn,
+        SubmissionResult::Rejected {
+            error: settings_changed(),
+        },
+    ));
+    assert_eq!(
+        manual.input.text(),
+        "user draft",
+        "自动发送被拒不覆盖输入区草稿"
+    );
+    assert!(manual.queue.is_paused(), "SettingsChanged 应暂停队列");
+    let queued: Vec<_> = manual.queue.messages().map(|m| m.text.as_str()).collect();
+    assert_eq!(queued, vec!["queued later"], "被拒的排队消息放回队首");
+    let auto_msg = manual.dock.message().expect("SettingsChanged 应暂驻 Error");
+    assert_eq!(auto_msg.level, NoticeLevel::Error);
+    assert!(
+        auto_msg.text.contains("会话设置已变更"),
+        "应说明会话设置已变更：{}",
+        auto_msg.text
     );
 }

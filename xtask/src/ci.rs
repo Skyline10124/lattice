@@ -1,21 +1,24 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Local CI replica.
+//! 本地 CI 的复刻。
 //!
-//! Compile parallelism is capped via `CARGO_BUILD_JOBS` (default 4). The dev
-//! machine has 24 cores and runs a heavy desktop whose Electron apps massively
-//! over-reserve virtual address space; cargo's default of one rustc per core
-//! plus codegen allocation spikes has triggered global OOM during the compile
-//! phase (see docs/archive/records/FINDINGS.md "OOM: dev-machine compile-phase oversubscription").
-//! The cap bounds the compile footprint on oversubscribed hosts without
-//! slowing down resource-rich CI, where `CARGO_BUILD_JOBS` can be raised.
+//! 编译并发由 `CARGO_BUILD_JOBS` 限制，默认 4。一台 24 核开发机上常驻的 Electron
+//! 应用预留了极大的虚拟地址空间，cargo 默认每核一个 rustc，加上 codegen 的瞬时分配，
+//! 曾在编译阶段触发全局 OOM。限制并发后，编译占用在资源紧张的主机上有上限；资源充足的
+//! CI 可以调高 `CARGO_BUILD_JOBS`。原始记录见
+//! `git show ead22771^:docs/archive/records/FINDINGS.md` 中的 ENV-OOM-01。
 //!
-//! The test step runs one `cargo test -p <crate>` per workspace member in
-//! dependency order, each under a hard timeout. A single runaway (e.g. a
-//! network test hanging in a DNS-blackhole environment — see docs/archive/records/FINDINGS.md
-//! L-26-01) is bounded to its crate's budget and fails fast instead of
-//! hanging the whole gate indefinitely.
+//! 测试步骤按依赖顺序，对每个 workspace 成员单独运行 `cargo test -p <crate>`，每次都有
+//! 超时上限。某个 crate 失控时（例如网络测试在 DNS 黑洞环境里挂起），只耗尽它自己的时间
+//! 预算并快速失败，整个门禁随之结束。原始记录见
+//! `git show ead22771^:docs/archive/records/FIX.md` 中的 L-26-01。
+//!
+//! 门禁按两轮验证被测二进制：第一轮构建无测试 feature 的生产二进制并跑全部默认测试；
+//! 第二轮先检查测试 feature 下的 clippy，再用 `--features test-fake-tools,test-crash-barriers`
+//! 重新构建并覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 路径不变），随后运行假执行器与
+//! 全部 harness 目标（含假工具场景与崩溃屏障）。`xtask ci` 结束后，`target/debug/lattice`
+//! 留存的是第二轮带测试 feature 的构建产物。
 
 use std::env;
 use std::os::unix::process::CommandExt;
@@ -27,7 +30,7 @@ use anyhow::Context as _;
 use cargo_metadata::{Metadata, MetadataCommand, PackageId};
 use clap::Args;
 
-use crate::{harness_boundary, lancet_boundary, repo_root, tool_build, tool_codegen};
+use crate::{docs_check, harness_boundary, repo_root};
 
 #[derive(Args, Debug)]
 pub struct CiArgs {}
@@ -47,6 +50,8 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     let build_jobs = env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| DEFAULT_BUILD_JOBS.to_owned());
 
     step("toolchain precheck", check_toolchain)?;
+
+    step("docs-check", docs_check::run)?;
 
     step("fmt", || {
         run_cargo(&root, &["fmt", "--all", "--check"], &build_jobs)
@@ -77,15 +82,69 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
 
     step("system harness boundary", harness_boundary::run)?;
 
-    step("lancet boundary", lancet_boundary::run)?;
-
-    step("tool-codegen --check", tool_codegen::check)?;
-
     step("test", || {
         run_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
     })?;
 
-    step("tool-build --verify (warn-only)", tool_build::verify)?;
+    // 第二轮：检查测试专用 feature 的编译与 lint，再用带测试 feature 的产物覆盖同一个
+    // target/debug/lattice（LATTICE_BIN 不变），运行假执行器单元测试、假工具场景与崩溃屏障。
+    step("clippy (test features: product)", || {
+        run_cargo(
+            &root,
+            &[
+                "clippy",
+                "-p",
+                "lattice-api",
+                "-p",
+                "lattice-cli",
+                "--all-targets",
+                "--features",
+                "test-fake-tools,test-crash-barriers",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &build_jobs,
+        )
+    })?;
+
+    step("clippy (test features: harness)", || {
+        run_cargo(
+            &root,
+            &[
+                "clippy",
+                "-p",
+                "lattice-system-harness",
+                "--all-targets",
+                "--features",
+                "fake-tools,crash-barriers",
+                "--",
+                "-D",
+                "warnings",
+            ],
+            &build_jobs,
+        )
+    })?;
+
+    step("build lattice (debug, test features)", || {
+        run_cargo(
+            &root,
+            &[
+                "build",
+                "-p",
+                "lattice-cli",
+                "--bin",
+                "lattice",
+                "--features",
+                "test-fake-tools,test-crash-barriers",
+            ],
+            &build_jobs,
+        )
+    })?;
+
+    step("test (test features)", || {
+        run_feature_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
+    })?;
 
     println!();
     println!("\u{1b}[1;32mAll checks passed.\u{1b}[0m");
@@ -100,11 +159,7 @@ fn step(name: &str, run: impl FnOnce() -> anyhow::Result<()>) -> anyhow::Result<
     Ok(())
 }
 
-/// Assert the Source Tool build prerequisites (#5 slice B decision 1): the
-/// pinned rustc from `rust-toolchain.toml`, the `wasm32-unknown-unknown`
-/// target std, and the `wasm-tools` encoder. `tool-codegen`/`tool-build` and
-/// the guest crate both need the wasm target installed; a missing target would
-/// otherwise surface as an opaque linker error deep in `tool-build`.
+/// 核验 `rust-toolchain.toml` 固定的 `rustc` 版本，让工具链版本不符的主机在门禁开头快速失败。
 fn check_toolchain() -> anyhow::Result<()> {
     let rustc_out = Command::new("rustc")
         .arg("--version")
@@ -115,121 +170,11 @@ fn check_toolchain() -> anyhow::Result<()> {
         anyhow::bail!("`rustc --version` failed");
     }
     let version = String::from_utf8_lossy(&rustc_out.stdout);
-    // The pinned channel is 1.96.0 (rust-toolchain.toml). We assert the major
-    // minor so a host on an older stable fails the gate early with a clear
-    // message instead of a later wasmtime/wit-bindgen MSRV error.
     if !version.contains("1.96.0") {
         anyhow::bail!("pinned rustc 1.96.0 required; got: {version}");
     }
 
-    let targets = Command::new("rustup")
-        .args(["target", "list", "--installed"])
-        .stderr(Stdio::inherit())
-        .output()
-        .context("failed to run `rustup target list --installed`")?;
-    if !targets.status.success() {
-        anyhow::bail!("`rustup target list --installed` failed");
-    }
-    let installed = String::from_utf8_lossy(&targets.stdout);
-    if !installed
-        .lines()
-        .any(|l| l.trim() == "wasm32-unknown-unknown")
-    {
-        anyhow::bail!(
-            "wasm32-unknown-unknown target not installed; run `rustup target add wasm32-unknown-unknown`"
-        );
-    }
-
-    // `wasm-tools` is an implicit external build dependency: `tool-build`
-    // shells out to it to encode the core module into a Component and to
-    // validate the import surface. It is not a Cargo dependency, so nothing
-    // installs it for us, and the encoder determines the committed
-    // Component's bytes. Absence is fatal here (the gate's last step would
-    // fail anyway, but ~9 steps later); a version mismatch is a warning
-    // because reproducibility is still warn-only per #5 decision 1 / #73.
-    match probe_wasm_tools() {
-        WasmToolsProbe::Version(version) => {
-            if version != EXPECTED_WASM_TOOLS {
-                println!(
-                    "warn: wasm-tools {version} installed, expected {EXPECTED_WASM_TOOLS}; \
-                     Component digests may drift (see #73)"
-                );
-            }
-        }
-        WasmToolsProbe::NotOnPath => anyhow::bail!(
-            "wasm-tools not found on PATH; `cargo xtask tool-build` needs it to encode and \
-             validate Source Tool Components. Install {EXPECTED_WASM_TOOLS} (for example \
-             `cargo install wasm-tools --version {EXPECTED_WASM_TOOLS} --locked`)."
-        ),
-        // Present but unusable: reinstalling the same version is the wrong
-        // advice, so report what actually happened instead.
-        WasmToolsProbe::Failed(why) => anyhow::bail!(
-            "wasm-tools is on PATH but {why}; `cargo xtask tool-build` needs a working \
-             {EXPECTED_WASM_TOOLS} encoder. Repair the installation, then re-run."
-        ),
-    }
-
     Ok(())
-}
-
-/// The `wasm-tools` release the committed Component artifacts were encoded
-/// with. Three places must agree, each asserted by a test below: this constant,
-/// the pinned installer in `.github/workflows/full-gate.yml`, and the
-/// `[artifact] toolchain` fingerprint in `tools/*/manifest.toml`.
-pub(crate) const EXPECTED_WASM_TOOLS: &str = "1.254.0";
-
-/// Why `wasm-tools --version` could not be answered. Distinguished so the
-/// caller can tell a user to *install* the encoder versus *repair* it —
-/// collapsing all three into "not found on PATH" sends someone whose binary is
-/// present but broken off to do a reinstall that changes nothing.
-pub(crate) enum WasmToolsProbe {
-    Version(String),
-    NotOnPath,
-    Failed(String),
-}
-
-/// The installed `wasm-tools` version, or `None` when the binary is missing,
-/// exits non-zero, or prints output this can't parse. Prefer
-/// [`probe_wasm_tools`] when the distinction matters.
-pub(crate) fn wasm_tools_version() -> Option<String> {
-    match probe_wasm_tools() {
-        WasmToolsProbe::Version(v) => Some(v),
-        _ => None,
-    }
-}
-
-pub(crate) fn probe_wasm_tools() -> WasmToolsProbe {
-    let out = match Command::new("wasm-tools")
-        .arg("--version")
-        .stderr(Stdio::null())
-        .output()
-    {
-        Ok(out) => out,
-        // Only ENOENT means "not installed"; anything else (permissions, exec
-        // format) is a broken installation.
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return WasmToolsProbe::NotOnPath,
-        Err(e) => return WasmToolsProbe::Failed(format!("could not be executed: {e}")),
-    };
-    if !out.status.success() {
-        return WasmToolsProbe::Failed(format!(
-            "`wasm-tools --version` exited with {}",
-            out.status
-        ));
-    }
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    match parse_wasm_tools_version(&stdout) {
-        Some(v) => WasmToolsProbe::Version(v),
-        None => WasmToolsProbe::Failed(format!(
-            "`wasm-tools --version` printed unparseable output: {:?}",
-            stdout.trim()
-        )),
-    }
-}
-
-/// `wasm-tools --version` prints `wasm-tools <semver>`. Split out from the
-/// process call so the parse is unit-testable without the binary installed.
-fn parse_wasm_tools_version(stdout: &str) -> Option<String> {
-    stdout.split_whitespace().nth(1).map(str::to_owned)
 }
 
 fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow::Result<()> {
@@ -246,6 +191,13 @@ fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow:
     Ok(())
 }
 
+fn test_timeout_secs() -> u64 {
+    env::var("LATTICE_TEST_TIMEOUT_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(DEFAULT_TEST_TIMEOUT_SECS)
+}
+
 fn run_tests(
     root: &Path,
     lattice_bin: &Path,
@@ -257,10 +209,7 @@ fn run_tests(
         .exec()
         .map_err(|e| anyhow::anyhow!("failed to read workspace metadata: {e}"))?;
     let crates = ordered_test_crates(&metadata)?;
-    let timeout_secs = env::var("LATTICE_TEST_TIMEOUT_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(DEFAULT_TEST_TIMEOUT_SECS);
+    let timeout_secs = test_timeout_secs();
 
     println!();
     println!(
@@ -273,7 +222,7 @@ fn run_tests(
         match run_cargo_test(
             root,
             name,
-            &[],
+            None,
             build_jobs,
             lattice_bin,
             harness_failures,
@@ -297,24 +246,77 @@ fn run_tests(
     Ok(())
 }
 
+fn run_feature_tests(
+    root: &Path,
+    lattice_bin: &Path,
+    harness_failures: &Path,
+    build_jobs: &str,
+) -> anyhow::Result<()> {
+    let targets = [
+        ("lattice-api", "test-fake-tools,test-crash-barriers"),
+        ("lattice-system-harness", "fake-tools,crash-barriers"),
+    ];
+    let timeout_secs = test_timeout_secs();
+
+    println!();
+    println!(
+        "\u{1b}[1m── test (test features: {} crates, {build_jobs} build jobs, {timeout_secs}s/crate) ──\u{1b}[0m",
+        targets.len()
+    );
+
+    let mut failures: Vec<String> = Vec::new();
+    for (name, features) in targets {
+        let label = format!("{name} ({features})");
+        match run_cargo_test(
+            root,
+            name,
+            Some(features),
+            build_jobs,
+            lattice_bin,
+            harness_failures,
+            timeout_secs,
+        ) {
+            Ok(()) => println!("\u{1b}[0;32m✓\u{1b}[0m test {label}"),
+            Err(e) => {
+                println!("\u{1b}[0;31m✗\u{1b}[0m test {label}: {e}");
+                failures.push(label);
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        anyhow::bail!(
+            "带测试 feature 的 cargo test 在 {} 个目标上失败：{}",
+            failures.len(),
+            failures.join(", ")
+        );
+    }
+    Ok(())
+}
+
 fn run_cargo_test(
     root: &Path,
     crate_name: &str,
-    extra_libtest_args: &[&str],
+    features: Option<&str>,
     build_jobs: &str,
     lattice_bin: &Path,
     harness_failures: &Path,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
+    let cmd_desc = match features {
+        Some(f) => format!("cargo test -p {crate_name} --features {f}"),
+        None => format!("cargo test -p {crate_name}"),
+    };
     let mut cmd = Command::new("cargo");
     cmd.current_dir(root)
         .env("CARGO_BUILD_JOBS", build_jobs)
         .arg("test")
         .arg("-p")
-        .arg(crate_name)
-        .arg("--")
-        .args(extra_libtest_args)
-        .stdout(Stdio::inherit())
+        .arg(crate_name);
+    if let Some(features) = features {
+        cmd.arg("--features").arg(features);
+    }
+    cmd.stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
         // Put cargo in its own process group so a timeout can kill the whole
         // tree (cargo + rustc + test binaries) instead of orphaning them.
@@ -330,7 +332,7 @@ fn run_cargo_test(
     let deadline = Duration::from_secs(timeout_secs);
     let mut child = cmd
         .spawn()
-        .with_context(|| format!("failed to spawn `cargo test -p {crate_name}`"))?;
+        .with_context(|| format!("启动 `{cmd_desc}` 失败"))?;
     // `process_group(0)` makes the child its own pgrp leader, so its pid is the
     // pgrp id used to signal the whole tree on timeout.
     let pgid = child.id();
@@ -341,7 +343,7 @@ fn run_cargo_test(
                 if status.success() {
                     return Ok(());
                 }
-                anyhow::bail!("`cargo test -p {crate_name}` failed: {status}");
+                anyhow::bail!("`{cmd_desc}` 失败：{status}");
             }
             None => {
                 if start.elapsed() >= deadline {
@@ -356,8 +358,7 @@ fn run_cargo_test(
                     let _ = child.kill();
                     let _ = child.wait();
                     anyhow::bail!(
-                        "`cargo test -p {crate_name}` timed out after {timeout_secs}s \
-                         (set LATTICE_TEST_TIMEOUT_SECS to raise the bound)"
+                        "`{cmd_desc}` 在 {timeout_secs}s 后超时（可设置 LATTICE_TEST_TIMEOUT_SECS 提高上限）"
                     );
                 }
                 std::thread::sleep(Duration::from_millis(200));
@@ -431,55 +432,4 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
     }
 
     Ok(order)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The pinned version must stay in step with the installer in
-    /// `.github/workflows/full-gate.yml`; a silent divergence would make the
-    /// local gate warn on exactly the version CI uses (see #80).
-    #[test]
-    fn expected_wasm_tools_matches_the_full_gate_installer_pin() {
-        let root = repo_root::repo_root().unwrap();
-        let workflow =
-            std::fs::read_to_string(root.join(".github/workflows/full-gate.yml")).unwrap();
-        assert!(
-            workflow.contains(&format!("wasm-tools@{EXPECTED_WASM_TOOLS}")),
-            "full-gate.yml must install wasm-tools@{EXPECTED_WASM_TOOLS}"
-        );
-    }
-
-    /// The encoder determines the committed Component's bytes, so every
-    /// manifest's `[artifact] toolchain` fingerprint must name the encoder its
-    /// pinned `sha256` was produced with. Without this the fingerprint claims
-    /// to identify the build while omitting a factor that changes the digest
-    /// (see #80), and `EXPECTED_WASM_TOOLS` could be bumped without anyone
-    /// re-pinning the artifacts.
-    #[test]
-    fn every_tool_manifest_fingerprint_names_the_expected_wasm_tools() {
-        let root = repo_root::repo_root().unwrap();
-        let manifests =
-            crate::tool_codegen::discover_tool_manifests(&root).expect("discover manifests");
-        assert!(
-            !manifests.is_empty(),
-            "expected at least one tools/*/manifest.toml"
-        );
-        let needle = format!("wasm-tools-{EXPECTED_WASM_TOOLS}");
-        for manifest in manifests {
-            let raw = std::fs::read_to_string(&manifest).unwrap();
-            let toolchain = raw
-                .lines()
-                .find_map(|l| l.trim().strip_prefix("toolchain = "))
-                .unwrap_or_else(|| panic!("{} has no [artifact] toolchain", manifest.display()))
-                .trim_matches('"');
-            assert!(
-                toolchain.contains(&needle),
-                "{}: [artifact] toolchain is {toolchain:?}, which does not name {needle}; \
-                 re-run `cargo xtask tool-build` after changing the encoder pin",
-                manifest.display()
-            );
-        }
-    }
 }

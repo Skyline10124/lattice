@@ -94,6 +94,11 @@ impl ObserverSink {
         state.watchers.push(Arc::downgrade(&cursor));
         cursor
     }
+    pub(crate) fn has_watchers(&self) -> bool {
+        let mut state = self.state.lock().expect("observation lock");
+        state.watchers.retain(|watcher| watcher.strong_count() != 0);
+        !state.watchers.is_empty()
+    }
     fn mark(state: &mut ObservationState, nodes: &[NodeId], replace: bool) {
         state.watchers.retain(|watcher| {
             let Some(watcher) = watcher.upgrade() else {
@@ -228,18 +233,21 @@ impl ObserverSink {
             TurnEvent::ModelFinished { .. }
             | TurnEvent::ToolCallStarted { .. }
             | TurnEvent::ToolCallFinished { .. } => nodes.extend(state.current),
-            TurnEvent::CepCallStarted { .. } | TurnEvent::CepCallFinished { .. } => {}
         }
         Self::mark(&mut state, &nodes, false);
         #[cfg(test)]
         state.events.push(event);
         self.changed.send_replace(());
     }
+    #[cfg(test)]
+    pub(crate) fn notify_without_marking(&self) {
+        self.changed.send_replace(());
+    }
     /// 锁内只复制尚未发送的文字，再开启读事务，避免阻塞模型回调。
     pub(crate) fn capture(
         &self,
         store: &SessionStore,
-        session_id: lancet_protocol::SessionId,
+        session_id: lattice_conversation::SessionId,
         cursor: &Mutex<PushState>,
     ) -> lattice_session::store::Result<Vec<ViewUpdate>> {
         let (initial, reload, replaced, mut pending, attempt, head_changed) = {
@@ -287,20 +295,10 @@ impl ObserverSink {
                     }
                     view.entries.sort_by_key(|entry| entry.node());
                 }
-                let turn_id = view
-                    .entries
-                    .iter()
-                    .find(|entry| entry.node() == view.session.current)
-                    .and_then(|entry| content(entry).turn_id());
                 (
                     SessionHead {
-                        session_id,
-                        position: view.session.current,
-                        agent: view.current_agent,
-                        turn_id,
-                        owner: false,
-                        diagnostic: None,
                         path_replaced: replaced,
+                        ..session_head(&read, session_id)?
                     },
                     view.entries,
                 )
@@ -367,7 +365,7 @@ fn content(entry: &ConversationEntry) -> &Node {
 }
 fn session_record(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<lattice_session::store::SessionRecord> {
     read.find_session(session_id)?
         .ok_or_else(|| StoreError::NotFound {
@@ -377,7 +375,7 @@ fn session_record(
 }
 pub(crate) fn session_head(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<SessionHead> {
     let record = session_record(read, session_id)?;
     let current = read.path_node(session_id, record.current)?;
@@ -385,19 +383,27 @@ pub(crate) fn session_head(
 }
 fn head_from_node(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
     position: NodeId,
     current: &Node,
 ) -> lattice_session::store::Result<SessionHead> {
-    let agent = match current {
-        Node::Root => None,
-        Node::UserMessage { agent_name, .. } => Some(agent_name.clone()),
-        Node::Step { turn_id, .. } => Some(read.turn_agent(session_id, *turn_id)?),
+    let settings = read.session_settings(session_id)?;
+    let settings_version = settings.version()?;
+    let (provider, model) = match &settings.model {
+        Some(target) => (
+            Some(target.provider().clone()),
+            Some(target.model().clone()),
+        ),
+        None => (None, None),
     };
     Ok(SessionHead {
         session_id,
         position,
-        agent,
+        agent: settings.profile.agent_name.as_str().to_owned(),
+        model,
+        provider,
+        effort: settings.effort,
+        settings_version,
         turn_id: current.turn_id(),
         owner: false,
         diagnostic: None,

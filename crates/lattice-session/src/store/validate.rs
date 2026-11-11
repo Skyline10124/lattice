@@ -2,37 +2,25 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lancet_protocol::{CellEvidenceTriple, InvocationBinding, InvocationId, ModelMessageAddress};
 use lattice_conversation::{
-    BoundToolCall, MessageRole, MessageSemantic, NativeMessage, ProviderOrigin, RawToolCall,
-    ToolCallState, validate_tool_call_batch,
+    BoundToolCall, MessageRole, MessageSemantic, ModelMessageAddress, NativeMessage, ProviderId,
+    RawToolCall, ToolCallState, validate_tool_call_batch,
 };
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(super) fn provider_id(id: &str) -> Result<()> {
-    lattice_conversation::validate_provider_id(id)
-        .map_err(|error| invalid("provider", &error.to_string()))
-}
-
-pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &str) -> Result<()> {
-    provider_id(&origin.provider_id)?;
-    if origin.provider_id != provider {
+pub(super) fn attempt_origin(origin: &AttemptOrigin, provider: &ProviderId) -> Result<()> {
+    if &origin.provider_id != provider {
         return Err(invalid("origin", "attempt provider mismatch"));
     }
     Ok(())
 }
 
-pub(super) fn reply_protocol<S: ToolCallState>(
+pub(super) fn reply_origin<S: ToolCallState>(
     origin: &AttemptOrigin,
     message: &NativeMessage<S>,
 ) -> Result<()> {
-    let protocol = message.provider_origin.map(|origin| match origin {
-        ProviderOrigin::OpenAiCompatible => AttemptProtocol::ChatCompletions,
-        ProviderOrigin::Anthropic => AttemptProtocol::AnthropicMessages,
-        ProviderOrigin::Gemini => AttemptProtocol::GenerateContent,
-    });
-    if protocol.is_some_and(|p| p != origin.protocol) {
-        return Err(invalid("origin", "reply protocol mismatch"));
+    if message.provider_origin.as_ref() != Some(origin) {
+        return Err(invalid("origin", "reply source mismatch"));
     }
     Ok(())
 }
@@ -44,44 +32,11 @@ pub(super) fn stored_config(digest: &[u8; 32], stored: &StoredTurnConfig) -> Res
     if stored.digest()? != *digest {
         return Err(invalid("config", "stored configuration digest mismatch"));
     }
-    let rebuilt = ToolCatalogSnapshot::new(
-        stored.catalog.runtime_build_id.clone(),
-        stored.catalog.entries.clone(),
-    )
-    .map_err(|_| invalid("catalog", "invalid catalog entries"))?;
-    if rebuilt != stored.catalog
-        || stored.catalog.entries.iter().any(|e| {
-            e.descriptor_identity.len() != 64
-                || !e
-                    .descriptor_identity
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        })
-    {
-        return Err(invalid(
-            "catalog",
-            "catalog ordering or descriptor identity invalid",
-        ));
+    let rebuilt = ToolCatalogSnapshot::new(stored.catalog.entries.clone())
+        .map_err(|_| invalid("catalog", "工具目录条目无效"))?;
+    if rebuilt != stored.catalog {
+        return Err(invalid("catalog", "工具目录排序不一致"));
     }
-    Ok(())
-}
-
-pub(super) fn user_fields(
-    agent_name: &str,
-    model: &str,
-    provider_name: &str,
-    limits: &TurnExecutionLimits,
-) -> Result<()> {
-    if agent_name.is_empty()
-        || agent_name.len() > 128
-        || model.is_empty()
-        || model.len() > 4096
-        || !(1..=3600).contains(&limits.timeout_secs)
-    {
-        return Err(invalid("config", "configuration bound exceeded"));
-    }
-    limits.validate()?;
-    provider_id(provider_name)?;
     Ok(())
 }
 
@@ -89,12 +44,6 @@ pub(super) fn config(config: &FrozenTurnConfig) -> Result<()> {
     config
         .validate()
         .map_err(|_| invalid("config", "invalid frozen configuration"))?;
-    user_fields(
-        &config.agent_name,
-        &config.model,
-        &config.provider,
-        &config.limits,
-    )?;
     let stored = config.stored();
     let digest = stored.digest()?;
     stored_config(&digest, &stored)
@@ -113,7 +62,7 @@ pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<
             MessageSemantic::ToolCall { call } => Some(RawToolCall {
                 provider_call_id: call.provider_call_id().map(str::to_owned),
                 name: call.name().into(),
-                arguments: lancet_protocol::canonical_json(call.arguments()),
+                arguments: lattice_conversation::canonical_json(call.arguments()),
             }),
             _ => None,
         })
@@ -141,55 +90,11 @@ pub(super) fn diagnostic(cause: &StopCause, d: &AttemptDiagnostic) -> Result<()>
     Ok(())
 }
 
-pub(super) fn evidence(binding: &InvocationBinding, e: &CellEvidenceTriple) -> Result<()> {
-    use lancet_protocol::evidence::{
-        ADMISSION_EVIDENCE_VERSION, DENIED_OPERATIONS_RECORD_VERSION,
-        OBSERVED_EFFECTS_RECORD_VERSION,
-    };
-    if e.admission.version != ADMISSION_EVIDENCE_VERSION
-        || e.effects.version != OBSERVED_EFFECTS_RECORD_VERSION
-        || e.denied.version != DENIED_OPERATIONS_RECORD_VERSION
-        || e.admission.tool != binding.identity.method
-    {
-        return Err(invalid("evidence", "evidence version or method mismatch"));
-    }
-    let mut seq = BTreeSet::new();
-    if e.effects.effects.windows(2).any(|w| w[0].seq >= w[1].seq)
-        || e.denied.denied.windows(2).any(|w| w[0].seq >= w[1].seq)
-        || e.effects
-            .effects
-            .iter()
-            .map(|e| e.seq)
-            .chain(e.denied.denied.iter().map(|e| e.seq))
-            .any(|s| !seq.insert(s))
-    {
-        return Err(invalid("evidence", "invalid operation order"));
-    }
-    for names in [
-        &e.admission.approved_capabilities,
-        &e.admission.denied_capabilities,
-        &e.admission.boundary_excluded,
-    ] {
-        if names.windows(2).any(|w| w[0] >= w[1]) {
-            return Err(invalid("evidence", "capabilities not sorted and unique"));
-        }
-    }
-    Ok(())
-}
-
-pub(super) fn terminal(
-    binding: &InvocationBinding,
-    result: &StoredToolResult,
-    ev: &InvocationEvidence,
-) -> Result<()> {
+pub(super) fn terminal(binding: &InvocationBinding, result: &StoredToolResult) -> Result<()> {
     if result.invocation_id != binding.invocation_id || result.name != binding.identity.method {
         return Err(invalid("terminal", "result identity mismatch"));
     }
-    // 槽位只在 LANCET 实际返回后推进到 Terminal；未分发或无结果的槽位停在 Registered/Started。
-    let InvocationEvidence::Recorded(e) = ev else {
-        return Err(invalid("terminal", "missing receipt evidence"));
-    };
-    evidence(binding, e)?;
+    // 槽位只在执行器实际返回非 Deadline 结果后推进到 Terminal；未分发或无结果的槽位停在 Registered/Started。
     match &result.payload {
         ResultPayload::NotExecuted | ResultPayload::Indeterminate(IndeterminateCause::NoResult) => {
             return Err(invalid(
@@ -202,7 +107,7 @@ pub(super) fn terminal(
             digest,
             byte_length,
         }) => {
-            let bytes = lancet_protocol::canonical_json(value);
+            let bytes = lattice_conversation::canonical_json(value);
             if bytes.len() > MAX_TOOL_CONTENT_BYTES
                 || bytes.len() as u64 != *byte_length
                 || lattice_conversation::tool_content_digest(&bytes) != *digest
@@ -228,13 +133,13 @@ fn bound_reply(
     message: &NativeMessage<BoundToolCall>,
     slots: &[InvocationSlot],
 ) -> Result<()> {
-    reply_protocol(origin, message)?;
+    reply_origin(origin, message)?;
     if message.tool_calls().count() != slots.len() {
         return Err(invalid("slots", "reply/slot count mismatch"));
     }
     for ((ordinal, call), slot) in message.tool_calls().zip(slots) {
-        if let SlotProgress::Terminal { result, evidence } = &slot.progress {
-            terminal(&slot.binding, result, evidence)?;
+        if let SlotProgress::Terminal { result } = &slot.progress {
+            terminal(&slot.binding, result)?;
         }
         let entry = catalog
             .entries
@@ -253,34 +158,14 @@ fn bound_reply(
             || call.address != a
             || call.invocation_id != b.invocation_id
             || b.identity.method != call.name
-            || b.identity.descriptor_identity != entry.descriptor_identity
+            || b.identity.tool_identity != entry.tool_identity
             || b.identity.arguments_digest != call.arguments_digest
-            || call.arguments_digest != lancet_protocol::arguments_digest(&call.arguments)
+            || call.arguments_digest != lattice_conversation::arguments_digest(&call.arguments)
         {
             return Err(invalid("slots", "binding/reply mismatch"));
         }
     }
     Ok(())
-}
-
-pub(super) fn stage(progress: &SlotProgress) -> InvocationStage {
-    match progress {
-        SlotProgress::Registered => InvocationStage::Registered,
-        SlotProgress::Started => InvocationStage::Started,
-        SlotProgress::Terminal { .. } => InvocationStage::Terminal,
-    }
-}
-
-pub(super) fn invocation_transition(
-    previous: Option<InvocationStage>,
-    next: InvocationStage,
-) -> bool {
-    matches!(
-        (previous, next),
-        (None, InvocationStage::Registered)
-            | (Some(InvocationStage::Registered), InvocationStage::Started)
-            | (Some(InvocationStage::Started), InvocationStage::Terminal)
-    )
 }
 
 pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
@@ -293,6 +178,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
         parent: user_parent,
         turn_id,
         provider: provider_name,
+        limits,
         config_digest,
         ..
     }) = r.nodes.get(&(s, user_ref.node))
@@ -302,7 +188,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
         return Err(err());
     }
-    provider_id(provider_name).map_err(|_| err())?;
+    limits.validate().map_err(|_| err())?;
     let stored = r.configs.get(config_digest).ok_or_else(err)?;
     let steps = r.turn_steps(s, t)?;
     if steps.is_empty() {
@@ -346,6 +232,15 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
         }
         if let Some(reply) = reply {
             let completed = attempts.last().ok_or_else(err)?;
+            if !matches!(
+                completed.progress,
+                AttemptProgress::Ended {
+                    end: AttemptEnd::Completed,
+                    ..
+                }
+            ) {
+                return Err(err());
+            }
             bound_reply(
                 s,
                 &completed.origin,
@@ -420,7 +315,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
     let s = scope.session;
     let err = || corrupt("sessions", &s.to_string(), "invalid local relations");
     let Some(session) = r.sessions.get(&s) else {
-        return if r.turn_index.is_empty() && r.nodes.is_empty() {
+        return if r.turn_index.is_empty() && r.nodes.is_empty() && r.session_settings.is_empty() {
             Ok(())
         } else {
             Err(err())
@@ -435,6 +330,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
     for (digest, stored) in &r.configs {
         stored_config(digest, stored).map_err(|_| err())?;
     }
+    session_settings(r, s)?;
     for n in &scope.nodes {
         if r.nodes.contains_key(&(s, *n)) {
             node(r, s, *n)?;
@@ -471,14 +367,7 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
                     return Err(err());
                 }
                 let index = r.index.get(&id).ok_or_else(err)?;
-                let change = r.changes.get(&index.last_change).ok_or_else(err)?;
-                if index.address != slot.binding.identity.address()
-                    || index.last_change.0 == 0
-                    || index.last_change > r.last_change
-                    || change.sequence != index.last_change
-                    || change.invocation_id != id
-                    || change.stage != stage(&slot.progress)
-                {
+                if index.address != slot.binding.identity.address() {
                     return Err(err());
                 }
             }
@@ -509,6 +398,7 @@ pub(super) fn records(r: &Records) -> Result<()> {
                 "session identity/root/current mismatch",
             ));
         }
+        session_settings(r, *id)?;
         let mut expected = 0u64;
         for ((_, n), _) in r.nodes.range((*id, NodeId(0))..=(*id, NodeId(u64::MAX))) {
             if n.0 != expected {
@@ -516,6 +406,16 @@ pub(super) fn records(r: &Records) -> Result<()> {
             }
             expected = next_sequence(expected, "node")?;
         }
+    }
+    if r.session_settings
+        .keys()
+        .any(|id| !r.sessions.contains_key(id))
+    {
+        return Err(err(
+            "session_settings",
+            "set".into(),
+            "orphan session settings",
+        ));
     }
     let mut user_nodes = BTreeMap::new();
     let mut all_slots = BTreeMap::new();
@@ -574,58 +474,31 @@ pub(super) fn records(r: &Records) -> Result<()> {
             "index key set differs from slots",
         ));
     }
-    let mut previous: BTreeMap<InvocationId, (InvocationStage, ChangeSeq)> = BTreeMap::new();
-    let mut seq = 0;
-    for (key, change) in &r.changes {
-        seq = next_sequence(seq, "change")?;
-        if key.0 != seq || change.sequence != *key {
-            return Err(err(
-                "invocation_changes",
-                key.0.to_string(),
-                "non-contiguous changes",
-            ));
-        }
-        if !all_slots.contains_key(&change.invocation_id) {
-            return Err(err(
-                "invocation_changes",
-                key.0.to_string(),
-                "orphan change",
-            ));
-        }
-        let legal = invocation_transition(
-            previous.get(&change.invocation_id).map(|p| p.0),
-            change.stage,
-        );
-        if !legal {
-            return Err(err(
-                "invocation_changes",
-                key.0.to_string(),
-                "illegal lifecycle transition",
-            ));
-        }
-        previous.insert(change.invocation_id, (change.stage, *key));
-    }
-    if r.last_change != ChangeSeq(seq) {
-        return Err(err(
-            "meta",
-            "last_change_seq".into(),
-            "high water mark mismatch",
-        ));
-    }
     for (id, (_, slot)) in all_slots {
         let index = r
             .index
             .get(&id)
             .ok_or_else(|| err("invocation_index", id.to_string(), "missing index"))?;
-        if index.address != slot.binding.identity.address()
-            || previous.get(&id) != Some(&(stage(&slot.progress), index.last_change))
-        {
+        if index.address != slot.binding.identity.address() {
             return Err(err(
                 "invocation_index",
                 id.to_string(),
-                "index or latest change mismatch",
+                "index address mismatch",
             ));
         }
     }
+    Ok(())
+}
+
+fn session_settings(r: &Records, session: SessionId) -> Result<()> {
+    let error = || {
+        corrupt(
+            "session_settings",
+            &session.to_string(),
+            "invalid session settings",
+        )
+    };
+    let settings = r.session_settings.get(&session).ok_or_else(error)?;
+    settings.validate().map_err(|_| error())?;
     Ok(())
 }

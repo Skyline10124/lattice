@@ -1,15 +1,13 @@
 mod boundary_report;
 mod ci;
+mod docs_check;
 mod harness_boundary;
-mod lancet_boundary;
 #[cfg(feature = "model-metadata")]
 mod model_metadata;
 mod output;
 mod path_norm;
 mod repo_root;
 mod rollout;
-mod tool_build;
-mod tool_codegen;
 mod tui_mock;
 
 use clap::{Parser, Subcommand};
@@ -25,17 +23,13 @@ struct Cli {
 enum Commands {
     /// Local CI replica (fmt, clippy, build, harness boundary, test).
     Ci(ci::CiArgs),
-    /// Verify lattice-system-harness has no product-crate dependencies.
+    /// 检查 Markdown 相对链接的目标文件与锚点。
+    DocsCheck,
+    /// 检查 lattice-system-harness 不依赖产品 crate，且测试专用 feature 不进入生产依赖图。
     HarnessBoundary,
-    /// LANCET architecture boundary gate.
-    LancetBoundary,
     /// Generate the built-in model metadata snapshot from models.dev.
     #[cfg(feature = "model-metadata")]
     ModelMetadata,
-    /// Generate (or check) Source Tool artifacts from manifests.
-    ToolCodegen(tool_codegen::ToolCodegenArgs),
-    /// Build a Source Tool's WASM Component and pin its artifact hash.
-    ToolBuild(tool_build::ToolBuildArgs),
     /// Launch the real TUI against a deterministic local fake provider.
     TuiMock(tui_mock::TuiMockArgs),
     /// Alpha rollout gate: clean-worktree check, locked release build,
@@ -47,12 +41,10 @@ fn main() -> anyhow::Result<()> {
     let cli = Cli::parse();
     match cli.command {
         Commands::Ci(args) => ci::run(args),
+        Commands::DocsCheck => docs_check::run(),
         Commands::HarnessBoundary => harness_boundary::run(),
-        Commands::LancetBoundary => lancet_boundary::run(),
         #[cfg(feature = "model-metadata")]
         Commands::ModelMetadata => model_metadata::run(),
-        Commands::ToolCodegen(args) => tool_codegen::run(args),
-        Commands::ToolBuild(args) => tool_build::run(args),
         Commands::TuiMock(args) => tui_mock::run(args),
         Commands::Rollout(args) => rollout::run(args),
     }

@@ -1,26 +1,49 @@
 # lattice-tui 工作指引
 
-## 职责
+维护基于 `ratatui` 与 `crossterm` 的全屏终端界面，经 `lattice-api::local::LocalClient` 操作与观察当前会话，被 `lattice-cli` 的 `tui` 子命令调用。
 
-维护 ratatui/crossterm 全屏 TUI、输入、应用状态、对话记录与停靠区渲染，通过公开 LocalClient 操作与观察当前会话。CLI 参数解析和命令分派留在 lattice-cli，调用 `lattice_tui::run`；TUI 不反向依赖 CLI。
+## 模块
 
-## 上位文档
+| 模块 | 负责 |
+| --- | --- |
+| `src/lib.rs` | `TuiOptions` 与 `run` 入口，连接 `LocalClient` 并启动终端循环 |
+| `src/app.rs` | 主事件循环，持有 `LocalTurn`、会话视图、在途 `configure` 请求并调度查询与重绘 |
+| `src/session.rs` | 启动时经 `configure` 创建新会话或更新既有会话设置、核对项目绑定并将对话条目按节点与调用身份转换为 `Block` |
+| `src/connection.rs` | 将回执、`configure` 回复、会话头、连接与查询异常、重试提示、Turn 结局及 `DetachReport` 转换为定级状态消息与退出文案 |
+| `src/blocks.rs` | 扁平显示 `Block` 列表与按 `NodeId`、`InvocationId` 原位更新 |
+| `src/input.rs` | 输入区缓冲、按键处理、粘贴及 `<session_dir>/repl_history.txt` 纯文本历史读写 |
+| `src/comment.rs` | 助手正文块级锚定、`<lattice-comment>` 消息编解码与草稿管理 |
+| `src/queue.rs` | 运行中排队消息缓冲、入队设置版本记录、原地编辑、暂停与自动发出控制 |
+| `src/markdown.rs`、`src/wrapping.rs` | GFM 正文、代码块高亮、diff、表格解析及按显示宽度的统一折行 |
+| `src/view.rs`、`src/view/` | 统一 `content_w` 布局、viewport 与浏览光标（`browse.rs`）、评论卡片（`comments.rs`）、选择面板与 Dock（`dock.rs`）及 `statusline.rs` |
 
-修改前读取 [TUI 交互与视觉合同](../../docs/architecture/tui.md)。键位、布局尺寸、Dock 与 statusline、评论与排队、配色、折叠指示及非目标均由该合同维护；取消和持久结果读取[会话合同](../../docs/architecture/session.md)，测试读取[测试工程](../../docs/development/testing.md)。色表是[设计资产](../../docs/reference/cassette-futurism-palette.md)，不代替实际用色规则。
+## 先读
 
-## 局部约束
+| 修改的内容 | 读取 |
+| --- | --- |
+| 任何改动 | [TUI 交互与视觉](../../docs/architecture/tui/README.md)、[工程规范](../../docs/development/engineering.md) |
+| 布局尺寸与 statusline | [布局](../../docs/architecture/tui/layout.md) |
+| 对话记录、Markdown 与工具行 | [对话记录与工具显示](../../docs/architecture/tui/transcript.md) |
+| 输入区、状态栏模块与 `/model`、`/effort` 面板 | [Dock 与输入区](../../docs/architecture/tui/dock.md) |
+| 浏览光标、评论、排队与按键 | [浏览光标、评论、排队与键盘](../../docs/architecture/tui/interaction.md) |
+| 配色与色阶取值 | [配色与终端约定](../../docs/architecture/tui/palette.md)（实际用色规则）、[Cassette Futurism 配色资产](../../docs/reference/cassette-futurism-palette.md)（原始色值表） |
+| 取消、退出交接与持久结局 | [重开、取消与未完成状态](../../docs/architecture/session/recovery.md#取消与退出)、[测试工程](../../docs/development/testing.md) |
 
-- TUI 不读取 profile、provider 配置或凭据；配置问题在提交时由后台拒绝，显示 API 给出的配置拒绝说明，输入保留。既有会话与重连走只读入口。Component 预热与执行由后台所属 API 处理。
-- `/model` 与 `/effort` 的选择由 app 持有，随下一次提交交出，候选项来自后台的模型候选查询；面板、档位回退与 statusline 的规则见[选择面板](../../docs/architecture/tui.md#选择面板)。
-- session 负责打开已有会话及对话条目到 Block 的转换；新会话的 SessionId 在首次提交时生成，Session 在首次提交接受时创建。connection 生成状态消息的文字并定级，转换退出报告文案；等级只在这里决定，是否暂驻由 Dock 按等级判断，见[状态消息与等级](../../docs/architecture/tui.md#状态消息与等级)。app 持有本客户端一次提交的具体句柄 LocalTurn 与当前会话的视图，发出提交、`watch`、查询与取消，按 NodeId 维护条目的显示；连接、视图与查询的转交及分帧归 LocalClient。完整交接见 [TUI 组件接线](../../docs/architecture/tui.md#组件接线)。
-- input 负责缓冲、历史与按键，view 负责布局、折行、viewport、Dock 与 statusline。共享渲染归本 crate，目录和文件按职责组织。
-- raw 模式下 Ctrl+C 按 TurnId 取消：本客户端提交的一轮经 LocalTurn 登记取消意图，不另起 tokio::signal::ctrl_c watcher。退出、接受未知、视图推送与路径替换、往上翻取更早的轮、尝试边界与连接中断的完整显示规则归 TUI 合同。
-- REPL 历史尽力写入 `<session_dir>/repl_history.txt`，保持纯文本行格式。
-- 所有布局使用统一 content_w 和安全整数运算，具体不变量引用合同；运行状态的显示不是 Invocation 持久结果权威。
-- 目录组织调整不授权新增工具卡片或其他功能；卡片接线仍须以明确数据契约为依据。
+## 约束
 
-## 验证入口
+- 启动时新会话经 `configure(New)` 创建草稿会话，既有会话带 `--agent` 时经 `configure(Existing)` 更新设置，只读打开既有会话时核对项目绑定，进入事件循环即开始 `watch`；提交携带当前或入队时的 `expected_settings`（排队绑定规则见[排队](../../docs/architecture/tui/interaction.md#排队)），被配置拒绝或 `SettingsChanged` 冲突拒绝时展示说明并保留输入，见[启动、提交与运行](../../docs/architecture/tui/README.md#启动提交与运行)。
+- `/model` 与 `/effort` 候选项取自后台模型候选查询，选定后异步发出 `configure(Existing)`，statusline 与 `/effort` 面板直接读取会话头，见[选择面板](../../docs/architecture/tui/dock.md#选择面板)。
+- `connection.rs` 集中生成状态消息文案并决定等级，Dock 只按等级决定暂驻或常驻，组件间状态与句柄交接见[状态消息与等级](../../docs/architecture/tui/README.md#状态消息与等级)与[组件接线](../../docs/architecture/tui/README.md#组件接线)。
+- raw 模式下直接从终端输入事件捕获 `Ctrl+C`，经当前 `LocalTurn` 按 `TurnId` 发出取消意图，退出交接、视图推送替换、向上翻页与断连恢复显示按[连接、结局与重载](../../docs/architecture/tui/README.md#连接结局与重载)与[取消、退出与恢复提示](../../docs/architecture/tui/README.md#取消退出与恢复提示)执行。
+- `input.rs` 将已提交输入按纯文本行尽力写入 `<session_dir>/repl_history.txt`；所有布局统一以 `content_w` 和饱和整数运算计算几何尺寸，见[水平与垂直分配](../../docs/architecture/tui/layout.md#水平与垂直分配)。
+- 界面运行态仅反映实时观察进度，调用终态以会话库节点持久记录为准（失败工具显示 `ToolError.message`）；新增工具卡片或交互元素以明确的数据契约与[功能边界](../../docs/architecture/tui/README.md#功能边界)为依据。
+- 本 crate 之外：命令行参数解析与子命令分派由 `lattice-cli` 负责；IPC 连接分帧、profile/provider/凭据读取与持久 Turn 执行由 `lattice-api` 和 `lattice-llm` 负责。
 
-- 运行 `cargo test -p lattice-tui`。
-- 改了 UI 接线时，重新构建 lattice-cli，用当前产物运行 `pty_tui_smoke`；改了 CLI 表面时，再运行 `cargo test -p lattice-cli`。
-- 视觉与交互按合同在真实终端中人工核验，不能用布局计算或快照代替体验判断；操作步骤见[验证指南](../../docs/development/validation-guide.md)。
+## 验证
+
+| 改动 | 运行 |
+| --- | --- |
+| 任何改动 | `cargo test -p lattice-tui` |
+| 修改前后端接线、选择面板或取消流程 | 重新构建 `lattice-cli` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke` |
+| 修改 `TuiOptions` 或启动参数接口 | `cargo test -p lattice-cli` |
+| 修改布局、配色、折行或交互体验 | 按[验证指南](../../docs/development/validation-guide.md)在真实终端中人工核验视觉与交互表现 |

@@ -3,13 +3,140 @@
 
 use super::{ipc, types::*, *};
 use std::time::Duration;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::{UnixListener, UnixStream},
+};
 
 struct Peer {
     _directory: tempfile::TempDir,
     _instance: ipc::Instance,
     listener: UnixListener,
     client: LocalClient,
+}
+
+#[tokio::test]
+async fn credential_cleanup_preserves_each_remote_revocation_result() {
+    for revocation in [
+        RevocationStatus::Confirmed,
+        RevocationStatus::Unconfirmed,
+        RevocationStatus::NotNeeded,
+    ] {
+        for remove in [false, true] {
+            let peer = Peer::new();
+            let server = async {
+                let (mut wire, request) = peer.request().await;
+                assert!(match request {
+                    Request::AuthRemove { provider } if remove => provider == "chatgpt",
+                    Request::AuthLogout { provider } if !remove => provider == "chatgpt",
+                    _ => false,
+                });
+                wire.reply(if remove {
+                    Response::AuthRemoved(AuthRemoval {
+                        removed: true,
+                        revocation: Some(revocation),
+                    })
+                } else {
+                    Response::AuthLoggedOut(AuthLoggedOut { revocation })
+                })
+                .await;
+            };
+            let client = async {
+                if remove {
+                    let result = peer.client.auth_remove("chatgpt").await.unwrap();
+                    assert!(result.removed);
+                    assert_eq!(result.revocation, Some(revocation));
+                } else {
+                    assert_eq!(
+                        peer.client.auth_logout("chatgpt").await.unwrap(),
+                        revocation
+                    );
+                }
+            };
+            within(async { tokio::join!(client, server) }).await;
+        }
+    }
+}
+
+#[tokio::test]
+async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors() {
+    use serde_json::json;
+    for requested_query in [
+        ModelCandidateQuery::List {
+            provider: Some(ProviderId::parse("local").unwrap()),
+            ready_only: false,
+        },
+        ModelCandidateQuery::List {
+            provider: None,
+            ready_only: true,
+        },
+        ModelCandidateQuery::Target(ModelRef::parse("local/org/model").unwrap()),
+    ] {
+        let peer = Peer::new();
+        let is_target = matches!(requested_query, ModelCandidateQuery::Target(_));
+        let efforts = if is_target {
+            json!([])
+        } else {
+            json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
+        };
+        // 未配置与配置无效的模型随列表一并返回各自 availability。
+        let expected: crate::ModelCandidates = serde_json::from_value(json!({
+            "models":[{"provider":"local", "model":"org/model", "name":null, "context":null,
+                "output":null, "cost":null,
+                "availability":{"status":"unconfigured", "requirement":"api_key"},
+                "supported_efforts":efforts},
+                {"provider":"local", "model":"broken", "name":null, "context":null,
+                "output":null, "cost":null,
+                "availability":{"status":"invalid", "reason":"invalid effort"},
+                "supported_efforts":[]}],
+            "warnings":[{"provider":"local", "message":"catalog has no metadata"}]
+        }))
+        .unwrap();
+        assert_eq!(expected.models[0].provider, "local");
+        assert_eq!(expected.models[0].model, "org/model");
+        assert_eq!(
+            expected.models[0].availability,
+            crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey
+            }
+        );
+        assert_eq!(
+            expected.models[1].availability,
+            crate::Availability::Invalid {
+                reason: "invalid effort".into()
+            }
+        );
+        let expected_query = requested_query.clone();
+        let query = peer.client.models(requested_query);
+        let server = async {
+            let (mut wire, request) = peer.request().await;
+            match request {
+                Request::Models { query } => {
+                    assert_eq!(query, expected_query);
+                }
+                _ => panic!("expected models query"),
+            }
+            wire.reply(Response::Models(expected.clone())).await;
+        };
+        let (actual, ()) = within(async { tokio::join!(query, server) }).await;
+        assert_eq!(actual.unwrap(), expected);
+    }
+    let peer = Peer::new();
+    let missing = ModelCandidateQuery::Target(ModelRef::parse("missing/model").unwrap());
+    let expected_missing = missing.clone();
+    let server = async {
+        let (mut wire, request) = peer.request().await;
+        assert!(matches!(request, Request::Models { query } if query == expected_missing));
+        wire.reply(Response::Error(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "provider is not registered",
+        )))
+        .await;
+    };
+    let (result, ()) = within(async { tokio::join!(peer.client.models(missing), server) }).await;
+    let error = result.unwrap_err();
+    assert_eq!(error.kind, LocalErrorKind::BadRequest);
+    assert_eq!(error.message, "provider is not registered");
 }
 struct Wire {
     socket: UnixStream,
@@ -73,7 +200,7 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
         session_id: sid(),
         turn_id: id,
         user_node: NodeId(1),
-        agent_name: "local-test".into(),
+        agent_name: AgentName::parse("local-test").unwrap(),
         accepted_at: "2026-10-17T00:00:00Z".parse().unwrap(),
         ended_at: "2026-10-17T00:00:01Z".parse().unwrap(),
         summary: TurnSummary {
@@ -91,21 +218,28 @@ fn detail(id: TurnId, closed: bool) -> TurnDetail {
                 StepProgress::Reserved
             },
         },
-        usage: UsageSummary::Complete {
-            total: lattice_conversation::TokenUsage {
-                prompt_tokens: 0,
-                completion_tokens: 0,
-                total_tokens: 0,
-            },
-        },
+        usage: UsageSummary::from_attempts([(
+            Some(lattice_conversation::TokenUsage {
+                input: Some(0),
+                output: Some(0),
+                ..Default::default()
+            }),
+            lattice_conversation::UsageCompleteness::Partial,
+            None,
+        )])
+        .into(),
         steps: vec![],
     }
 }
 fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
+        model: Some(ModelId::parse("test").unwrap()),
+        provider: Some(ProviderId::parse("openai-compatible").unwrap()),
+        effort: None,
+        settings_version: serde_json::from_value(serde_json::json!("22".repeat(32))).unwrap(),
         session_id: sid(),
         position: NodeId(2),
-        agent: Some("local-test".into()),
+        agent: "local-test".into(),
         turn_id: Some(id),
         owner,
         diagnostic: None,
@@ -158,10 +292,10 @@ fn entry(id: TurnId, closed: bool) -> Box<ConversationEntry> {
 fn request(peer: &Peer, id: TurnId) -> TurnRequest {
     TurnRequest {
         turn_id: id,
-        session: SubmitSession::New(sid()),
+        session: sid(),
         workspace: peer._directory.path().into(),
         input: "原始输入".into(),
-        agent: Some("local-test".into()),
+        expected_settings: None,
     }
 }
 fn accepted(id: TurnId) -> Response {
@@ -190,19 +324,13 @@ async fn cancel_status(turn: &mut LocalTurn, expected: CancelStatus) {
     }
 }
 async fn submit(peer: &Peer, id: TurnId) -> (LocalTurn, Wire) {
-    let mut turn = peer.client.start_turn(
-        request(peer, id),
-        Ok(super::tests::frozen(
-            peer._directory.path(),
-            "http://127.0.0.1:1/v1",
-        )),
-    );
+    let mut turn = peer.client.start_turn(request(peer, id));
     assert!(
-        matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, session_id, new: true } } if turn_id == id && session_id == sid())
+        matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, session_id } } if turn_id == id && session_id == sid())
     );
     let (wire, request) = peer.request().await;
     assert!(
-        matches!(request, Request::Submit { request: TurnRequest { turn_id, session: SubmitSession::New(_), .. }, .. } if turn_id == id)
+        matches!(request, Request::Submit { request: TurnRequest { turn_id, session, .. }, .. } if turn_id == id && session == sid())
     );
     (turn, wire)
 }
@@ -273,13 +401,7 @@ async fn submission_only_preserves_external_completion_before_the_late_receipt()
     for closed in [false, true] {
         let peer = Peer::new();
         let id = new_turn_id();
-        let mut turn = peer.client.start_submission(
-            request(&peer, id),
-            Ok(super::tests::frozen(
-                peer._directory.path(),
-                "http://127.0.0.1:1/v1",
-            )),
-        );
+        let mut turn = peer.client.start_submission(request(&peer, id));
         next(&mut turn).await;
         let (mut wire, request) = peer.request().await;
         assert!(matches!(request, Request::Submit { .. }));
@@ -337,16 +459,11 @@ async fn accepted_submission_ignores_backlogged_views_until_its_user_message() {
         for root in [true, false] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let mut input = request(&peer, id);
-            input.session = SubmitSession::Existing(sid());
-            let configuration = Ok(super::tests::frozen(
-                peer._directory.path(),
-                "http://127.0.0.1:1/v1",
-            ));
+            let input = request(&peer, id);
             let mut turn = if own_view {
-                peer.client.start_turn(input, configuration)
+                peer.client.start_turn(input)
             } else {
-                peer.client.start_submission(input, configuration)
+                peer.client.start_submission(input)
             };
             next(&mut turn).await;
             let (mut submit, request) = peer.request().await;
@@ -457,13 +574,7 @@ async fn submission_only_keeps_receipts_recovery_and_cancel_without_a_watch() {
         for evidence_first in [false, true] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let mut turn = peer.client.start_submission(
-                request(&peer, id),
-                Ok(super::tests::frozen(
-                    peer._directory.path(),
-                    "http://127.0.0.1:1/v1",
-                )),
-            );
+            let mut turn = peer.client.start_submission(request(&peer, id));
             assert!(
                 matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, .. } } if turn_id == id)
             );
@@ -534,12 +645,13 @@ async fn configuration_rejection_has_identity_and_exactly_one_receipt() {
     let peer = Peer::new();
     let id = new_turn_id();
     let error = LocalError::new(LocalErrorKind::BadRequest, "configuration unavailable");
-    let mut turn = peer
-        .client
-        .start_turn(request(&peer, id), Err(error.clone()));
+    let mut turn = peer.client.start_turn(request(&peer, id));
     assert!(
         matches!(next(&mut turn).await, LocalUpdate::Submit { update: SubmissionUpdate::Sending { turn_id, .. } } if turn_id == id)
     );
+    let (mut wire, request) = peer.request().await;
+    assert!(matches!(request, Request::Submit { .. }));
+    wire.reply(Response::Error(error.clone())).await;
     let result = receipt(&mut turn).await;
     assert_eq!(result.result, SubmissionResult::Rejected { error });
     assert!(!result.recovered);
@@ -834,14 +946,15 @@ fn user_entry(id: TurnId) -> Box<ConversationEntry> {
         node: NodeId(1),
         ordinal: 1,
         content: Node::UserMessage {
+            effort: None,
             parent: NodeId(0),
             turn_id: id,
             accepted_at: detail(id, true).accepted_at,
-            agent_name: "local-test".into(),
-            model: "test".into(),
-            provider: "openai-compatible".into(),
+            agent_name: AgentName::parse("local-test").unwrap(),
+            model: ModelId::parse("test").unwrap(),
+            provider: ProviderId::parse("openai-compatible").unwrap(),
             limits: lattice_session::store::TurnExecutionLimits {
-                timeout_secs: 300,
+                timeout_secs: crate::TurnTimeout::default(),
                 max_model_steps: 32,
                 max_model_attempts: 2,
             },
@@ -918,19 +1031,12 @@ async fn late_acceptance_after_cancel_handoff_follows_the_submitted_turn() {
         for recover in [false, true] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let mut input = request(&peer, id);
-            input.session = SubmitSession::Existing(sid());
-            let mut turn = peer.client.start_turn(
-                input,
-                Ok(super::tests::frozen(
-                    peer._directory.path(),
-                    "http://127.0.0.1:1/v1",
-                )),
-            );
+            let input = request(&peer, id);
+            let mut turn = peer.client.start_turn(input);
             assert!(matches!(
                 next(&mut turn).await,
                 LocalUpdate::Submit {
-                    update: SubmissionUpdate::Sending { new: false, .. }
+                    update: SubmissionUpdate::Sending { .. }
                 }
             ));
             let (mut wire, _) = peer.request().await;
@@ -1094,15 +1200,10 @@ async fn late_definitive_receipts_notify_submission_only_but_keep_one_receipt_wi
         for outcome in ["accepted", "rejected", "not_accepted"] {
             let peer = Peer::new();
             let id = new_turn_id();
-            let configuration = Ok(super::tests::frozen(
-                peer._directory.path(),
-                "http://127.0.0.1:1/v1",
-            ));
             let mut turn = if own_view {
-                peer.client.start_turn(request(&peer, id), configuration)
+                peer.client.start_turn(request(&peer, id))
             } else {
-                peer.client
-                    .start_submission(request(&peer, id), configuration)
+                peer.client.start_submission(request(&peer, id))
             };
             next(&mut turn).await;
             let (mut submit, request) = peer.request().await;
@@ -1253,14 +1354,23 @@ async fn cancel_handoff_preserves_late_backend_rejection_separately_from_transpo
     }
 }
 #[tokio::test]
-async fn updates_round_trip_the_seven_record_shapes() {
+async fn updates_round_trip_the_record_shapes() {
     let id = new_turn_id();
     let updates = vec![
+        LocalUpdate::Configure {
+            session_id: sid(),
+            result: ConfigureResult::Configured {
+                head: head(id, false),
+                adjustment: Some(EffortAdjustment {
+                    from: Some(Effort::Max),
+                    to: Some(Effort::High),
+                }),
+            },
+        },
         LocalUpdate::Submit {
             update: SubmissionUpdate::Sending {
                 turn_id: id,
                 session_id: sid(),
-                new: true,
             },
         },
         LocalUpdate::Submit {
@@ -1294,6 +1404,7 @@ async fn updates_round_trip_the_seven_record_shapes() {
         },
     ];
     for (update, expected) in updates.into_iter().zip([
+        "configure",
         "submit",
         "submit",
         "head",
@@ -1391,13 +1502,7 @@ async fn clean_view_eof_and_a_partial_frame_failure_are_connection_records() {
 async fn cancel_before_sending_never_writes_a_submit_and_still_finishes_its_receipt() {
     let peer = Peer::new();
     let id = new_turn_id();
-    let mut turn = peer.client.start_turn(
-        request(&peer, id),
-        Ok(super::tests::frozen(
-            peer._directory.path(),
-            "http://127.0.0.1:1/v1",
-        )),
-    );
+    let mut turn = peer.client.start_turn(request(&peer, id));
     turn.cancel();
     assert!(matches!(
         next(&mut turn).await,
@@ -1441,4 +1546,105 @@ async fn reconnect_after_idle_starts_a_fresh_session_watch() {
         LocalUpdate::Head(SessionHead { owner: false, .. })
     ));
     assert_eq!(within(turn.detach()).await.head.unwrap().turn_id, Some(id));
+}
+
+async fn status_against(
+    backend: impl FnOnce(
+        tokio::net::UnixStream,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
+    + Send
+    + 'static,
+) -> LocalError {
+    within(async {
+        let directory = tempfile::tempdir().unwrap();
+        let layout = crate::StateLayout::in_state_root(directory.path());
+        let (_instance, listener) = ipc::Instance::bind(&layout).unwrap();
+        let listener = UnixListener::from_std(listener).unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            backend(stream).await;
+        });
+        let error = LocalClient::new(layout).status().await.unwrap_err();
+        server.await.unwrap();
+        error
+    })
+    .await
+}
+
+const OLDER_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
+const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
+
+/// 已发布的旧后台读到不认识的魔数就关连接，不回写任何字节；请求剩下的部分留在它的接收队列里。
+#[tokio::test]
+async fn status_hints_at_an_older_backend_that_drops_the_connection_mid_request() {
+    let error = status_against(|mut stream| {
+        Box::pin(async move {
+            let mut magic = [0; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            drop(stream);
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (LocalErrorKind::Transport, SILENT_CLOSE)
+    );
+}
+
+#[tokio::test]
+async fn status_hints_when_the_backend_reads_the_request_and_closes_without_replying() {
+    let error = status_against(|mut stream| {
+        Box::pin(async move {
+            let mut magic = [0; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            let len = stream.read_u32().await.unwrap() as usize;
+            stream.read_exact(&mut vec![0; len]).await.unwrap();
+            drop(stream);
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (LocalErrorKind::Transport, SILENT_CLOSE)
+    );
+}
+
+/// 从本版本起，后台读到别的魔数会先回写自己的魔数；更旧的魔数要明确报版本不兼容。
+#[tokio::test]
+async fn status_reports_an_older_backend_that_announces_its_magic() {
+    let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+    let error = status_against(move |mut stream| {
+        Box::pin(async move {
+            stream.write_all(&older).await.unwrap();
+            stream.write_u32(4).await.unwrap();
+            stream.write_all(b"null").await.unwrap();
+            let _held = stream;
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (LocalErrorKind::IncompatibleBackend, OLDER_BACKEND)
+    );
+}
+
+#[tokio::test]
+async fn status_reports_a_backend_newer_than_the_client() {
+    let newer = ipc::magic_for_version(ipc::PROTOCOL_VERSION + 1);
+    let error = status_against(move |mut stream| {
+        Box::pin(async move {
+            stream.write_all(&newer).await.unwrap();
+            stream.write_u32(4).await.unwrap();
+            stream.write_all(b"null").await.unwrap();
+            let _held = stream;
+        })
+    })
+    .await;
+    assert_eq!(
+        (error.kind, error.message.as_str()),
+        (
+            LocalErrorKind::IncompatibleBackend,
+            "the running backend is newer than this client; use the newer binary",
+        )
+    );
 }

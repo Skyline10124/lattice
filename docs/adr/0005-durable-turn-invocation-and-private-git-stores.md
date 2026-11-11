@@ -11,9 +11,11 @@ status: accepted
 - Implementation tracking: GitHub #141–#144 and #139
 - Superseded in part by: ADR 0006 (PendingTurn phases, the three-store layout, ModelAttempt events, the Interrupted outcome, Turn checkpoint and file Rewind; see ADR 0006 “与 ADR 0005 的关系”)
 - Amended in part by: ADR 0010 (in decision 7, the provider origin of opaque replay state becomes protocol plus provider id; see ADR 0010 [“与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系”](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系))
+- Superseded in part by: ADR 0009 (identity primitives move to `lattice-conversation`, and the Git store kernel, `workspace-history.git`, workspace lock, and LANCET dependency edges are removed; see ADR 0009 [“与其他 ADR 的关系”](0009-remove-legacy-lancet-tool-executor.md#与其他-adr-的关系))
+- Superseded in part by: ADR 0012 (in decision 2, `ProjectStoreKey` hash binding is replaced by canonical project path bytes stored on the Session record; see ADR 0012 [“与其他 ADR 的关系”](0012-backend-owns-session-settings.md#与其他-adr-的关系))
 
-> 承接说明：会话、对话、请求接受、PendingTurn、ResultDraft、重开及最终发布由[会话合同](../architecture/session.md#验证与承接)维护；调用身份、预留、分发、终态与操作员读取由 [LANCET 合同](../architecture/lancet.md#来源与承接范围)维护，Cell 证据由 [Cell 合同](../architecture/cell.md#来源与迁移边界)维护。
-> 项目寻址、三库布局、Git 内核、锁及位置能力由[存储合同](../architecture/storage.md#验证入口与承接)维护；项目全局 checkpoint、文件历史与 Rewind 由[工作区合同](../architecture/workspace.md#来源与承接范围)维护。
+> 承接说明：会话、对话、请求接受、PendingTurn、ResultDraft、重开及最终发布由[会话合同](../architecture/session/README.md#验证与承接)维护；调用身份、预留、分发、终态与操作员读取由 [LANCET 合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/lancet.md#来源与承接范围)维护，Cell 证据由 [Cell 合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/cell.md#来源与迁移边界)维护。
+> 项目寻址、三库布局、Git 内核、锁及位置能力由[存储合同](../architecture/storage.md#验证入口与承接)维护；项目全局 checkpoint、文件历史与 Rewind 由[工作区合同](https://github.com/Skyline10124/lattice/blob/4842b13a9aaaff9a86ea67ae90c13b02b9d5ee06/docs/architecture/workspace.md#来源与承接范围)维护。
 > 本 ADR 保留理由、取舍、历史与原有修订关系，不再作为当前实施流水。第 11 节的 ledger/high-water witness 与冷读复杂度由 LANCET 合同承接，第 12 节的 FinalizeBudget 及耦合由会话合同承接；资格化的现行 diagnostic-only 操作、manifest 单一来源和证据规则见 [InvocationStore 诊断指南](../development/invocation-store-diagnostics.md)。原批准、撤回与 campaign 数值/verdict 不因当前裁决改写。旧独立 admission-control 队列义务已由所有者废止，现有锁与实际等待计入预算的要求不变；旧开发状态重建步骤不是当前清理授权。
 
 ## Context
@@ -891,12 +893,12 @@ Layer 0:    lancet-protocol   net-guard   lattice-store
 Layer 0.5:  lattice-conversation(->lancet-protocol)
             lattice-llm(->net-guard,lattice-conversation)
 Layer 1:    lancet-catalog(->lancet-protocol)
-            lattice-profile(->lancet-protocol)
             lattice-agent(->lattice-llm,lattice-conversation)
             lattice-session(->lancet-protocol,lattice-conversation,lattice-store)
 Layer 2:    lancet-dispatch(->lancet-protocol,lancet-catalog)
             lancet-audit(->lancet-protocol,lancet-catalog,lattice-store)
             lancet-authority(->lancet-protocol,lancet-catalog,net-guard)
+            lattice-profile(->lancet-protocol,lattice-conversation,lattice-session)
 Layer 2.5:  lancet-cep(->lancet-protocol,lancet-catalog,lancet-dispatch)
             lancet-runtime(->lancet-protocol,lancet-dispatch,
                             lancet-authority,lattice-store)
@@ -921,11 +923,11 @@ After #34 removes `lancet-catalog`, `lancet-dispatch`, `lancet-cep`, and
 Layer 0:    lancet-protocol   net-guard   lattice-store
 Layer 0.5:  lattice-conversation(->lancet-protocol)
             lattice-llm(->net-guard,lattice-conversation)
-Layer 1:    lattice-profile(->lancet-protocol)
-            lattice-agent(->lattice-llm,lattice-conversation)
+Layer 1:    lattice-agent(->lattice-llm,lattice-conversation)
             lattice-session(->lancet-protocol,lattice-conversation,lattice-store)
 Layer 2:    lancet-audit(->lancet-protocol,lattice-store)
             lancet-authority(->lancet-protocol,net-guard)
+            lattice-profile(->lancet-protocol,lattice-conversation,lattice-session)
 Layer 2.5:  lancet-runtime(->lancet-protocol,lancet-authority,net-guard,
                             lattice-store)
 Layer 3:    lancet-api(->lancet-protocol,lancet-audit,lancet-authority,

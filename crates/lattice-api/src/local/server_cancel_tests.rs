@@ -14,6 +14,13 @@ pub(super) struct Gates {
     pub capture_checked: Mutex<Option<Gate>>,
     pub watch_wait: Mutex<Option<Gate>>,
     pub watch_done: Mutex<Option<Gate>>,
+    pub watch_waiting_owner: Mutex<Option<Gate>>,
+    pub cleanup_scanned: Mutex<Option<Gate>>,
+    pub cleanup_claimed: Mutex<Option<Gate>>,
+    /// 回执与排空之后、关闭 listener 之前。
+    pub listener_close: Mutex<Option<Gate>>,
+    /// socket 已撤下、实例锁尚未释放。
+    pub lock_release: Mutex<Option<Gate>>,
 }
 pub(super) fn arm(slot: &Mutex<Option<Gate>>) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entry) = oneshot::channel();
@@ -66,7 +73,7 @@ impl Provider {
                     while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); assert!(headers.len() <= 65_536); }
                     let headers = String::from_utf8(headers).unwrap();
                     let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse().unwrap())).unwrap();
-                    assert!(length < 1_048_576);
+                    assert!(length < 4 * 1024 * 1024);
                     let mut body = vec![0; length]; socket.read_exact(&mut body).await.unwrap();
                     requests.push(serde_json::from_slice(&body).unwrap());
                     if let Some(arrival) = arrival.take() { let _ = arrival.send(()); }
@@ -100,11 +107,26 @@ async fn backend() -> (
     super::super::LocalClient,
     tokio::task::JoinHandle<()>,
 ) {
+    backend_with_roots(vec![include_bytes!("test_root.der").to_vec()]).await
+}
+async fn backend_with_roots(
+    roots: Vec<Vec<u8>>,
+) -> (
+    tempfile::TempDir,
+    Arc<Backend>,
+    super::super::LocalClient,
+    tokio::task::JoinHandle<()>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(dir.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
-    let backend = Backend::new(layout.clone(), Some(dir.path().into()));
+    let backend = Backend::with_tls_roots(
+        layout.clone(),
+        Some(dir.path().into()),
+        roots,
+        Arc::new(crate::NoTools),
+    );
     let server = backend.clone();
     let task = tokio::spawn(async move {
         let mut connections = JoinSet::new();
@@ -122,27 +144,40 @@ async fn backend() -> (
     });
     (dir, backend, super::super::LocalClient::new(layout), task)
 }
-fn request(dir: &std::path::Path) -> TurnRequest {
-    TurnRequest {
-        turn_id: super::super::new_turn_id(),
-        session: SubmitSession::New(super::super::new_session_id()),
+fn configure_new(dir: &std::path::Path, sid: SessionId) -> ConfigureRequest {
+    ConfigureRequest {
+        session: ConfigureSession::New(sid),
         workspace: dir.into(),
-        input: "测试".into(),
-        agent: Some("local-test".into()),
+        agent: Some(AgentName::parse("local-test").unwrap()),
+        model: None,
+        effort: None,
     }
 }
-fn config(dir: &std::path::Path, endpoint: &str) -> super::super::FrozenConfiguration {
-    super::super::tests::frozen(dir, endpoint)
+fn raw_request(dir: &std::path::Path, sid: SessionId) -> TurnRequest {
+    TurnRequest {
+        turn_id: super::super::new_turn_id(),
+        session: sid,
+        workspace: dir.into(),
+        input: "测试".into(),
+        expected_settings: None,
+    }
 }
-fn invalid(dir: &std::path::Path) -> super::super::FrozenConfiguration {
-    let mut config = serde_json::to_value(config(dir, "http://127.0.0.1:1/v1")).unwrap();
-    config["profile_toml"] = serde_json::json!("invalid toml");
-    serde_json::from_value(config).unwrap()
+async fn create_request(client: &super::super::LocalClient, dir: &std::path::Path) -> TurnRequest {
+    let sid = super::super::new_session_id();
+    client.configure(configure_new(dir, sid)).await.unwrap();
+    raw_request(dir, sid)
+}
+fn config(dir: &std::path::Path, endpoint: &str) {
+    super::super::tests::configure(dir, endpoint);
+}
+fn invalid(dir: &std::path::Path) {
+    config(dir, "http://127.0.0.1:1/v1");
+    std::fs::write(dir.join(".lattice/providers.toml"), "invalid toml").unwrap();
 }
 async fn idle(backend: &Backend) {
     let mut changed = backend.changed.subscribe();
     bounded(async {
-        while backend.status().owners != 0 {
+        while backend.has_active_work() {
             changed.changed().await.unwrap();
         }
     })
@@ -153,41 +188,188 @@ async fn finish(backend: &Backend, task: tokio::task::JoinHandle<()>) {
     backend.closed.send_replace(true);
     bounded(task).await.unwrap();
 }
+
+#[tokio::test]
+async fn prompt_byte_limits_are_checked_before_acceptance_and_dispatch() {
+    for (size, accepted) in [(2_097_152, true), (2_097_153, false)] {
+        let (dir, backend, client, task) = backend().await;
+        let provider = Provider::start().await;
+        config(dir.path(), &provider.endpoint);
+        let path = dir.path().join(".lattice/agents/local-test/agent.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let prompt = "x".repeat(size);
+        std::fs::write(
+            &path,
+            source.replace("system = 'test'", &format!("system = '{prompt}'")),
+        )
+        .unwrap();
+        let sid = super::super::new_session_id();
+        let configured = bounded(client.configure(configure_new(dir.path(), sid))).await;
+        idle(&backend).await;
+        if accepted {
+            configured.unwrap();
+            let input = raw_request(dir.path(), sid);
+            let result = bounded(client.submit(input)).await;
+            idle(&backend).await;
+            assert!(matches!(result.unwrap(), Acceptance::Accepted { .. }));
+        } else {
+            let error = configured.unwrap_err();
+            assert_eq!(error.kind, LocalErrorKind::BadRequest);
+            assert!(error.message.contains(path.to_str().unwrap()), "{error}");
+            assert!(error.message.contains("2097152"), "{error}");
+            assert_eq!(
+                client.session_head(sid).await.unwrap_err().kind,
+                LocalErrorKind::NotFound
+            );
+        }
+        assert_eq!(provider.finish().await.len(), usize::from(accepted));
+        finish(&backend, task).await;
+    }
+}
+
+/// 没有可用的根证书时后台照常启动、照常回答查询；https 端点在接受前按配置错误拒绝，
+/// http 端点照常放行。旧实现把整个网关置为配置错误，http 提交也会被拒绝。
+#[tokio::test]
+async fn without_tls_roots_status_answers_http_is_accepted_and_https_is_rejected() {
+    let (dir, backend, client, task) = backend_with_roots(Vec::new()).await;
+    bounded(client.status())
+        .await
+        .expect("status must answer without usable TLS roots");
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let https = format!("https://{}/v1", listener.local_addr().unwrap());
+    let connections = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counter = connections.clone();
+    let accepting = tokio::spawn(async move {
+        while let Ok(_socket) = listener.accept().await {
+            counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        }
+    });
+    config(dir.path(), &https);
+    let input = create_request(&client, dir.path()).await;
+    let error = bounded(client.submit(input.clone())).await.unwrap_err();
+    idle(&backend).await;
+    assert_eq!(
+        error.kind,
+        LocalErrorKind::BadRequest,
+        "https without roots must be rejected before acceptance: {error}"
+    );
+    assert!(
+        error.message.contains("configuration error")
+            && error.message.contains("no usable TLS root certificates"),
+        "rejection must be the configuration error naming the missing roots: {error}"
+    );
+    assert_eq!(
+        client.turn(input.turn_id).await.unwrap_err().kind,
+        LocalErrorKind::NotFound,
+        "rejected https submit must not create a Turn"
+    );
+    assert_eq!(
+        connections.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "https provider must not be contacted"
+    );
+    accepting.abort();
+
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let accepted = bounded(client.submit(raw_request(dir.path(), input.session))).await;
+    idle(&backend).await;
+    assert!(
+        matches!(accepted, Ok(Acceptance::Accepted { .. })),
+        "http submit must be accepted without TLS roots: {accepted:?}"
+    );
+    assert_eq!(
+        provider.finish().await.len(),
+        1,
+        "http provider received the request"
+    );
+    bounded(client.status())
+        .await
+        .expect("status still answers after the rejection");
+    finish(&backend, task).await;
+}
+
+#[tokio::test]
+async fn removed_lancet_or_tools_section_is_rejected_before_acceptance() {
+    let (dir, backend, client, task) = backend().await;
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let profile = dir.path().join(".lattice/agents/local-test/agent.toml");
+    let source = std::fs::read_to_string(&profile).unwrap();
+    for (extra, section) in [
+        ("[lancet.policy]\npath='policy.toml'\n", "[lancet]"),
+        ("[tools]\nenabled=['observe__workspace']\n", "[tools]"),
+    ] {
+        std::fs::write(&profile, format!("{source}\n{extra}")).unwrap();
+        let sid = super::super::new_session_id();
+        let error = bounded(client.configure(configure_new(dir.path(), sid)))
+            .await
+            .unwrap_err();
+        assert_eq!(error.kind, LocalErrorKind::BadRequest);
+        assert!(
+            error
+                .message
+                .contains(&format!("forbidden top-level section {section}")),
+            "unexpected error message: {}",
+            error.message
+        );
+        idle(&backend).await;
+        assert!(matches!(
+            client.list_sessions().await.unwrap_err().store.as_deref(),
+            Some(StoreDiagnostic::NotInitialized { .. })
+        ));
+    }
+    assert!(provider.finish().await.is_empty());
+    finish(&backend, task).await;
+}
+
 #[tokio::test]
 async fn legacy_store_rejection_before_execution_does_not_leave_unconfirmed_cleanup() {
     let (dir, backend, client, task) = backend().await;
     let legacy = backend.layout.lattice_root().join("sessions.git");
     std::fs::create_dir_all(&legacy).unwrap();
+    config(dir.path(), "http://127.0.0.1:1/v1");
+    let sid = super::super::new_session_id();
     let error = client
-        .submit(
-            request(dir.path()),
-            config(dir.path(), "http://127.0.0.1:1/v1"),
-        )
+        .configure(configure_new(dir.path(), sid))
         .await
         .unwrap_err();
     assert!(
-        matches!(error.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths == &[legacy])
+        matches!(error.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths == std::slice::from_ref(&legacy))
+    );
+    let submit_err = client
+        .submit(raw_request(dir.path(), sid))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(submit_err.store.as_deref(), Some(StoreDiagnostic::LegacyStores { paths }) if paths == std::slice::from_ref(&legacy))
     );
     idle(&backend).await;
     assert_eq!(
-        client.stop().await.unwrap().unconfirmed_operations,
+        client
+            .request_stop()
+            .await
+            .unwrap()
+            .0
+            .unconfirmed_operations,
         0,
         "接受前拒绝没有需要确认的写入或收尾"
     );
     finish(&backend, task).await;
 }
 #[tokio::test]
-async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_session() {
+async fn admission_identity_conflicts_busy_and_departed_submitter_never_accepts_turn() {
     let (dir, backend, client, task) = backend().await;
-    let input = request(dir.path());
-    let sid = input.session.id();
+    config(dir.path(), "http://127.0.0.1:1/v1");
+    let input = create_request(&client, dir.path()).await;
+    let sid = input.session;
     let (entered, release) = arm(&backend.gates.registered);
     let mut wire = ipc::connect(backend.layout.clone()).await.unwrap();
     ipc::write(
         &mut wire,
         &Request::Submit {
             request: input.clone(),
-            configuration: Box::new(config(dir.path(), "http://127.0.0.1:1/v1")),
         },
     )
     .await
@@ -198,7 +380,10 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
         TurnLookup::InFlight
     ));
     let conflict = client
-        .submit(input.clone(), invalid(dir.path()))
+        .submit({
+            invalid(dir.path());
+            input.clone()
+        })
         .await
         .unwrap_err();
     assert_eq!(
@@ -209,19 +394,16 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
     race.turn_id = super::super::new_turn_id();
     assert_eq!(
         client
-            .submit(race.clone(), invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                race.clone()
+            })
             .await
             .unwrap_err()
             .kind,
         LocalErrorKind::Busy
     );
     assert!(client.status().await.unwrap().owners >= 1);
-    let mut view = client.watch(sid).await.unwrap();
-    assert_eq!(
-        view.next().await.unwrap_err().kind,
-        LocalErrorKind::NotFound
-    );
-    drop(view);
     drop(wire);
     release.send(()).unwrap();
     idle(&backend).await;
@@ -229,11 +411,14 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
         client.turn(input.turn_id).await.unwrap_err().kind,
         LocalErrorKind::NotFound
     );
-    assert!(backend.optional_store().await.unwrap().is_none());
-    // 被拒绝的 New(S) 没有建立，释放后同一个 S 可以由新 TurnId 使用。
+    assert_eq!(
+        client.session_head(sid).await.unwrap().position,
+        NodeId(0),
+        "提前离场的提交者不能写入轮次节点"
+    );
     let provider = Provider::start().await;
     assert!(
-        matches!(client.submit(race.clone(), config(dir.path(), &provider.endpoint)).await.unwrap(), Acceptance::Accepted { turn } if turn.session_id == sid)
+        matches!(client.submit({ config(dir.path(), &provider.endpoint); race.clone() }).await.unwrap(), Acceptance::Accepted { turn } if turn.session_id == sid)
     );
     idle(&backend).await;
     assert!(matches!(
@@ -244,32 +429,36 @@ async fn admission_identity_conflicts_busy_and_departed_submitter_never_creates_
     finish(&backend, task).await;
 }
 #[tokio::test]
-async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
+async fn identity_table_prioritizes_used_turn_binding_busy_and_configure_collision() {
     let (dir, backend, client, task) = backend().await;
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let input = request(dir.path());
-    let sid = input.session.id();
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    let sid = input.session;
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
     let wrong = tempfile::tempdir().unwrap();
     let mut reused = input.clone();
-    reused.session = SubmitSession::Existing(super::super::new_session_id());
+    reused.session = super::super::new_session_id();
     reused.workspace = wrong.path().into();
     let error = client
-        .submit(reused, invalid(dir.path()))
+        .submit({
+            invalid(dir.path());
+            reused
+        })
         .await
         .unwrap_err();
     assert_eq!(error.conflict, Some(ConflictReason::TurnIdUsed));
     let mut missing = input.clone();
     missing.turn_id = super::super::new_turn_id();
-    missing.session = SubmitSession::Existing(super::super::new_session_id());
+    missing.session = super::super::new_session_id();
     assert_eq!(
         client
-            .submit(missing, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                missing
+            })
             .await
             .unwrap_err()
             .kind,
@@ -277,11 +466,14 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     );
     let mut appended = input.clone();
     appended.turn_id = super::super::new_turn_id();
-    appended.session = SubmitSession::Existing(sid);
+    appended.session = sid;
     appended.workspace = wrong.path().into();
     assert_eq!(
         client
-            .submit(appended.clone(), invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                appended.clone()
+            })
             .await
             .unwrap_err()
             .conflict,
@@ -290,21 +482,22 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     appended.workspace = input.workspace.clone();
     assert_eq!(
         client
-            .submit(appended, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                appended
+            })
             .await
             .unwrap_err()
             .kind,
         LocalErrorKind::Busy
     );
-    let mut collision = input.clone();
-    collision.turn_id = super::super::new_turn_id();
     assert_eq!(
         client
-            .submit(collision, invalid(dir.path()))
+            .configure(configure_new(dir.path(), sid))
             .await
             .unwrap_err()
-            .conflict,
-        Some(ConflictReason::SessionExists)
+            .kind,
+        LocalErrorKind::Busy
     );
     assert!(client.list_sessions().await.unwrap()[0].owner);
     assert!(!client.cancel(super::super::new_turn_id()).await.unwrap());
@@ -312,10 +505,37 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
     assert!(client.cancel(input.turn_id).await.unwrap());
     provider.release.send_replace(true);
     idle(&backend).await;
+    assert_eq!(
+        client
+            .configure(configure_new(dir.path(), sid))
+            .await
+            .unwrap_err()
+            .conflict,
+        Some(ConflictReason::SessionExists)
+    );
+    assert_eq!(
+        client
+            .rewind(
+                sid,
+                NodeId(0),
+                crate::LocalWorkspaceRoot::from_path(wrong.path())
+                    .unwrap()
+                    .canonical_path()
+                    .to_path_buf(),
+            )
+            .await
+            .unwrap_err()
+            .conflict,
+        Some(ConflictReason::BindingMismatch),
+        "在另一个项目目录下执行 rewind 必须返回项目绑定不一致冲突"
+    );
     assert!(!client.cancel(input.turn_id).await.unwrap());
     assert!(!client.list_sessions().await.unwrap()[0].owner);
     let error = client
-        .submit(input.clone(), invalid(dir.path()))
+        .submit({
+            invalid(dir.path());
+            input.clone()
+        })
         .await
         .unwrap_err();
     assert_eq!(error.conflict, Some(ConflictReason::TurnIdUsed));
@@ -325,13 +545,14 @@ async fn identity_table_prioritizes_used_turn_binding_new_collision_and_busy() {
 #[tokio::test]
 async fn preparation_cancel_is_owned_and_rejected_request_does_not_poison_retry() {
     let (dir, backend, client, task) = backend().await;
-    let input = request(dir.path());
+    config(dir.path(), "http://127.0.0.1:1/v1");
+    let input = create_request(&client, dir.path()).await;
     let (entered, release) = arm(&backend.gates.prepare);
     let submit = {
         let client = client.clone();
         let input = input.clone();
-        let config = invalid(dir.path());
-        tokio::spawn(async move { client.submit(input, config).await })
+        invalid(dir.path());
+        tokio::spawn(async move { client.submit(input).await })
     };
     bounded(entered).await.unwrap();
     assert!(client.cancel(input.turn_id).await.unwrap());
@@ -343,7 +564,10 @@ async fn preparation_cancel_is_owned_and_rejected_request_does_not_poison_retry(
     idle(&backend).await;
     let provider = Provider::start().await;
     let acceptance = client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
+        .submit({
+            config(dir.path(), &provider.endpoint);
+            input.clone()
+        })
         .await
         .unwrap();
     assert!(matches!(acceptance, Acceptance::Accepted { .. }));
@@ -363,20 +587,18 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     let (dir, backend, client, task) = backend().await;
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let input = request(dir.path());
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
-    let mut view = client.watch(input.session.id()).await.unwrap();
+    let mut view = client.watch(input.session).await.unwrap();
     assert!(matches!(
         view.next().await.unwrap().unwrap(),
         ViewUpdate::Head(SessionHead { owner: true, .. })
     ));
     let stop = {
         let client = client.clone();
-        tokio::spawn(async move { client.stop().await })
+        tokio::spawn(async move { client.request_stop().await.map(|(status, _)| status) })
     };
     let mut changed = backend.changed.subscribe();
     bounded(async {
@@ -386,9 +608,17 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     })
     .await;
     assert!(!stop.is_finished());
+    // Owner 尚未排空时只关闭登录，认证生命周期仍可接纳操作。
+    assert_eq!(
+        backend.chatgpt_auth().unwrap().logout().await.unwrap(),
+        RevocationStatus::NotNeeded
+    );
     assert_eq!(
         client
-            .submit(request(dir.path()), invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                raw_request(dir.path(), super::super::new_session_id())
+            })
             .await
             .unwrap_err()
             .kind,
@@ -403,6 +633,7 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     })
     .await;
     assert_eq!(bounded(stop).await.unwrap().unwrap().owners, 0);
+    assert!(backend.chatgpt_auth().unwrap().logout().await.is_err());
     bounded(async {
         loop {
             if matches!(
@@ -425,34 +656,38 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
     let project =
         crate::LocalWorkspaceRoot::from_path(backend.layout.lattice_root().parent().unwrap())
             .unwrap()
-            .store_key();
+            .project_path();
     api.blocking(move |api| {
         let guard = api.store.try_lock_session(sid)?;
+        let config = FrozenTurnConfig {
+            effort: None,
+            agent_name: AgentName::parse("local-test").unwrap(),
+            model: ModelId::parse("test").unwrap(),
+            provider: ProviderId::parse("local").unwrap(),
+            system_prompt: None,
+            catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
+            limits: TurnExecutionLimits {
+                timeout_secs: crate::TurnTimeout::default(),
+                max_model_steps: 32,
+                max_model_attempts: 2,
+            },
+        };
+        if fresh {
+            let settings = SessionSettings::for_test(&config);
+            api.store
+                .create_session(&guard, project.clone(), settings, chrono::Utc::now())?;
+        }
+        let settings_version = api.store.begin_read()?.session_settings(sid)?.version()?;
         api.store.accept_turn(
             &guard,
             AcceptTurn {
-                session: if fresh {
-                    AcceptSession::New { id: sid }
-                } else {
-                    AcceptSession::Existing { id: sid }
-                },
+                session_id: sid,
                 turn_id: id,
-                project_store_key: project,
+                project_path: project,
                 input: "seed".into(),
                 accepted_at: chrono::Utc::now(),
-                agent_selection: AgentSelection::Explicit,
-                config: FrozenTurnConfig {
-                    agent_name: "local-test".into(),
-                    model: "test".into(),
-                    provider: "openai-compatible".into(),
-                    system_prompt: None,
-                    catalog: ToolCatalogSnapshot::new("test".into(), vec![]).unwrap(),
-                    limits: TurnExecutionLimits {
-                        timeout_secs: 300,
-                        max_model_steps: 32,
-                        max_model_attempts: 2,
-                    },
-                },
+                config,
+                settings_version,
             },
         )?;
         Ok(())
@@ -549,12 +784,10 @@ async fn diagnostic_and_owner_only_heads_repeat_the_current_entry() {
     let (dir, backend, client, task) = backend().await;
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let input = request(dir.path());
-    let sid = input.session.id();
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    let sid = input.session;
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
     let sink = backend.observer(sid);
     let (waiting, resume) = arm(&backend.gates.watch_wait);
@@ -571,14 +804,8 @@ async fn diagnostic_and_owner_only_heads_repeat_the_current_entry() {
     lock(&backend.admission)
         .diagnostics
         .insert(input.turn_id, diagnostic.clone());
-    // CEP 通知只唤醒推送，不标记任何节点；不能借节点变化掩盖缺失的补推。
-    sink.emit(crate::TurnEvent::CepCallStarted {
-        invocation_id: lancet_protocol::InvocationId::parse("00000000-0000-4000-8000-000000000001")
-            .unwrap(),
-        method: "test".into(),
-        semantic_stage: "test".into(),
-        guard_stage: "test".into(),
-    });
+    // 仅唤醒推送而不标记任何节点，不能借节点变化掩盖缺失的补推。
+    sink.notify_without_marking();
     let (waiting, resume_next) = arm(&backend.gates.watch_wait);
     resume.send(()).unwrap();
     assert!(
@@ -645,15 +872,14 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         model_step_ordinal: 0,
         attempt_ordinal: 0,
     };
-    let origin = lattice_conversation::ProviderOrigin::OpenAiCompatible;
     let attempt_origin = AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: "openai-compatible".into(),
+        provider_id: ProviderId::parse("local").unwrap(),
     };
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
         key,
-        provider: origin,
+        origin: attempt_origin.clone(),
         model: "test".into(),
     });
     sink.emit(crate::TurnEvent::TokenDelta {
@@ -702,6 +928,8 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         matches!(batch.as_slice(), [ViewUpdate::Text(TextUpdate { offset: 6, segments, .. })] if segments == &[TextSegment::Text { text: "！".into() }])
     );
     io.stop_attempt(AttemptStopped {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key,
         origin: attempt_origin.clone(),
         usage: None,
@@ -726,7 +954,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     io.start_request(key, attempt_origin.clone()).await.unwrap();
     sink.emit(crate::TurnEvent::ModelStarted {
         key,
-        provider: origin,
+        origin: attempt_origin.clone(),
         model: "test".into(),
     });
     sink.emit(crate::TurnEvent::ReasoningDelta {
@@ -753,6 +981,8 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     // 关闭已提交但变化尚未标记，初次推送必须读到最终节点，旧尝试的文字不能复活。
     let simultaneous = sink.register();
     io.stop_attempt(AttemptStopped {
+        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+        cost: None,
         key,
         origin: attempt_origin.clone(),
         usage: None,
@@ -794,14 +1024,12 @@ async fn owner_retiring_during_capture_never_pairs_an_old_entry_with_no_owner() 
     let (dir, backend, client, task) = backend().await;
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let input = request(dir.path());
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
     let (entered, release) = arm(&backend.gates.capture);
-    let mut view = client.watch(input.session.id()).await.unwrap();
+    let mut view = client.watch(input.session).await.unwrap();
     bounded(entered).await.unwrap();
     provider.release.send_replace(true);
     idle(&backend).await;
@@ -827,7 +1055,7 @@ async fn owner_retiring_during_capture_never_pairs_an_old_entry_with_no_owner() 
         .unwrap()
         .read(move |r| {
             r.entry(NodeRef {
-                session_id: input.session.id(),
+                session_id: input.session,
                 node: NodeId(2),
             })
         })
@@ -844,14 +1072,11 @@ async fn owner_retiring_during_capture_never_pairs_an_old_entry_with_no_owner() 
 #[tokio::test]
 async fn owner_appearing_and_retiring_during_capture_reloads_the_final_entry() {
     let (dir, backend, client, task) = backend().await;
-    let sid = super::super::new_session_id();
     let first_provider = Provider::start().await;
-    let mut first = request(dir.path());
-    first.session = SubmitSession::New(sid);
-    client
-        .submit(first, config(dir.path(), &first_provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &first_provider.endpoint);
+    let first = create_request(&client, dir.path()).await;
+    let sid = first.session;
+    client.submit(first).await.unwrap();
     idle(&backend).await;
     assert_eq!(first_provider.finish().await.len(), 1);
     let (before, resume_read) = arm(&backend.gates.capture_before);
@@ -859,12 +1084,9 @@ async fn owner_appearing_and_retiring_during_capture_reloads_the_final_entry() {
     bounded(before).await.unwrap();
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let mut input = request(dir.path());
-    input.session = SubmitSession::Existing(sid);
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = raw_request(dir.path(), sid);
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
     let (captured, resume_check) = arm(&backend.gates.capture);
     resume_read.send(()).unwrap();
@@ -927,11 +1149,13 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
         });
         close_seed(&backend, sid, id).await;
     }
-    let mut rejected = request(dir.path());
-    rejected.session = SubmitSession::Existing(sid);
+    let rejected = raw_request(dir.path(), sid);
     assert_eq!(
         client
-            .submit(rejected, invalid(dir.path()))
+            .submit({
+                invalid(dir.path());
+                rejected
+            })
             .await
             .unwrap_err()
             .kind,
@@ -958,31 +1182,27 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
 }
 #[tokio::test]
 async fn accepted_read_failure_before_turn_started_republishes_position_after_retirement() {
-    for existing in [false, true] {
+    for has_prior_turn in [false, true] {
         let (dir, backend, client, task) = backend().await;
-        let mut input = request(dir.path());
-        let sid = input.session.id();
+        config(dir.path(), "http://127.0.0.1:1/v1");
+        let input = create_request(&client, dir.path()).await;
+        let sid = input.session;
         let sink = backend.observer(sid);
-        if existing {
+        if has_prior_turn {
             let provider = Provider::start().await;
-            let mut first = request(dir.path());
-            first.session = SubmitSession::New(sid);
-            client
-                .submit(first, config(dir.path(), &provider.endpoint))
-                .await
-                .unwrap();
+            config(dir.path(), &provider.endpoint);
+            client.submit(raw_request(dir.path(), sid)).await.unwrap();
             idle(&backend).await;
             assert_eq!(provider.finish().await.len(), 1);
-            input.session = SubmitSession::Existing(sid);
         }
-        let position = NodeId(if existing { 4 } else { 2 });
+        let position = NodeId(if has_prior_turn { 4 } else { 2 });
         let provider = Provider::start().await;
         let (accepted, fail_read) = arm(&sink.accepted_read_failure);
         let submitting = {
             let client = client.clone();
             let input = input.clone();
-            let configuration = config(dir.path(), &provider.endpoint);
-            tokio::spawn(async move { client.submit(input, configuration).await })
+            config(dir.path(), &provider.endpoint);
+            tokio::spawn(async move { client.submit(input).await })
         };
         bounded(accepted).await.unwrap();
         assert!(!sink.events().iter().any(|event| matches!(event, crate::TurnEvent::TurnStarted { turn, .. } if turn.turn_id == input.turn_id)));
@@ -1102,7 +1322,16 @@ async fn observer_cache_reclaims_missing_rejected_and_disconnected_sessions() {
     for _ in 0..12 {
         assert!(
             client
-                .submit(request(dir.path()), invalid(dir.path()))
+                .configure({
+                    invalid(dir.path());
+                    configure_new(dir.path(), super::super::new_session_id())
+                })
+                .await
+                .is_err()
+        );
+        assert!(
+            client
+                .submit(raw_request(dir.path(), super::super::new_session_id()))
                 .await
                 .is_err()
         );
@@ -1154,13 +1383,11 @@ async fn observer_cache_reclaims_missing_rejected_and_disconnected_sessions() {
     }
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let input = request(dir.path());
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
-    let mut view = client.watch(input.session.id()).await.unwrap();
+    let mut view = client.watch(input.session).await.unwrap();
     // 初始批次结束后断开，Owner 仍须持有这一会话的观察状态。
     loop {
         if matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if entry.node() == NodeId(2))
@@ -1199,11 +1426,9 @@ async fn commit_fault_drains_real_reader_and_owner_before_reopening_the_store() 
         let first = seed_round(&backend, sid, true).await;
         let mut provider = Provider::start().await;
         provider.release.send_replace(false);
-        let second = request(dir.path());
-        client
-            .submit(second.clone(), config(dir.path(), &provider.endpoint))
-            .await
-            .unwrap();
+        config(dir.path(), &provider.endpoint);
+        let second = create_request(&client, dir.path()).await;
+        client.submit(second.clone()).await.unwrap();
         bounded(&mut provider.arrived).await.unwrap();
         let owner = lock(&backend.admission).turns[&second.turn_id].clone();
         let (retiring, release_owner) = arm(&backend.gates.retire);
@@ -1277,7 +1502,7 @@ async fn commit_fault_drains_real_reader_and_owner_before_reopening_the_store() 
             matches!(fault, TestCommitFault::UnknownAfter)
         );
         let second_id = second.turn_id;
-        let second_sid = second.session.id();
+        let second_sid = second.session;
         let second = reopened
             .read(move |r| r.turn_detail(second_sid, second_id))
             .await
@@ -1300,19 +1525,16 @@ async fn commit_fault_drains_real_reader_and_owner_before_reopening_the_store() 
 #[tokio::test]
 async fn write_disabled_before_acceptance_is_rejected_not_unknown() {
     use lattice_session::store::*;
-    // 已开库时停在接受事务之前，未建库时停在建库之前；两处都已通过停机检查。
-    for store_open in [true, false] {
+    // 分别停在准备前与接受事务之前；两处都尚未进入接受事务，禁写后必须确定性拒绝。
+    for before_accept in [true, false] {
         let (dir, backend, client, task) = backend().await;
         let other = super::super::new_session_id();
-        let seeded = if store_open {
-            Some(seed_round(&backend, other, true).await)
-        } else {
-            None
-        };
+        let seeded = seed_round(&backend, other, true).await;
         let provider = Provider::start().await;
-        let input = request(dir.path());
-        let sink = backend.observer(input.session.id());
-        let (paused, resume) = arm(if store_open {
+        config(dir.path(), &provider.endpoint);
+        let input = create_request(&client, dir.path()).await;
+        let sink = backend.observer(input.session);
+        let (paused, resume) = arm(if before_accept {
             &sink.before_accept
         } else {
             &backend.gates.prepare
@@ -1320,14 +1542,9 @@ async fn write_disabled_before_acceptance_is_rejected_not_unknown() {
         let submitting = {
             let client = client.clone();
             let input = input.clone();
-            let configuration = config(dir.path(), &provider.endpoint);
-            tokio::spawn(async move { client.submit(input, configuration).await })
+            tokio::spawn(async move { client.submit(input).await })
         };
         bounded(paused).await.unwrap();
-        let seeded = match seeded {
-            Some(id) => id,
-            None => seed_round(&backend, other, true).await,
-        };
         // 另一个会话的提交失败使库转为禁写；持有租约，恢复在本请求回复前不能重开。
         let api = backend.open().await.unwrap();
         let error = api
@@ -1367,15 +1584,13 @@ async fn write_disabled_before_acceptance_is_rejected_not_unknown() {
     }
 }
 #[tokio::test]
-async fn store_creation_failure_rejects_the_first_submission() {
+async fn store_creation_failure_rejects_the_first_configure() {
     let (dir, backend, client, task) = backend().await;
-    // 建库的父目录同步失败，库是否持久不明；这一轮尚未进入接受事务。
+    // 建库的父目录同步失败，库是否持久不明；尚未写入会话记录。
     *lock(&backend.stores.creation_sync_probe) = Some(Arc::new(|| true));
+    config(dir.path(), "http://127.0.0.1:1/v1");
     let error = client
-        .submit(
-            request(dir.path()),
-            config(dir.path(), "http://127.0.0.1:1/v1"),
-        )
+        .configure(configure_new(dir.path(), super::super::new_session_id()))
         .await
         .unwrap_err();
     assert!(
@@ -1394,24 +1609,25 @@ async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     first_provider.release.send_replace(false);
     let mut second_provider = Provider::start().await;
     second_provider.release.send_replace(false);
-    let first = request(dir.path());
-    let second = request(dir.path());
-    let mut first_config =
-        serde_json::to_value(config(dir.path(), &first_provider.endpoint)).unwrap();
-    first_config["system_prompt"] = serde_json::json!("first frozen prompt");
-    let first_config = serde_json::from_value(first_config).unwrap();
-    client.submit(first.clone(), first_config).await.unwrap();
+    let profile_path = dir.path().join(".lattice/agents/local-test/agent.toml");
+    config(dir.path(), &first_provider.endpoint);
+    let source = std::fs::read_to_string(&profile_path).unwrap();
+    std::fs::write(
+        &profile_path,
+        source.replace("system = 'test'", "system = 'first frozen prompt'"),
+    )
+    .unwrap();
+    let first = create_request(&client, dir.path()).await;
+    client.submit(first.clone()).await.unwrap();
     bounded(&mut first_provider.arrived).await.unwrap();
-    let mut second_config =
-        serde_json::to_value(config(dir.path(), &second_provider.endpoint)).unwrap();
-    second_config["system_prompt"] = serde_json::json!("second frozen prompt");
-    client
-        .submit(
-            second.clone(),
-            serde_json::from_value(second_config).unwrap(),
-        )
-        .await
-        .unwrap();
+    config(dir.path(), &second_provider.endpoint);
+    std::fs::write(
+        &profile_path,
+        source.replace("system = 'test'", "system = 'second frozen prompt'"),
+    )
+    .unwrap();
+    let second = create_request(&client, dir.path()).await;
+    client.submit(second.clone()).await.unwrap();
     bounded(&mut second_provider.arrived).await.unwrap();
     assert_eq!(
         client
@@ -1427,13 +1643,13 @@ async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     second_provider.release.send_replace(true);
     idle(&backend).await;
     let api = backend.open().await.unwrap();
-    let first_sid = first.session.id();
+    let first_sid = first.session;
     let first_tid = first.turn_id;
     let first_config = api
         .read(move |r| r.turn_config(first_sid, first_tid))
         .await
         .unwrap();
-    let second_sid = second.session.id();
+    let second_sid = second.session;
     let second_tid = second.turn_id;
     let second_config = api
         .read(move |r| r.turn_config(second_sid, second_tid))
@@ -1470,25 +1686,29 @@ async fn different_sessions_overlap_and_keep_their_frozen_configuration() {
     finish(&backend, task).await;
 }
 #[tokio::test]
-async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_requires_agent() {
+async fn existing_orphan_and_root_use_session_settings_without_mutating_old_nodes() {
     let (dir, backend, client, task) = backend().await;
     let sid = super::super::new_session_id();
     let old = seed_round(&backend, sid, true).await;
     let before = client.turn(old).await.unwrap();
-    let root = crate::LocalWorkspaceRoot::from_path(dir.path()).unwrap();
-    let backing =
-        lancet_api::WorkspaceHistoryBacking::for_key(backend.layout.clone(), root.store_key());
-    tokio::task::spawn_blocking(move || lancet_api::WorkspaceHistory::create(backing))
-        .await
-        .unwrap()
-        .unwrap();
     let provider = Provider::start().await;
-    let mut next = request(dir.path());
-    next.session = SubmitSession::Existing(sid);
-    next.agent = None;
+    let configure_source = || {
+        config(dir.path(), &provider.endpoint);
+        let path = dir.path().join(".lattice/agents/local-test/agent.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(
+            path,
+            source.replace("local/local-test", "local/source-only-model"),
+        )
+        .unwrap();
+    };
+    let next = raw_request(dir.path(), sid);
     assert!(matches!(
         client
-            .submit(next.clone(), config(dir.path(), &provider.endpoint))
+            .submit({
+                configure_source();
+                next.clone()
+            })
             .await
             .unwrap(),
         Acceptance::Accepted { .. }
@@ -1499,28 +1719,41 @@ async fn existing_orphan_accepts_new_input_without_mutating_old_nodes_and_root_r
         .rewind(sid, NodeId(0), dir.path().into())
         .await
         .unwrap();
+    let at_root = client.session_head(sid).await.unwrap();
+    assert_eq!(at_root.agent, "local-test");
+    assert_eq!(at_root.model.as_ref().map(|m| m.as_str()), Some("test"));
+    assert_eq!(at_root.turn_id, None);
     let mut root_request = next;
     root_request.turn_id = super::super::new_turn_id();
-    assert_eq!(
-        client
-            .submit(root_request.clone(), config(dir.path(), &provider.endpoint))
-            .await
-            .unwrap_err()
-            .kind,
-        LocalErrorKind::BadRequest
-    );
-    assert_eq!(
-        client.turn(root_request.turn_id).await.unwrap_err().kind,
-        LocalErrorKind::NotFound
-    );
-    root_request.agent = Some("local-test".into());
     client
-        .submit(root_request, config(dir.path(), &provider.endpoint))
+        .submit({
+            configure_source();
+            root_request.clone()
+        })
         .await
         .unwrap();
     idle(&backend).await;
+    assert_eq!(client.session_head(sid).await.unwrap().agent, "local-test");
+    configure_source();
+    client
+        .configure(ConfigureRequest {
+            session: ConfigureSession::Existing(sid),
+            workspace: dir.path().into(),
+            agent: Some(AgentName::parse("local-test").unwrap()),
+            model: None,
+            effort: None,
+        })
+        .await
+        .unwrap();
+    root_request.turn_id = super::super::new_turn_id();
+    client.submit(root_request).await.unwrap();
+    idle(&backend).await;
     assert_eq!(client.turn(old).await.unwrap(), before);
-    assert_eq!(provider.finish().await.len(), 2);
+    let captured = provider.finish().await;
+    assert_eq!(captured.len(), 3);
+    assert_eq!(captured[0]["model"], "test");
+    assert_eq!(captured[1]["model"], "test");
+    assert_eq!(captured[2]["model"], "source-only-model");
     finish(&backend, task).await;
 }
 #[tokio::test]
@@ -1529,7 +1762,8 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         let (dir, backend, client, task) = backend().await;
         let mut provider = Provider::start().await;
         provider.release.send_replace(false);
-        let input = request(dir.path());
+        config(dir.path(), &provider.endpoint);
+        let input = create_request(&client, dir.path()).await;
         let (entered, release) = arm(if forwarding_panic {
             &backend.gates.forward_panic
         } else {
@@ -1538,8 +1772,7 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         let submit = {
             let client = client.clone();
             let input = input.clone();
-            let config = config(dir.path(), &provider.endpoint);
-            tokio::spawn(async move { client.submit(input, config).await })
+            tokio::spawn(async move { client.submit(input).await })
         };
         let mut release = Some(release);
         bounded(entered).await.unwrap();
@@ -1549,7 +1782,7 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
             assert!(matches!(
                 bounded(submit).await.unwrap().unwrap(),
                 Acceptance::ConfirmationUnknown { turn_id, session_id }
-                    if turn_id == input.turn_id && session_id == input.session.id()
+                    if turn_id == input.turn_id && session_id == input.session
             ));
         } else {
             submit.abort();
@@ -1557,7 +1790,7 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         }
         let stop = {
             let client = client.clone();
-            tokio::spawn(async move { client.stop().await })
+            tokio::spawn(async move { client.request_stop().await.map(|(status, _)| status) })
         };
         bounded(async {
             while !backend.status().stopping {
@@ -1596,19 +1829,17 @@ async fn session_head_and_cancel_do_not_need_observation_permits() {
     let (dir, backend, client, task) = backend().await;
     let mut provider = Provider::start().await;
     provider.release.send_replace(false);
-    let input = request(dir.path());
-    client
-        .submit(input.clone(), config(dir.path(), &provider.endpoint))
-        .await
-        .unwrap();
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    client.submit(input.clone()).await.unwrap();
     bounded(&mut provider.arrived).await.unwrap();
     let permits = backend.subscriptions.acquire_many(32).await.unwrap();
-    let head = client.session_head(input.session.id()).await.unwrap();
+    let head = client.session_head(input.session).await.unwrap();
     assert_eq!(head.turn_id, Some(input.turn_id));
     assert!(head.owner);
     assert!(!head.path_replaced);
     assert_eq!(
-        client.cancel_session(input.session.id()).await.unwrap(),
+        client.cancel_session(input.session).await.unwrap(),
         (Some(input.turn_id), true)
     );
     assert_eq!(
@@ -1620,9 +1851,9 @@ async fn session_head_and_cancel_do_not_need_observation_permits() {
         LocalErrorKind::NotFound
     );
     idle(&backend).await;
-    assert!(!client.session_head(input.session.id()).await.unwrap().owner);
+    assert!(!client.session_head(input.session).await.unwrap().owner);
     assert_eq!(
-        client.cancel_session(input.session.id()).await.unwrap(),
+        client.cancel_session(input.session).await.unwrap(),
         (None, false)
     );
     drop(permits);
@@ -1637,8 +1868,7 @@ async fn dispatch_submit_without_submitter_is_an_internal_error() {
     client.status().await.unwrap();
     let result = backend
         .dispatch(Request::Submit {
-            request: request(dir.path()),
-            configuration: Box::new(invalid(dir.path())),
+            request: raw_request(dir.path(), super::super::new_session_id()),
         })
         .await;
     assert!(matches!(
@@ -1653,24 +1883,149 @@ async fn dispatch_submit_without_submitter_is_an_internal_error() {
 }
 
 #[tokio::test]
-async fn invalid_request_is_rejected_before_claiming_a_new_session() {
+async fn invalid_request_is_rejected_before_claiming_session() {
     let (dir, backend, client, task) = backend().await;
-    let mut input = request(dir.path());
+    config(dir.path(), "http://127.0.0.1:1/v1");
+    let mut input = create_request(&client, dir.path()).await;
     input.input = "x".repeat(2 * 1024 * 1024 + 1);
-    let sid = input.session.id();
+    let sid = input.session;
     let (entered, release) = arm(&backend.gates.registered);
     let submitting = {
         let client = client.clone();
-        let configuration = invalid(dir.path());
-        tokio::spawn(async move { client.submit(input, configuration).await })
+        invalid(dir.path());
+        tokio::spawn(async move { client.submit(input).await })
     };
     tokio::select! {
         result = submitting => assert_eq!(result.unwrap().unwrap_err().kind, LocalErrorKind::BadRequest),
         _ = entered => {
             release.send(()).unwrap();
-            panic!("无效输入占住了 New(SessionId)");
+            panic!("无效输入占住了 Session 槽位");
         }
     }
     assert!(!lock(&backend.admission).sessions.contains_key(&sid));
+    finish(&backend, task).await;
+}
+
+type GateSlot = fn(&Gates) -> &Mutex<Option<Gate>>;
+type GatedServe = (
+    tempfile::TempDir,
+    crate::StateLayout,
+    super::super::LocalClient,
+    oneshot::Receiver<()>,
+    oneshot::Sender<()>,
+    tokio::task::JoinHandle<Result<()>>,
+);
+/// 以正式 serve 收尾路径起后台，构造 Backend 时在指定退场窗口装 gate。
+async fn serve_gated(slot: GateSlot) -> GatedServe {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(dir.path());
+    let (armed, gate) = oneshot::channel();
+    let (backend_layout, home) = (layout.clone(), dir.path().to_path_buf());
+    let serving = tokio::spawn(serve_with_backend(layout.clone(), move || {
+        let mut backend = Backend::with_tools(
+            backend_layout,
+            Some(home),
+            crate::turn::tools::default_tool_executor(),
+        );
+        Arc::get_mut(&mut backend)
+            .expect("unshared test backend")
+            .metadata = super::super::metadata::MetadataRefresh::without_network();
+        let _ = armed.send(arm(slot(&backend.gates)));
+        backend
+    }));
+    let (entry, release) = bounded(gate).await.unwrap();
+    let client = super::super::LocalClient::new(layout.clone());
+    (dir, layout, client, entry, release, serving)
+}
+/// 另开文件描述做非阻塞 flock；同进程内的后台锁同样会冲突。
+fn owner_lock_free(layout: &crate::StateLayout) -> bool {
+    use std::os::fd::AsRawFd;
+    let file = std::fs::File::open(layout.lattice_root().join("local/owner.lock")).unwrap();
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+}
+/// stop 回执之后后台停在退场窗口：stop 不能先返回，放行后返回时实例锁已释放、socket 已撤下。
+async fn stop_waits_for_departure(slot: GateSlot) {
+    let (_dir, layout, client, entry, release, serving) = serve_gated(slot).await;
+    let stop = {
+        let client = client.clone();
+        tokio::spawn(async move { client.stop().await })
+    };
+    bounded(entry).await.unwrap();
+    assert!(!owner_lock_free(&layout));
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert!(!stop.is_finished(), "实例锁仍被持有时 stop 已返回");
+    release.send(()).unwrap();
+    let status = bounded(stop).await.unwrap().unwrap();
+    assert_eq!(status.owners, 0);
+    assert!(owner_lock_free(&layout), "stop 返回时实例锁尚未释放");
+    assert!(!layout.lattice_root().join("local/api.sock").exists());
+    bounded(serving).await.unwrap().unwrap();
+}
+#[tokio::test]
+async fn stop_waits_while_listener_close_is_delayed() {
+    stop_waits_for_departure(|gates| &gates.listener_close).await;
+}
+#[tokio::test]
+async fn stop_waits_while_lock_release_is_delayed() {
+    stop_waits_for_departure(|gates| &gates.lock_release).await;
+}
+#[tokio::test]
+async fn stop_reports_timeout_when_lock_is_never_released() {
+    let (_dir, layout, client, entry, release, serving) =
+        serve_gated(|gates| &gates.lock_release).await;
+    let started = std::time::Instant::now();
+    let error = bounded(client.stop_within(Duration::from_millis(200)))
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind, LocalErrorKind::Stopping);
+    assert!(error.message.contains("lattice daemon status"));
+    assert!(started.elapsed() < Duration::from_secs(5));
+    // 超时报错时后台仍停在锁释放之前，说明报错不是因为锁恰好放开。
+    bounded(entry).await.unwrap();
+    assert!(!owner_lock_free(&layout));
+    release.send(()).unwrap();
+    bounded(serving).await.unwrap().unwrap();
+    assert!(owner_lock_free(&layout));
+}
+#[tokio::test]
+async fn symlinked_workspace_shares_canonical_project_binding() {
+    let (dir, backend, client, task) = backend().await;
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let first = create_request(&client, dir.path()).await;
+    let sid = first.session;
+    client.submit(first).await.expect("在原始目录提交首轮");
+    idle(&backend).await;
+
+    let link_parent = tempfile::tempdir().expect("创建符号链接父目录");
+    let symlink_ws = link_parent.path().join("project-symlink");
+    std::os::unix::fs::symlink(dir.path(), &symlink_ws).expect("创建指向项目根的符号链接");
+    let original_root = crate::LocalWorkspaceRoot::from_path(dir.path()).expect("解析原始工作区");
+    let via_symlink =
+        crate::LocalWorkspaceRoot::from_path(&symlink_ws).expect("经符号链接解析工作区");
+    assert_eq!(
+        via_symlink.project_path(),
+        original_root.project_path(),
+        "经符号链接解析得到的规范项目路径必须与原始项目一致"
+    );
+
+    let second = raw_request(via_symlink.canonical_path(), sid);
+    client
+        .submit(second)
+        .await
+        .expect("经符号链接续写同一会话应成功");
+    idle(&backend).await;
+
+    let rewound = client
+        .rewind(sid, NodeId(0), via_symlink.canonical_path().to_path_buf())
+        .await
+        .expect("经符号链接在同一会话执行 rewind 应成功");
+    assert_eq!(rewound.current, NodeId(0), "rewind 后当前节点应回到根");
+    assert_eq!(
+        rewound.project_path,
+        original_root.project_path(),
+        "rewind 返回的会话记录应保留同一规范项目路径"
+    );
+    assert_eq!(provider.finish().await.len(), 2);
     finish(&backend, task).await;
 }

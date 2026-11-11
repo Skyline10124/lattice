@@ -4,7 +4,7 @@
 //! These types define the direct wire contract for LATTICE LLM calls
 //! and are independent of `lattice-core`.
 
-use lattice_conversation::{ConversationItem, TokenUsage};
+use lattice_conversation::{ConversationItem, Effort, ModelRef, TokenUsage};
 use serde::{Deserialize, Serialize};
 
 /// A tool definition providing a function specification to the model.
@@ -38,10 +38,6 @@ pub struct ChatRequest {
     pub messages: Vec<ConversationItem>,
     pub tools: Vec<ToolDefinition>,
     pub target: ModelTarget,
-    pub temperature: Option<f64>,
-    pub max_tokens: Option<u32>,
-    /// OpenAI-specific: max completion tokens (replaces max_tokens for o-series)
-    pub max_completion_tokens: Option<u32>,
     /// 作为 `x-client-request-id` 发出，取 SessionId，便于在 provider 侧关联同一会话的请求。
     pub client_request_id: Option<String>,
 }
@@ -52,9 +48,6 @@ impl ChatRequest {
             messages: messages.into(),
             tools: Vec::new(),
             target,
-            temperature: None,
-            max_tokens: None,
-            max_completion_tokens: None,
             client_request_id: None,
         }
     }
@@ -78,34 +71,59 @@ pub enum LlmEvent {
     },
 }
 
-/// `Finished` 的报告只携带 provider 已报告的结束原因和用量。
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+/// `Finished` 携带结束原因、规范化用量与可选费用估算。
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct AttemptReport {
     pub finish_reason: Option<String>,
     pub usage: Option<TokenUsage>,
+    pub usage_kind: lattice_conversation::UsageCompleteness,
+    pub cost: Option<lattice_conversation::CostEstimate>,
 }
 
-/// A model target specifying which model alias to route to.
+/// 请求持有已解析的模型引用；可选档位由网关按当前元数据解释。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ModelTarget {
-    pub model: String,
-    pub provider: Option<String>,
-}
-
-impl Default for ModelTarget {
-    fn default() -> Self {
-        ModelTarget {
-            model: "sonnet".to_string(),
-            provider: None,
-        }
-    }
+    pub model: ModelRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<Effort>,
 }
 
 impl ModelTarget {
-    pub fn new(model: impl Into<String>) -> Self {
-        ModelTarget {
-            model: model.into(),
-            provider: None,
+    pub fn new(model: ModelRef) -> Self {
+        Self {
+            model,
+            effort: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn test_target(provider: &str, model: &str) -> Self {
+        Self::new(ModelRef::new(
+            lattice_conversation::ProviderId::parse(provider).expect("valid test provider id"),
+            lattice_conversation::ModelId::parse(model).expect("valid test model id"),
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn model_target_distinguishes_no_selection_from_off() {
+        let mut target = ModelTarget::test_target("test", "model");
+        let plain = serde_json::json!({"model":"test/model"});
+        assert_eq!(serde_json::to_value(&target).unwrap(), plain);
+        assert_eq!(
+            serde_json::from_value::<ModelTarget>(plain).unwrap(),
+            target
+        );
+        target.effort = Some(Effort::Off);
+        let selected = serde_json::to_value(&target).unwrap();
+        assert_eq!(selected["effort"], "off");
+        assert_eq!(
+            serde_json::from_value::<ModelTarget>(selected).unwrap(),
+            target
+        );
     }
 }

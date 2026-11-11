@@ -2,26 +2,105 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use anyhow::Result;
+use clap::Subcommand;
+use lattice_api::{
+    ModelCandidateQuery, ProviderId, StateLayout,
+    local::{Availability, LocalClient},
+};
+use std::io::Write;
 
-/// List known model aliases.
-///
-/// Plain `models` lists all known aliases one per line.
-/// `models --auth` lists only aliases whose credentials are present.
-pub fn run(auth_only: bool, json: bool) -> Result<()> {
-    let entries = lattice_api::list_models(auth_only);
+#[derive(Subcommand)]
+pub enum ModelsAction {
+    #[command(about = "Refresh model metadata and the signed-in ChatGPT account catalog.")]
+    Refresh,
+}
+
+pub async fn run(
+    provider: Option<ProviderId>,
+    auth_only: bool,
+    action: Option<ModelsAction>,
+    json: bool,
+) -> Result<()> {
+    let client = LocalClient::new(StateLayout::resolve()?);
+    client.ensure_running().await?;
+    if let Some(ModelsAction::Refresh) = action {
+        return refresh(&client, json, &mut std::io::stdout()).await;
+    }
+    let candidates = client
+        .models(ModelCandidateQuery::List {
+            provider,
+            ready_only: auth_only,
+        })
+        .await?;
 
     if json {
-        let items: Vec<serde_json::Value> = entries
-            .iter()
-            .map(super::model_render::resolved_model_json)
-            .collect();
-        println!("{}", serde_json::to_string_pretty(&items)?);
+        println!("{}", serde_json::to_string(&candidates)?);
         return Ok(());
     }
 
-    for entry in &entries {
-        println!("{}", entry.alias);
+    println!(
+        "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
+    );
+    let mut config_errors = Vec::new();
+    for model in candidates.models {
+        let limits =
+            |value: Option<u64>| value.map_or_else(|| "-".into(), |value| value.to_string());
+        let price =
+            |value: Option<f64>| value.map_or_else(|| "-".into(), |value| value.to_string());
+        let cost = model.cost.unwrap_or_default();
+        let auth_status = model.availability.status_str();
+        // 配置无效的模型仍列出，档位列标记出错，诊断随警告写到 stderr。
+        let efforts = if let Availability::Invalid { reason } = model.availability {
+            config_errors.push((format!("{}/{}", model.provider, model.model), reason));
+            "config-error".into()
+        } else if model.supported_efforts.is_empty() {
+            "-".into()
+        } else {
+            model
+                .supported_efforts
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+        println!(
+            "{}/{}\t{}\t{}\t{}\t{}/{}/{}/{}\t{}",
+            model.provider,
+            model.model,
+            limits(model.context),
+            limits(model.output),
+            efforts,
+            price(cost.input),
+            price(cost.output),
+            price(cost.cache_read),
+            price(cost.cache_write),
+            auth_status
+        );
+    }
+    for (model, error) in config_errors {
+        eprintln!("{model}: {error}");
+    }
+    for warning in candidates.warnings {
+        if let Some(provider) = warning.provider {
+            eprintln!("{provider}: {}", warning.message);
+        } else {
+            eprintln!("{}", warning.message);
+        }
     }
 
+    Ok(())
+}
+
+pub(super) async fn refresh(client: &LocalClient, json: bool, out: &mut impl Write) -> Result<()> {
+    client.models_refresh().await?;
+    if json {
+        writeln!(
+            out,
+            "{}",
+            serde_json::json!({"type":"models_refresh","status":"refreshed"})
+        )?;
+    } else {
+        writeln!(out, "Model metadata refreshed.")?;
+    }
     Ok(())
 }

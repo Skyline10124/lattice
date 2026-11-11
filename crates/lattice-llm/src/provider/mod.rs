@@ -5,15 +5,13 @@
 
 use std::collections::BTreeMap;
 
+use lattice_conversation::{Effort, ModelId, ProviderId};
 use serde::Deserialize;
 
 use crate::protocol::{Features, Protocol};
 
 mod builtins;
 pub(crate) mod config;
-mod model_ref;
-
-pub use model_ref::{ModelRef, ModelRefError};
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "kebab-case")]
@@ -36,18 +34,6 @@ impl Auth {
     }
 }
 
-#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum Effort {
-    Off,
-    Minimal,
-    Low,
-    Medium,
-    High,
-    Xhigh,
-    Max,
-}
-
 /// 手写价格以美元/百万 token 计；缺失字段保留，供元数据层按字段合并。
 #[derive(Clone, Debug, Default, Deserialize, PartialEq)]
 #[serde(default, deny_unknown_fields)]
@@ -63,6 +49,7 @@ pub(crate) struct ModelCost {
 pub(crate) struct ModelMetadata {
     pub(crate) context: Option<u64>,
     pub(crate) output: Option<u64>,
+    pub(crate) reasoning: Option<bool>,
     pub(crate) effort: Option<Vec<Effort>>,
     /// 未指定时继承元数据；所有来源都未指定时，默认支持工具。
     pub(crate) tools: Option<bool>,
@@ -73,13 +60,14 @@ pub(crate) struct ModelMetadata {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Provider {
-    pub(crate) id: String,
+    pub(crate) id: ProviderId,
     pub(crate) protocol: Protocol,
     pub(crate) base_url: String,
     pub(crate) auth: Auth,
+    pub(crate) declared: bool,
     pub(crate) catalog: Option<String>,
     pub(crate) features: Features,
-    pub(crate) models: BTreeMap<String, ModelMetadata>,
+    pub(crate) models: BTreeMap<ModelId, ModelMetadata>,
 }
 
 #[cfg(test)]

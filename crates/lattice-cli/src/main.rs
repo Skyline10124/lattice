@@ -7,7 +7,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 mod commands;
 #[cfg(test)]
 mod test_support;
-use commands::{audit, lancet as lancet_cmd, models, resolve, session as session_cmd};
+use commands::{models, session as session_cmd};
 
 #[derive(Parser)]
 #[command(name = "lattice")]
@@ -21,16 +21,11 @@ struct Cli {
         short,
         long,
         global = true,
-        help = "Emit JSONL (submit/cancel/head/entry/text/connection/error records) without human status lines."
+        help = "Emit JSONL (submit/configure/cancel/head/entry/text/connection/error records) without human status lines."
     )]
     json: bool,
 
-    #[arg(
-        short,
-        long,
-        global = true,
-        help = "Verbose output (show resolve trace)"
-    )]
+    #[arg(short, long, global = true, help = "Verbose logging")]
     verbose: bool,
 }
 
@@ -43,21 +38,21 @@ enum Commands {
         #[command(subcommand)]
         action: commands::daemon::DaemonAction,
     },
-    /// Manage provider API keys and credential status.
+    /// Manage provider credentials and Sign in with ChatGPT.
     Auth {
         #[command(subcommand)]
         action: commands::auth::AuthAction,
     },
-    /// List available models.
+    /// List available models or refresh model metadata.
     Models {
         /// Only show authenticated models.
         #[arg(long)]
         auth: bool,
-    },
-    /// Resolve a model alias to provider details.
-    Resolve {
-        /// Model alias to resolve.
-        model: String,
+        /// Only list models from this configured provider.
+        #[arg(long)]
+        provider: Option<lattice_api::ProviderId>,
+        #[command(subcommand)]
+        action: Option<models::ModelsAction>,
     },
     /// Manage sessions.
     #[command(disable_help_subcommand = true)]
@@ -65,24 +60,36 @@ enum Commands {
         #[command(subcommand)]
         action: session_cmd::SessionAction,
     },
-    /// Inspect CEP invocation records (registered, started and terminal).
-    Audit(Box<audit::AuditCmd>),
-    /// LANCET inspection and self-check subcommands.
-    Lancet {
-        #[command(subcommand)]
-        action: Option<lancet_cmd::LancetAction>,
-    },
     /// Open the terminal UI.
     Tui {
-        /// Existing session; when omitted, a session is created once the first submission is accepted.
+        /// Existing session; when omitted, a new session is created via configure.
         session_id: Option<String>,
         #[arg(long, required_unless_present = "session_id")]
-        agent: Option<String>,
+        agent: Option<lattice_api::AgentName>,
     },
 }
 
+fn parse_cli(
+    args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
+) -> Result<Cli, clap::Error> {
+    let cli = Cli::try_parse_from(args)?;
+    if let Some(Commands::Models {
+        auth,
+        provider,
+        action: Some(_),
+    }) = &cli.command
+        && (*auth || provider.is_some())
+    {
+        return Err(Cli::command().error(
+            clap::error::ErrorKind::ArgumentConflict,
+            "--auth and --provider cannot be used with models refresh",
+        ));
+    }
+    Ok(cli)
+}
+
 fn main() -> std::process::ExitCode {
-    let cli = match Cli::try_parse() {
+    let cli = match parse_cli(std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => {
             let help = matches!(
@@ -135,30 +142,23 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             return commands::daemon::run(action, cli.json).await;
         }
         Some(Commands::Auth { action }) => {
-            commands::auth::run(action, cli.json).await?;
+            return commands::auth::run(action, cli.json).await;
         }
-        Some(Commands::Models { auth }) => {
-            models::run(auth, cli.json)?;
-        }
-        Some(Commands::Resolve { model }) => {
-            resolve::run(&model, cli.verbose, cli.json)?;
+        Some(Commands::Models {
+            auth,
+            provider,
+            action,
+        }) => {
+            models::run(provider, auth, action, cli.json).await?;
         }
         Some(Commands::Session { action }) => {
             return session_cmd::run(action, cli.json, cli.verbose).await;
         }
-        Some(Commands::Audit(cmd)) => {
-            audit::run(*cmd, cli.json).await?;
-        }
-        Some(Commands::Lancet { action }) => {
-            lancet_cmd::run(action, cli.json).await?;
-        }
         Some(Commands::Tui { session_id, agent }) => {
-            let agents_dir = commands::run::agents_dir(None);
             return lattice_tui::run(lattice_tui::TuiOptions {
                 session_id,
-                agent: agent.unwrap_or_default(),
+                agent,
                 session_dir: session_cmd::default_session_dir(),
-                agents_dir,
                 project_root: std::env::current_dir()?,
             })
             .await;
@@ -174,8 +174,73 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, Commands};
-    use clap::Parser;
+    use super::{Cli, Commands, parse_cli};
+    use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn models_accepts_provider_and_auth_filters_and_documents_them() {
+        let cli = Cli::try_parse_from([
+            "lattice",
+            "--json",
+            "models",
+            "--provider",
+            "local",
+            "--auth",
+        ])
+        .unwrap();
+        assert!(cli.json);
+        assert!(
+            matches!(cli.command, Some(Commands::Models { auth: true, provider: Some(provider), action: None }) if provider == "local")
+        );
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("models")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(help.contains("--provider"));
+        assert!(help.contains("--auth"));
+    }
+
+    #[test]
+    fn models_refresh_is_separate_from_list_filters() {
+        assert!(matches!(
+            parse_cli(["lattice", "models", "refresh"]).unwrap().command,
+            Some(Commands::Models {
+                action: Some(crate::commands::models::ModelsAction::Refresh),
+                ..
+            })
+        ));
+        for args in [
+            vec!["lattice", "models", "--auth", "refresh"],
+            vec!["lattice", "models", "--provider", "anthropic", "refresh"],
+            vec!["lattice", "models", "refresh", "--auth"],
+        ] {
+            assert!(parse_cli(args).is_err());
+        }
+    }
+
+    #[test]
+    fn models_refresh_accepts_global_flags_before_and_after_the_subcommand() {
+        for flag in ["--json", "--verbose"] {
+            for args in [
+                vec!["lattice", flag, "models", "refresh"],
+                vec!["lattice", "models", flag, "refresh"],
+                vec!["lattice", "models", "refresh", flag],
+            ] {
+                let cli = parse_cli(args).unwrap();
+                assert_eq!(cli.json, flag == "--json");
+                assert_eq!(cli.verbose, flag == "--verbose");
+                assert!(matches!(
+                    cli.command,
+                    Some(Commands::Models {
+                        action: Some(crate::commands::models::ModelsAction::Refresh),
+                        ..
+                    })
+                ));
+            }
+        }
+    }
 
     #[test]
     fn auth_surface_accepts_only_provider_arguments_and_lists_commands() {
@@ -183,14 +248,17 @@ mod tests {
             vec!["auth", "set", "openai"],
             vec!["auth", "remove", "openai"],
             vec!["auth", "status"],
+            vec!["auth", "login", "chatgpt"],
+            vec!["auth", "logout", "chatgpt"],
         ] {
             assert!(Cli::try_parse_from(std::iter::once("lattice").chain(args)).is_ok());
         }
         for args in [
             vec!["auth", "set"],
             vec!["auth", "set", "openai", "key"],
-            vec!["auth", "login", "chatgpt"],
-            vec!["auth", "logout", "chatgpt"],
+            vec!["auth", "login", "openai"],
+            vec!["auth", "logout", "openai"],
+            vec!["auth", "login", "chatgpt", "secret"],
         ] {
             assert!(Cli::try_parse_from(std::iter::once("lattice").chain(args)).is_err());
         }
@@ -201,7 +269,7 @@ mod tests {
             .unwrap()
             .render_long_help()
             .to_string();
-        for word in ["set", "remove", "status"] {
+        for word in ["set", "remove", "status", "login", "logout"] {
             assert!(auth.contains(word));
         }
     }
@@ -216,7 +284,73 @@ mod tests {
                 let mut args = vec!["lattice"];
                 args.extend(command.clone());
                 args.extend(tail);
-                assert!(Cli::try_parse_from(&args).is_ok(), "{args:?}");
+                let cli = Cli::try_parse_from(&args).unwrap();
+                let choices = match cli.command.unwrap() {
+                    Commands::Run(args)
+                    | Commands::Session {
+                        action: super::session_cmd::SessionAction::Send(args),
+                    } => args,
+                    _ => panic!("expected submission"),
+                };
+                assert_eq!(choices.model, None);
+                assert_eq!(choices.effort, None);
+                for effort in ["off", "minimal", "low", "medium", "high", "xhigh", "max"] {
+                    let mut explicit = args.clone();
+                    explicit.extend(["--model", "unregistered/org/model", "--effort", effort]);
+                    let cli = Cli::try_parse_from(&explicit).unwrap();
+                    let choices = match cli.command.unwrap() {
+                        Commands::Run(args)
+                        | Commands::Session {
+                            action: super::session_cmd::SessionAction::Send(args),
+                        } => args,
+                        _ => panic!("expected submission"),
+                    };
+                    assert_eq!(
+                        choices.model.as_ref().map(ToString::to_string).as_deref(),
+                        Some("unregistered/org/model")
+                    );
+                    assert_eq!(choices.effort.unwrap().as_str(), effort);
+                }
+                for (flag, value) in [
+                    ("--model", "missing-slash"),
+                    ("--model", "local/"),
+                    ("--model", "Bad/model"),
+                    ("--model", "local/control\n"),
+                    ("--effort", "none"),
+                    ("--effort", "default"),
+                    ("--effort", "HIGH"),
+                    ("--effort", " high"),
+                ] {
+                    let mut invalid = args.clone();
+                    invalid.extend([flag, value]);
+                    assert_eq!(
+                        Cli::try_parse_from(&invalid).err().unwrap().kind(),
+                        clap::error::ErrorKind::ValueValidation,
+                        "{invalid:?}"
+                    );
+                }
+            }
+            let mut missing_agent = vec!["lattice"];
+            missing_agent.extend(command.clone());
+            missing_agent.extend(["hello", "--model", "local/model", "--effort", "off"]);
+            assert_eq!(
+                Cli::try_parse_from(missing_agent).err().unwrap().kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+            let mut root = Cli::command();
+            let mut subcommand = &mut root;
+            for name in command {
+                subcommand = subcommand.find_subcommand_mut(name).unwrap();
+            }
+            let help = subcommand.render_long_help().to_string();
+            for text in [
+                "--model",
+                "--effort",
+                "<provider>/<model>",
+                "inherit",
+                "off, minimal, low, medium, high, xhigh, max",
+            ] {
+                assert!(help.contains(text), "missing {text}: {help}");
             }
         }
         for node in ["0", "18446744073709551615"] {
@@ -250,5 +384,19 @@ mod tests {
                 agent: None
             })
         ));
+    }
+
+    #[test]
+    fn top_level_subcommands_exclude_removed_audit_and_lancet() {
+        let command = Cli::command();
+        assert_eq!(
+            command
+                .get_subcommands()
+                .map(|c| c.get_name())
+                .collect::<Vec<_>>(),
+            ["run", "daemon", "auth", "models", "session", "tui"]
+        );
+        assert!(Cli::try_parse_from(["lattice", "audit"]).is_err());
+        assert!(Cli::try_parse_from(["lattice", "lancet"]).is_err());
     }
 }

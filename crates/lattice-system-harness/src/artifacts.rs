@@ -1,6 +1,22 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+//! 场景的失败证据：终端上的失败报告与持久化的 bundle。
+//!
+//! - 失败报告依次保留：排序去重的秘密泄露位置、原始断言、命令诊断、按发生顺序的证据错误。
+//!   命令诊断先于 bundle I/O 形成；场景失败时附每条命令 stdout 与 stderr 的开头（先脱敏再截断，
+//!   每个流最多 2,048 字节，注明截掉的字节数）与完整脱敏副本的路径。
+//! - bundle 根目录取 `LATTICE_HARNESS_FAILURE_DIR`，未设置时为本 crate 下的
+//!   `target/harness-failures/`。场景名称由 `validate_artifact_name` 核对：单个普通路径分量，
+//!   保留名 `.claims` 除外。
+//! - 写者在清理旧产物之前取得 `<base>/.claims/<scenario>.lock` 的非阻塞独占锁，持有到持久化与
+//!   扫描结束；同名的并发写者立即失败，锁文件保留。[`ScenarioEvidence`] 从构造起持有占用权，
+//!   嵌套记录器使用不同的场景名称。
+//! - 输出错误与持久副本先做字面脱敏。递归字节扫描先记录泄露位置再修改副本；遍历、读取、重写、
+//!   符号链接与特殊文件的错误分别保留，扫描继续检查其他可达条目。工作区快照把符号链接本身记为叶子。
+//! - 证据目录里的命令文件不含证据路径；`world.txt` 以绝对路径记录场景临时目录。
+//! - 只有失败的场景写 bundle。
+
 use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::fs::{File, OpenOptions};
@@ -177,6 +193,58 @@ pub(crate) fn render_command_text(
         &format!("{summary}\noutcome: {}\n", outcome.summary()),
         secrets,
     )
+}
+
+/// 失败诊断里每个输出流最多显示的已脱敏字节数；完整的脱敏副本在证据目录里。
+const DIAGNOSTIC_EXCERPT_BYTES: usize = 2048;
+
+/// 先用写入证据文件时相同的 [`redact`] 脱敏，再截取开头部分，
+/// 截断不会把被替换前的秘密切成两半而漏过替换。
+fn redacted_excerpt(bytes: &[u8], secrets: &[&str]) -> String {
+    let text = redact(&String::from_utf8_lossy(bytes), secrets);
+    if text.is_empty() {
+        return "(empty)\n".into();
+    }
+    let mut end = text.len().min(DIAGNOSTIC_EXCERPT_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut excerpt = text[..end].to_string();
+    if !excerpt.ends_with('\n') {
+        excerpt.push('\n');
+    }
+    if end < text.len() {
+        excerpt.push_str(&format!(
+            "... [{} more bytes truncated]\n",
+            text.len() - end
+        ));
+    }
+    excerpt
+}
+
+/// 失败命令的诊断：元数据加上已脱敏 stdout/stderr 的开头部分，以及完整副本的路径。
+pub(crate) fn render_failed_command_text(
+    summary: &str,
+    outcome: &CommandOutcome,
+    secrets: &[&str],
+    stdout_copy: &Path,
+    stderr_copy: &Path,
+) -> String {
+    let mut text = render_command_text(summary, outcome, secrets);
+    for (stream, bytes, copy) in [
+        ("stdout", &outcome.stdout, stdout_copy),
+        ("stderr", &outcome.stderr, stderr_copy),
+    ] {
+        text.push_str(&redact(
+            &format!(
+                "{stream} (redacted, first {DIAGNOSTIC_EXCERPT_BYTES} bytes at most; full redacted copy: {}):\n",
+                copy.display()
+            ),
+            secrets,
+        ));
+        text.push_str(&redacted_excerpt(bytes, secrets));
+    }
+    text
 }
 
 pub(crate) fn capture_from_output(
@@ -659,11 +727,20 @@ impl ScenarioEvidence {
                 report.add_evidence_error("daemon cleanup", error, &secrets);
             }
         }
-        for command in &self.commands {
-            report.add_command_diagnostic(
-                render_command_text(&command.summary, &command.outcome, &secrets),
-                &secrets,
-            );
+        for (index, command) in self.commands.iter().enumerate() {
+            // 只有失败时才写证据，也才在诊断里显示已脱敏的输出开头。
+            let diagnostic = if persist {
+                render_failed_command_text(
+                    &command.summary,
+                    &command.outcome,
+                    &secrets,
+                    &self.failure_dir.join(format!("{index}-stdout.txt")),
+                    &self.failure_dir.join(format!("{index}-stderr.txt")),
+                )
+            } else {
+                render_command_text(&command.summary, &command.outcome, &secrets)
+            };
+            report.add_command_diagnostic(diagnostic, &secrets);
         }
         if !persist {
             return report.finish();
@@ -967,6 +1044,28 @@ mod tests {
     use serde_json::json;
     use std::time::Duration;
     use tempfile::TempDir;
+
+    #[test]
+    fn excerpt_redacts_a_secret_that_straddles_the_truncation_point() {
+        // 密钥从第 2040 字节开始，跨过 2048 字节的截断点：先截断再脱敏会漏出前 8 个字符。
+        let secret = "QZJXWVKMPLHGFDTRBNCY";
+        let mut bytes = "x".repeat(DIAGNOSTIC_EXCERPT_BYTES - 8).into_bytes();
+        bytes.extend_from_slice(secret.as_bytes());
+        bytes.extend_from_slice(b"\ntail\n");
+        let excerpt = redacted_excerpt(&bytes, &[secret]);
+        let leaked = (2..=secret.len())
+            .rev()
+            .find(|len| excerpt.contains(&secret[..*len]));
+        assert_eq!(
+            leaked, None,
+            "no prefix of the secret may appear in the excerpt"
+        );
+        assert!(
+            excerpt.contains("more bytes truncated"),
+            "excerpt must still be truncated, got tail {:?}",
+            &excerpt[excerpt.len().saturating_sub(80)..]
+        );
+    }
 
     #[test]
     fn write_fake_llm_log_renders_one_block_per_capture() {
@@ -1301,6 +1400,60 @@ mod tests {
         let command = std::fs::read_to_string(failure_dir.join("0-command.txt")).unwrap();
         assert!(command.contains("stdout_bytes: 18"));
         assert!(command.contains("stderr_bytes: 18"));
+    }
+
+    #[test]
+    fn scenario_failure_diagnostic_shows_redacted_output_head_and_evidence_path() {
+        let secret = "scenario-excerpt-secret";
+        let world = ScenarioWorld::new("evidence-command-excerpt").unwrap();
+        let root = TempDir::new().unwrap();
+        let failure_dir = root.path().join("scenario");
+        let outcome = CommandOutcome {
+            stdout: format!("{{\"error\":\"{secret} rejected\"}}").into_bytes(),
+            stderr: Vec::new(),
+            stdout_complete: true,
+            stderr_complete: true,
+            termination: Some(ProcessTermination::Exited(2)),
+            interventions: Vec::new(),
+            cleanup: ProcessGroupCleanup::default(),
+        };
+
+        let mut passing =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
+                .unwrap();
+        let clean = CommandOutcome {
+            stdout: b"ok".to_vec(),
+            ..outcome.clone()
+        };
+        passing.record_command("lattice send", &clean);
+        passing
+            .finish_report(None)
+            .expect("a passing scenario has no diagnostic");
+
+        let mut evidence =
+            ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
+                .unwrap();
+        evidence.record_command("lattice send", &outcome);
+        let report = evidence
+            .finish_report(Some("scenario failed".into()))
+            .unwrap_err()
+            .to_string();
+        assert!(!report.contains(secret), "{report}");
+        assert!(
+            report.contains("{\"error\":\"[REDACTED] rejected\"}"),
+            "diagnostic must show the redacted stdout: {report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "full redacted copy: {}",
+                failure_dir.join("0-stdout.txt").display()
+            )),
+            "diagnostic must point at the evidence copy: {report}"
+        );
+        assert!(
+            report.contains("(empty)"),
+            "empty stderr is labelled: {report}"
+        );
     }
 
     fn report_test_outcome(secret: &str) -> CommandOutcome {

@@ -43,7 +43,6 @@ repos/
 # 运行状态与本地产物
 *.db
 .lattice/
-.lancet/
 findings/
 
 # 不再适用的文档

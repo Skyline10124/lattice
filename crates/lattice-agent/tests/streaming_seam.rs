@@ -54,13 +54,12 @@ async fn fake_stream_preserves_part_order_and_matches_its_live_projection() {
     let attempt = ModelStepDriver::new(Arc::new(client))
         .run(
             &ModelStepRequest {
+                effort: None,
                 system_prompt: None,
                 history: vec![],
-                model: "test-model".into(),
-                provider: None,
+                model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                provider: lattice_conversation::ProviderId::parse("test").unwrap(),
                 tools: vec![],
-                temperature: None,
-                max_tokens: None,
                 cancel: None,
                 deadline: None,
                 session_id: None,
@@ -113,13 +112,12 @@ async fn typed_stream_failure_after_delta_preserves_retryability() {
         let result = ModelStepDriver::new(std::sync::Arc::new(client))
             .run(
                 &ModelStepRequest {
+                    effort: None,
                     system_prompt: None,
                     history: vec![],
-                    model: "test-model".into(),
-                    provider: None,
+                    model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                    provider: lattice_conversation::ProviderId::parse("test").unwrap(),
                     tools: vec![],
-                    temperature: None,
-                    max_tokens: None,
                     cancel: None,
                     deadline: None,
                     session_id: None,

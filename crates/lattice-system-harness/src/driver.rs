@@ -105,7 +105,11 @@ impl ProcessGroupCleanup {
     }
 }
 
-/// Captured command bytes with completeness, direct-child observation, intervention, and cleanup.
+/// 一条命令的完整结果：输出字节及其完整性、直接子进程的终止方式、harness 的干预与进程组清理。
+///
+/// [`CommandOutcome::clean_exit_code`] 只在干净退出时给出退出码：两条输出流都读到 EOF，没有
+/// 干预与强制清理，清理成功且没有存活进程。信号、缺失的终止状态或单纯的 exit 0 都不算干净退出。
+/// [`CommandOutcome::summary`] 与 `Debug` 只输出元数据；产品是否 panic 不从信号推断。
 #[derive(Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub stdout: Vec<u8>,
@@ -579,6 +583,7 @@ fn record_process_group_signal_result<F>(
 {
     match result {
         Ok(()) => {}
+        // 清理信号遇到 ESRCH 时立即复核进程组：组已为空才算无害。请求发出的 SIGINT 走另一条路径。
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
             let signal_error = CleanupError::new(operation, error);
             match recheck() {
@@ -1185,30 +1190,82 @@ mod tests {
         );
     }
 
+    /// 让 interrupt 测试 re-exec 本测试二进制时运行的进程组成员。
+    const INT_RECORDER_DIR: &str = "LATTICE_HARNESS_INT_RECORDER_DIR";
+
+    /// 后台 `&` 启动的进程继承被忽略的 SIGINT，sh 的 trap 不能恢复它；
+    /// 这里自己装处理器，收到 SIGINT 时在当前目录创建 `got-int` 后退出。
+    #[test]
+    #[ignore = "re-exec helper"]
+    fn int_recorder_helper() {
+        let Some(dir) = std::env::var_os(INT_RECORDER_DIR) else {
+            return;
+        };
+        extern "C" fn record_int(_: libc::c_int) {
+            // SAFETY: open 与 _exit 都是 async-signal-safe；路径是静态 C 字符串。
+            unsafe {
+                libc::open(
+                    c"got-int".as_ptr(),
+                    libc::O_CREAT | libc::O_WRONLY | libc::O_CLOEXEC,
+                    0o600,
+                );
+                libc::_exit(0);
+            }
+        }
+        std::env::set_current_dir(&dir).expect("enter recorder dir");
+        let handler: extern "C" fn(libc::c_int) = record_int;
+        // SAFETY: 安装的处理器只调用 async-signal-safe 函数。
+        let previous = unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) };
+        assert_ne!(previous, libc::SIG_ERR, "install SIGINT handler");
+        std::fs::write("recorder-ready", b"").expect("write recorder ready");
+        std::thread::sleep(Duration::from_secs(30));
+    }
+
     #[test]
     fn interrupt_reaches_and_reaps_the_process_group() {
         let dir = tempfile::tempdir().expect("tempdir");
         let ready = dir.path().join("ready");
+        let recorder_ready = dir.path().join("recorder-ready");
+        let got_int = dir.path().join("got-int");
         // 就绪文件由后台子进程在设置忽略 SIGINT 之后创建。若由外层在 `&` 之后创建，
         // 中断可能赶在子进程设置忽略之前到达，子进程随之退出，进程组里没有幸存者，
         // 也就不会出现预期的强制清理（压力下约 2%）。外层的 trap 在启动子进程之前
         // 已经设置，所以子进程就绪时外层也已就绪。
+        // 外层用 `sleep 1 & wait`：trap 只在前台命令结束后运行，`wait` 被信号打断后
+        // 立即运行 trap，不必等当前的 sleep 结束。
+        // 第三个成员是 re-exec 的本测试二进制，自己装 SIGINT 处理器并记录收到信号，
+        // 用来区分信号发给了整个进程组还是只发给了组长。
+        let exe = std::env::current_exe().expect("test binary");
         let mut cmd = Command::new("sh");
+        cmd.env(INT_RECORDER_DIR, dir.path());
         cmd.arg("-c").arg(format!(
             "trap 'exit 0' INT; sh -c \"trap '' INT; touch '{}'; sleep 30\" & \
-             while :; do sleep 1; done",
-            ready.display()
+             '{}' --exact driver::tests::int_recorder_helper --ignored --nocapture --test-threads=1 & \
+             while :; do sleep 1 & wait $!; done",
+            ready.display(),
+            exe.display()
         ));
         let mut running = RunningCommand::spawn(cmd).expect("spawn");
         let pgid = running.pgid();
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !ready.exists() && Instant::now() < deadline {
-            std::thread::yield_now();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !(ready.exists() && recorder_ready.exists()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
         }
         assert!(ready.exists(), "child never reached interrupt gate");
+        assert!(recorder_ready.exists(), "INT recorder never became ready");
         running.interrupt().expect("interrupt group");
+        // 先等记录者落盘再收尾，避免强制清理抢在处理器运行之前。
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !got_int.exists() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(
+            got_int.exists(),
+            "SIGINT did not reach a non-leader group member"
+        );
+        // 时限从启动算起，含等待就绪的时间；放宽到 20 秒，负载下也不会误判超时。
         let outcome = running
-            .wait(Some(Duration::from_secs(2)))
+            .wait(Some(Duration::from_secs(20)))
             .expect("interrupt outcome");
         assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
         assert_eq!(
@@ -1221,10 +1278,7 @@ mod tests {
         assert!(outcome.cleanup.forced);
         assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
         assert!(outcome.cleanup.surviving_pids.is_empty());
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !process_group_members(pgid).is_empty() && Instant::now() < deadline {
-            std::thread::yield_now();
-        }
-        assert!(process_group_members(pgid).is_empty());
+        // `wait` 返回时进程组必须已经清空，不再额外等待。
+        assert_eq!(process_group_members(pgid), Vec::<u32>::new());
     }
 }

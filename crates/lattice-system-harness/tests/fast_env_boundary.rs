@@ -6,19 +6,13 @@
 
 use lattice_system_harness::cli::run;
 use lattice_system_harness::{
-    AssertError, CommandOutcome, FAKE_API_KEY, FakeLlmServer, ScenarioSpec, ScenarioWorld,
-    SseScript, assert_exit_code, assert_exit_success, assert_stdout_contains,
+    AssertError, CommandOutcome, FAKE_API_KEY, FakeLlmServer, ProviderFixture, ProviderProtocol,
+    ProviderTarget, ScenarioSpec, ScenarioWorld, SseScript, TlsIdentity, assert_exit_code,
+    assert_exit_success,
 };
-use serde_json::Value;
 
 const SECRET_SENTINEL: &str = "sk-ant-dotenv-sentinel-4b91";
 const ATTACKER_BASE_URL: &str = "http://127.0.0.1:9/v1";
-
-fn parse_json(output: &CommandOutcome) -> Result<Value, AssertError> {
-    serde_json::from_slice(&output.stdout).map_err(|error| AssertError::StdoutMissing {
-        expected: format!("valid JSON output: {error}"),
-    })
-}
 
 fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertError> {
     if condition {
@@ -35,9 +29,14 @@ fn unloaded_world(name: &str) -> ScenarioWorld {
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
+        "XAI_API_KEY",
+        "GOOGLE_API_KEY",
         "GEMINI_API_KEY",
         "OPENAI_COMPATIBLE_API_KEY",
         "ANTHROPIC_BASE_URL",
+        "OPENAI_BASE_URL",
+        "XAI_BASE_URL",
+        "GOOGLE_BASE_URL",
         "GEMINI_BASE_URL",
         "OPENAI_COMPATIBLE_BASE_URL",
         "OPENAI_COMPATIBLE_MODEL",
@@ -63,16 +62,137 @@ fn unloaded_world(name: &str) -> ScenarioWorld {
 }
 
 #[test]
-fn fast_dotenv_cannot_supply_provider_credentials() {
-    let spec = ScenarioSpec::fast("fast-dotenv-missing-credentials");
+fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
+    for source in ["process", "dotenv"] {
+        for (id, protocol, key_env, url_env) in [
+            (
+                "anthropic",
+                ProviderProtocol::AnthropicMessages,
+                "ANTHROPIC_API_KEY",
+                "ANTHROPIC_BASE_URL",
+            ),
+            (
+                "openai",
+                ProviderProtocol::Responses,
+                "OPENAI_API_KEY",
+                "OPENAI_BASE_URL",
+            ),
+            (
+                "xai",
+                ProviderProtocol::Responses,
+                "XAI_API_KEY",
+                "XAI_BASE_URL",
+            ),
+            (
+                "google",
+                ProviderProtocol::Interactions,
+                "GEMINI_API_KEY",
+                "GEMINI_BASE_URL",
+            ),
+            (
+                "local",
+                ProviderProtocol::ChatCompletions,
+                "OPENAI_COMPATIBLE_API_KEY",
+                "OPENAI_COMPATIBLE_BASE_URL",
+            ),
+        ] {
+            let spec = ScenarioSpec::fast(format!("provider-env-{source}-{id}"));
+            let world = unloaded_world(&spec.name);
+            world.budget(&spec);
+            world.init_git_project().unwrap();
+            let server = FakeLlmServer::start(SseScript::plain("formal provider")).unwrap();
+            let hostile = FakeLlmServer::start(SseScript::plain("environment endpoint")).unwrap();
+            let fixture = ProviderFixture {
+                protocol,
+                target: if id == "local" {
+                    ProviderTarget::Custom(id)
+                } else {
+                    ProviderTarget::Builtin(id)
+                },
+                model: "boundary",
+            };
+            fixture.configure(&world, &server.base_url()).unwrap();
+            world
+                .write_agent_profile("boundary", &fixture.model_ref().unwrap())
+                .unwrap();
+            if source == "process" {
+                world.set_env(key_env, SECRET_SENTINEL);
+                world.set_env(url_env, hostile.base_url());
+                if id == "google" {
+                    world.set_env("GOOGLE_API_KEY", SECRET_SENTINEL);
+                    world.set_env("GOOGLE_BASE_URL", hostile.base_url());
+                }
+                world.set_env("OPENAI_COMPATIBLE_MODEL", "hostile-model");
+            } else {
+                world.write_project_file(".env", &format!("{key_env}={SECRET_SENTINEL}\n{url_env}={}\nGOOGLE_API_KEY={SECRET_SENTINEL}\nGOOGLE_BASE_URL={}\nOPENAI_COMPATIBLE_MODEL=hostile-model\n", hostile.base_url(), hostile.base_url())).unwrap();
+            }
+            let missing = run(
+                &world,
+                &spec,
+                &["--json", "run", "boundary", "--agent", "boundary"],
+            );
+            let result = assert_exit_code(&missing, 2).and_then(|_| {
+                let sent =
+                    lattice_system_harness::parse_send_stdout(&missing.stdout, missing.exit_code());
+                require(
+                    sent.rejection().is_some_and(|error| {
+                        error.kind == "bad_request"
+                            && error.message.contains(&format!("lattice auth set {id}"))
+                    }),
+                    "environment key cannot accept Turn",
+                )?;
+                require(
+                    server.captured_requests().is_empty(),
+                    "preaccept rejection sends no request",
+                )
+            });
+            assert_result(&world, &spec.name, &missing, result);
+            world.register_key(fixture, Some(FAKE_API_KEY)).unwrap();
+            let sent = run(
+                &world,
+                &spec,
+                &["--json", "run", "boundary", "--agent", "boundary"],
+            );
+            assert_result(&world, &spec.name, &sent, assert_exit_success(&sent));
+            let captures = server.captured_requests();
+            assert_eq!(captures.len(), 1);
+            assert_eq!(captures[0].model, "boundary");
+            assert_eq!(
+                captures[0].provider,
+                match id {
+                    "openai" | "xai" => "responses",
+                    "google" => "interactions",
+                    "anthropic" => "anthropic",
+                    _ => "openai",
+                }
+            );
+            assert!(hostile.captured_requests().is_empty());
+        }
+    }
+}
+
+#[test]
+fn project_providers_are_ignored_and_old_model_syntax_is_configuration_rejection() {
+    let spec = ScenarioSpec::fast("project-provider-boundary");
     let world = unloaded_world(&spec.name);
+    world.budget(&spec);
     world.init_git_project().unwrap();
-    for (model, key) in [
-        ("sonnet", "ANTHROPIC_API_KEY"),
-        ("gpt-4o-mini", "OPENAI_API_KEY"),
-        ("gemini", "GEMINI_API_KEY"),
-        ("compat:boundary", "OPENAI_COMPATIBLE_API_KEY"),
-    ] {
+    let server = FakeLlmServer::start(SseScript::plain("project ignored")).unwrap();
+    let hostile = FakeLlmServer::start(SseScript::plain("project endpoint")).unwrap();
+    let fixture = ProviderFixture::chat_completions("boundary");
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let project_config = format!(
+        "[providers.local]\nprotocol='chat-completions'\nbase_url='{}'\nauth='bearer'\n[providers.project]\nprotocol='chat-completions'\nbase_url='{}'\nauth='none'\n",
+        hostile.base_url(),
+        hostile.base_url()
+    );
+    world
+        .write_project_file("providers.toml", &project_config)
+        .unwrap();
+    world
+        .write_project_file(".lattice/providers.toml", &project_config)
+        .unwrap();
+    for model in ["project/model", "sonnet", "compat:boundary"] {
         world.write_agent_profile("boundary", model).unwrap();
         let out = run(
             &world,
@@ -81,189 +201,160 @@ fn fast_dotenv_cannot_supply_provider_credentials() {
         );
         let result = assert_exit_code(&out, 2).and_then(|_| {
             let sent = lattice_system_harness::parse_send_stdout(&out.stdout, out.exit_code());
-            require(sent.receipt_error.is_none(), "valid submission receipt")?;
-            require(sent.malformed_lines.is_empty(), "valid JSONL")?;
-            require(
-                sent.accepted_turn_id().is_none(),
-                ".env credentials must not accept a Turn",
-            )?;
             require(
                 sent.rejection().is_some_and(|error| {
                     error.kind == "bad_request"
-                        && error.message.contains("missing API key")
-                        && error.message.contains(key)
+                        && if model.contains('/') {
+                            error.message.contains("not registered")
+                        } else {
+                            error.message.contains("<provider>/<model>")
+                        }
                 }),
-                format!("submission must be rejected for missing {key}"),
+                "configuration rejection retains kind and reason",
             )
         });
-        assert_result(&world, &format!("{}-{key}", spec.name), &out, result);
+        assert_result(&world, &spec.name, &out, result);
     }
-}
-
-#[test]
-fn fast_dotenv_cannot_change_endpoint_or_model() {
-    let spec = ScenarioSpec::fast("fast-dotenv-endpoint-model");
-    let world = unloaded_world(&spec.name);
-    for (model, base_url) in [
-        ("sonnet", "https://api.anthropic.com"),
-        ("gemini", "https://generativelanguage.googleapis.com/v1beta"),
-        ("compat:boundary", "http://localhost:11434/v1"),
-    ] {
-        let out = run(&world, &spec, &["--json", "resolve", model]);
-        let result = assert_exit_success(&out)
-            .and_then(|_| parse_json(&out))
-            .and_then(|parsed| {
-                require(
-                    parsed.get("base_url").and_then(Value::as_str) == Some(base_url),
-                    format!("{model} endpoint must remain the built-in default"),
-                )
-            });
-        assert_result(&world, &format!("{}-{model}", spec.name), &out, result);
-    }
-
-    let bare = run(&world, &spec, &["--json", "resolve", "openai-compatible"]);
-    let result = assert_exit_code(&bare, 2)
-        .and_then(|_| assert_stdout_contains(&bare, "OPENAI_COMPATIBLE_MODEL"));
-    assert_result(&world, "fast-dotenv-missing-model", &bare, result);
-
-    let server = FakeLlmServer::start(SseScript::plain("trusted by the process")).unwrap();
-    let ca_file = world.root().join("tls-trust/ca.pem");
-    let dotenv = std::fs::read_to_string(world.project_dir().join(".env")).unwrap();
     world
-        .write_project_file(
-            ".env",
-            &format!("{dotenv}SSL_CERT_FILE={}\n", ca_file.display()),
-        )
+        .write_agent_profile("boundary", &fixture.model_ref().unwrap())
         .unwrap();
-    for key in ["SSL_CERT_FILE", "SSL_CERT_DIR"] {
-        world.unset_env(key);
-    }
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-    world
-        .write_project_file(
-            ".lattice/agents/boundary/agent.toml",
-            "schema_version=1\n[agent]\nname='boundary'\nmodel='compat:boundary'\n\
-             [prompt]\nsystem='harness agent'\n[tools]\nenabled=[]\n\
-             [llm.retry]\nmax_retries=0\n",
-        )
-        .unwrap();
-    world.init_git_project().unwrap();
-    let args = &["--json", "run", "TLS boundary", "--agent", "boundary"];
-
-    // CA 只写在 .env 中时，真实 TLS 握手仍须拒绝它。
-    let untrusted = run(&world, &spec, args);
-    let result = assert_exit_code(&untrusted, 1).and_then(|_| {
-        let sent =
-            lattice_system_harness::parse_send_stdout(&untrusted.stdout, untrusted.exit_code());
-        require(sent.receipt_error.is_none(), "valid TLS submission receipt")?;
-        require(sent.malformed_lines.is_empty(), "valid TLS JSONL")?;
-        require(
-            sent.accepted_turn_id().is_some(),
-            "TLS failure must follow acceptance",
-        )?;
-        require(
-            server.rejected_handshakes() > 0,
-            ".env must not add TLS trust",
-        )?;
-        require(
-            server.captured_requests().is_empty(),
-            "untrusted TLS must deliver no request",
-        )
-    });
-    assert_result(&world, "fast-dotenv-untrusted-tls", &untrusted, result);
-
-    // 相同 CA 由 shell 明确提供后可完成请求。
-    world.set_env("SSL_CERT_FILE", ca_file.display().to_string());
-    let trusted = run(&world, &spec, args);
-    let result = assert_exit_success(&trusted).and_then(|_| {
-        let sent = lattice_system_harness::parse_send_stdout(&trusted.stdout, trusted.exit_code());
-        require(
-            sent.has_completed(),
-            "process TLS trust must allow completion",
-        )?;
-        require(
-            server.captured_requests().len() == 1,
-            "trusted TLS must deliver one provider request",
-        )
-    });
-    assert_result(&world, "fast-dotenv-tls-control", &trusted, result);
-}
-
-#[test]
-fn fast_dotenv_agents_dir_cannot_redirect_profile_lookup() {
-    let spec = ScenarioSpec::fast("fast-dotenv-agents-dir");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    world.unset_env("LATTICE_AGENTS_DIR");
-    world.write_agent_profile("evil", "compat:evil").unwrap();
-    let server = lattice_system_harness::FakeLlmServer::start(
-        lattice_system_harness::SseScript::plain("control accepted"),
-    )
-    .unwrap();
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env(
-        "OPENAI_COMPATIBLE_API_KEY",
-        lattice_system_harness::FAKE_API_KEY,
+    let out = run(
+        &world,
+        &spec,
+        &["--json", "run", "boundary", "--agent", "boundary"],
     );
-    world.init_git_project().unwrap();
-    // 空覆盖会绕过 HOME 派生目录校验；工作区 .env 不能开启这条路径。
-    world
-        .write_project_file(".env", "LATTICE_AGENTS_DIR=\n")
-        .unwrap();
-    let args = &["--json", "run", "boundary control", "--agent", "evil"];
-    let from_dotenv = run(&world, &spec, args);
-    let result = lattice_system_harness::assert_exit_code(&from_dotenv, 2).and_then(|_| {
-        let sent =
-            lattice_system_harness::parse_send_stdout(&from_dotenv.stdout, from_dotenv.exit_code());
-        require(
-            sent.receipt_error.is_none(),
-            format!("valid submission receipt: {:?}", sent.receipt_error),
-        )?;
-        require(
-            sent.malformed_lines.is_empty(),
-            format!("valid JSONL: {:?}", sent.malformed_lines),
-        )?;
-        require(
-            sent.accepted_turn_id().is_none(),
-            "invalid directory must not accept a Turn",
-        )?;
-        require(
-            server.captured_requests().is_empty(),
-            "invalid directory must not dispatch",
-        )?;
-        // 配置在请求写出前加载失败：拒绝在 `sending` 之后的 `rejected` 回执中。
-        require(
-            sent.rejection()
-                .is_some_and(|error| error.kind == "bad_request"),
-            "ignored .env override must retain directory validation",
-        )
-    });
-    assert_result(&world, "fast-dotenv-agents-dir", &from_dotenv, result);
-    // 相同值只有明确来自提交进程时才生效，避免全部禁用变量造成假绿。
-    world.set_env("LATTICE_AGENTS_DIR", "");
-    let from_process = run(&world, &spec, args);
-    let control = assert_exit_success(&from_process).and_then(|_| {
-        let sent = lattice_system_harness::parse_send_stdout(
-            &from_process.stdout,
-            from_process.exit_code(),
-        );
-        require(
-            sent.receipt_error.is_none(),
-            format!("valid submission receipt: {:?}", sent.receipt_error),
-        )?;
-        require(
-            sent.accepted_turn_id().is_some(),
-            "process override must permit the selected project profile",
-        )
-    });
+    assert_result(&world, &spec.name, &out, assert_exit_success(&out));
     assert_eq!(server.captured_requests().len(), 1);
-    assert_eq!(server.captured_requests()[0].raw["model"], "evil");
+    assert!(hostile.captured_requests().is_empty());
+}
+
+#[test]
+fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
+    let spec = ScenarioSpec::fast("dotenv-tls-startup-trust");
+    let world = unloaded_world(&spec.name);
+    world.budget(&spec);
+    world.init_git_project().unwrap();
+    let server = FakeLlmServer::start(SseScript::plain("startup trust accepted")).unwrap();
+    let foreign = TlsIdentity::generate().unwrap();
+    let startup_ca = world.root().join("startup-ca.pem");
+    let target_ca = world.root().join("target-ca.pem");
+    std::fs::write(&startup_ca, foreign.ca_pem()).unwrap();
+    std::fs::write(&target_ca, TlsIdentity::shared().unwrap().ca_pem()).unwrap();
+    world.set_env("SSL_CERT_FILE", startup_ca.display().to_string());
+    world
+        .write_project_file(".env", &format!("SSL_CERT_FILE={}\n", target_ca.display()))
+        .unwrap();
+    world
+        .write_agent_profile("boundary", "local/boundary")
+        .unwrap();
+    world
+        .wire_provider(
+            ProviderFixture::chat_completions("boundary"),
+            &server,
+            FAKE_API_KEY,
+        )
+        .unwrap();
+    let args = &["--json", "run", "TLS boundary", "--agent", "boundary"];
+    let failed = run(&world, &spec, args);
+    assert_result(&world, &spec.name, &failed, assert_exit_code(&failed, 1));
+    let sent = lattice_system_harness::parse_send_stdout(&failed.stdout, failed.exit_code());
+    assert!(sent.accepted_turn_id().is_some());
+    assert!(server.rejected_handshakes() > 0);
+    assert!(server.captured_requests().is_empty());
+    world.set_env("SSL_CERT_FILE", target_ca.display().to_string());
+    world.stop_daemon().unwrap();
+    let accepted = run(&world, &spec, args);
     assert_result(
         &world,
-        "fast-dotenv-agents-dir-control",
-        &from_process,
-        control,
+        &spec.name,
+        &accepted,
+        assert_exit_success(&accepted),
     );
+    assert_eq!(server.captured_requests().len(), 1);
+}
+
+#[test]
+fn agents_use_backend_home_and_project_precedence() {
+    let spec = ScenarioSpec::fast("agents-backend-home");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
+    world.budget(&spec);
+    world.init_git_project().unwrap();
+    let server = FakeLlmServer::start(SseScript::plain("profile accepted")).unwrap();
+    let fixture = ProviderFixture::chat_completions("boundary");
+    world
+        .write_agent_profile("boundary", &fixture.model_ref().unwrap())
+        .unwrap();
+    let project_profile = world
+        .project_dir()
+        .join(".lattice/agents/boundary/agent.toml");
+    let source = std::fs::read_to_string(&project_profile).unwrap();
+    let global = world.home().join(".lattice/agents/boundary");
+    std::fs::create_dir_all(&global).unwrap();
+    std::fs::write(
+        global.join("agent.toml"),
+        source.replace("harness agent", "global test agent"),
+    )
+    .unwrap();
+    // 固定为 umask 022 的默认权限，不随机器 umask 变化：全局 profile 可被他人读取，
+    // 只要不被 group/other 改写就应接受。
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = |path: &std::path::Path, mode: u32| {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap()
+        };
+        mode(&world.home().join(".lattice/agents"), 0o755);
+        mode(&global, 0o755);
+        mode(&global.join("agent.toml"), 0o644);
+    }
+    std::fs::remove_file(&project_profile).unwrap();
+    // 录入凭据先启动后台；前端随后更换 HOME，仍通过相同的 XDG 状态根连接它。
+    world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+    let frontend_home = world.root().join("frontend-home");
+    std::fs::create_dir_all(&frontend_home).unwrap();
+    world.set_env("HOME", frontend_home.display().to_string());
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, [FAKE_API_KEY.into()])
+            .unwrap();
+    let result = (|| -> Result<(), AssertError> {
+        let args = &["--json", "run", "profile sources", "--agent", "boundary"];
+        let global_out = run(&world, &spec, args);
+        evidence.record_command("global profile", &global_out);
+        assert_exit_success(&global_out)?;
+        std::fs::write(&project_profile, &source).unwrap();
+        let project_out = run(&world, &spec, args);
+        evidence.record_command("project profile", &project_out);
+        assert_exit_success(&project_out)?;
+        let captures = server.captured_requests();
+        require(captures.len() == 2, "one request per accepted submission")?;
+        require(
+            captures[0].raw["messages"][0]["content"] == "global test agent",
+            "backend global prompt",
+        )?;
+        require(
+            captures[1].raw["messages"][0]["content"] == "harness agent",
+            "project prompt takes precedence",
+        )?;
+        std::fs::write(&project_profile, "schema_version=@invalid").unwrap();
+        let rejected = run(&world, &spec, args);
+        evidence.record_command("invalid project profile", &rejected);
+        assert_exit_code(&rejected, 2)?;
+        let sent =
+            lattice_system_harness::parse_send_stdout(&rejected.stdout, rejected.exit_code());
+        require(
+            sent.rejection().is_some_and(|error| {
+                error.kind == "bad_request" && error.message.contains("line 1")
+            }),
+            "invalid project profile must not fall back to global",
+        )?;
+        require(
+            server.captured_requests().len() == 2,
+            "rejected profile must not dispatch",
+        )
+    })();
+    evidence.record_captures(server.captured_requests());
+    evidence
+        .finish_report(result.err().map(|error| error.to_string()))
+        .unwrap_or_else(|report| panic!("{report}"));
 }
 
 #[test]
@@ -271,10 +362,15 @@ fn fast_dotenv_cannot_redirect_state_root() {
     let spec = ScenarioSpec::fast("fast-dotenv-state-root");
     let world = ScenarioWorld::new(&spec.name).expect("world");
     let server = FakeLlmServer::start(SseScript::plain("state initialized")).unwrap();
-    world.set_env("OPENAI_COMPATIBLE_BASE_URL", server.base_url());
-    world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
     world
-        .write_agent_profile("boundary", "compat:boundary")
+        .wire_provider(
+            lattice_system_harness::ProviderFixture::chat_completions("boundary"),
+            &server,
+            FAKE_API_KEY,
+        )
+        .unwrap();
+    world
+        .write_agent_profile("boundary", "local/boundary")
         .unwrap();
     world.init_git_project().unwrap();
     let started = run(

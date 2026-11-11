@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use lattice_conversation::validate_provider_id;
+use lattice_conversation::ProviderId;
 use serde::de::{MapAccess, Visitor, value::MapAccessDeserializer};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -22,7 +22,52 @@ impl Default for Document {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+impl Document {
+    pub(super) fn values(&self) -> Vec<&str> {
+        let mut values = Vec::new();
+        for credential in self.providers.values() {
+            match credential {
+                Credential::ApiKey { key } => values.push(key.0.as_str()),
+                Credential::Chatgpt {
+                    host_id,
+                    client_id,
+                    account,
+                    tokens,
+                } => {
+                    values.push(host_id.0.as_str());
+                    if let Some(client_id) = client_id {
+                        values.push(client_id.0.as_str());
+                    }
+                    if let Some(account) = account {
+                        values.push(account.subject.0.as_str());
+                    }
+                    if let Some(tokens) = tokens {
+                        values.extend([
+                            tokens.access_token.0.as_str(),
+                            tokens.refresh_token.0.as_str(),
+                            tokens.id_token.0.as_str(),
+                        ]);
+                    }
+                }
+            }
+        }
+        // 先替换长值，避免较短凭据遮住长凭据的一部分后留下后缀。
+        values.sort_unstable_by_key(|value| std::cmp::Reverse(value.len()));
+        values.dedup();
+        values
+    }
+
+    pub(super) fn redact(&self, message: &str) -> String {
+        self.values()
+            .into_iter()
+            .filter(|value| !value.is_empty())
+            .fold(message.to_owned(), |text, value| {
+                text.replace(value, "[REDACTED]")
+            })
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub(super) enum Credential {
     ApiKey {
@@ -47,22 +92,22 @@ pub(super) enum Credential {
     },
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Account {
-    subject: Secret,
+    pub(super) subject: Secret,
     pub(super) email: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Tokens {
-    access_token: Secret,
-    refresh_token: Secret,
-    id_token: Secret,
+    pub(super) access_token: Secret,
+    pub(super) refresh_token: Secret,
+    pub(super) id_token: Secret,
     #[serde(deserialize_with = "timestamp")]
     pub(super) expires_at: String,
-    scopes: Vec<String>,
+    pub(super) scopes: Vec<String>,
 }
 
 fn timestamp<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
@@ -131,7 +176,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Document, AuthError> {
         return Err(AuthError::InvalidFile("unsupported version (expected 1)"));
     }
     for (id, credential) in &document.providers {
-        validate_provider_id(id).map_err(|_| AuthError::InvalidFile("invalid provider id"))?;
+        ProviderId::parse(id).map_err(|_| AuthError::InvalidFile("invalid provider id"))?;
         match credential {
             Credential::ApiKey { key } => {
                 if id == "chatgpt" {

@@ -8,8 +8,6 @@ use clap::Args;
 
 use crate::repo_root;
 
-const TUI_MOCK_PROFILE: &str = "tui-mock";
-
 #[derive(Args, Debug)]
 pub struct TuiMockArgs {
     /// Scenario: long-text, tool-call, disconnect, slow, or error.
@@ -17,20 +15,21 @@ pub struct TuiMockArgs {
     scenario: String,
 }
 
+/// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，被测二进制须带 `test-fake-tools`。
 fn build_args() -> [&'static str; 7] {
     [
         "build",
-        "--profile",
-        TUI_MOCK_PROFILE,
         "-p",
         "lattice-cli",
         "--bin",
         "lattice",
+        "--features",
+        "test-fake-tools",
     ]
 }
 
 fn lattice_binary(target_dir: &std::path::Path) -> std::path::PathBuf {
-    target_dir.join(TUI_MOCK_PROFILE).join("lattice")
+    target_dir.join("debug").join("lattice")
 }
 
 pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
@@ -52,7 +51,7 @@ pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
         .status()
         .context("build lattice binary")?;
     if !build.success() {
-        bail!("cargo build --profile {TUI_MOCK_PROFILE} -p lattice-cli --bin lattice failed");
+        bail!("`cargo {}` 失败", build_args().join(" "));
     }
 
     let status = Command::new("cargo")

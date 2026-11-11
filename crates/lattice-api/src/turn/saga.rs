@@ -8,12 +8,11 @@ use super::{
     observer::ObserverSink,
     types::{TurnEvent, TurnRef},
 };
-use lancet_protocol::{ModelAttemptKey, TurnId};
 use lattice_agent::{
     ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
     ModelStopCause,
 };
-use lattice_conversation::ConversationItem;
+use lattice_conversation::{ConversationItem, ModelAttemptKey, TurnId};
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -33,17 +32,75 @@ fn retry_after_allowed(wait: Duration, deadline: Instant) -> bool {
     wait <= MAX_PROVIDER_RETRY_AFTER && wait < deadline.saturating_duration_since(Instant::now())
 }
 
+pub(crate) enum ModelExecution {
+    Gateway {
+        turn: lattice_llm::GatewayTurn,
+        last_origin: AttemptOrigin,
+    },
+    Injected {
+        driver: Arc<ModelStepDriver>,
+        origin: AttemptOrigin,
+    },
+}
+
+impl ModelExecution {
+    pub(crate) fn gateway(
+        turn: lattice_llm::GatewayTurn,
+        resolved: &lattice_llm::ResolvedRequest,
+    ) -> Self {
+        Self::Gateway {
+            turn,
+            last_origin: resolved.origin(),
+        }
+    }
+
+    async fn resolve(
+        &mut self,
+        target: &lattice_llm::ModelTarget,
+    ) -> (
+        AttemptOrigin,
+        std::result::Result<Arc<ModelStepDriver>, crate::ConfigRejection>,
+    ) {
+        match self {
+            Self::Gateway { turn, last_origin } => {
+                match turn.resolve(target).await {
+                    Ok(resolved) => {
+                        *last_origin = resolved.origin();
+                        (
+                            last_origin.clone(),
+                            Ok(Arc::new(ModelStepDriver::new(Arc::new(resolved)))),
+                        )
+                    }
+                    Err(error) => {
+                        // #331：解析失败尚无本次协议，暂按最近一次成功解析的协议记失败尝试，不发送请求。
+                        let origin = AttemptOrigin {
+                            provider_id: target.model.provider().clone(),
+                            protocol: last_origin.protocol,
+                        };
+                        (
+                            origin,
+                            Err(crate::ConfigRejection::new(
+                                &error.to_string(),
+                                Some(&turn.auth_store()),
+                            )),
+                        )
+                    }
+                }
+            }
+            Self::Injected { driver, origin } => (origin.clone(), Ok(driver.clone())),
+        }
+    }
+}
+
 pub(crate) struct LiveExecution {
-    pub provider: lattice_llm::ProviderKind,
-    pub driver: Arc<ModelStepDriver>,
-    pub runtime: Arc<lancet_api::LancetRuntime>,
-    pub events: tokio::sync::mpsc::UnboundedReceiver<lancet_protocol::ToolEvent>,
+    pub model: ModelExecution,
+    pub tools: Arc<dyn super::tools::TurnTools>,
     pub observer: Arc<ObserverSink>,
     pub cancel: Arc<AtomicBool>,
     /// 库代故障，不是用户取消。退出时不向失败代写入内存结果。
     pub shutdown: Arc<AtomicBool>,
     pub deadline: Instant,
-    pub retry: lattice_profile::LlmRetrySection,
+    pub retry: crate::RetryPolicy,
 }
 
 impl LiveExecution {
@@ -77,25 +134,11 @@ impl LiveExecution {
             }
             tokio::select! {
                 result = &mut worker => {
-                    self.drain_events();
                     self.healthy()?;
                     return Ok(result?);
                 }
-                Some(event) = self.events.recv() => self.emit_tool(event),
                 _ = tokio::time::sleep(Duration::from_millis(10)) => {}
             }
-        }
-    }
-
-    fn emit_tool(&self, event: lancet_protocol::ToolEvent) {
-        if let Some(event) = super::cep::map_cep_tool_event(event) {
-            self.observer.emit(event);
-        }
-    }
-
-    fn drain_events(&mut self) {
-        while let Ok(event) = self.events.try_recv() {
-            self.emit_tool(event);
         }
     }
 
@@ -120,7 +163,6 @@ pub(crate) async fn run_coordinator_saga(
         .io
         .read(move |read| read.turn_config(session, turn_id))
         .await?;
-    let (origin, message_origin) = super::live::provider_origin(&live.provider);
     let tools = config
         .catalog
         .entries
@@ -148,7 +190,7 @@ pub(crate) async fn run_coordinator_saga(
             .read(move |read| history(read, session))
             .await?;
         let mut attempt = 0;
-        let mut delay = live.retry.initial_delay_ms.min(live.retry.max_delay_ms);
+        let mut delay = live.retry.initial_delay_ms().min(live.retry.max_delay_ms());
         let reply = loop {
             live.healthy()?;
             if let Some(cause) = live.stop() {
@@ -163,6 +205,19 @@ pub(crate) async fn run_coordinator_saga(
                 model_step_ordinal: ordinal,
                 attempt_ordinal: attempt,
             };
+            let target = lattice_llm::ModelTarget {
+                model: crate::ModelRef::new(config.provider.clone(), config.model.clone()),
+                effort: config.effort,
+            };
+            let (origin, driver) = live.model.resolve(&target).await;
+            live.healthy()?;
+            if let Some(cause) = live.stop() {
+                let closed = coordinator
+                    .io
+                    .close_step(CloseStep::StopBetweenRequests { turn_id, cause })
+                    .await?;
+                return publish_closed(coordinator, &live.observer, closed).await;
+            }
             coordinator.io.start_request(key, origin.clone()).await?;
             #[cfg(feature = "test-crash-barriers")]
             super::crash_barrier::hit(
@@ -175,66 +230,73 @@ pub(crate) async fn run_coordinator_saga(
             .await?;
             live.observer.emit(TurnEvent::ModelStarted {
                 key,
-                provider: message_origin,
-                model: config.model.clone(),
+                origin: origin.clone(),
+                model: config.model.as_str().to_owned(),
             });
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
             let request = ModelStepRequest {
                 system_prompt: config.system_prompt.clone(),
                 history: history.clone(),
                 model: config.model.clone(),
-                provider: Some(config.provider.clone()),
+                provider: config.provider.clone(),
+                effort: config.effort,
                 tools: tools.clone(),
-                temperature: None,
-                max_tokens: None,
                 cancel: Some(cancellation.clone()),
                 deadline: Some(live.deadline),
                 session_id: Some(session.to_string()),
             };
-            let driver = live.driver.clone();
             let observer = live.observer.clone();
             live.healthy()?;
-            let worker = coordinator
-                .io
-                .start_execution(
-                    async move {
-                        driver
-                            .run(
-                                &request,
-                                Some(&mut |event| match event {
-                                    ModelStepEvent::TokenDelta { content } => {
-                                        observer.emit(TurnEvent::TokenDelta { key, content })
-                                    }
-                                    ModelStepEvent::ReasoningDelta { content } => {
-                                        observer.emit(TurnEvent::ReasoningDelta { key, content })
-                                    }
-                                    ModelStepEvent::Opened { .. } => {}
-                                }),
-                            )
-                            .await
+            let result = match driver {
+                Ok(driver) => {
+                    let worker = coordinator
+                        .io
+                        .start_execution(
+                            async move {
+                                driver
+                                    .run(
+                                        &request,
+                                        Some(&mut |event| match event {
+                                            ModelStepEvent::TokenDelta { content } => observer
+                                                .emit(TurnEvent::TokenDelta { key, content }),
+                                            ModelStepEvent::ReasoningDelta { content } => observer
+                                                .emit(TurnEvent::ReasoningDelta { key, content }),
+                                            ModelStepEvent::Opened { .. } => {}
+                                        }),
+                                    )
+                                    .await
+                            }
+                            // lattice-llm 的请求、重发与连接日志都落在这个 span 下，可对回具体尝试。
+                            .instrument(tracing::info_span!(
+                                "model_attempt",
+                                session = %session,
+                                turn = %turn_id,
+                                step = ordinal,
+                                attempt
+                            )),
+                            live.cancel.clone(),
+                            live.deadline,
+                        )
+                        .await?;
+                    match worker {
+                        Ok(worker) => live.join(worker, cancellation).await?,
+                        Err(cause) => Ok(ModelStepAttempt::Stopped {
+                            cause: if cause == StopCause::Cancelled {
+                                ModelStopCause::Cancelled
+                            } else {
+                                ModelStopCause::Deadline
+                            },
+                            usage: None,
+                            usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                            cost: None,
+                            diagnostic: Default::default(),
+                        }),
                     }
-                    // lattice-llm 的请求、重发与连接日志都落在这个 span 下，可对回具体尝试。
-                    .instrument(tracing::info_span!(
-                        "model_attempt",
-                        session = %session,
-                        turn = %turn_id,
-                        step = ordinal,
-                        attempt
-                    )),
-                    live.cancel.clone(),
-                    live.deadline,
-                )
-                .await?;
-            let result = match worker {
-                Ok(worker) => live.join(worker, cancellation).await?,
-                Err(cause) => Ok(ModelStepAttempt::Stopped {
-                    cause: if cause == StopCause::Cancelled {
-                        ModelStopCause::Cancelled
-                    } else {
-                        ModelStopCause::Deadline
-                    },
-                    usage: None,
-                    diagnostic: Default::default(),
+                }
+                Err(error) => Err(ModelStepError::OpeningFailed {
+                    message: lattice_llm::bound_diagnostic(&error.to_string()),
+                    retryable: false,
+                    retry_after: None,
                 }),
             };
             let mut retry_after = None;
@@ -242,11 +304,15 @@ pub(crate) async fn run_coordinator_saga(
                 Ok(ModelStepAttempt::Complete {
                     message,
                     usage,
+                    usage_kind,
+                    cost,
                     finish_reason,
                 }) => {
                     live.observer.emit(TurnEvent::ModelFinished {
                         key,
                         usage,
+                        usage_kind,
+                        cost,
                         finish_reason,
                     });
                     break CompleteReply {
@@ -254,16 +320,22 @@ pub(crate) async fn run_coordinator_saga(
                         origin: origin.clone(),
                         message,
                         usage,
+                        usage_kind,
+                        cost,
                     };
                 }
                 Ok(ModelStepAttempt::Stopped {
                     cause,
                     usage,
+                    usage_kind,
+                    cost,
                     diagnostic,
                 }) => AttemptStopped {
                     key,
                     origin: origin.clone(),
                     usage,
+                    usage_kind,
+                    cost,
                     retry_delay_ms: None,
                     cause: map_stop(cause),
                     diagnostic: AttemptDiagnostic {
@@ -284,6 +356,8 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin: origin.clone(),
                         usage: None,
+                        usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                        cost: None,
                         retry_delay_ms: None,
                         cause: StopCause::ProviderError {
                             retryable: retryable
@@ -299,6 +373,8 @@ pub(crate) async fn run_coordinator_saga(
                     key,
                     origin: origin.clone(),
                     usage: None,
+                    usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                    cost: None,
                     retry_delay_ms: None,
                     cause: StopCause::ProviderError { retryable: false },
                     diagnostic: AttemptDiagnostic {
@@ -346,7 +422,7 @@ pub(crate) async fn run_coordinator_saga(
                     });
                     live.backoff(Duration::from_millis(retry_delay_ms)).await?;
                     attempt = next_attempt;
-                    delay = delay.saturating_mul(2).min(live.retry.max_delay_ms);
+                    delay = delay.saturating_mul(2).min(live.retry.max_delay_ms());
                 }
             }
         };
@@ -357,6 +433,9 @@ pub(crate) async fn run_coordinator_saga(
         }
         let key = reply.key;
         let usage = reply.usage;
+        let usage_kind = reply.usage_kind;
+        let cost = reply.cost;
+        let origin = reply.origin.clone();
         let registered = match coordinator.register(reply).await {
             Ok(calls) => calls,
             Err(CoordinatorIoError::Store(StoreError::InvalidInput { .. })) => {
@@ -366,6 +445,8 @@ pub(crate) async fn run_coordinator_saga(
                         key,
                         origin: origin.clone(),
                         usage,
+                        usage_kind,
+                        cost,
                         retry_delay_ms: None,
                         cause: StopCause::InvalidBatch,
                         diagnostic: AttemptDiagnostic::default(),
@@ -423,46 +504,60 @@ pub(crate) async fn run_coordinator_saga(
             )
             .await?;
             live.healthy()?;
-            let runtime = live.runtime.clone();
+            let turn_tools = live.tools.clone();
             let method = call.name.clone();
             let params = call.arguments.clone();
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
             let call_cancel = cancellation.clone();
+            let call_deadline = live.deadline;
             let worker = coordinator
                 .io
                 .start_execution(
                     async move {
-                        runtime
-                            .dispatch(started, method, params, Some(call_cancel))
+                        turn_tools
+                            .execute(started, &method, params, call_cancel, call_deadline)
                             .await
                     },
                     live.cancel.clone(),
                     live.deadline,
                 )
                 .await?;
-            let worker = match worker {
-                Ok(worker) => worker,
-                Err(cause) => {
+            let reply = match worker {
+                Ok(worker) => {
+                    live.observer.emit(TurnEvent::ToolCallStarted {
+                        id: binding.invocation_id,
+                        name: call.name.clone(),
+                    });
+                    match live.join(worker, cancellation).await? {
+                        super::tools::ToolOutcome::Succeeded(value) => {
+                            Ok(ToolReply::Succeeded(value))
+                        }
+                        super::tools::ToolOutcome::Failed(error) => Ok(ToolReply::Failed(error)),
+                        super::tools::ToolOutcome::Cancelled => Ok(ToolReply::Cancelled),
+                        super::tools::ToolOutcome::Indeterminate => Ok(ToolReply::Indeterminate),
+                        super::tools::ToolOutcome::Deadline => Err(DispatchStop::Deadline),
+                    }
+                }
+                Err(cause) => Err(if cause == StopCause::Cancelled {
+                    DispatchStop::Cancelled
+                } else {
+                    DispatchStop::Deadline
+                }),
+            };
+            let reply = match reply {
+                Ok(reply) => reply,
+                Err(stop) => {
                     let closed = coordinator
                         .io
                         .close_step(CloseStep::StopExecuting {
                             key: registered.key,
-                            stop: if cause == StopCause::Cancelled {
-                                DispatchStop::Cancelled
-                            } else {
-                                DispatchStop::Deadline
-                            },
+                            stop,
                         })
                         .await?;
                     return publish_closed(coordinator, &live.observer, closed).await;
                 }
             };
-            live.observer.emit(TurnEvent::ToolCallStarted {
-                id: binding.invocation_id,
-                name: call.name.clone(),
-            });
-            let receipt = live.join(worker, cancellation).await?;
-            let terminal = prepare_terminal(binding, receipt.result, receipt.evidence)?;
+            let terminal = prepare_terminal(binding, reply);
             let outcome = terminal.result().payload.outcome();
             let error_summary = match &terminal.result().payload {
                 ResultPayload::Failed(error) => Some(bound_provider_diagnostic(&error.message)),
@@ -551,7 +646,7 @@ fn map_stop(cause: ModelStopCause) -> StopCause {
 
 fn history(
     read: &SessionRead,
-    session_id: lancet_protocol::SessionId,
+    session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<Vec<ConversationItem>> {
     let mut current = read.session(session_id)?.current;
     let mut items = Vec::new();
@@ -653,4 +748,45 @@ async fn publish_closed(
         }
     });
     Ok(detail)
+}
+
+#[cfg(test)]
+mod resolution_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn configuration_failure_uses_latest_successful_resolution_in_the_turn() {
+        let directory = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(
+            directory.path(),
+            <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+        )
+        .unwrap();
+        let path = directory.path().join("providers.toml");
+        let configure = |protocol| {
+            std::fs::write(&path, format!(
+            "[providers.local]\nprotocol='{protocol}'\nbase_url='http://localhost:9/v1'\nauth='none'\n"
+        )).unwrap()
+        };
+        configure("chat-completions");
+        let gateway = lattice_llm::RequestGateway::new(directory.path().into(), vec![]).unwrap();
+        let turn = gateway.open_turn();
+        let target = lattice_llm::ModelTarget::new(crate::ModelRef::parse("local/model").unwrap());
+        let initial = turn.resolve(&target).await.unwrap();
+        let mut execution = ModelExecution::gateway(turn, &initial);
+        configure("generate-content");
+        let (latest, ready) = execution.resolve(&target).await;
+        assert!(ready.is_ok());
+        assert_eq!(latest.protocol, AttemptProtocol::GenerateContent);
+        std::fs::write(path, "invalid configuration").unwrap();
+        let (failed, request) = execution.resolve(&target).await;
+        assert!(
+            request
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("configuration error")
+        );
+        assert_eq!(failed, latest);
+    }
 }

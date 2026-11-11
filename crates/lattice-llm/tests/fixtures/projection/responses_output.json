@@ -1,0 +1,11 @@
+{
+  "status": "completed",
+  "output": [
+    {"type":"message","id":"msg_comment","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"I will inspect both files.","annotations":[],"logprobs":[]}]},
+    {"type":"reasoning","id":"rs_a","summary":[{"type":"summary_text","text":"Check both inputs."}],"encrypted_content":"final-encrypted-content"},
+    {"type":"function_call","id":"fc_item_a","call_id":"call_a","name":"observe__workspace","arguments":"{\"path\":\"a\"}"},
+    {"type":"function_call","id":"fc_item_b","call_id":"call_b","name":"observe__workspace","arguments":"{\"path\":\"b\"}"},
+    {"type":"message","id":"msg_final","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":"Ready.","annotations":[],"logprobs":[]}]}
+  ],
+  "usage":{"input_tokens":100,"input_tokens_details":{"cached_tokens":60,"cache_write_tokens":10},"output_tokens":20,"output_tokens_details":{"reasoning_tokens":5}}
+}

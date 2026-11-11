@@ -10,6 +10,7 @@ use clap::Subcommand;
 use lattice_api::{StateLayout, local::LocalClient};
 use zeroize::Zeroizing;
 
+mod login;
 mod terminal;
 use terminal::TerminalInput;
 
@@ -20,15 +21,42 @@ const MAX_INPUT_BYTES: usize = 16 * 1024 + 3;
 pub enum AuthAction {
     /// Read an API key from the terminal without echo, or from standard input.
     Set { provider: String },
-    /// Remove a provider's API key.
+    /// Sign in with ChatGPT using a browser or a pasted callback URL.
+    Login {
+        #[arg(value_parser = ["chatgpt"])]
+        provider: String,
+    },
+    /// Sign out of ChatGPT and report remote revocation status.
+    Logout {
+        #[arg(value_parser = ["chatgpt"])]
+        provider: String,
+    },
+    /// Remove credentials and report ChatGPT remote revocation status.
     Remove { provider: String },
     /// Show credential status without exposing credentials.
     Status,
 }
 
-pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<()> {
+pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process::ExitCode> {
     let client = LocalClient::new(StateLayout::resolve()?);
     match action {
+        AuthAction::Login { provider } => {
+            client.ensure_running().await?;
+            return login::run(client.auth_login(&provider).await?, json).await;
+        }
+        AuthAction::Logout { provider } => {
+            client.ensure_running().await?;
+            let revocation = client.auth_logout(&provider).await?;
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"type":"auth","action":"logout","provider":provider,"revocation":revocation})
+                );
+            } else {
+                println!("{provider} logged out");
+                show_revocation(revocation);
+            }
+        }
         AuthAction::Set { provider } => {
             let mut key = Zeroizing::new(read_key()?);
             client.ensure_running().await?;
@@ -46,14 +74,21 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<()> {
         }
         AuthAction::Remove { provider } => {
             client.ensure_running().await?;
-            let removed = client.auth_remove(&provider).await?;
+            let result = client.auth_remove(&provider).await?;
             if json {
-                println!(
-                    "{}",
-                    serde_json::json!({"type":"auth","action":"remove","provider":provider,"removed":removed})
-                );
+                let mut value = serde_json::json!({"type":"auth","action":"remove","provider":provider,"removed":result.removed});
+                if let Some(revocation) = result.revocation {
+                    value["revocation"] = serde_json::to_value(revocation)?;
+                }
+                println!("{value}");
             } else {
-                println!("{provider} {}", if removed { "removed" } else { "missing" });
+                println!(
+                    "{provider} {}",
+                    if result.removed { "removed" } else { "missing" }
+                );
+                if let Some(revocation) = result.revocation {
+                    show_revocation(revocation);
+                }
             }
         }
         AuthAction::Status => {
@@ -63,12 +98,23 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<()> {
                 println!("{}", serde_json::to_string(&status)?);
             } else {
                 for row in status.providers {
-                    print!("{} {}", row.provider, row.status);
+                    print!("{} {}", row.provider, row.availability.status_str());
+                    if let lattice_api::local::Availability::Unconfigured { requirement } =
+                        row.availability
+                    {
+                        print!(" requirement={requirement}");
+                    }
                     if let Some(email) = row.email {
                         print!(" email={email}");
                     }
                     if let Some(expiry) = row.expires_at {
                         print!(" expires_at={expiry}");
+                    }
+                    if let Some(diagnostic) = row
+                        .availability
+                        .diagnostic(&row.provider, &status.providers_path)
+                    {
+                        print!(": {diagnostic}");
                     }
                     println!();
                 }
@@ -78,7 +124,18 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<()> {
             }
         }
     }
-    Ok(())
+    Ok(std::process::ExitCode::SUCCESS)
+}
+
+fn show_revocation(status: lattice_api::local::RevocationStatus) {
+    use lattice_api::local::RevocationStatus::*;
+    match status {
+        Confirmed => println!("Remote revocation confirmed"),
+        Unconfirmed => println!(
+            "Local tokens cleared; remote revocation unconfirmed. Disconnect LATTICE in ChatGPT settings."
+        ),
+        NotNeeded => println!("Remote revocation not needed"),
+    }
 }
 
 fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
@@ -92,7 +149,7 @@ fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
     let key = std::str::from_utf8(&bytes).map_err(|_| {
         lattice_api::ApiError::Configuration(lattice_api::ConfigRejection::new(
             "API key input must be valid UTF-8",
-            &[],
+            None,
         ))
     })?;
     Ok(key.to_owned())

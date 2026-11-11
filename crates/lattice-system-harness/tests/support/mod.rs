@@ -15,6 +15,7 @@ use serde_json::{Value, json};
 use std::{
     io::{Read, Write},
     os::unix::net::UnixStream,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -91,26 +92,6 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
     )
 }
 
-/// 带 Tool 调用的步骤都在完成结局的最后一步之前，结局来自 Step 条目而不是瞬时事件。
-pub(crate) fn assert_completed_after_tools(outcome: &SendOutcome) -> Result<(), AssertError> {
-    let entries = outcome.entries();
-    let last_tool = entries
-        .iter()
-        .rposition(|entry| entry.step().is_some_and(|step| !step.slots.is_empty()));
-    let completed = entries.iter().rposition(|entry| {
-        entry.step().is_some_and(|step| {
-            step.summary
-                .as_ref()
-                .is_some_and(|summary| summary.outcome.as_str() == "completed")
-        })
-    });
-    require(
-        last_tool.is_some() && completed.is_some_and(|completed| last_tool < Some(completed)),
-        "completed step must follow the last step with Tool calls",
-    )?;
-    require(outcome.has_completed(), "durable completed summary")
-}
-
 /// CLI 输出中这一轮的 `TurnSummary` 与各 Step 详情（按 `node` 覆盖后的最新值），
 /// 与 `session turn` 详情中同名字段同形，用于核验实时观察与重新打开看到的相同。
 pub(crate) fn live_turn(outcome: &SendOutcome) -> Value {
@@ -175,7 +156,7 @@ pub(crate) fn finish_scenario(
         .unwrap_or_else(|report| panic!("{report}"));
 }
 
-/// 复用 PTY 的公开读取采集，保留整棵树及其中每个 Turn 的操作员投影。
+/// 复用 PTY 的公开读取采集，保留整棵树及其中每个 Turn 的详情。
 pub(crate) fn record_session(
     session: &lattice_system_harness::SessionSendDriver<'_>,
     evidence: &mut ScenarioEvidence,
@@ -191,8 +172,6 @@ pub(crate) fn record_session(
     for args in [
         vec!["session", "log", sid],
         vec!["--json", "session", "list"],
-        vec!["--json", "audit", "--tail"],
-        vec!["--json", "lancet", "status"],
     ] {
         let out = session.run_command(&args).unwrap();
         evidence.record_command(args.join(" "), &out);
@@ -200,14 +179,10 @@ pub(crate) fn record_session(
     }
     for node in tree["nodes"].as_array().unwrap() {
         if let Some(tid) = node["turn_start"]["turn_id"].as_str() {
-            for args in [
-                vec!["--json", "session", "turn", tid],
-                vec!["--json", "audit", "replay", "--session", sid, "--turn", tid],
-            ] {
-                let out = session.run_command(&args).unwrap();
-                evidence.record_command(args.join(" "), &out);
-                assert!(out.is_clean_exit(0));
-            }
+            let args = ["--json", "session", "turn", tid];
+            let out = session.run_command(&args).unwrap();
+            evidence.record_command(args.join(" "), &out);
+            assert!(out.is_clean_exit(0));
         }
     }
     evidence.record_json("state-summary", &tree).unwrap();
@@ -262,7 +237,6 @@ pub(crate) fn wire_gated_fake_llm(
 pub(crate) fn direct_world(
     prefix: &str,
     agent: &str,
-    tools: &str,
     extra_profile: &str,
 ) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(prefix);
@@ -273,8 +247,7 @@ pub(crate) fn direct_world(
     let toml = format!(
         "schema_version = 1\n\n\
          [agent]\nname = \"{agent}\"\nmodel = \"{model}\"\n\n\
-         [prompt]\nsystem = \"You are a concise test agent.\"\n\n\
-         [tools]\nenabled = {tools}\n{extra_profile}"
+         [prompt]\nsystem = \"You are a concise test agent.\"\n{extra_profile}"
     );
     world
         .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
@@ -307,50 +280,11 @@ pub(crate) fn tool_result_value(capture: &CapturedRequest) -> Option<Value> {
     }
 }
 
-/// 这一轮有名为 `name` 的调用且结论不是 Succeeded。
-pub(crate) fn tool_failed(outcome: &SendOutcome, name: &str) -> bool {
-    outcome
-        .slots()
-        .iter()
-        .any(|slot| slot.method == name && slot.outcome != SlotOutcome::Succeeded)
-}
-
 pub(crate) fn tool_ok(outcome: &SendOutcome, name: &str) -> bool {
     outcome
         .slots()
         .iter()
         .any(|slot| slot.method == name && slot.outcome == SlotOutcome::Succeeded)
-}
-
-/// `method` 的某次调用以 Failed 结束，原因中的 CEP 错误码为 `code`（snake_case）。
-pub(crate) fn finished_with_code(outcome: &SendOutcome, method: &str, code: &str) -> bool {
-    outcome.slots().iter().any(|slot| {
-        slot.method == method
-            && slot.outcome == SlotOutcome::Failed
-            && slot.error_code.as_deref() == Some(code)
-    })
-}
-
-/// 公开会话条目中同一失败调用的原始槽位和完整 CEP 错误。
-pub(crate) fn tool_failure<'a>(
-    outcome: &'a SendOutcome,
-    method: &str,
-) -> Option<(&'a Value, &'a Value)> {
-    outcome.entries().into_iter().find_map(|entry| {
-        entry
-            .raw
-            .pointer("/content/slots")?
-            .as_array()?
-            .iter()
-            .find_map(|slot| {
-                let result = slot.pointer("/progress/result")?;
-                (slot.pointer("/binding/identity/method")?.as_str()? == method
-                    && result["name"] == method
-                    && slot["progress"]["progress"] == "terminal"
-                    && result["payload"]["outcome"] == "failed")
-                    .then(|| (slot, &result["payload"]["payload"]))
-            })
-    })
 }
 
 pub(crate) fn tool_call(id: &str, name: &str, args: &str) -> SseScript {
@@ -377,7 +311,11 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
         .expect("drive lattice")
 }
 
-/// 公开 Local IPC 的一条连接：请求写成一帧，回复按 `LTLOCAL5` 帧重组为逻辑消息。
+/// 与 `lattice_api::local::test_support::FRAME_MAGIC` 相同；harness 不能依赖产品 crate，用同一版本号拼出帧魔数。
+const PROTOCOL_VERSION: u8 = 63;
+const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
+
+/// 公开 Local IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
 pub(crate) struct Wire {
     stream: UnixStream,
     message: u64,
@@ -390,7 +328,7 @@ impl Wire {
         stream.set_read_timeout(Some(timeout)).unwrap();
         stream.set_write_timeout(Some(timeout)).unwrap();
         let body = serde_json::to_vec(request).unwrap();
-        stream.write_all(b"LTLOCAL5").unwrap();
+        stream.write_all(FRAME_MAGIC).unwrap();
         stream
             .write_all(&(body.len() as u32).to_be_bytes())
             .unwrap();
@@ -420,7 +358,7 @@ impl Wire {
             {
                 None
             }
-            other => panic!("read an LTLOCAL5 frame header: {other:?}"),
+            other => panic!("read a local frame header: {other:?}"),
         }
     }
     /// 读一条逻辑消息；`first` 是已读出的帧头首字节。
@@ -437,8 +375,8 @@ impl Wire {
             };
             self.stream
                 .read_exact(rest)
-                .expect("read an LTLOCAL5 frame header");
-            assert_eq!(&header[..8], b"LTLOCAL5");
+                .expect("read a local frame header");
+            assert_eq!(&header[..8], FRAME_MAGIC);
             let length = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
             assert!((1..=16 * 1024 * 1024).contains(&length));
             let mut bytes = vec![0; length];
@@ -459,35 +397,31 @@ pub(crate) fn ipc(world: &ScenarioWorld, timeout: Duration, request: Value) -> V
     Wire::connect(world, timeout, &request).next()
 }
 
-/// 提交端加载好的冻结配置：项目中的 profile 原文与指向 fake provider 的连接材料。
-pub(crate) fn configuration(world: &ScenarioWorld, agent: &str, base_url: &str) -> Value {
-    let profile = std::fs::read_to_string(
-        world
-            .project_dir()
-            .join(format!(".lattice/agents/{agent}/agent.toml")),
-    )
-    .unwrap();
-    let connection = ProviderFixture::chat_completions(agent)
-        .configuration(base_url, FAKE_API_KEY)
-        .unwrap();
-    json!({
-        "profile_toml": profile,
-        "system_prompt": "You are a concise test agent.",
-        "connection": connection,
-    })
+pub(crate) fn path_bytes(path: &Path) -> &[u8] {
+    std::os::unix::ffi::OsStrExt::as_bytes(path.as_os_str())
 }
 
-/// `session` 写作 `{"new": S}` 或 `{"existing": S}`；身份都由客户端生成。
+/// `session` 写作 `{"new": S}` 或 `{"existing": S}`；创建会话与修改设置都走 `configure`。
+pub(crate) fn configure_request(
+    world: &ScenarioWorld,
+    session: Value,
+    agent: Option<&str>,
+    model: Option<&str>,
+    effort: Option<&str>,
+) -> Value {
+    json!({"operation":"configure","request":{"session":session,
+        "workspace":path_bytes(world.project_dir()),"agent":agent,"model":model,"effort":effort}})
+}
+
+/// 原始 `submit` 只针对已有 `session_id` 提交输入与可选的 `expected_settings`。
 pub(crate) fn submit_request(
     world: &ScenarioWorld,
     turn_id: &str,
-    session: Value,
+    session_id: &str,
     input: &str,
-    agent: Option<&str>,
-    configuration: Value,
 ) -> Value {
-    json!({"operation":"submit","request":{"turn_id":turn_id,"session":session,
-        "workspace":world.project_dir(),"input":input,"agent":agent},"configuration":configuration})
+    json!({"operation":"submit","request":{"turn_id":turn_id,"session":session_id,
+        "workspace":path_bytes(world.project_dir()),"input":input,"expected_settings":null}})
 }
 
 /// 按 TurnId 查询：已接受、在途，或 `not_found` 错误。

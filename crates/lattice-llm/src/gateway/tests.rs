@@ -1,0 +1,3359 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
+use std::{
+    collections::{BTreeMap, VecDeque},
+    sync::{Arc, Mutex},
+    time::Duration,
+};
+
+use futures::{FutureExt, StreamExt};
+use lattice_conversation::UsageCompleteness;
+use std::os::unix::fs::PermissionsExt;
+use tokio::{
+    io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
+    net::TcpListener,
+    sync::{mpsc, oneshot},
+    task::JoinHandle,
+};
+use tokio_rustls::TlsAcceptor;
+use tracing::instrument::WithSubscriber;
+
+use super::{GatewayTurn, RequestGateway, TurnClient};
+use crate::models::test_support::{list_query, target_query};
+use crate::test_tls::TLS;
+use crate::{ChatRequest, LlmEvent, ModelTarget, ReplyOutcome, StreamControl};
+
+const DONE: &str = "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+const MESSAGES_DONE: &str = "event: message_start\ndata: {\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\nevent: content_block_start\ndata: {\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"ok\"}}\n\nevent: content_block_stop\ndata: {\"index\":0}\n\nevent: message_delta\ndata: {\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1}}\n\nevent: message_stop\ndata: {}\n\n";
+const CONTENT_DONE: &str = "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"ok\"}]},\"finishReason\":\"STOP\"}]}\n\n";
+
+#[tokio::test]
+async fn supported_efforts_reads_current_metadata_without_credentials() {
+    use lattice_conversation::Effort;
+    let directory = private_dir();
+    let path = directory.path().join("providers.toml");
+    let base = "[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='chat-completions'\nbase_url='http://localhost:1/v1'\n";
+    std::fs::write(
+        &path,
+        format!("{base}[providers.test.models.model]\neffort=['high','off','low']\n"),
+    )
+    .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let target = ModelTarget::test_target("test", "model");
+    assert_eq!(
+        crate::model_candidates(directory.path(), &target_query("test/model"))
+            .unwrap()
+            .models[0]
+            .supported_efforts,
+        vec![Effort::Off, Effort::Low, Effort::High]
+    );
+    assert!(matches!(
+        turn.prepare(&target.model, crate::EffortPolicy::Strict(None))
+            .await,
+        Err(crate::PrepareError::Unavailable {
+            availability: crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey,
+            },
+            ..
+        })
+    ));
+    std::fs::write(
+        &path,
+        format!("{base}[providers.test.models.model]\neffort=['medium']\n"),
+    )
+    .unwrap();
+    assert_eq!(
+        crate::model_candidates(directory.path(), &target_query("test/model"))
+            .unwrap()
+            .models[0]
+            .supported_efforts,
+        vec![Effort::Medium]
+    );
+    assert!(
+        crate::model_candidates(directory.path(), &target_query("test/unknown"))
+            .unwrap()
+            .models[0]
+            .supported_efforts
+            .is_empty()
+    );
+    assert!(matches!(
+        turn.prepare(
+            &crate::ModelRef::parse("missing/model").unwrap(),
+            crate::EffortPolicy::Strict(None),
+        )
+        .await,
+        Err(crate::PrepareError::ProviderNotFound { .. })
+    ));
+    std::fs::write(&path, format!("{base}[providers.test.features]\nthinking_toggle='thinking-type'\n[providers.test.models.budget.features]\nthinking_budget='thinking-budget'\n[providers.test.models.disabled.features]\nthinking_toggle='none'\n[providers.test.models.handwritten]\neffort=['high','off','high','low']\n[providers.test.models.handwritten.features]\nthinking_toggle='none'\n")).unwrap();
+    std::fs::create_dir_all(directory.path().join("cache")).unwrap();
+    std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"test-capabilities":{"models":{
+        "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
+        "disabled":{"id":"disabled","reasoning_options":[{"type":"toggle"}]},
+        "budget":{"id":"budget","limit":{"output":8192},"reasoning_options":[{"type":"budget_tokens"}]},
+        "unavailable-budget":{"id":"unavailable-budget","reasoning_options":[{"type":"budget_tokens"}]},
+        "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high"]}]},
+        "always":{"id":"always","reasoning":true}
+    }}, "openai":{"models":{
+        "effort":{"id":"effort","reasoning_options":[{"type":"effort","values":["none","low","high"]}]}
+    }}})).unwrap()).unwrap();
+    let source = std::fs::read_to_string(&path).unwrap().replace(
+        "[providers.test.features]",
+        "catalog='test-capabilities'\n[providers.test.features]",
+    );
+    std::fs::write(&path, &source).unwrap();
+    for (model, expected) in [
+        ("toggle", vec![Effort::Off, Effort::High]),
+        ("disabled", vec![]),
+        ("budget", vec![Effort::Low, Effort::Medium]),
+        ("unavailable-budget", vec![]),
+        ("always", vec![]),
+        ("handwritten", vec![Effort::Off, Effort::Low, Effort::High]),
+        ("effort", vec![Effort::Off, Effort::Low, Effort::High]),
+        ("org/unknown", vec![]),
+    ] {
+        let candidates =
+            crate::model_candidates(directory.path(), &target_query(&format!("test/{model}")))
+                .unwrap();
+        assert_eq!(candidates.models.len(), 1);
+        assert_eq!(
+            candidates.models[0].supported_efforts, expected,
+            "candidate: {model}"
+        );
+        assert_eq!(
+            candidates.models[0].availability,
+            crate::Availability::Unconfigured {
+                requirement: crate::ConfigurationRequirement::ApiKey
+            }
+        );
+    }
+    for (provider, configuration) in [
+        ("chatgpt", ""),
+        (
+            "pending-responses",
+            "[providers.pending-responses]\nprotocol='responses'\nauth='none'\nbase_url='http://localhost:1'\ncatalog='test-capabilities'\n",
+        ),
+        (
+            "pending-interactions",
+            "[providers.pending-interactions]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\ncatalog='test-capabilities'\n",
+        ),
+    ] {
+        std::fs::write(&path, format!("{source}\n{configuration}")).unwrap();
+        let expected = if provider == "pending-responses" || provider == "chatgpt" {
+            vec![Effort::Off, Effort::Low, Effort::High]
+        } else if provider == "pending-interactions" {
+            vec![Effort::Low, Effort::High]
+        } else {
+            vec![]
+        };
+        let exact = crate::model_candidates(
+            directory.path(),
+            &target_query(&format!("{provider}/effort")),
+        )
+        .unwrap();
+        assert_eq!(exact.models.len(), 1);
+        assert_eq!(exact.models[0].model.as_str(), "effort");
+        assert_eq!(
+            exact.models[0].supported_efforts, expected,
+            "candidate: {provider}"
+        );
+        if provider != "chatgpt" {
+            for &effort in &expected {
+                let resolved = turn
+                    .prepare(
+                        &crate::ModelRef::parse(&format!("{provider}/effort")).unwrap(),
+                        crate::EffortPolicy::Strict(Some(effort)),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(resolved.target().effort, Some(effort));
+            }
+            let listed =
+                crate::model_candidates(directory.path(), &list_query(Some(provider), false))
+                    .unwrap();
+            assert!(listed.models.iter().all(|model| model.supported_efforts
+                == if model.model.as_str() == "effort" {
+                    expected.clone()
+                } else {
+                    vec![]
+                }));
+            assert!(
+                listed
+                    .models
+                    .iter()
+                    .any(|model| model.model.as_str() == "effort")
+            );
+        }
+    }
+    for (feature, effort, reason) in [
+        (
+            "thinking_toggle='enable-thinking'",
+            "low",
+            "thinking_toggle",
+        ),
+        (
+            "thinking_budget='thinking-budget'",
+            "off",
+            "thinking_budget",
+        ),
+    ] {
+        std::fs::write(
+            &path,
+            format!("{base}[providers.test.features]\n{feature}\n[providers.test.models.model]\neffort=['{effort}']\n"),
+        )
+        .unwrap();
+        // provider 未配置且模型配置错误时，网关与候选都先报 Unconfigured。
+        assert!(matches!(
+            turn.prepare(&target.model, crate::EffortPolicy::Strict(None))
+                .await,
+            Err(crate::PrepareError::Unavailable {
+                availability: crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey,
+                },
+                ..
+            })
+        ));
+        let resolve_unconfigured = turn.resolve(&target).await.err().unwrap();
+        assert!(
+            matches!(
+                &resolve_unconfigured,
+                crate::LlmError::Config { message } if message.contains("lattice auth set test")
+            ),
+            "{resolve_unconfigured}"
+        );
+        for query in [
+            list_query(Some("test"), false),
+            crate::ModelCandidateQuery::Target(target.model.clone()),
+        ] {
+            let candidates = crate::model_candidates(directory.path(), &query).unwrap();
+            let model = &candidates.models[0];
+            assert_eq!(model.model.as_str(), "model");
+            assert!(model.supported_efforts.is_empty());
+            assert_eq!(
+                model.availability,
+                crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey
+                }
+            );
+        }
+        // provider Ready 后，网关与候选才求值模型配置并返回同一 Invalid 原因。
+        turn.auth_store().set("test", "test-key").unwrap();
+        let prepare_invalid = turn
+            .prepare(&target.model, crate::EffortPolicy::Strict(None))
+            .await
+            .err()
+            .unwrap();
+        let crate::PrepareError::Unavailable {
+            availability:
+                crate::Availability::Invalid {
+                    reason: ref prepare_reason,
+                },
+            ..
+        } = prepare_invalid
+        else {
+            panic!("expected invalid availability, got {prepare_invalid:?}");
+        };
+        assert!(prepare_reason.contains(reason), "{prepare_reason}");
+        let resolve_invalid = turn.resolve(&target).await.err().unwrap();
+        assert_eq!(
+            resolve_invalid,
+            crate::LlmError::from(prepare_invalid.clone())
+        );
+        for query in [
+            list_query(Some("test"), false),
+            crate::ModelCandidateQuery::Target(target.model.clone()),
+        ] {
+            let candidates = crate::model_candidates(directory.path(), &query).unwrap();
+            let model = &candidates.models[0];
+            assert_eq!(model.model.as_str(), "model");
+            assert!(model.supported_efforts.is_empty());
+            let crate::Availability::Invalid {
+                reason: candidate_reason,
+            } = &model.availability
+            else {
+                panic!(
+                    "expected invalid availability, got {:?}",
+                    model.availability
+                );
+            };
+            assert_eq!(candidate_reason, prepare_reason);
+            for detail in ["provider \"test\"", "model \"model\"", effort] {
+                assert!(candidate_reason.contains(detail), "{candidate_reason}");
+            }
+        }
+        turn.auth_store().remove_api_key("test").unwrap();
+    }
+}
+
+fn private_dir() -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    // 临时目录权限取决于 umask，这里固定为 0700，避免结果随环境变化。
+    std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+    dir
+}
+
+struct Received {
+    connection: usize,
+    path: String,
+    headers: BTreeMap<String, String>,
+    body: serde_json::Value,
+}
+
+struct Response {
+    message: String,
+    close: bool,
+    tail: Option<(oneshot::Receiver<()>, String)>,
+}
+
+struct Server {
+    url: String,
+    received: mpsc::UnboundedReceiver<Received>,
+    address: std::net::SocketAddr,
+    peers: mpsc::UnboundedReceiver<std::net::SocketAddr>,
+    task: JoinHandle<()>,
+    responses: Arc<Mutex<VecDeque<Response>>>,
+}
+
+impl Server {
+    async fn start(tls: bool) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, received) = mpsc::unbounded_channel();
+        let (peers_tx, peers) = mpsc::unbounded_channel();
+        let responses = Arc::new(Mutex::new(VecDeque::new()));
+        let queued = responses.clone();
+        let task = tokio::spawn(async move {
+            let mut connections = tokio::task::JoinSet::new();
+            let mut id = 0;
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let (socket, peer) = accepted.unwrap();
+                        let _ = peers_tx.send(peer);
+                        id += 1;
+                        let tx = tx.clone();
+                        let queued = queued.clone();
+                        connections.spawn(async move {
+                            if tls {
+                                let acceptor = TlsAcceptor::from(TLS.server.clone());
+                                if let Ok(socket) = acceptor.accept(socket).await {
+                                    serve(socket, id, tx, queued).await;
+                                }
+                            } else {
+                                serve(socket, id, tx, queued).await;
+                            }
+                        });
+                    }
+                    Some(result) = connections.join_next(), if !connections.is_empty() => result.unwrap(),
+                }
+            }
+        });
+        Self {
+            url: format!(
+                "{}://localhost:{}/v1",
+                if tls { "https" } else { "http" },
+                address.port()
+            ),
+            received,
+            address,
+            peers,
+            task,
+            responses,
+        }
+    }
+
+    /// 被测请求返回后再连一次探针：内核按到达顺序交出已完成握手的连接，
+    /// 所以探针之前被接受的连接数就是被测代码对这个服务器发起的连接数。
+    ///
+    /// 前提：只统计被测代码在探针之前已完成（connect 已 await 返回）的连接。
+    /// 被测代码若 spawn 一个不等待的连接，它可能在探针之后才连上而被漏计，计数偏少；
+    /// 探针之前已完成的连接仍会计入。所以被测代码不能这样发起连接。
+    async fn connections_before_probe(&mut self) -> usize {
+        let probe = tokio::net::TcpStream::connect(self.address).await.unwrap();
+        let probe_addr = probe.local_addr().unwrap();
+        let mut before = 0;
+        loop {
+            let peer = tokio::time::timeout(Duration::from_secs(5), self.peers.recv())
+                .await
+                .expect("probe connection was accepted")
+                .expect("server is still running");
+            if peer == probe_addr {
+                return before;
+            }
+            before += 1;
+        }
+    }
+
+    async fn next(&mut self) -> Received {
+        tokio::time::timeout(Duration::from_secs(5), self.received.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    fn respond(&self, response: String, close: bool) {
+        self.responses.lock().unwrap().push_back(Response {
+            message: response,
+            close,
+            tail: None,
+        });
+    }
+
+    fn respond_with_tail(&self, response: String, tail: String) -> oneshot::Sender<()> {
+        let (release, released) = oneshot::channel();
+        self.responses.lock().unwrap().push_back(Response {
+            message: response,
+            close: false,
+            tail: Some((released, tail)),
+        });
+        release
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
+}
+
+async fn serve(
+    mut socket: impl AsyncRead + AsyncWrite + Unpin,
+    connection: usize,
+    tx: mpsc::UnboundedSender<Received>,
+    responses: Arc<Mutex<VecDeque<Response>>>,
+) {
+    loop {
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            let mut byte = [0];
+            if socket.read_exact(&mut byte).await.is_err() {
+                return;
+            }
+            head.push(byte[0]);
+            assert!(head.len() < 32 * 1024);
+        }
+        let head = String::from_utf8(head).unwrap();
+        let mut lines = head.lines();
+        let path = lines
+            .next()
+            .unwrap()
+            .split_whitespace()
+            .nth(1)
+            .unwrap()
+            .to_owned();
+        let headers: BTreeMap<_, _> = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(key, value)| (key.to_ascii_lowercase(), value.trim().to_owned()))
+            .collect();
+        let length = headers
+            .get("content-length")
+            .map_or(0, |length| length.parse().unwrap());
+        let mut body = vec![0; length];
+        socket.read_exact(&mut body).await.unwrap();
+        let body = if body.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::from_slice(&body).unwrap()
+        };
+        let response_body = if path.ends_with("/messages") {
+            MESSAGES_DONE
+        } else if path.ends_with("/responses") {
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[]}}\n\n"
+        } else if path.ends_with("/interactions") {
+            include_str!("../../tests/fixtures/projection/interactions_thought_and_text.sse")
+        } else if path.contains(":streamGenerateContent") {
+            CONTENT_DONE
+        } else {
+            DONE
+        };
+        tx.send(Received {
+            connection,
+            path,
+            headers,
+            body,
+        })
+        .unwrap();
+        let response = responses.lock().unwrap().pop_front().unwrap_or_else(|| Response {
+            message: format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{response_body}", response_body.len()),
+            close: false, tail: None,
+        });
+        if socket.write_all(response.message.as_bytes()).await.is_err() {
+            return;
+        }
+        if let Some((released, tail)) = response.tail
+            && (released.await.is_err() || socket.write_all(tail.as_bytes()).await.is_err())
+        {
+            return;
+        }
+        if response.close {
+            let _ = socket.shutdown().await;
+            return;
+        }
+    }
+}
+
+fn configure(dir: &std::path::Path, url: &str, protocol: &str, auth: &str) {
+    std::fs::write(
+        dir.join("providers.toml"),
+        format!("[providers.test]\nprotocol = '{protocol}'\nbase_url = '{url}'\nauth = '{auth}'\n"),
+    )
+    .unwrap();
+}
+
+fn request(provider: &str) -> ChatRequest {
+    let mut request = ChatRequest::new(Vec::new(), ModelTarget::test_target(provider, "model-id"));
+    request.client_request_id = Some("session-id".into());
+    request
+}
+
+async fn complete(stream: crate::LlmStream) {
+    let events = tokio::time::timeout(Duration::from_secs(5), stream.collect::<Vec<_>>())
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            events.last(),
+            Some(LlmEvent::Finished {
+                outcome: ReplyOutcome::Complete { .. },
+                ..
+            })
+        ),
+        "{events:?}"
+    );
+}
+
+fn price_configuration(directory: &std::path::Path, url: &str, prices: &str) {
+    configure(directory, url, "chat-completions", "none");
+    let path = directory.join("providers.toml");
+    let mut source = std::fs::read_to_string(&path).unwrap();
+    source.push_str("catalog = 'pricing-fixture'\n[providers.test.models.model-id.cost]\n");
+    source.push_str(prices);
+    std::fs::write(path, source).unwrap();
+}
+
+fn price_response(server: &Server, tail: &str) -> oneshot::Sender<()> {
+    // 用量先于可观察文字交付，收到文字即可确定取消前已有用量。
+    let prefix = concat!(
+        "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":1000,\"completion_tokens\":100,\"prompt_tokens_details\":{\"cached_tokens\":200,\"cache_creation_input_tokens\":100},\"completion_tokens_details\":{\"reasoning_tokens\":20}}}\n\n",
+        "data: {\"choices\":[{\"delta\":{\"content\":\"priced\"}}]}\n\n"
+    );
+    server.respond_with_tail(
+        format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{prefix}", prefix.len() + tail.len()),
+        tail.into(),
+    )
+}
+
+#[tokio::test]
+async fn finished_cost_uses_current_merged_prices_without_requiring_current_credentials() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut server = Server::start(false).await;
+        let directory = private_dir();
+        price_configuration(directory.path(), &server.url, "input = 99\noutput = 99\n");
+        let cache = directory.path().join("cache");
+        std::fs::create_dir(&cache).unwrap();
+        std::fs::write(cache.join("models.json"), r#"{"pricing-fixture":{"models":{"model-id":{"id":"model-id","cost":{"input":88,"output":88,"cache_read":88,"cache_write":88,"reasoning":88}}}}}"#).unwrap();
+        let release = price_response(&server, DONE);
+        let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+        let resolved = gateway.open_turn().resolve(&request("test").target).await.unwrap();
+        let mut stream = resolved.stream_chat(request("test"), StreamControl::default()).await.unwrap();
+        assert_eq!(stream.next().await, Some(LlmEvent::Started));
+        assert_eq!(stream.next().await, Some(LlmEvent::Delta(crate::LiveDelta::Text("priced".into()))));
+        price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\ncache_read = 0.5\n");
+        std::fs::write(cache.join("models.json"), r#"{"pricing-fixture":{"models":{"model-id":{"id":"model-id","cost":{"input":77,"output":77,"cache_read":77,"cache_write":3,"reasoning":20}}}}}"#).unwrap();
+        std::fs::write(directory.path().join("auth.json"), "invalid credentials file").unwrap();
+        release.send(()).unwrap();
+        let events = stream.collect::<Vec<_>>().await;
+        let [LlmEvent::Delta(_), LlmEvent::Finished { outcome: ReplyOutcome::Complete { .. }, report }] = events.as_slice() else {
+            panic!("{events:?}");
+        };
+        let cost = report.cost.unwrap();
+        assert!((cost.usd - 0.0028).abs() < 1e-15);
+        assert!(cost.exact);
+        assert_eq!(report.usage_kind, UsageCompleteness::Complete);
+        assert_eq!(report.usage.unwrap().input, Some(1000));
+        server.next().await;
+        assert!(server.received.try_recv().is_err(), "pricing does not issue another request");
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn finished_cost_is_delivered_once_for_each_terminal_outcome() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    tokio::time::pause();
+    let _resume = ResumeClock;
+    let exercise = tokio::time::timeout(Duration::from_secs(15), async {
+        for ending in ["complete", "cancel", "deadline", "error", "rejected"] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            price_configuration(
+                directory.path(),
+                &server.url,
+                "input = 2\noutput = 10\ncache_read = 0.5\ncache_write = 3\n",
+            );
+            let tail = match ending {
+                "error" => {
+                    "data: {\"error\":{\"message\":\"retryable failure\",\"type\":\"server_error\"}}\n\n"
+                }
+                "rejected" => {
+                    "data: {\"choices\":[{\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call\",\"function\":{\"name\":\"tool\",\"arguments\":\"{\"}}]},\"finish_reason\":\"tool_calls\"}]}\n\ndata: [DONE]\n\n"
+                }
+                _ => DONE,
+            };
+            let release = price_response(&server, tail);
+            let cancel = Arc::new(AtomicBool::new(false));
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let before_open = tokio::time::Instant::now();
+            let mut stream = gateway
+                .open_turn()
+                .stream_chat(
+                    request("test"),
+                    StreamControl {
+                        cancel: Some(cancel.clone()),
+                        deadline: (ending == "deadline")
+                            .then(|| tokio::time::Instant::now() + Duration::from_secs(1)),
+                    },
+                )
+                .await
+                .unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            assert_eq!(
+                tokio::time::Instant::now(),
+                before_open,
+                "opening and usage delivery do not advance time"
+            );
+            if ending == "cancel" {
+                cancel.store(true, Ordering::Release);
+            } else if ending == "deadline" {
+                tokio::time::advance(Duration::from_secs(1)).await;
+            } else {
+                release.send(()).unwrap();
+            }
+            let events = stream.collect::<Vec<_>>().await;
+            let finished: Vec<_> = events
+                .iter()
+                .filter_map(|event| match event {
+                    LlmEvent::Finished { outcome, report } => Some((outcome, report)),
+                    _ => None,
+                })
+                .collect();
+            let [(outcome, report)] = finished.as_slice() else {
+                panic!("{ending}: {events:?}")
+            };
+            let correct = match ending {
+                "complete" => matches!(outcome, ReplyOutcome::Complete { .. }),
+                "cancel" => matches!(
+                    outcome,
+                    ReplyOutcome::Interrupted {
+                        reason: crate::ReplyStop::Stream(crate::StreamStop::Cancelled)
+                    }
+                ),
+                "deadline" => matches!(
+                    outcome,
+                    ReplyOutcome::Interrupted {
+                        reason: crate::ReplyStop::Stream(crate::StreamStop::Deadline)
+                    }
+                ),
+                "error" => {
+                    matches!(outcome, ReplyOutcome::Interrupted { reason: crate::ReplyStop::Stream(crate::StreamStop::Provider(failure)) } if failure.retryable)
+                }
+                _ => matches!(outcome, ReplyOutcome::Rejected { .. }),
+            };
+            assert!(correct, "{ending}: {outcome:?}");
+            let interrupted = matches!(outcome, ReplyOutcome::Interrupted { .. });
+            let cost = report.cost.unwrap();
+            assert!((cost.usd - 0.0028).abs() < 1e-15, "{ending}");
+            assert_eq!(cost.exact, !interrupted, "{ending}");
+            assert_eq!(
+                report.usage_kind,
+                if interrupted {
+                    UsageCompleteness::Partial
+                } else {
+                    UsageCompleteness::Complete
+                },
+                "{ending}"
+            );
+            assert_eq!(report.usage.unwrap().reasoning, Some(20), "{ending}");
+        }
+    });
+    tokio::pin!(exercise);
+    let wall_deadline = std::time::Instant::now() + Duration::from_secs(15);
+    // 持续让出执行权且保持可运行，避免本地 I/O 等待让暂停的时钟自动推进。
+    loop {
+        if let Some(result) = exercise.as_mut().now_or_never() {
+            result.unwrap();
+            break;
+        }
+        assert!(
+            std::time::Instant::now() < wall_deadline,
+            "terminal cost test exceeded its wall-clock timeout"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn finished_price_read_failures_keep_the_reply_and_only_log_safe_reasons() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (failure, reason, kind) in [
+            ("syntax", "provider configuration unavailable", UsageCompleteness::Partial),
+            ("unreadable", "provider configuration unavailable", UsageCompleteness::Partial),
+            ("provider removed", "provider unavailable", UsageCompleteness::Partial),
+            ("model without price", "model price unavailable", UsageCompleteness::Complete),
+            ("invalid price", "invalid model price", UsageCompleteness::Complete),
+        ] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\n");
+            let release = price_response(&server, DONE);
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let mut stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            let path = directory.path().join("providers.toml");
+            match failure {
+                "unreadable" => {
+                    std::fs::remove_file(&path).unwrap();
+                    std::fs::create_dir(&path).unwrap();
+                }
+                "invalid price" => price_configuration(directory.path(), &server.url, "input = nan\noutput = 10\n"),
+                "provider removed" => std::fs::write(&path, "[metadata]\nauto_refresh = false\n").unwrap(),
+                "model without price" => {
+                    configure(directory.path(), &server.url, "chat-completions", "none");
+                    let source = std::fs::read_to_string(&path).unwrap();
+                    std::fs::write(&path, format!("{source}\n[providers.test.models.model-id]\ncontext = 4096\n")).unwrap();
+                }
+                _ => std::fs::write(&path, "secret-key-in-invalid-configuration = [").unwrap(),
+            }
+            release.send(()).unwrap();
+            let (events, logs) = capture_logs(stream.collect::<Vec<_>>()).await;
+            let Some(LlmEvent::Finished { outcome: ReplyOutcome::Complete { message }, report }) = events.last() else { panic!("{events:?}") };
+            assert!(message.as_message().parts.iter().any(|part| matches!(&part.semantic, lattice_conversation::MessageSemantic::Text { text } if text == "pricedok")));
+            assert_eq!(report.usage.unwrap().input, Some(1000));
+            assert_eq!(report.cost, None);
+            assert_eq!(report.usage_kind, kind, "{failure}");
+            assert!(logs.contains(reason), "{logs}");
+            assert!(!logs.contains("secret-key-in-invalid-configuration"), "{logs}");
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn finished_without_usage_keeps_cost_unknown_without_reading_prices() {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for interrupted in [false, true] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\n");
+            let prefix = "data: {\"choices\":[{\"delta\":{\"content\":\"unmetered\"}}]}\n\n";
+            let tail = if interrupted {
+                "data: {\"error\":{\"message\":\"failed\",\"type\":\"server_error\"}}\n\n"
+            } else { DONE };
+            let release = server.respond_with_tail(
+                format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{prefix}", prefix.len() + tail.len()), tail.into(),
+            );
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let mut stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
+            assert_eq!(stream.next().await, Some(LlmEvent::Started));
+            assert!(matches!(stream.next().await, Some(LlmEvent::Delta(_))));
+            std::fs::write(directory.path().join("providers.toml"), "secret-key = [").unwrap();
+            release.send(()).unwrap();
+            let (events, logs) = capture_logs(stream.collect::<Vec<_>>()).await;
+            let Some(LlmEvent::Finished { outcome, report }) = events.last() else { panic!("{events:?}") };
+            assert!(if interrupted {
+                matches!(outcome, ReplyOutcome::Interrupted { .. })
+            } else {
+                matches!(outcome, ReplyOutcome::Complete { .. })
+            }, "{outcome:?}");
+            assert_eq!(report.usage, None);
+            assert_eq!(report.usage_kind, UsageCompleteness::Partial);
+            assert_eq!(report.cost, None);
+            assert!(!logs.contains("attempt cost estimate unavailable"), "no price lookup without usage: {logs}");
+        }
+    }).await.unwrap();
+}
+
+#[tokio::test]
+async fn finished_cost_compares_chat_alias_zero_and_gemini_final_usage() {
+    use serde_json::json;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        for (name, protocol, frame, prices, expected, amount, kind, complete) in [
+            ("chat explicit write zero without price", "chat-completions",
+                json!({"choices":[{"delta":{"content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_write_tokens":0},"completion_tokens_details":{"reasoning_tokens":20}}}),
+                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,200,0,100,20]), 0.0027, UsageCompleteness::Complete, true),
+            ("gemini omitted read with price", "generate-content",
+                json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100}}),
+                "input = 2\noutput = 10\ncache_read = 0.5\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete, true),
+            ("gemini omitted read without price", "generate-content",
+                json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":100}}),
+                "input = 2\noutput = 10\n", json!([1000,0,null,100,0]), 0.003, UsageCompleteness::Complete, true),
+            ("gemini missing prompt", "generate-content",
+                json!({"candidates":[{"finishReason":"STOP"}],"usageMetadata":{"candidatesTokenCount":5}}),
+                "input = 2\noutput = 10\n", json!([null,0,null,5,0]), 0.00005, UsageCompleteness::Partial, true),
+            ("gemini thoughts exhaust output budget", "generate-content",
+                json!({"candidates":[{"finishReason":"MAX_TOKENS"}],"usageMetadata":{"promptTokenCount":10,"thoughtsTokenCount":4}}),
+                "input = 2\noutput = 10\n", json!([10,0,null,4,4]), 0.00006, UsageCompleteness::Complete, true),
+            ("gemini candidate safety", "generate-content",
+                json!({"candidates":[{"finishReason":"SAFETY"}],"usageMetadata":{"promptTokenCount":10,"totalTokenCount":10}}),
+                "input = 2\noutput = 10\n", json!([10,0,null,0,0]), 0.00002, UsageCompleteness::Complete, true),
+            ("gemini interrupted thoughts without candidates", "generate-content",
+                json!({"usageMetadata":{"promptTokenCount":10,"thoughtsTokenCount":4}}),
+                "input = 2\noutput = 10\n", json!([10,null,null,null,4]), 0.00002, UsageCompleteness::Partial, false),
+        ] {
+            let server = Server::start(false).await;
+            let directory = private_dir();
+            configure(directory.path(), &server.url, protocol, "none");
+            let path = directory.path().join("providers.toml");
+            let source = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(path, format!("{source}\n[providers.test.models.model-id.cost]\n{prices}")).unwrap();
+            let body = format!("data: {frame}\n\n");
+            server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+            let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+            let stream = gateway.open_turn().stream_chat(request("test"), StreamControl::default()).await.unwrap();
+            let events = stream.collect::<Vec<_>>().await;
+            let Some(LlmEvent::Finished { outcome, report }) = events.last() else { panic!("{name}: {events:?}") };
+            if complete {
+                assert!(matches!(outcome, ReplyOutcome::Complete { .. }), "{name}: {outcome:?}");
+            } else {
+                assert!(matches!(outcome, ReplyOutcome::Interrupted { reason: crate::ReplyStop::Stream(crate::StreamStop::UnexpectedEof) }), "{name}: {outcome:?}");
+            }
+            let usage = serde_json::to_value(report.usage.unwrap()).unwrap();
+            assert_eq!(json!([usage["input"],usage["cache_read"],usage["cache_write"],usage["output"],usage["reasoning"]]), expected, "{name}");
+            assert_eq!(report.usage_kind, kind, "{name}");
+            let cost = report.cost.unwrap();
+            assert!((cost.usd - amount).abs() < 1e-15, "{name}: {cost:?}");
+            assert_eq!(cost.exact, kind == UsageCompleteness::Complete, "{name}");
+        }
+    }).await.unwrap();
+}
+
+#[derive(Clone, Default)]
+struct LogOutput(Arc<Mutex<Vec<u8>>>);
+
+impl std::io::Write for LogOutput {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+async fn capture_logs<T>(future: impl std::future::Future<Output = T>) -> (T, String) {
+    let output = LogOutput::default();
+    let writer = output.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_env_filter("lattice_llm=debug")
+        .without_time()
+        .with_ansi(false)
+        .with_writer(move || writer.clone())
+        .finish();
+    let subscriber = tracing::Dispatch::new(subscriber);
+    // 同时保留空 subscriber，使并行测试首次注册调用点时按全部 subscriber 计算兴趣。
+    let _other_threads = tracing::Dispatch::new(tracing::subscriber::NoSubscriber::default());
+    let result = future.with_subscriber(subscriber).await;
+    let logs = String::from_utf8(output.0.lock().unwrap().clone()).unwrap();
+    (result, logs)
+}
+
+#[tokio::test]
+async fn none_sends_protocol_request_without_credentials() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let received = server.next().await;
+    assert_eq!(received.connection, 1);
+    assert_eq!(received.path, "/v1/chat/completions");
+    assert_eq!(received.body["model"], "model-id");
+    assert_eq!(received.headers["x-client-request-id"], "session-id");
+    assert!(!received.headers.contains_key("authorization"));
+    assert!(!received.headers.contains_key("x-api-key"));
+    assert!(!received.headers.contains_key("x-goog-api-key"));
+}
+
+#[tokio::test]
+async fn protocol_and_auth_independently_select_wire_requests() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    for protocol in [
+        "chat-completions",
+        "responses",
+        "interactions",
+        "anthropic-messages",
+        "generate-content",
+    ] {
+        for auth in ["bearer", "x-api-key", "x-goog-api-key", "none"] {
+            configure(directory.path(), &server.url, protocol, auth);
+            if auth != "none" {
+                crate::auth::AuthStore::new(directory.path().into())
+                    .set("test", "test-credential")
+                    .unwrap();
+            }
+            let mut request = request("test");
+            request.target.model = crate::ModelRef::parse("test/family/model id").unwrap();
+            request
+                .messages
+                .push(lattice_conversation::ConversationItem::Message(
+                    lattice_conversation::NativeMessage::new(
+                        lattice_conversation::MessageRole::User,
+                        None,
+                        vec![lattice_conversation::MessagePart::semantic_only(
+                            lattice_conversation::MessageSemantic::Text {
+                                text: "hello".into(),
+                            },
+                        )],
+                    ),
+                ));
+            request.tools.push(crate::ToolDefinition::new(
+                "tool_name",
+                "description",
+                serde_json::json!({"type":"object"}),
+            ));
+            complete(
+                turn.stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let cell = format!("{protocol}/{auth}");
+            let received = server.next().await;
+            assert!(
+                received.body.get("temperature").is_none(),
+                "{cell}: temperature"
+            );
+            assert!(
+                received.body.get("max_completion_tokens").is_none(),
+                "{cell}: max_completion_tokens"
+            );
+            if protocol != "anthropic-messages" {
+                assert!(
+                    received.body.get("max_tokens").is_none(),
+                    "{cell}: max_tokens"
+                );
+                assert!(
+                    received.body.get("generationConfig").is_none(),
+                    "{cell}: generationConfig"
+                );
+            }
+            let expected_path = match protocol {
+                "chat-completions" => "/v1/chat/completions",
+                "responses" => "/v1/responses",
+                "interactions" => "/v1/interactions",
+                "anthropic-messages" => "/v1/v1/messages",
+                _ => "/v1/models/family%2Fmodel%20id:streamGenerateContent?alt=sse",
+            };
+            assert_eq!(received.path, expected_path, "{cell}: path");
+            for (header, expected_auth) in [
+                ("authorization", "bearer"),
+                ("x-api-key", "x-api-key"),
+                ("x-goog-api-key", "x-goog-api-key"),
+            ] {
+                let expected = (auth == expected_auth).then_some(if auth == "bearer" {
+                    "Bearer test-credential"
+                } else {
+                    "test-credential"
+                });
+                assert_eq!(
+                    received.headers.get(header).map(String::as_str),
+                    expected,
+                    "{cell}: {header}"
+                );
+            }
+            assert_eq!(
+                received
+                    .headers
+                    .get("anthropic-version")
+                    .map(String::as_str),
+                (protocol == "anthropic-messages").then_some("2023-06-01"),
+                "{cell}: anthropic-version"
+            );
+            assert_eq!(
+                received.headers["accept"], "text/event-stream, application/json",
+                "{cell}: accept"
+            );
+            assert!(
+                received.headers["user-agent"].starts_with("lattice/"),
+                "{cell}: user-agent"
+            );
+            assert_eq!(
+                received.headers["x-client-request-id"], "session-id",
+                "{cell}: client request id"
+            );
+            for header in received.headers.keys() {
+                assert!(
+                    [
+                        "host",
+                        "content-length",
+                        "content-type",
+                        "authorization",
+                        "x-api-key",
+                        "x-goog-api-key",
+                        "anthropic-version",
+                        "user-agent",
+                        "accept",
+                        "x-client-request-id"
+                    ]
+                    .contains(&header.as_str()),
+                    "{cell}: unexpected header {header}"
+                );
+            }
+            match protocol {
+                "chat-completions" => {
+                    assert_eq!(received.body["model"], "family/model id", "{cell}: model");
+                    assert_eq!(
+                        received.body["messages"][0]["content"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["function"]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                    assert_eq!(received.body["stream"], true, "{cell}: stream");
+                    assert_eq!(
+                        received.body["stream_options"]["include_usage"], true,
+                        "{cell}: usage"
+                    );
+                }
+                "responses" => {
+                    assert_eq!(received.body["model"], "family/model id");
+                    assert_eq!(received.body["input"][0]["content"][0]["text"], "hello");
+                    assert_eq!(received.body["tools"][0]["name"], "tool_name");
+                    assert_eq!(received.body["tools"][0]["strict"], false);
+                    assert_eq!(received.body["store"], false);
+                    assert_eq!(received.body["stream"], true);
+                    assert_eq!(received.body["prompt_cache_key"], "session-id");
+                    assert!(received.body.get("include").is_none(), "{cell}: include");
+                    assert!(
+                        received.body.get("reasoning").is_none(),
+                        "{cell}: reasoning"
+                    );
+                }
+                "interactions" => {
+                    assert_eq!(received.body["model"], "family/model id");
+                    assert_eq!(
+                        received.body["input"][0],
+                        serde_json::json!({"type":"user_input","content":[{"type":"text","text":"hello"}]})
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["parameters"],
+                        serde_json::json!({"type":"object"})
+                    );
+                    assert_eq!(received.body["store"], false);
+                    assert_eq!(received.body["stream"], true);
+                    assert!(
+                        received.body.get("generation_config").is_none(),
+                        "{cell}: generation_config"
+                    );
+                    for field in [
+                        "thinking_summaries",
+                        "prompt_cache_key",
+                        "max_output_tokens",
+                        "previous_interaction_id",
+                        "background",
+                        "temperature",
+                        "top_p",
+                    ] {
+                        assert!(received.body.get(field).is_none(), "{cell}: {field}");
+                    }
+                }
+                "anthropic-messages" => {
+                    assert_eq!(received.body["model"], "family/model id", "{cell}: model");
+                    assert_eq!(
+                        received.body["messages"][0]["content"][0]["text"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                    assert_eq!(received.body["max_tokens"], 32_768, "{cell}: max_tokens");
+                    assert_eq!(received.body["stream"], true, "{cell}: stream");
+                }
+                _ => {
+                    assert_eq!(
+                        received.body["contents"][0]["parts"][0]["text"], "hello",
+                        "{cell}: message"
+                    );
+                    assert_eq!(
+                        received.body["tools"][0]["functionDeclarations"][0]["name"], "tool_name",
+                        "{cell}: tool"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent() {
+    let mut first = Server::start(true).await;
+    let mut second = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &first.url, "chat-completions", "bearer");
+    let config = directory.path().join("providers.toml");
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!("{base}[providers.test.models.model-id]\neffort=['high']\n"),
+    )
+    .unwrap();
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "first-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let mut request = request("test");
+    request.target.effort = Some(lattice_conversation::Effort::High);
+    let resolved = turn.resolve(&request.target).await.unwrap();
+    assert_eq!(
+        resolved.protocol(),
+        crate::protocol::Protocol::ChatCompletions
+    );
+    configure(
+        directory.path(),
+        &second.url,
+        "generate-content",
+        "x-goog-api-key",
+    );
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        &config,
+        format!("{base}[providers.test.models.model-id]\neffort=['high']\n"),
+    )
+    .unwrap();
+    auth.set("test", "second-key").unwrap();
+    let mut changed = request.clone();
+    changed.target.effort = Some(lattice_conversation::Effort::Off);
+    let error = match resolved
+        .stream_chat(changed, StreamControl::default())
+        .await
+    {
+        Err(error) => error,
+        Ok(_) => panic!("发送时不能替换已解析的档位"),
+    };
+    assert!(matches!(error, crate::LlmError::Config { .. }));
+    complete(
+        resolved
+            .stream_chat(request.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let received = first.next().await;
+    assert_eq!(received.path, "/v1/chat/completions");
+    assert_eq!(received.headers["authorization"], "Bearer first-key");
+    assert_eq!(received.body["reasoning_effort"], "high");
+    let resolved = turn.resolve(&request.target).await.unwrap();
+    assert_eq!(
+        resolved.protocol(),
+        crate::protocol::Protocol::GenerateContent
+    );
+    complete(
+        resolved
+            .stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let received = second.next().await;
+    assert!(received.path.contains(":streamGenerateContent"));
+    assert_eq!(received.headers["x-goog-api-key"], "second-key");
+    assert_eq!(
+        received.body["generationConfig"]["thinkingConfig"]["thinkingLevel"],
+        "high"
+    );
+}
+
+#[tokio::test]
+async fn reasoning_plan_reloads_metadata_and_model_features_for_each_resolution() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    std::fs::create_dir(directory.path().join("cache")).unwrap();
+    let url = server.url.clone();
+    let configure_model = |output, toggle, budget| {
+        std::fs::write(directory.path().join("providers.toml"), format!(
+            "[providers.test]\nprotocol='chat-completions'\nauth='none'\nbase_url='{url}'\ncatalog='custom'\n[providers.test.features]\nthinking_toggle='enable-thinking'\nthinking_budget='thinking-budget'\n[providers.test.models.model-id.features]\nthinking_toggle='{toggle}'\nthinking_budget='{budget}'\n")).unwrap();
+        std::fs::write(directory.path().join("cache/models.json"), serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"output":output},"reasoning_options":[{"type":"toggle"},{"type":"budget_tokens"}]}}}})).unwrap()).unwrap();
+    };
+    configure_model(65536, "thinking-type", "reasoning-max-tokens");
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let mut request = request("test");
+    request.target.effort = Some(lattice_conversation::Effort::High);
+    let old = turn.resolve(&request.target).await.unwrap();
+    configure_model(24576, "enable-thinking", "thinking-budget");
+    complete(
+        old.stream_chat(request.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let body = server.next().await.body;
+    assert_eq!(body["reasoning"], serde_json::json!({"max_tokens":16384}));
+    assert_eq!(body["thinking"], serde_json::json!({"type":"enabled"}));
+    assert!(body.get("thinking_budget").is_none());
+    assert!(body.get("enable_thinking").is_none());
+    complete(
+        turn.stream_chat(request.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let body = server.next().await.body;
+    assert_eq!(body["thinking_budget"], 12288);
+    assert_eq!(body["enable_thinking"], true);
+    assert!(body.get("reasoning").is_none());
+    assert!(body.get("thinking").is_none());
+    let mut unselected = request.clone();
+    unselected.target.effort = None;
+    complete(
+        turn.stream_chat(unselected, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let body = server.next().await.body;
+    assert_eq!(body["model"], "model-id");
+    for field in [
+        "reasoning",
+        "reasoning_effort",
+        "thinking",
+        "enable_thinking",
+        "thinking_budget",
+        "output_config",
+        "generationConfig",
+    ] {
+        assert!(body.get(field).is_none(), "已有推理能力但未选档位：{field}");
+    }
+    configure_model(24576, "enable-thinking", "none");
+    let error = match turn.resolve(&request.target).await {
+        Err(error) => error,
+        Ok(_) => panic!("预算来源不可表达时必须拒绝"),
+    };
+    assert!(matches!(error, crate::LlmError::Config { .. }));
+    assert!(!error.retryable());
+    assert!(server.received.try_recv().is_err());
+    request.target.model = crate::ModelRef::parse("test/unknown-model").unwrap();
+    assert!(turn.resolve(&request.target).await.is_err());
+    request.target.effort = None;
+    complete(
+        turn.stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let body = server.next().await.body;
+    assert_eq!(body["model"], "unknown-model");
+    for field in [
+        "reasoning",
+        "reasoning_effort",
+        "thinking",
+        "enable_thinking",
+        "thinking_budget",
+    ] {
+        assert!(body.get(field).is_none(), "{field}");
+    }
+}
+
+#[tokio::test]
+async fn handwritten_efforts_infer_features_and_reject_invalid_lists_before_selection() {
+    use lattice_conversation::Effort::{High, Low, Max, Medium, Minimal, Off, Xhigh};
+    use serde_json::json;
+
+    for (toggle, budget, efforts, expected) in [
+        (
+            "thinking-type",
+            "none",
+            vec![Off],
+            Ok(json!({"thinking":{"type":"disabled"}})),
+        ),
+        (
+            "enable-thinking",
+            "none",
+            vec![High],
+            Ok(json!({"enable_thinking":true})),
+        ),
+        (
+            "thinking-type",
+            "none",
+            vec![High, Low],
+            Err((Low, "thinking_toggle")),
+        ),
+        (
+            "none",
+            "thinking-budget",
+            vec![Off],
+            Err((Off, "thinking_budget")),
+        ),
+        (
+            "none",
+            "thinking-budget",
+            vec![Minimal],
+            Err((Minimal, "thinking_budget")),
+        ),
+        (
+            "none",
+            "thinking-budget",
+            vec![Xhigh],
+            Err((Xhigh, "thinking_budget")),
+        ),
+        (
+            "none",
+            "thinking-budget",
+            vec![Low],
+            Ok(json!({"thinking_budget":2048})),
+        ),
+        (
+            "none",
+            "thinking-budget",
+            vec![Medium],
+            Ok(json!({"thinking_budget":8192})),
+        ),
+        (
+            "none",
+            "reasoning-max-tokens",
+            vec![High],
+            Ok(json!({"reasoning":{"max_tokens":16384}})),
+        ),
+        (
+            "none",
+            "thinking-budget",
+            vec![Max],
+            Ok(json!({"thinking_budget":32768})),
+        ),
+        (
+            "enable-thinking",
+            "thinking-budget",
+            vec![Off],
+            Ok(json!({"enable_thinking":false})),
+        ),
+        (
+            "thinking-type",
+            "reasoning-max-tokens",
+            vec![Low],
+            Ok(json!({"thinking":{"type":"enabled"},"reasoning":{"max_tokens":2048}})),
+        ),
+        (
+            "enable-thinking",
+            "thinking-budget",
+            vec![Minimal],
+            Err((Minimal, "thinking_budget")),
+        ),
+        (
+            "enable-thinking",
+            "thinking-budget",
+            vec![Xhigh],
+            Err((Xhigh, "thinking_budget")),
+        ),
+        (
+            "none",
+            "none",
+            vec![Off],
+            Ok(json!({"reasoning_effort":"none"})),
+        ),
+        (
+            "none",
+            "none",
+            vec![Xhigh],
+            Ok(json!({"reasoning_effort":"xhigh"})),
+        ),
+    ] {
+        let mut server = Server::start(true).await;
+        let directory = private_dir();
+        std::fs::write(directory.path().join("providers.toml"), format!(
+            "[providers.test]\nprotocol='chat-completions'\nauth='none'\nbase_url='{}'\n[providers.test.features]\nthinking_toggle='{toggle}'\nthinking_budget='{budget}'\n[providers.test.models.model-id]\noutput=65536\neffort={}\n",
+            server.url, serde_json::to_string(&efforts).unwrap(),
+        )).unwrap();
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        let turn = gateway.open_turn();
+        let mut request = request("test");
+        match expected {
+            Ok(expected) => {
+                let listed =
+                    crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                        .unwrap()
+                        .models;
+                assert_eq!(listed.len(), 1);
+                assert_eq!(listed[0].availability, crate::Availability::Ready);
+                turn.resolve(&request.target).await.unwrap();
+                request.target.effort = Some(efforts[0]);
+                complete(
+                    turn.stream_chat(request, StreamControl::default())
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let body = server.next().await.body;
+                let controls: serde_json::Map<_, _> = body
+                    .as_object()
+                    .unwrap()
+                    .iter()
+                    .filter(|(key, _)| {
+                        matches!(
+                            key.as_str(),
+                            "reasoning"
+                                | "reasoning_effort"
+                                | "thinking"
+                                | "thinking_budget"
+                                | "enable_thinking"
+                        )
+                    })
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                assert_eq!(
+                    serde_json::Value::Object(controls),
+                    expected,
+                    "{toggle}/{budget}: {efforts:?}"
+                );
+            }
+            Err((invalid, reason)) => {
+                let candidate =
+                    crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                        .unwrap()
+                        .models
+                        .remove(0);
+                let crate::Availability::Invalid {
+                    reason: listing_error,
+                } = candidate.availability
+                else {
+                    panic!(
+                        "expected invalid availability, got {:?}",
+                        candidate.availability
+                    );
+                };
+                // 未选档位和选择另一合法档位，也必须拒绝整份手写列表。
+                for selected in [None, Some(efforts[0])] {
+                    request.target.effort = selected;
+                    let error = match turn.resolve(&request.target).await {
+                        Err(error) => error,
+                        Ok(_) => panic!("invalid handwritten list was accepted: {efforts:?}"),
+                    };
+                    assert!(matches!(error, crate::LlmError::Config { .. }));
+                    assert!(!error.retryable());
+                    assert_eq!(
+                        error,
+                        crate::LlmError::Config {
+                            message: listing_error.clone()
+                        }
+                    );
+                    let diagnostic = error.to_string();
+                    for detail in [
+                        "provider \"test\"",
+                        "model \"model-id\"",
+                        invalid.as_str(),
+                        reason,
+                    ] {
+                        assert!(diagnostic.contains(detail), "{diagnostic}");
+                    }
+                }
+                assert_eq!(server.connections_before_probe().await, 0);
+                assert!(server.received.try_recv().is_err());
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn chat_replay_defaults_to_no_reasoning() {
+    use lattice_conversation::{ConversationItem, Protocol, StepContent};
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let mut request = request("test");
+    let assistant = crate::test_reply::wire_to_native(
+        Protocol::ChatCompletions,
+        &serde_json::json!({"choices":[{"message":{
+            "content":"answer", "reasoning_content":"private reasoning"
+        }}]}),
+    )
+    .unwrap()
+    .bind_zero_tool()
+    .unwrap();
+    request.messages.push(ConversationItem::Step(StepContent {
+        assistant,
+        results: vec![],
+    }));
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        server.next().await.body["messages"][0],
+        serde_json::json!({"role":"assistant", "content":"answer"})
+    );
+
+    let base = std::fs::read_to_string(directory.path().join("providers.toml")).unwrap();
+    for (provider, model, expected) in [
+        (
+            "reasoning-content",
+            None,
+            serde_json::json!({"role":"assistant", "content":[{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}}], "reasoning_content":"private reasoning"}),
+        ),
+        (
+            "content-chunks",
+            None,
+            serde_json::json!({"role":"assistant", "content":[{"type":"thinking", "thinking":[{"type":"text", "text":"private reasoning"}]}, {"type":"text", "text":"answer","cache_control":{"type":"ephemeral"}}]}),
+        ),
+        (
+            "reasoning-content",
+            Some("none"),
+            serde_json::json!({"role":"assistant", "content":"answer"}),
+        ),
+        (
+            "none",
+            Some("reasoning-content"),
+            serde_json::json!({"role":"assistant", "content":[{"type":"text","text":"answer","cache_control":{"type":"ephemeral"}}], "reasoning_content":"private reasoning"}),
+        ),
+    ] {
+        let overlay = model.map_or(String::new(), |value| {
+            format!("[providers.test.models.model-id.features]\nreasoning_replay = '{value}'\ncache_markers = {}\n", value != "none")
+        });
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            format!("{base}[providers.test.features]\nreasoning_replay = '{provider}'\ncache_markers = {}\n{overlay}", provider != "none"),
+        )
+        .unwrap();
+        let mut request = self::request("test");
+        request.messages.push(ConversationItem::Step(StepContent {
+            assistant: crate::test_reply::wire_to_native(Protocol::ChatCompletions,
+                &serde_json::json!({"choices":[{"message":{"content":"answer", "reasoning_content":"private reasoning"}}]})).unwrap().bind_zero_tool().unwrap(),
+            results: vec![],
+        }));
+        let resolved = gateway.open_turn().resolve(&request.target).await.unwrap();
+        std::fs::write(directory.path().join("providers.toml"), &base).unwrap();
+        complete(
+            resolved
+                .stream_chat(request, StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(server.next().await.body["messages"][0], expected);
+    }
+}
+
+#[tokio::test]
+async fn replay_source_matrix_reaches_each_protocol_request_body() {
+    use crate::protocol::projection::wire_to_native;
+    use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
+
+    // 期望来自夹具里的原文，不经过 project_cross_provider / native_to_wire 再算一遍。
+    let cases = [
+        (
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+            &["call_9f8e7d6c5b", "call_1a2b3c4d5e"][..],
+            &["The user wants the weather; call get_weather first, then get_time."][..],
+        ),
+        (
+            Protocol::Messages,
+            include_str!("../../tests/fixtures/projection/anthropic_thinking_tool_use.json"),
+            &["toolu_01AbCdEfGh", "toolu_02BcDeFgHi"][..],
+            &[
+                "Need the weather first, then the time; both are independent calls.",
+                "ErUBCkYIAxgCIkD3c2FmZGVmNTQ2Ny0xMjM0LWFiY2QtZXhhbXBsZXNpZ25hdHVyZQ==",
+            ][..],
+        ),
+        (
+            Protocol::Messages,
+            include_str!(
+                "../../tests/fixtures/projection/anthropic_redacted_thinking_tool_use.json"
+            ),
+            &["toolu_redacted_1", "toolu_redacted_2"][..],
+            &[
+                "Plan with tools.",
+                "U2lnbmF0dXJl",
+                "RW1wdHkgc2lnbmF0dXJl",
+                "UmVkYWN0ZWQgcGF5bG9hZA==",
+                "U2Vjb25kIHJlZGFjdGVkIHBheWxvYWQ=",
+            ][..],
+        ),
+        (
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+            &["fc-2026-08-13-001"][..],
+            &[
+                "Plan: check weather, then time.",
+                "CigIARABGkh4dGh5YnJpZC1zaWduYXR1cmUtb24tdGhvdWdodA==",
+                "CigIARABGkh4ZW1wdHktdGV4dC1wYXJ0LXNpZ25hdHVyZQ==",
+                "CigIARABGkh4c2lnbmF0dXJlLW9uLWZ1bmN0aW9uLWNhbGw=",
+            ][..],
+        ),
+    ];
+    let protocols = [
+        Protocol::ChatCompletions,
+        Protocol::Messages,
+        Protocol::GenerateContent,
+    ];
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    for (protocol, fixture, call_ids, replay_material) in cases {
+        let origin = ReplayOrigin {
+            protocol,
+            provider_id: crate::ProviderId::parse("test").unwrap(),
+        };
+        let wire: serde_json::Value = serde_json::from_str(fixture).unwrap();
+        let has_redacted = wire["content"].as_array().is_some_and(|blocks| {
+            blocks
+                .iter()
+                .any(|block| block["type"] == "redacted_thinking")
+        });
+        let decoded = wire_to_native(&origin, &wire).unwrap();
+        let (assistant, results) = crate::test_reply::bind_replay_step(decoded);
+        for target_protocol in protocols {
+            // 第三格在写过 other 的配置后回到同一 provider，标签带序号以免重名。
+            for (round, provider) in ["test", "other", "test"].into_iter().enumerate() {
+                let cell = format!("{protocol} -> {target_protocol}/{provider}#{round}");
+                let same_provider = target_protocol == protocol && provider == "test";
+                let feature = if target_protocol == Protocol::ChatCompletions {
+                    format!(
+                        "[providers.{provider}.features]\nreasoning_replay='reasoning-content'\n"
+                    )
+                } else {
+                    String::new()
+                };
+                std::fs::write(directory.path().join("providers.toml"), format!(
+                    "[providers.{provider}]\nprotocol='{target_protocol}'\nbase_url='{}'\nauth='none'\n{feature}", server.url)).unwrap();
+                let body = match target_protocol {
+                    Protocol::ChatCompletions => DONE,
+                    Protocol::Messages => MESSAGES_DONE,
+                    Protocol::GenerateContent => CONTENT_DONE,
+                    _ => unreachable!(),
+                };
+                server.respond(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+                let mut request = self::request(provider);
+                request.messages.push(ConversationItem::Step(StepContent {
+                    assistant: assistant.clone(),
+                    results: results.clone(),
+                }));
+                let stream = gateway
+                    .open_turn()
+                    .stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap();
+                complete(stream).await;
+                let body = server.next().await.body;
+                if has_redacted && !same_provider {
+                    match target_protocol {
+                        Protocol::ChatCompletions => assert_eq!(
+                            body["messages"][0]["content"], "Checking both.",
+                            "{cell}: 跨来源请求不能携带空文本占位块"
+                        ),
+                        Protocol::Messages | Protocol::GenerateContent => {
+                            let blocks = if target_protocol == Protocol::Messages {
+                                &body["messages"][0]["content"]
+                            } else {
+                                &body["contents"][0]["parts"]
+                            };
+                            let texts: Vec<_> = blocks
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .filter_map(|block| block.get("text"))
+                                .collect();
+                            assert_eq!(
+                                texts,
+                                vec![&serde_json::json!("Checking both.")],
+                                "{cell}: 跨来源请求只能保留固定夹具的正文，不能携带空文本占位块"
+                            );
+                        }
+                        _ => unreachable!(),
+                    }
+                }
+                let serialized = body.to_string();
+                for id in call_ids {
+                    assert!(serialized.contains(id), "{cell}: provider call id {id}");
+                }
+                for material in replay_material {
+                    assert_eq!(
+                        serialized.contains(material),
+                        same_provider,
+                        "{cell}: replay material"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_request() {
+    use lattice_conversation::{
+        ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "anthropic-messages", "none");
+    let config = directory.path().join("providers.toml");
+    let base = std::fs::read_to_string(&config).unwrap();
+    std::fs::create_dir(directory.path().join("cache")).unwrap();
+    let cache = directory.path().join("cache/models.json");
+    let write_cache = |output| {
+        std::fs::write(&cache, serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":{"output":output}}}}})).unwrap()).unwrap();
+    };
+    std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
+    write_cache(8192);
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let mut request = request("test");
+    request
+        .messages
+        .push(ConversationItem::Message(NativeMessage::new(
+            MessageRole::System,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::Text {
+                text: "system".into(),
+            })],
+        )));
+    let old = turn.resolve(&request.target).await.unwrap();
+    write_cache(65536);
+    complete(
+        old.stream_chat(request.clone(), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.body["max_tokens"], 8192);
+    for (handwritten, provider_cache, model_cache, expected, cache_enabled) in [
+        (None, "automatic", None, 65536_u64, true),
+        (Some(4096), "automatic", Some("none"), 4096, false),
+        (Some(4096), "none", Some("automatic"), 4096, true),
+        (None, "none", None, 65536, false),
+    ] {
+        let overlay = handwritten.map_or(String::new(), |value| {
+            format!("[providers.test.models.model-id]\noutput = {value}\n")
+        });
+        let model_features = model_cache.map_or(String::new(), |value| {
+            format!("[providers.test.models.model-id.features]\ncache = '{value}'\n")
+        });
+        std::fs::write(&config, format!("{base}catalog = 'custom'\n[providers.test.features]\ncache = '{provider_cache}'\n{overlay}{model_features}")).unwrap();
+        complete(
+            turn.stream_chat(request.clone(), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let body = server.next().await.body;
+        assert_eq!(body["max_tokens"], expected);
+        assert_eq!(
+            crate::test_reply::cache_controls(&body),
+            if cache_enabled {
+                vec![
+                    (
+                        "/cache_control".into(),
+                        serde_json::json!({"type":"ephemeral"}),
+                    ),
+                    (
+                        "/system/0/cache_control".into(),
+                        serde_json::json!({"type":"ephemeral"}),
+                    ),
+                ]
+            } else {
+                vec![]
+            }
+        );
+        assert_eq!(
+            body["system"],
+            if cache_enabled {
+                serde_json::json!([{"type":"text","text":"system","cache_control":{"type":"ephemeral"}}])
+            } else {
+                serde_json::json!("system")
+            }
+        );
+        assert_eq!(
+            crate::model_candidates(directory.path(), &list_query(Some("test"), false))
+                .unwrap()
+                .models[0]
+                .output,
+            Some(expected)
+        );
+    }
+    std::fs::write(&config, &base).unwrap();
+    complete(
+        turn.stream_chat(request, StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.body["max_tokens"], 32768);
+}
+
+#[tokio::test]
+async fn messages_max_tokens_uses_only_output_metadata() {
+    for (limit, expected) in [
+        (serde_json::json!({"context":1}), 32_768),
+        (serde_json::json!({"context":1,"output":0}), 32_768),
+        (serde_json::json!({"context":1,"output":64_000}), 64_000),
+        (serde_json::json!({"context":1,"output":1}), 1),
+    ] {
+        let mut server = Server::start(true).await;
+        let directory = private_dir();
+        configure(directory.path(), &server.url, "anthropic-messages", "none");
+        let config = directory.path().join("providers.toml");
+        let base = std::fs::read_to_string(&config).unwrap();
+        std::fs::write(&config, format!("{base}catalog = 'custom'\n")).unwrap();
+        std::fs::create_dir(directory.path().join("cache")).unwrap();
+        std::fs::write(
+            directory.path().join("cache/models.json"),
+            serde_json::to_vec(&serde_json::json!({"custom":{"models":{"model-id":{"id":"model-id","limit":limit}}}})).unwrap(),
+        ).unwrap();
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        let mut request = request("test");
+        request
+            .messages
+            .push(user_message("a prompt 超过一个 token 的窗口"));
+        complete(
+            gateway
+                .open_turn()
+                .stream_chat(request, StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(server.next().await.body["max_tokens"], expected, "{limit}");
+    }
+}
+
+fn user_message(text: &str) -> lattice_conversation::ConversationItem {
+    use lattice_conversation::{
+        BoundToolCall, ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    ConversationItem::Message(NativeMessage::<BoundToolCall>::new(
+        MessageRole::User,
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::Text {
+            text: text.to_owned(),
+        })],
+    ))
+}
+
+#[tokio::test]
+async fn metadata_refresh_with_no_roots_fails_before_network_or_directory_creation() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let directory = home.path().join(".lattice");
+    let gateway = RequestGateway::new(directory.clone(), Vec::new())
+        .unwrap()
+        .with_metadata_url(format!(
+            "https://{}/api.json",
+            listener.local_addr().unwrap()
+        ));
+    assert!(matches!(
+        gateway
+            .refresh_metadata(Arc::new(crate::MetadataRefreshControl::default()))
+            .await,
+        Err(crate::MetadataError::Configuration(_))
+    ));
+    assert!(matches!(
+        listener.accept(),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    assert!(!directory.exists());
+}
+
+#[tokio::test]
+async fn refresh_metadata_uses_startup_roots_and_updates_candidates_and_messages() {
+    let mut source = Server::start(true).await;
+    let mut messages = Server::start(true).await;
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        &messages.url,
+        "anthropic-messages",
+        "none",
+    );
+    let config = directory.path().join("providers.toml");
+    let provider = std::fs::read_to_string(&config).unwrap();
+    std::fs::write(
+        config,
+        format!("[metadata]\nauto_refresh = false\n{provider}catalog = 'refresh-entry'\n"),
+    )
+    .unwrap();
+    let query = list_query(Some("test"), false);
+    let before = crate::model_candidates(directory.path(), &query).unwrap();
+    assert!(before.models.is_empty());
+    let metadata = serde_json::json!({"refresh-entry":{"models":{"model-id":{
+        "id":"model-id","limit":{"output":65536}
+    }}}});
+    let body = serde_json::to_string(&metadata).unwrap();
+    source.respond(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        true,
+    );
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()])
+        .unwrap()
+        .with_metadata_url(format!("{}/api.json", source.url));
+    gateway
+        .refresh_metadata(Arc::new(crate::MetadataRefreshControl::default()))
+        .await
+        .unwrap();
+    assert_eq!(source.next().await.path, "/v1/api.json");
+    let cached: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(directory.path().join("cache/models.json")).unwrap())
+            .unwrap();
+    assert_eq!(cached, metadata);
+    let after = crate::model_candidates(directory.path(), &query).unwrap();
+    assert_eq!(after.models.len(), 1);
+    assert_eq!(after.models[0].model, "model-id");
+    assert_eq!(after.models[0].output, Some(65536));
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(messages.next().await.body["max_tokens"], 65536);
+}
+
+#[tokio::test]
+async fn next_request_uses_current_endpoint_protocol_auth_and_key() {
+    let mut first = Server::start(true).await;
+    let mut second = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &first.url, "chat-completions", "bearer");
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "first-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        first.next().await.headers["authorization"],
+        "Bearer first-key"
+    );
+    auth.set("test", "second-key").unwrap();
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let changed_key = first.next().await;
+    assert_eq!(changed_key.headers["authorization"], "Bearer second-key");
+    assert_eq!(changed_key.connection, 1);
+    configure(
+        directory.path(),
+        &second.url,
+        "anthropic-messages",
+        "x-goog-api-key",
+    );
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let changed_endpoint = second.next().await;
+    assert_eq!(changed_endpoint.path, "/v1/v1/messages");
+    assert_eq!(changed_endpoint.headers["x-goog-api-key"], "second-key");
+    assert!(!changed_endpoint.headers.contains_key("authorization"));
+    configure(directory.path(), &first.url, "generate-content", "none");
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let no_auth = first.next().await;
+    assert!(no_auth.path.contains(":streamGenerateContent"));
+    assert!(!no_auth.headers.contains_key("authorization"));
+    assert!(!no_auth.headers.contains_key("x-goog-api-key"));
+}
+
+async fn configuration_failure(
+    turn: &super::GatewayTurn,
+    provider: &str,
+    contains: &str,
+    stage: &str,
+) -> crate::LlmError {
+    let error = match turn.resolve(&request(provider).target).await {
+        Ok(_) => panic!("{stage}: invalid configuration resolved a request"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(error, crate::LlmError::Config { .. }),
+        "{stage}: {error}"
+    );
+    assert!(!error.retryable(), "{stage}: {error}");
+    assert!(
+        error.to_string().contains("configuration error"),
+        "{stage}: {error}"
+    );
+    assert!(error.to_string().contains(contains), "{stage}: {error}");
+    error
+}
+
+/// 以测试 CA 为模板生成彼此不同的真实根：把主题与颁发者中的 "LATTICE test CA"
+/// 换成等长的 "LATTICE NNNN CA"。DER 结构不变，仍能通过 rustls 信任锚解析；
+/// 主题不同，所以不能为测试服务器的证书链作信任锚。
+fn renamed_test_ca(index: u16) -> Vec<u8> {
+    const NAME: &[u8] = b"LATTICE test CA";
+    let renamed = format!("LATTICE {index:04} CA");
+    assert_eq!(
+        renamed.len(),
+        NAME.len(),
+        "renamed subject must keep the DER length"
+    );
+    let mut der = TLS.ca_der.clone();
+    let mut replaced = 0;
+    let mut at = 0;
+    while let Some(offset) = der[at..].windows(NAME.len()).position(|w| w == NAME) {
+        let start = at + offset;
+        der[start..start + NAME.len()].copy_from_slice(renamed.as_bytes());
+        at = start + NAME.len();
+        replaced += 1;
+    }
+    assert_eq!(
+        replaced, 2,
+        "test CA subject and issuer must both be renamed"
+    );
+    der
+}
+
+#[tokio::test]
+async fn invalid_tls_root_near_the_count_limit_is_skipped_without_using_a_slot() {
+    // 1_023 个彼此不同的有效根之后是一张无法解析的根，再接真正的测试 CA 与另一张有效根。
+    // 无效根不占名额时保留 1_023 个改名根与测试 CA（按原顺序），截掉最后一张；
+    // 它若占名额，测试 CA 会被截掉，HTTPS 请求无法建立。改名根的主题不同，
+    // 不能替测试 CA 完成验证，所以请求成功说明恰好保留了测试 CA。
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut roots: Vec<Vec<u8>> = (0..1_023).map(renamed_test_ca).collect();
+    roots.push(vec![1, 2, 3]);
+    roots.push(TLS.ca_der.clone());
+    roots.push(renamed_test_ca(1_023));
+    let mut expected = roots[..1_023].to_vec();
+    expected.push(TLS.ca_der.clone());
+    let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
+    let kept = gateway.tls_roots_der();
+    assert_eq!(kept.len(), 1_024, "kept root count");
+    assert!(
+        kept == expected.as_slice(),
+        "kept roots must be the 1_023 renamed roots then the test CA, in original order; first mismatch at {:?}",
+        kept.iter().zip(&expected).position(|(a, b)| a != b)
+    );
+    let stream = gateway
+        .open_turn()
+        .stream_chat(request("test"), StreamControl::default())
+        .await
+        .expect("the test CA kept after the invalid root must verify the TLS server");
+    complete(stream).await;
+    server.next().await;
+}
+
+/// 没有可用根证书时，无法解析的端点不能被当成 http 放行（失败即关闭）。provider 载入已用
+/// `validate_base_url_static` 保证地址能解析，经 `providers.toml` 构造不出这种地址，所以直接检查
+/// `prepare` 在建立客户端之前调用的守卫：它返回错误时 `prepare` 不会构造客户端，也不会发出请求。
+#[test]
+fn without_usable_tls_roots_an_unparseable_endpoint_is_a_configuration_error() {
+    for base_url in [
+        "",
+        "not a url",
+        "https://[::1",
+        "http://exa mple.invalid",
+        "//localhost/v1",
+    ] {
+        let error = super::require_endpoint_without_tls_roots(base_url).expect_err(&format!(
+            "unparseable endpoint {base_url:?} must be rejected"
+        ));
+        assert!(
+            matches!(error, crate::PrepareError::Configuration { .. }),
+            "{base_url:?} is a configuration error: {error}"
+        );
+        assert!(
+            !crate::LlmError::from(error.clone()).retryable(),
+            "{base_url:?} is not retryable"
+        );
+        assert!(
+            error.to_string().contains("invalid provider endpoint URL"),
+            "{base_url:?} says the endpoint URL is invalid: {error}"
+        );
+    }
+    let other_scheme = super::require_endpoint_without_tls_roots("ftp://localhost/v1")
+        .expect_err("a non-http scheme needs TLS roots too");
+    assert!(
+        matches!(other_scheme, crate::PrepareError::Configuration { .. }),
+        "non-http scheme is a configuration error: {other_scheme}"
+    );
+    assert!(
+        other_scheme
+            .to_string()
+            .contains("no usable TLS root certificates"),
+        "non-http scheme names the missing roots: {other_scheme}"
+    );
+    super::require_endpoint_without_tls_roots("http://localhost:1/v1")
+        .expect("a parseable http endpoint is still allowed");
+}
+
+#[tokio::test]
+async fn without_usable_tls_roots_https_is_a_configuration_error_and_http_is_served() {
+    // 选根经过真实的 parse_root：超过 64 KiB 的根先被跳过，无法解析的根被丢弃。
+    let mut oversized = TLS.ca_der.clone();
+    oversized.resize(65_537, 0);
+    let cases = [
+        (
+            "all roots larger than 64 KiB",
+            vec![oversized.clone(), oversized],
+        ),
+        (
+            "all roots invalid",
+            vec![vec![1, 2, 3], b"not a certificate".to_vec()],
+        ),
+        ("empty root set", Vec::new()),
+    ];
+    for (case, roots) in cases {
+        let mut https = Server::start(true).await;
+        let directory = private_dir();
+        configure(directory.path(), &https.url, "chat-completions", "none");
+        let gateway = RequestGateway::new(directory.path().into(), roots)
+            .unwrap_or_else(|error| panic!("{case}: gateway must still be constructed: {error}"));
+        assert!(
+            !gateway.has_usable_tls_roots(),
+            "{case}: gateway must record that no TLS roots are usable"
+        );
+        assert!(gateway.tls_roots_der().is_empty(), "{case}: no roots kept");
+        let turn = gateway.open_turn();
+        configuration_failure(&turn, "test", "no usable TLS root certificates", case).await;
+        let error = match turn
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+        {
+            Ok(_) => panic!("{case}: https endpoint without usable roots was dispatched"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, crate::LlmError::Config { .. }),
+            "{case}: https without roots must be a configuration error: {error}"
+        );
+        assert!(
+            !error.retryable(),
+            "{case}: configuration error must not be retried"
+        );
+        assert!(
+            matches!(
+                https.received.try_recv(),
+                Err(mpsc::error::TryRecvError::Empty)
+            ),
+            "{case}: the https mock provider must have received zero requests"
+        );
+        assert_eq!(
+            https.connections_before_probe().await,
+            0,
+            "{case}: the https mock provider must have accepted zero TCP connections"
+        );
+
+        let mut http = Server::start(false).await;
+        configure(directory.path(), &http.url, "chat-completions", "none");
+        complete(
+            turn.stream_chat(request("test"), StreamControl::default())
+                .await
+                .unwrap_or_else(|error| panic!("{case}: http endpoint must be served: {error}")),
+        )
+        .await;
+        assert_eq!(
+            http.next().await.path,
+            "/v1/chat/completions",
+            "{case}: http request reached the provider"
+        );
+    }
+}
+
+#[tokio::test]
+async fn oversized_tls_roots_still_serve_plain_http() {
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut roots = vec![vec![0_u8; 65_537]];
+    for _ in 0..1025 {
+        roots.push(TLS.ca_der.clone());
+    }
+    let gateway = RequestGateway::new(directory.path().into(), roots).unwrap();
+    assert_eq!(
+        gateway.tls_roots_der().len(),
+        1024,
+        "an oversized root set must be truncated to 1024 certificates"
+    );
+    assert!(
+        gateway
+            .tls_roots_der()
+            .iter()
+            .all(|der| der.len() <= 65_536),
+        "a root larger than 65536 bytes must not be loaded"
+    );
+    complete(
+        gateway
+            .open_turn()
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.path, "/v1/chat/completions");
+}
+
+#[tokio::test]
+async fn invalid_configuration_only_blocks_requests_that_depend_on_it() {
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "bearer");
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "test-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let turn = gateway.open_turn();
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    server.next().await;
+
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        "[providers.test]\nprotocol = 'broken'\n",
+    )
+    .unwrap();
+    configuration_failure(&turn, "test", "providers.toml:2:", "broken protocol").await;
+    std::fs::write(directory.path().join("providers.toml"), "").unwrap();
+    let missing_provider =
+        configuration_failure(&turn, "test", "not registered", "empty registry").await;
+    for detail in [
+        &directory
+            .path()
+            .join("providers.toml")
+            .display()
+            .to_string(),
+        "[providers.test]",
+        "protocol",
+        "base_url",
+        "available providers:",
+    ] {
+        assert!(
+            missing_provider.to_string().contains(detail),
+            "{missing_provider}"
+        );
+    }
+    configure(directory.path(), &server.url, "chat-completions", "bearer");
+    auth.remove_api_key("test").unwrap();
+    configuration_failure(&turn, "test", "lattice auth set test", "removed key").await;
+    auth.set("test", "restored-key").unwrap();
+    std::fs::write(directory.path().join("auth.json"), "{invalid").unwrap();
+    configuration_failure(&turn, "test", "auth.json", "malformed auth file").await;
+    assert!(
+        server.received.try_recv().is_err(),
+        "malformed auth file: request reached the server"
+    );
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let no_auth = server.next().await;
+    assert!(
+        !no_auth.headers.contains_key("authorization"),
+        "restored none auth: authorization"
+    );
+    assert!(
+        !no_auth.headers.contains_key("x-api-key"),
+        "restored none auth: x-api-key"
+    );
+    assert!(
+        !no_auth.headers.contains_key("x-goog-api-key"),
+        "restored none auth: x-goog-api-key"
+    );
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        "[providers.test]\nprotocol = 'untrusted-value'\n",
+    )
+    .unwrap();
+    let error = configuration_failure(
+        &turn,
+        "test",
+        "providers.toml:2:",
+        "untrusted protocol value",
+    )
+    .await;
+    assert!(
+        error.to_string().contains("providers.toml:2:"),
+        "untrusted protocol value: {error}"
+    );
+    assert!(
+        error.to_string().contains("untrusted-value"),
+        "untrusted protocol value: {error}"
+    );
+    configure(directory.path(), &server.url, "chat-completions", "bearer");
+    std::fs::remove_file(directory.path().join("auth.json")).unwrap();
+    configuration_failure(&turn, "test", "lattice auth set test", "deleted auth file").await;
+    assert!(
+        server.received.try_recv().is_err(),
+        "deleted auth file: request reached the server"
+    );
+}
+
+#[tokio::test]
+async fn gateway_and_all_turns_share_the_same_credential_lifecycle() {
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let first = gateway.open_turn();
+    let second = gateway.open_turn();
+    gateway.chatgpt_auth().shutdown().await.unwrap();
+    assert!(first.configuration.chatgpt_auth.logout().await.is_err());
+    assert!(second.configuration.chatgpt_auth.remove().await.is_err());
+    assert!(gateway.chatgpt_auth().logout().await.is_err());
+}
+
+#[tokio::test]
+async fn prepare_does_not_cache_availability_across_subsequent_resolutions() {
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        "http://localhost:1/v1",
+        "chat-completions",
+        "bearer",
+    );
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    auth.set("test", "secret-key").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let keyed_model = crate::ModelRef::parse("test/model-id").unwrap();
+    let prepared = turn
+        .prepare(&keyed_model, crate::EffortPolicy::Strict(None))
+        .await
+        .expect("prepare succeeds while API key is present");
+    auth.remove_api_key("test").unwrap();
+    let missing_key = match turn.resolve(prepared.target()).await {
+        Ok(_) => panic!("resolve must reject after API key is withdrawn"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &missing_key,
+            crate::LlmError::Config { message } if message.contains("lattice auth set test")
+        ),
+        "expected unavailable diagnostic after key removal, got: {missing_key}"
+    );
+
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        "[providers.lmstudio]\nbase_url = 'http://localhost:1/v1'\n",
+    )
+    .unwrap();
+    let local_model = crate::ModelRef::parse("lmstudio/local-model").unwrap();
+    let prepared_local = turn
+        .prepare(&local_model, crate::EffortPolicy::Strict(None))
+        .await
+        .expect("prepare succeeds while local provider is declared");
+    std::fs::write(directory.path().join("providers.toml"), "").unwrap();
+    let undeclared = match turn.resolve(prepared_local.target()).await {
+        Ok(_) => panic!("resolve must reject after declaration is withdrawn"),
+        Err(error) => error,
+    };
+    assert!(
+        matches!(
+            &undeclared,
+            crate::LlmError::Config { message } if message.contains("[providers.lmstudio]")
+        ),
+        "expected undeclared local provider diagnostic after declaration removal, got: {undeclared}"
+    );
+}
+
+#[tokio::test]
+async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_during_stop() {
+    use serde_json::json;
+    let directory = private_dir();
+    let path = directory.path().join("auth.json");
+    let save = |token: &str, expiry: chrono::DateTime<chrono::Utc>| {
+        std::fs::write(&path, json!({"version":1,"providers":{"chatgpt":{
+            "type":"chatgpt","host_id":"host","client_id":"client",
+            "account":{"subject":"subject","email":"user@example.com"},
+            "tokens":{"access_token":token,"refresh_token":"refresh-secret","id_token":"id-secret",
+                "expires_at":expiry.to_rfc3339(),"scopes":["chatgpt.tokens.use.direct"]}
+        }}}).to_string()).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
+    };
+    save(
+        "expired-snapshot",
+        chrono::Utc::now() - chrono::TimeDelta::hours(1),
+    );
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let mut resolved = gateway
+        .open_turn()
+        .resolve(&ModelTarget::test_target("chatgpt", "model-id"))
+        .await
+        .unwrap();
+    let mut server = Server::start(true).await;
+    // 仅测试内部发送入口；生产固定 endpoint 不提供任何改写开关。
+    resolved.provider.base_url = server.url.clone();
+    let mut connection = None;
+    for token in ["live-first-token", "live-second-token"] {
+        save(token, chrono::Utc::now() + chrono::TimeDelta::hours(1));
+        gateway.chatgpt_auth().stop_logins();
+        complete(
+            resolved
+                .stream_chat(request("chatgpt"), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let received = server.next().await;
+        assert_eq!(received.headers["authorization"], format!("Bearer {token}"));
+        assert_eq!(received.path, "/v1/responses");
+        if let Some(connection) = connection {
+            assert_eq!(received.connection, connection);
+        }
+        connection = Some(received.connection);
+    }
+    gateway.chatgpt_auth().shutdown().await.unwrap();
+    assert!(
+        resolved
+            .stream_chat(request("chatgpt"), StreamControl::default())
+            .await
+            .is_err()
+    );
+    assert!(server.received.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn missing_chatgpt_login_is_configuration_error() {
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    configuration_failure(&turn, "chatgpt", "ChatGPT is not signed in", "chatgpt").await;
+}
+
+#[tokio::test]
+async fn interactions_invalid_handwritten_efforts_only_reject_the_affected_model() {
+    use lattice_conversation::Effort;
+    let directory = private_dir();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    for effort in ["off", "xhigh", "max"] {
+        std::fs::write(directory.path().join("providers.toml"),format!("[metadata]\nauto_refresh=false\n[providers.test]\nprotocol='interactions'\nauth='none'\nbase_url='http://localhost:1'\n[providers.test.models.model-id]\neffort=['{effort}']\n[providers.test.models.valid]\neffort=['minimal','low','medium','high']\n")).unwrap();
+        let candidates =
+            crate::model_candidates(directory.path(), &list_query(Some("test"), false)).unwrap();
+        let invalid = candidates
+            .models
+            .iter()
+            .find(|model| model.model == "model-id")
+            .unwrap();
+        assert!(matches!(
+            invalid.availability,
+            crate::Availability::Invalid { .. }
+        ));
+        assert!(invalid.supported_efforts.is_empty());
+        let valid = candidates
+            .models
+            .iter()
+            .find(|model| model.model == "valid")
+            .unwrap();
+        assert_eq!(valid.availability, crate::Availability::Ready);
+        assert_eq!(
+            valid.supported_efforts,
+            vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
+        );
+        configuration_failure(
+            &turn,
+            "test",
+            "thinking_level",
+            "handwritten Interactions effort",
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
+    use lattice_conversation::{
+        ConversationItem, Effort, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    use serde_json::json;
+
+    let mut server = Server::start(true).await;
+    for id in ["openai", "xai", "google"] {
+        let google = id == "google";
+        let directory = private_dir();
+        let base_url = if google {
+            format!("{}/v1beta", server.url.trim_end_matches("/v1"))
+        } else {
+            server.url.clone()
+        };
+        let source = format!(
+            "[providers.{id}]\nbase_url='{base_url}'\n[providers.{id}.models.handwritten]\neffort=['low','high']\n[providers.{id}.models.reused-budget]\neffort=['low','high']\n[providers.{id}.models.invalid]\neffort=['xhigh']\n"
+        );
+        std::fs::write(directory.path().join("providers.toml"), source).unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let models = json!({"models":{
+            "effort":{"id":"effort","reasoning":true,"reasoning_options":[{"type":"effort","values":["none","minimal","low","medium","high","xhigh","max"]}]},
+            "budget":{"id":"budget","reasoning":true,"reasoning_options":[{"type":"toggle"},{"type":"budget_tokens","min":128,"max":32768}]},
+            "reused-budget":{"id":"reused-budget","reasoning":true,"reasoning_options":[{"type":"budget_tokens"}]},
+            "toggle":{"id":"toggle","reasoning_options":[{"type":"toggle"}]},
+            "mixed":{"id":"mixed","reasoning_options":[{"type":"effort","values":["low","high"]},{"type":"toggle"},{"type":"budget_tokens"}]},
+            "always":{"id":"always","reasoning":true},
+            "plain":{"id":"plain","reasoning":false}
+        }});
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&json!({id:models})).unwrap(),
+        )
+        .unwrap();
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        let turn = gateway.open_turn();
+        for (model, expected, reasoning) in [
+            (
+                "effort",
+                if google {
+                    vec![Effort::Minimal, Effort::Low, Effort::Medium, Effort::High]
+                } else {
+                    vec![
+                        Effort::Off,
+                        Effort::Minimal,
+                        Effort::Low,
+                        Effort::Medium,
+                        Effort::High,
+                        Effort::Xhigh,
+                        Effort::Max,
+                    ]
+                },
+                true,
+            ),
+            ("mixed", vec![Effort::Low, Effort::High], false),
+            ("handwritten", vec![Effort::Low, Effort::High], false),
+            ("budget", vec![], true),
+            ("reused-budget", vec![], true),
+            ("toggle", vec![], false),
+            ("always", vec![], true),
+            ("plain", vec![], false),
+            ("unknown", vec![], false),
+        ] {
+            let target = ModelTarget::test_target(id, model);
+            let candidate = crate::model_candidates(
+                directory.path(),
+                &crate::ModelCandidateQuery::Target(target.model.clone()),
+            )
+            .unwrap()
+            .models
+            .remove(0);
+            assert_eq!(candidate.supported_efforts, expected, "{id}/{model}");
+            assert_eq!(
+                candidate.availability,
+                crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey
+                }
+            );
+
+            crate::auth::AuthStore::new(directory.path().into())
+                .set(id, "builtin-key")
+                .unwrap();
+            for effort in std::iter::once(None).chain(expected.iter().copied().map(Some)) {
+                let mut request = request(id);
+                request.target = target.clone();
+                request.target.effort = effort;
+                request.messages = vec![
+                    ConversationItem::Message(NativeMessage::new(
+                        MessageRole::System,
+                        None,
+                        vec![MessagePart::semantic_only(MessageSemantic::Text {
+                            text: "builtin system".into(),
+                        })],
+                    )),
+                    user_message("builtin input"),
+                ];
+                request.tools.push(crate::ToolDefinition::new(
+                    "observe__workspace",
+                    "read",
+                    json!({"type":"object"}),
+                ));
+                let resolved = turn.resolve(&request.target).await.unwrap();
+                assert_eq!(
+                    resolved.origin(),
+                    lattice_conversation::ReplayOrigin {
+                        protocol: if google {
+                            crate::Protocol::Interactions
+                        } else {
+                            crate::Protocol::Responses
+                        },
+                        provider_id: crate::ProviderId::parse(id).unwrap(),
+                    }
+                );
+                complete(
+                    resolved
+                        .stream_chat(request, StreamControl::default())
+                        .await
+                        .unwrap(),
+                )
+                .await;
+                let received = server.next().await;
+                assert_eq!(
+                    received.path,
+                    if google {
+                        "/v1beta/interactions"
+                    } else {
+                        "/v1/responses"
+                    }
+                );
+                assert_eq!(
+                    received
+                        .headers
+                        .get(if google {
+                            "x-goog-api-key"
+                        } else {
+                            "authorization"
+                        })
+                        .unwrap(),
+                    if google {
+                        "builtin-key"
+                    } else {
+                        "Bearer builtin-key"
+                    }
+                );
+                assert_eq!(received.headers["x-client-request-id"], "session-id");
+                let body = received.body;
+                assert_eq!(body["model"], model);
+                assert_eq!(body["stream"], true);
+                assert_eq!(body["store"], false);
+                assert_eq!(body["tools"][0]["name"], "observe__workspace");
+                assert_eq!(body.get("include").is_some(), !google && reasoning);
+                if google {
+                    assert_eq!(body["system_instruction"], "builtin system");
+                    assert_eq!(body["input"][0]["type"], "user_input");
+                    let expected_config = match (reasoning, effort) {
+                        (false, None) => None,
+                        (false, Some(effort)) => Some(json!({"thinking_level":effort.as_str()})),
+                        (true, None) => Some(json!({"thinking_summaries":"auto"})),
+                        (true, Some(effort)) => Some(
+                            json!({"thinking_level":effort.as_str(),"thinking_summaries":"auto"}),
+                        ),
+                    };
+                    assert_eq!(
+                        body.get("generation_config"),
+                        expected_config.as_ref(),
+                        "{id}/{model}/{effort:?}"
+                    );
+                    assert!(body.get("reasoning").is_none());
+                    assert!(body.get("prompt_cache_key").is_none());
+                } else {
+                    assert_eq!(body["instructions"], "builtin system");
+                    assert_eq!(body["input"][0]["role"], "user");
+                    assert_eq!(body["prompt_cache_key"], "session-id");
+                    assert_eq!(body["tools"][0]["strict"], false);
+                    let expected_reasoning = match (reasoning, effort) {
+                        (_, Some(Effort::Off)) => Some(json!({"effort":"none"})),
+                        (true, Some(effort)) => {
+                            Some(json!({"effort":effort.as_str(),"summary":"auto"}))
+                        }
+                        (true, None) => Some(json!({"summary":"auto"})),
+                        (false, Some(effort)) => Some(json!({"effort":effort.as_str()})),
+                        (false, None) => None,
+                    };
+                    assert_eq!(
+                        body.get("reasoning"),
+                        expected_reasoning.as_ref(),
+                        "{id}/{model}/{effort:?}"
+                    );
+                    assert!(body.get("generation_config").is_none());
+                    if reasoning {
+                        assert_eq!(body["include"], json!(["reasoning.encrypted_content"]));
+                    }
+                }
+                for field in [
+                    "messages",
+                    "contents",
+                    "reasoning_effort",
+                    "thinking",
+                    "generationConfig",
+                    "temperature",
+                    "top_p",
+                    "max_output_tokens",
+                    "previous_response_id",
+                    "previous_interaction_id",
+                    "background",
+                ] {
+                    assert!(body.get(field).is_none(), "{id}/{model}: {field}");
+                }
+            }
+            let mut unsupported = target;
+            unsupported.effort = Some(if expected.contains(&Effort::Off) {
+                Effort::Low
+            } else {
+                Effort::Off
+            });
+            if !expected.contains(&unsupported.effort.unwrap()) {
+                assert!(matches!(
+                    turn.resolve(&unsupported).await,
+                    Err(crate::LlmError::Config { message }) if message.contains("does not support reasoning effort")
+                ));
+            }
+            crate::auth::AuthStore::new(directory.path().into())
+                .remove_api_key(id)
+                .unwrap();
+        }
+        crate::auth::AuthStore::new(directory.path().into())
+            .set(id, "builtin-key")
+            .unwrap();
+        let invalid = ModelTarget::test_target(id, "invalid");
+        let candidate = crate::model_candidates(
+            directory.path(),
+            &crate::ModelCandidateQuery::Target(invalid.model.clone()),
+        )
+        .unwrap()
+        .models
+        .remove(0);
+        if google {
+            assert!(matches!(
+                &candidate.availability,
+                crate::Availability::Invalid { reason } if reason.contains("thinking_level")
+            ));
+            assert!(matches!(
+                turn.resolve(&invalid).await,
+                Err(crate::LlmError::Config { message }) if message.contains("thinking_level")
+            ));
+        } else {
+            assert_eq!(candidate.supported_efforts, vec![Effort::Xhigh]);
+            assert_eq!(candidate.availability, crate::Availability::Ready);
+        }
+    }
+}
+
+#[tokio::test]
+async fn builtin_protocol_switch_preserves_old_tool_ids() {
+    use crate::protocol::projection::wire_to_native;
+    use lattice_conversation::{ConversationItem, Protocol, ReplayOrigin, StepContent};
+    for (id, old, fixture) in [
+        (
+            "openai",
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            "xai",
+            Protocol::ChatCompletions,
+            include_str!("../../tests/fixtures/projection/openai_assistant_tool_calls.json"),
+        ),
+        (
+            "google",
+            Protocol::GenerateContent,
+            include_str!("../../tests/fixtures/projection/gemini_thought_signature.json"),
+        ),
+    ] {
+        let mut server = Server::start(true).await;
+        let directory = private_dir();
+        std::fs::write(
+            directory.path().join("providers.toml"),
+            format!("[providers.{id}]\nbase_url='{}'\n", server.url),
+        )
+        .unwrap();
+        crate::auth::AuthStore::new(directory.path().into())
+            .set(id, "builtin-key")
+            .unwrap();
+        let source = wire_to_native(
+            &ReplayOrigin {
+                protocol: old,
+                provider_id: crate::ProviderId::parse(id).unwrap(),
+            },
+            &serde_json::from_str(fixture).unwrap(),
+        )
+        .unwrap();
+        let ids: Vec<_> = source
+            .tool_calls()
+            .map(|(_, call)| call.provider_call_id.clone().unwrap())
+            .collect();
+        let (assistant, results) = crate::test_reply::bind_replay_step(source);
+        let mut request = request(id);
+        request
+            .messages
+            .push(ConversationItem::Step(StepContent { assistant, results }));
+        let gateway =
+            RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+        complete(
+            gateway
+                .open_turn()
+                .stream_chat(request, StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let body = server.next().await.body;
+        let items = body["input"].as_array().unwrap();
+        let calls: Vec<_> = items
+            .iter()
+            .filter(|item| item["type"] == "function_call")
+            .collect();
+        let results: Vec<_> = items
+            .iter()
+            .filter(|item| {
+                item["type"]
+                    == if id == "google" {
+                        "function_result"
+                    } else {
+                        "function_call_output"
+                    }
+            })
+            .collect();
+        assert_eq!(calls.len(), ids.len());
+        assert_eq!(results.len(), ids.len());
+        for (index, call_id) in ids.iter().enumerate() {
+            assert_eq!(
+                calls[index][if id == "google" { "id" } else { "call_id" }],
+                call_id.as_str()
+            );
+            assert_eq!(results[index]["call_id"], call_id.as_str());
+        }
+    }
+}
+
+#[tokio::test]
+async fn reasoning_text_controls_use_the_model_metadata_from_each_resolution() {
+    use lattice_conversation::Effort;
+    use serde_json::json;
+    for protocol in [
+        "responses",
+        "interactions",
+        "generate-content",
+        "anthropic-messages",
+    ] {
+        let mut server = Server::start(false).await;
+        let directory = private_dir();
+        configure(directory.path(), &server.url, protocol, "none");
+        let path = directory.path().join("providers.toml");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let cache = directory.path().join("cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+        let turn = gateway.open_turn();
+        let cases = if protocol == "responses" {
+            vec![
+                (Some(false), true, Some(true)),
+                (Some(true), true, Some(false)),
+                (None, false, Some(true)),
+                (None, false, Some(false)),
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
+            ]
+        } else {
+            vec![
+                (Some(false), true, None),
+                (Some(true), true, None),
+                (None, true, None),
+                (None, false, None),
+            ]
+        };
+        for (catalog_flag, present, handwritten) in cases {
+            let mut model_config =
+                handwritten.map_or_else(String::new, |flag| format!("reasoning={flag}\n"));
+            if protocol == "anthropic-messages" {
+                model_config.push_str("effort=['high']\n");
+            }
+            if !model_config.is_empty() {
+                model_config = format!("[providers.test.models.model-id]\n{model_config}");
+            }
+            std::fs::write(
+                &path,
+                format!("{source}\ncatalog='reasoning-fixture'\n{model_config}"),
+            )
+            .unwrap();
+            let mut model = json!({"id":"model-id"});
+            if protocol == "responses" {
+                model["reasoning_options"] = json!([{"type":"effort","values":["none","high"]}]);
+            }
+            if let Some(flag) = catalog_flag {
+                model["reasoning"] = flag.into();
+            }
+            let models = if present {
+                json!({"model-id":model})
+            } else {
+                json!({})
+            };
+            std::fs::write(
+                cache.join("models.json"),
+                serde_json::to_vec(&json!({"reasoning-fixture":{"models":models}})).unwrap(),
+            )
+            .unwrap();
+            let mut request = request("test");
+            if protocol == "anthropic-messages" {
+                request.target.effort = Some(Effort::High);
+            }
+            if protocol == "responses" {
+                assert_eq!(
+                    crate::model_candidates(
+                        directory.path(),
+                        &crate::ModelCandidateQuery::Target(request.target.model.clone()),
+                    )
+                    .unwrap()
+                    .models
+                    .remove(0)
+                    .supported_efforts,
+                    if present {
+                        vec![Effort::Off, Effort::High]
+                    } else {
+                        Vec::new()
+                    },
+                    "reasoning does not change effort derivation"
+                );
+            }
+            complete(
+                turn.stream_chat(request, StreamControl::default())
+                    .await
+                    .unwrap(),
+            )
+            .await;
+            let body = server.next().await.body;
+            let flag = handwritten.or(catalog_flag);
+            let enabled = flag == Some(true);
+            let (actual, expected) = match protocol {
+                "responses" => {
+                    assert_eq!(
+                        body.get("include").cloned(),
+                        enabled.then(|| json!(["reasoning.encrypted_content"]))
+                    );
+                    (body.get("reasoning").cloned(), json!({"summary":"auto"}))
+                }
+                "interactions" => (
+                    body.get("generation_config").cloned(),
+                    json!({"thinking_summaries":"auto"}),
+                ),
+                "anthropic-messages" => {
+                    assert_eq!(body["thinking"]["type"], "adaptive");
+                    assert_eq!(body["output_config"], json!({"effort":"high"}));
+                    (
+                        body["thinking"].get("display").cloned(),
+                        json!("summarized"),
+                    )
+                }
+                _ => (
+                    body.get("generationConfig").cloned(),
+                    json!({"thinkingConfig":{"includeThoughts":true}}),
+                ),
+            };
+            assert_eq!(
+                actual,
+                enabled.then_some(expected),
+                "{protocol}/{catalog_flag:?}/present={present}/handwritten={handwritten:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn clients_are_reused_only_within_the_same_turn_provider_and_base_url() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let mut config = std::fs::read_to_string(directory.path().join("providers.toml")).unwrap();
+    config.push_str(&format!(
+        "\n[providers.other]\nprotocol = 'chat-completions'\nbase_url = '{}'\nauth = 'none'\n",
+        server.url
+    ));
+    std::fs::write(directory.path().join("providers.toml"), config).unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let mut connections = Vec::new();
+    for provider in ["test", "test", "other", "test", "other"] {
+        complete(
+            turn.stream_chat(request(provider), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        connections.push(server.next().await.connection);
+    }
+    assert_eq!(connections, [1, 1, 2, 1, 2]);
+    let another_turn = gateway.open_turn();
+    complete(
+        another_turn
+            .stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.connection, 3);
+    configure(
+        directory.path(),
+        &server.url.replace("/v1", "/changed"),
+        "chat-completions",
+        "none",
+    );
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    let changed = server.next().await;
+    assert_eq!(changed.connection, 4);
+    assert_eq!(changed.path, "/changed/chat/completions");
+}
+
+struct ResumeClock;
+impl Drop for ResumeClock {
+    fn drop(&mut self) {
+        tokio::time::resume();
+    }
+}
+
+#[tokio::test]
+async fn unfinished_transport_discards_pinned_client_before_the_next_request() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let partial = "data: {\"choices\":[{\"delta\":{\"content\":\"partial\"}}]}\n\n";
+    let cases = [
+        ("no headers", String::new(), false),
+        (
+            "error body interrupted",
+            "HTTP/1.1 503 Unavailable\r\nContent-Length: 100\r\n\r\n{\"error\"".into(),
+            false,
+        ),
+        (
+            "error body exceeds read limit",
+            format!(
+                "HTTP/1.1 503 Unavailable\r\nContent-Length: 65537\r\n\r\n{}",
+                "x".repeat(65_537)
+            ),
+            false,
+        ),
+        (
+            "SSE interrupted",
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{partial}",
+                partial.len() + 64
+            ),
+            false,
+        ),
+        (
+            "EOF before Done",
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{partial}",
+                partial.len()
+            ),
+            false,
+        ),
+        (
+            "body interrupted after Done",
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{DONE}",
+                DONE.len() + 64
+            ),
+            true,
+        ),
+        (
+            "body tail timeout after Done",
+            format!(
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\n\r\n{DONE}",
+                DONE.len() + 64
+            ),
+            true,
+        ),
+    ];
+    for (name, response, completes) in cases {
+        complete(
+            turn.stream_chat(request("test"), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        let previous = server.next().await.connection;
+        server.respond(response, name != "body tail timeout after Done");
+        let result = turn
+            .stream_chat(request("test"), StreamControl::default())
+            .await;
+        match result {
+            Err(error) => assert!(error.retryable(), "{name}: {error}"),
+            Ok(stream) => {
+                let events = if name == "body tail timeout after Done" {
+                    // 连接保持打开，收尾读取要等 TAIL_WAIT。只在这一段暂停时钟，
+                    // 其余传输失败仍按真实 I/O 结束。
+                    tokio::time::pause();
+                    let _resume = ResumeClock;
+                    let started = tokio::time::Instant::now();
+                    let mut pending = std::pin::pin!(stream.collect::<Vec<_>>());
+                    let mut steps = 0;
+                    let events = loop {
+                        tokio::select! {
+                            biased;
+                            events = &mut pending => break events,
+                            _ = tokio::time::advance(Duration::from_millis(100)) => {
+                                steps += 1;
+                                assert!(steps < 20, "{name} did not finish");
+                            }
+                        }
+                    };
+                    // 与 client.rs 的 TAIL_WAIT（500ms）一致：提前结束说明没在等收尾。
+                    assert!(
+                        started.elapsed() >= Duration::from_millis(500),
+                        "{name} finished after {:?}, before the tail wait",
+                        started.elapsed()
+                    );
+                    events
+                } else {
+                    stream.collect::<Vec<_>>().await
+                };
+                assert_eq!(
+                    matches!(
+                        events.last(),
+                        Some(LlmEvent::Finished {
+                            outcome: ReplyOutcome::Complete { .. },
+                            ..
+                        })
+                    ),
+                    completes,
+                    "{name}: {events:?}"
+                );
+            }
+        }
+        server.next().await;
+        // loopback 服务无法观察公网 DNS，直接核对地址固定所用的 client 已被丢弃。
+        let slot = client_slot(&turn, &server.url);
+        assert!(!slot.is_cached(), "{name}");
+        complete(
+            turn.stream_chat(request("test"), StreamControl::default())
+                .await
+                .unwrap(),
+        )
+        .await;
+        assert_ne!(server.next().await.connection, previous, "{name}");
+        assert!(slot.is_cached(), "{name}");
+    }
+}
+
+#[tokio::test]
+async fn done_tail_above_64_kib_discards_the_pinned_client() {
+    let mut server = Server::start(true).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let release = server.respond_with_tail(
+        format!(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n{:x}\r\n{DONE}\r\n",
+            DONE.len()
+        ),
+        format!("10001\r\n{}\r\n0\r\n\r\n", "x".repeat(65_537)),
+    );
+    let mut stream = turn
+        .stream_chat(request("test"), StreamControl::default())
+        .await
+        .unwrap();
+    assert_eq!(stream.next().await, Some(LlmEvent::Started));
+    assert_eq!(
+        stream.next().await,
+        Some(LlmEvent::Delta(crate::LiveDelta::Text("ok".into())))
+    );
+    // 正文增量已交付后才释放尾部，保证尾部进入收尾读取的 64 KiB 计数。
+    release.send(()).unwrap();
+    complete(stream).await;
+    let previous = server.next().await.connection;
+    let slot = client_slot(&turn, &server.url);
+    assert!(!slot.is_cached());
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_ne!(server.next().await.connection, previous);
+}
+
+#[tokio::test]
+async fn dropping_an_opening_request_discards_its_pinned_client() {
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let turn = gateway.open_turn();
+    server.respond(String::new(), false);
+    {
+        let opening = turn.stream_chat(request("test"), StreamControl::default());
+        tokio::pin!(opening);
+        tokio::select! {
+            _ = server.next() => {},
+            _ = &mut opening => panic!("provider has not sent response headers"),
+        }
+    }
+    let slot = client_slot(&turn, &server.url);
+    assert!(!slot.is_cached());
+    complete(
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(server.next().await.connection, 2);
+}
+
+#[tokio::test]
+async fn client_setup_errors_redact_credentials_in_the_hostname() {
+    let directory = private_dir();
+    let key = "misplaced-test-key";
+    let url = format!("https://{key}.{}.invalid", "x".repeat(64));
+    configure(directory.path(), &url, "chat-completions", "bearer");
+    crate::auth::AuthStore::new(directory.path().into())
+        .set("test", key)
+        .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![TLS.ca_der.clone()]).unwrap();
+    let turn = gateway.open_turn();
+    let error = match tokio::time::timeout(
+        Duration::from_secs(5),
+        turn.stream_chat(request("test"), StreamControl::default()),
+    )
+    .await
+    .unwrap()
+    {
+        Ok(_) => panic!("invalid hostname opened a stream"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, crate::LlmError::Dns { .. }));
+    assert!(!error.retryable());
+    assert!(!error.to_string().contains(key));
+    assert!(error.to_string().contains("[REDACTED]"));
+}
+
+#[tokio::test]
+async fn diagnostics_redact_all_current_credentials_before_bounding() {
+    let server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "bearer");
+    let auth = crate::auth::AuthStore::new(directory.path().into());
+    let long_key = "other-secret-".repeat(100);
+    auth.set("test", "current-key").unwrap();
+    auth.set("deepseek", &long_key).unwrap();
+    auth.set("xai", "EMPTY").unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let turn = gateway.open_turn();
+    let body = format!("current-key {long_key} EMPTY");
+    server.respond(format!("HTTP/1.1 401 Unauthorized\r\nx-request-id: req-current-key-123\r\nContent-Length: {}\r\n\r\n{body}", body.len()), false);
+    let (result, logs) =
+        capture_logs(turn.stream_chat(request("test"), StreamControl::default())).await;
+    let error = match result {
+        Ok(_) => panic!("HTTP error opened a stream"),
+        Err(error) => error,
+    };
+    assert!(!error.to_string().contains("current-key"));
+    assert!(!error.to_string().contains("other-secret"));
+    assert!(!error.to_string().contains("EMPTY"));
+    assert!(error.to_string().contains("[REDACTED]"));
+    assert!(logs.contains("provider responded"));
+    assert!(logs.contains("provider returned an error status"));
+    assert!(logs.contains("request_id=\"req-[REDACTED]-123\""));
+    assert!(!logs.contains("current-key"));
+    assert!(!logs.contains("other-secret"));
+    let body = format!("data: {{\"error\":{{\"message\":\"{long_key} current-key EMPTY\"}}}}\n\n");
+    server.respond(
+        format!(
+            "HTTP/1.1 200 OK\r\nx-request-id: req-current-key-456\r\nContent-Length: {}\r\n\r\n{body}",
+            body.len()
+        ),
+        false,
+    );
+    let (events, logs) = capture_logs(async {
+        turn.stream_chat(request("test"), StreamControl::default())
+            .await
+            .unwrap()
+            .collect::<Vec<_>>()
+            .await
+    })
+    .await;
+    let Some(LlmEvent::Finished {
+        outcome:
+            ReplyOutcome::Interrupted {
+                reason: crate::ReplyStop::Stream(crate::StreamStop::Provider(failure)),
+            },
+        ..
+    }) = events.last()
+    else {
+        panic!("{events:?}");
+    };
+    assert!(!failure.message.contains("current-key"));
+    assert!(!failure.message.contains("other-secret"));
+    assert!(!failure.message.contains("EMPTY"));
+    assert!(failure.message.contains("[REDACTED]"));
+    assert!(failure.message.chars().count() <= crate::MAX_DIAGNOSTIC_CHARS);
+    assert!(logs.contains("provider stream error"));
+    assert!(logs.contains("request_id=\"req-[REDACTED]-456\""));
+    assert!(!logs.contains("current-key"));
+    assert!(!logs.contains("other-secret"));
+}
+
+#[tokio::test]
+async fn stream_control_reaches_the_shared_reply_assembler() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let server = Server::start(false).await;
+    let directory = private_dir();
+    configure(directory.path(), &server.url, "chat-completions", "none");
+    let gateway = RequestGateway::new(directory.path().into(), Vec::new()).unwrap();
+    let turn = gateway.open_turn();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let stream = turn
+        .stream_chat(
+            request("test"),
+            StreamControl {
+                cancel: Some(cancel.clone()),
+                deadline: None,
+            },
+        )
+        .await
+        .unwrap();
+    cancel.store(true, Ordering::Release);
+    let events = stream.collect::<Vec<_>>().await;
+    assert!(matches!(
+        events.as_slice(),
+        [
+            LlmEvent::Started,
+            LlmEvent::Finished {
+                outcome: ReplyOutcome::Interrupted {
+                    reason: crate::ReplyStop::Stream(crate::StreamStop::Cancelled)
+                },
+                ..
+            }
+        ]
+    ));
+    let slot = client_slot(&turn, &server.url);
+    assert!(!slot.is_cached());
+}
+
+fn client_slot(turn: &GatewayTurn, url: &str) -> Arc<TurnClient> {
+    turn.clients
+        .lock()
+        .unwrap()
+        .get(&(crate::ProviderId::parse("test").unwrap(), url.to_owned()))
+        .unwrap()
+        .clone()
+}

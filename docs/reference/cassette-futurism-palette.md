@@ -12,7 +12,7 @@ status: active
 
 原设计标注为 OKLCH 色表，以 Lone Trail 为视觉参考。本文保留原资产的 hex 值，不重新生成色阶；原 JSX 展示组件中的复制、明暗预览切换和装饰动画不再保留为代码。
 
-色系与色阶说明是设计参考。TUI 的实际角色、填充面与回退要求由 [TUI 交互与视觉合同](../architecture/tui.md)维护。
+色系与色阶说明是设计参考。TUI 的实际角色、填充面与回退要求由 [TUI 交互与视觉合同](../architecture/tui/palette.md)维护。
 
 ## 色系用途
 

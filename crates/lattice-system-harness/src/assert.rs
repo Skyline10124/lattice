@@ -7,7 +7,7 @@ use thiserror::Error;
 
 use crate::artifacts::{
     ArtifactClaim, EvidenceError, FailureReport, capture_from_output, checked_failure_dir,
-    clear_stale_bundle, render_command_text, scan_bundle_into_report,
+    clear_stale_bundle, render_command_text, render_failed_command_text, scan_bundle_into_report,
     write_failure_artifacts_collecting, write_world_context,
 };
 use crate::driver::CommandOutcome;
@@ -189,10 +189,18 @@ fn finalize_with_failure_artifacts_at_target(
             report.add_evidence_error("daemon cleanup", error, secrets);
         }
     }
-    report.add_command_diagnostic(
-        render_command_text(command_summary, output, secrets),
-        secrets,
-    );
+    let diagnostic = match (&target, failed) {
+        // 失败时显示已脱敏输出的开头部分，并指向证据目录里的完整脱敏副本。
+        (Ok(dir), true) => render_failed_command_text(
+            command_summary,
+            output,
+            secrets,
+            &dir.join("stdout.txt"),
+            &dir.join("stderr.txt"),
+        ),
+        _ => render_command_text(command_summary, output, secrets),
+    };
+    report.add_command_diagnostic(diagnostic, secrets);
 
     let dir = match target {
         Ok(dir) => dir,
@@ -478,6 +486,63 @@ mod tests {
             );
             assert!(!text.contains(secret), "{text}");
         }
+    }
+
+    #[test]
+    fn failed_exit_diagnostic_shows_redacted_output_head_and_evidence_path() {
+        let secret = "fast-excerpt-secret";
+        let world = ScenarioWorld::new("fast-failure-excerpt").unwrap();
+        let root = tempfile::TempDir::new().unwrap();
+        let dir = root.path().join("scenario");
+        let mut value = outcome(ProcessTermination::Exited(2));
+        value.stdout = format!("stdout head {secret}\n{}", "x".repeat(5_000)).into_bytes();
+        value.stderr = b"error: profile rejected".to_vec();
+
+        let report = finalize_with_failure_artifacts_at_target(
+            &world,
+            "scenario",
+            "lattice send",
+            &value,
+            &[secret],
+            assert_exit_success(&value),
+            Ok(dir.clone()),
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            !report.contains(secret),
+            "diagnostic must stay redacted: {report}"
+        );
+        assert!(
+            report.contains("stdout head [REDACTED]"),
+            "diagnostic must show the redacted stdout head: {report}"
+        );
+        assert!(
+            report.contains("error: profile rejected"),
+            "diagnostic must show stderr: {report}"
+        );
+        // 2048 字节内是 "stdout head [REDACTED]\n"（23 字节）加 2025 个 x，余下 2975 个 x。
+        assert!(
+            report.contains("... [2975 more bytes truncated]"),
+            "long stdout must be cut to a bounded head: {report}"
+        );
+        assert!(
+            !report.contains(&"x".repeat(2_026)),
+            "diagnostic must not exceed the 2048-byte head: {report}"
+        );
+        assert!(
+            report.contains(&format!(
+                "full redacted copy: {}",
+                dir.join("stdout.txt").display()
+            )),
+            "diagnostic must point at the evidence copy: {report}"
+        );
+        let saved = std::fs::read_to_string(dir.join("stdout.txt")).unwrap();
+        assert!(
+            saved.starts_with("stdout head [REDACTED]\n"),
+            "evidence copy uses the same redaction"
+        );
     }
 
     #[test]

@@ -1,27 +1,36 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Localhost fake LLM for harness scenarios.
+//! 供 harness 场景使用的本地 fake LLM。
 //!
 //! 场景经 [`ScenarioWorld::wire_provider`](crate::ScenarioWorld::wire_provider)
-//! 把模型与凭据接到 fake server。请求路由选择响应协议：OpenAI Chat Completions、
-//! Anthropic Messages 或 Gemini `streamGenerateContent`。
+//! 把模型与凭据接到 fake server。请求路由选择已实现协议的响应格式。
 //!
 //! 传输与官方 provider 一致：TLS + HTTP/2，ALPN 只提供 `h2`，证书来自
 //! [`TlsIdentity`]，场景经 `SSL_CERT_FILE` 信任它（见 `ScenarioWorld`）。
 //! [`FakeLlmServer::start_plain_http1`] 另起明文 HTTP/1.1，只服务本地 provider
-//! （Ollama 一类）场景，只支持完整响应。
+//! （Ollama 一类）场景，只支持完整响应，空闲连接五秒后关闭。传输层故障在 HTTP/2 上构造：
+//! 流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后的 `GOAWAY(NO_ERROR)`、
+//! 最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
 //!
-//! The server does two things (RFC #41, Codeberg #19, decision four):
+//! 依据 #41 的第四项决定，服务端做两件事：
 //!
-//! 1. Captures each model request (model, messages, tool names, identifying
-//!    headers, connection) so scenarios can assert on what the product sent.
-//! 2. Answers with the script chosen by the scenario: plain text, tool calls,
-//!    HTTP errors, or a transport failure (stream cut, reset, GOAWAY, refused
-//!    stream).
+//! 1. 捕获每个模型请求（模型、消息、工具名、识别头与连接），供场景断言产品发出了什么。
+//! 2. 按场景选定的脚本回复：正文、工具调用、HTTP 错误或传输故障。SSE 正文与真实流一致：
+//!    每个分片一条 `data: {chunk}\n\n`，OpenAI 协议以 `data: [DONE]\n\n` 结束。
 //!
-//! SSE bodies mirror the real streams: one `data: {chunk}\n\n` per chunk,
-//! terminated by `data: [DONE]\n\n` in the OpenAI protocol.
+//! 唯一的客户端是被测产品，所以服务端只做取出路由、凭据与 body 所需的最少解析。它对场景保证：
+//!
+//! 1. 计数准确：只有发往五种协议模型端点的请求进入捕获；其他请求得到错误响应，记为 fixture
+//!    failure。工具定义按 `tool_schema_rejection` 的规则核对，违反时返回 400，记为 fixture
+//!    failure，该请求不进入捕获。非 JSON 的 body 保留为诊断。对端放弃流或连接、客户端在 TLS
+//!    握手中拒绝证书属于对端行为，握手被拒的次数由 [`FakeLlmServer::rejected_handshakes`] 给出。
+//! 2. 回复确定：捕获、Sequence 的选择与推进、到达通知在同一临界区内发生；gate 只控制交付时机。
+//!    请求数超过 Sequence 长度时重复最后一项；空 Sequence 产生 `IllegalResponse`。
+//! 3. 失败有界：request、stall、release 与 shutdown 都是有界握手。shutdown 发出停止信号，同时
+//!    中止停在握手或读请求中的连接任务，并取消 gate，等在途任务结束后再 join 服务线程；超时返回
+//!    错误并保留线程，再次调用或 Drop 时继续有界等待。保留第一个 fixture failure，shutdown 在
+//!    有界清理后返回它。
 
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -52,7 +61,7 @@ use crate::tls::TlsIdentity;
 /// 默认场景 API key，由 provider 接线入口录入，也作为产物脱敏扫描的已知秘密。
 pub const FAKE_API_KEY: &str = "harness-fake-key-do-not-ship";
 
-/// A captured Chat Completions request body, decoded for scenario assertions.
+/// 按协议捕获模型请求，原生 JSON 留给场景核对。
 ///
 /// Only the fields the harness asserts on are typed; the rest stay in the
 /// generic `raw` JSON value so unknown provider extensions do not break
@@ -62,11 +71,9 @@ pub struct CapturedRequest {
     pub model: String,
     /// `role` → count of messages with that role, in arrival order.
     pub message_roles: Vec<String>,
-    /// Tool function names as sent on the wire (already `.__`-encoded by the
-    /// provider adapter, e.g. `observe__workspace`). Asserted verbatim so a
-    /// catalog rename surfaces.
+    /// 原样捕获请求体中的线上工具名。
     pub tool_names: Vec<String>,
-    /// Protocol the request used: `openai`, `anthropic` or `gemini`.
+    /// 请求协议：`openai`、`responses`、`interactions`、`anthropic` 或 `gemini`。
     pub provider: String,
     /// The full decoded JSON body, for assertions on fields this struct does
     /// not surface (e.g. `temperature`, `max_tokens`).
@@ -79,11 +86,30 @@ pub struct CapturedRequest {
     pub received_ms: u64,
 }
 
+/// 场景指定 provider 原生分项；Messages 的开始与末尾报告分别编排。
+#[derive(Debug, Clone)]
+pub enum NativeUsage {
+    ChatCompletions(Value),
+    Responses(Value),
+    Interactions(Value),
+    Messages { start: Value, delta: Value },
+    GenerateContent(Value),
+}
+
 /// The kind of SSE script the fake server returns for a request.
 #[derive(Debug, Clone)]
 pub enum SseScript {
+    /// 保留内层文本或工具脚本，只替换对应协议原生的 usage 事件。
+    WithUsage {
+        script: Box<SseScript>,
+        usage: NativeUsage,
+    },
     /// 手工编排的合法 OpenAI chunks，保持跨类型到达顺序；结尾自动添加 DONE。
     Chunks { chunks: Vec<Value> },
+    /// 原生 SSE 事件按序交付；不自动追加任何终止标记。
+    NativeEvents {
+        events: Vec<(Option<String>, Value)>,
+    },
     /// Plain assistant text. Emits one or more `delta.content` chunks then a
     /// terminal chunk with `finish_reason: "stop"` and `usage`, then
     /// `data: [DONE]`.
@@ -170,6 +196,8 @@ pub enum ServeError {
     UnexpectedRequest(String),
     #[error("provider would reject the tool definitions: {0}")]
     RejectedToolSchema(String),
+    #[error("provider would reject the assistant content: {0}")]
+    RejectedAssistantContent(String),
     #[error("script cannot be rendered in the {0} protocol")]
     UnsupportedScript(&'static str),
     #[error("fake-provider server thread failed: {0}")]
@@ -763,6 +791,8 @@ impl HttpRequest {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Protocol {
     OpenAi,
+    Responses,
+    Interactions,
     Anthropic,
     Gemini,
 }
@@ -775,6 +805,8 @@ impl Protocol {
         }
         match path {
             "/chat/completions" => Some((Self::OpenAi, None)),
+            "/responses" => Some((Self::Responses, None)),
+            "/interactions" | "/v1beta/interactions" => Some((Self::Interactions, None)),
             "/v1/messages" => Some((Self::Anthropic, None)),
             _ => {
                 let model = path
@@ -788,6 +820,8 @@ impl Protocol {
     fn name(self) -> &'static str {
         match self {
             Self::OpenAi => "openai",
+            Self::Responses => "responses",
+            Self::Interactions => "interactions",
             Self::Anthropic => "anthropic",
             Self::Gemini => "gemini",
         }
@@ -796,9 +830,9 @@ impl Protocol {
     /// The API key in this protocol's credential header.
     fn api_key(self, request: &HttpRequest) -> Option<&str> {
         let (header, prefix) = match self {
-            Self::OpenAi => ("authorization", "Bearer "),
+            Self::OpenAi | Self::Responses => ("authorization", "Bearer "),
             Self::Anthropic => ("x-api-key", ""),
-            Self::Gemini => ("x-goog-api-key", ""),
+            Self::Gemini | Self::Interactions => ("x-goog-api-key", ""),
         };
         request
             .credentials
@@ -879,6 +913,20 @@ fn decide(
             body: body.to_string(),
         };
         return Ok((reply, Some(ServeError::RejectedToolSchema(rejection))));
+    }
+    if let Some(rejection) = responses_assistant_content_rejection(protocol, &request.body) {
+        let body = serde_json::json!({"error": {
+            "message": rejection,
+            "type": "invalid_request_error",
+            "code": "invalid_value",
+        }});
+        let reply = Reply::Status {
+            status: 400,
+            content_type: "application/json".into(),
+            headers: Vec::new(),
+            body: body.to_string(),
+        };
+        return Ok((reply, Some(ServeError::RejectedAssistantContent(rejection))));
     }
     let mut captured = parse_request_body(protocol, path_model, &request.body);
     captured.headers = request.headers;
@@ -1384,13 +1432,31 @@ fn parse_request_body(
     let model = path_model.unwrap_or_else(|| raw["model"].as_str().unwrap_or("").to_string());
     let messages = match protocol {
         Protocol::Gemini => &raw["contents"],
+        Protocol::Responses | Protocol::Interactions => &raw["input"],
         _ => &raw["messages"],
     };
     let message_roles = messages
         .as_array()
         .into_iter()
         .flatten()
-        .filter_map(|message| message["role"].as_str())
+        .filter_map(|message| {
+            if protocol == Protocol::Interactions {
+                return match message["type"].as_str() {
+                    Some("user_input") => Some("user"),
+                    Some("model_output" | "thought" | "function_call") => Some("assistant"),
+                    Some("function_result") => Some("tool"),
+                    _ => None,
+                };
+            }
+            if protocol == Protocol::Responses {
+                match message["type"].as_str() {
+                    Some("reasoning" | "function_call") => return Some("assistant"),
+                    Some("function_call_output") => return Some("tool"),
+                    _ => {}
+                }
+            }
+            message["role"].as_str()
+        })
         .map(str::to_string)
         .collect();
     let tools = raw["tools"].as_array().into_iter().flatten();
@@ -1399,7 +1465,7 @@ fn parse_request_body(
             .filter_map(|tool| tool["function"]["name"].as_str())
             .map(str::to_string)
             .collect(),
-        Protocol::Anthropic => tools
+        Protocol::Anthropic | Protocol::Responses | Protocol::Interactions => tools
             .filter_map(|tool| tool["name"].as_str())
             .map(str::to_string)
             .collect(),
@@ -1426,14 +1492,22 @@ fn parse_request_body(
 
 /// 按真实 provider 的工具定义校验拒绝请求；违反者返回 400，整个 Turn 无法开始。
 ///
-/// - OpenAI、Anthropic：参数 schema 顶层必须是 `type: object`，且不能出现
+/// - Chat Completions、Responses、Anthropic：参数 schema 顶层必须是 `type: object`，且不能出现
 ///   `oneOf`、`anyOf`、`allOf`、`enum`、`not`。
 /// - Gemini：`functionDeclarations[].parameters` 只接受 OpenAPI 子集，任意层级出现
 ///   `additionalProperties`、`const`、`contains`、`minContains` 都会被拒（2026-10-05 对
 ///   AI Studio 与 Vertex 实测）；完整 JSON Schema 须放在 `parametersJsonSchema`。
+/// - Interactions：parameters 提供时须为 JSON 对象；不把忽略的关键字模拟成拒绝条件。
 fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(body).ok()?;
     let tools = raw["tools"].as_array().into_iter().flatten();
+    if protocol == Protocol::Interactions {
+        return tools.into_iter().find_map(|tool| {
+            tool.get("parameters")
+                .filter(|schema| !schema.is_object())
+                .map(|_| "Interactions function parameters must be a JSON object".into())
+        });
+    }
     if protocol == Protocol::Gemini {
         return tools
             .flat_map(|tool| {
@@ -1456,6 +1530,7 @@ fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
     tools.into_iter().find_map(|tool| {
         let (name, schema) = match protocol {
             Protocol::OpenAi => (&tool["function"]["name"], &tool["function"]["parameters"]),
+            Protocol::Responses => (&tool["name"], &tool["parameters"]),
             _ => (&tool["name"], &tool["input_schema"]),
         };
         let combinator = ["oneOf", "anyOf", "allOf", "enum", "not"]
@@ -1479,12 +1554,100 @@ fn has_key_anywhere(value: &Value, key: &str) -> bool {
         _ => false,
     }
 }
+
+/// Responses 的 assistant 正文只接受输出文本或拒绝，用户输入块不能作为历史回复。
+fn responses_assistant_content_rejection(protocol: Protocol, body: &str) -> Option<String> {
+    if protocol != Protocol::Responses {
+        return None;
+    }
+    let raw: Value = serde_json::from_str(body).ok()?;
+    raw["input"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|item| item["role"] == "assistant")
+        .flat_map(|item| item["content"].as_array().into_iter().flatten())
+        .find_map(|part| {
+            let kind = part["type"].as_str().unwrap_or("null");
+            (!matches!(kind, "output_text" | "refusal")).then(|| {
+                format!(
+                    "Invalid value: '{kind}'. Supported values are: 'output_text' and 'refusal'."
+                )
+            })
+        })
+}
+
 /// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
 type ScriptedCall = (String, String, String);
 
-/// Render `script` in `protocol`. Anthropic and Gemini render the text and
-/// Tool call scripts; the other scripts exist only in the OpenAI protocol.
+/// 按协议渲染文本、工具与原生用量，保留脚本控制的事件顺序。
 fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
+    if let SseScript::NativeEvents { events } = script {
+        let mut out = String::new();
+        for (name, data) in events {
+            if let Some(name) = name {
+                out.push_str(&format!("event: {name}\n"));
+            }
+            if protocol == Protocol::Interactions
+                && name.as_deref() == Some("done")
+                && data.as_str() == Some("[DONE]")
+            {
+                // 结束标记不是 JSON 字符串，不能在数据外加引号。
+                out.push_str("data: [DONE]\n\n");
+            } else {
+                out.push_str(&format!("data: {data}\n\n"));
+            }
+        }
+        return Some(out);
+    }
+    if let SseScript::WithUsage { script, usage } = script {
+        if !matches!(
+            (protocol, usage),
+            (Protocol::OpenAi, NativeUsage::ChatCompletions(_))
+                | (Protocol::Responses, NativeUsage::Responses(_))
+                | (Protocol::Interactions, NativeUsage::Interactions(_))
+                | (Protocol::Anthropic, NativeUsage::Messages { .. })
+                | (Protocol::Gemini, NativeUsage::GenerateContent(_))
+        ) {
+            return None;
+        }
+        let rendered = render(protocol, script)?;
+        let mut out = String::new();
+        for line in rendered.lines() {
+            if let Some(data) = line.strip_prefix("data: ")
+                && let Ok(mut root) = serde_json::from_str::<Value>(data)
+            {
+                match usage {
+                    NativeUsage::Interactions(value)
+                        if root["interaction"].get("usage").is_some() =>
+                    {
+                        root["interaction"]["usage"] = value.clone()
+                    }
+                    NativeUsage::Responses(value) if root["response"].get("usage").is_some() => {
+                        root["response"]["usage"] = value.clone()
+                    }
+                    NativeUsage::ChatCompletions(value) if root.get("usage").is_some() => {
+                        root["usage"] = value.clone()
+                    }
+                    NativeUsage::Messages { start, .. } if root["type"] == "message_start" => {
+                        root["message"]["usage"] = start.clone()
+                    }
+                    NativeUsage::Messages { delta, .. } if root["type"] == "message_delta" => {
+                        root["usage"] = delta.clone()
+                    }
+                    NativeUsage::GenerateContent(value) if root.get("usageMetadata").is_some() => {
+                        root["usageMetadata"] = value.clone()
+                    }
+                    _ => {}
+                }
+                out.push_str(&format!("data: {root}\n"));
+            } else {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+        return Some(out);
+    }
     if protocol == Protocol::OpenAi {
         return Some(render_script(script));
     }
@@ -1507,8 +1670,93 @@ fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
     };
     Some(match protocol {
         Protocol::Anthropic => render_anthropic(texts, &calls, finish),
+        Protocol::Responses => render_responses(texts, &calls),
+        Protocol::Interactions => render_interactions(texts, &calls),
         _ => render_gemini(texts, &calls, finish),
     })
+}
+
+/// 普通脚本也走原生 step 生命周期，工具轮以 requires_action 结束。
+fn render_interactions(texts: &[String], calls: &[ScriptedCall]) -> String {
+    use serde_json::json;
+    let mut events = vec![
+        json!({"event_type":"interaction.created","interaction":{"object":"interaction","model":"fixture-model"}}),
+        json!({"event_type":"interaction.status_update","status":"in_progress"}),
+    ];
+    let mut index = 0;
+    if !texts.is_empty() {
+        events
+            .push(json!({"event_type":"step.start","index":index,"step":{"type":"model_output"}}));
+        for text in texts {
+            events.push(json!({"event_type":"step.delta","index":index,"delta":{"type":"text","text":text}}));
+        }
+        events.push(json!({"event_type":"step.stop","index":index}));
+        index += 1;
+    }
+    for (id, name, arguments) in calls {
+        events.push(json!({"event_type":"step.start","index":index,"step":{"type":"function_call","id":id,"name":name,"arguments":{}}}));
+        events.push(json!({"event_type":"step.delta","index":index,"delta":{"type":"arguments_delta","arguments":arguments}}));
+        events.push(json!({"event_type":"step.stop","index":index}));
+        index += 1;
+    }
+    events.push(json!({"event_type":"interaction.completed","interaction":{"status":if calls.is_empty() {"completed"} else {"requires_action"},"usage":{"total_tokens":12,"total_input_tokens":8,"total_output_tokens":4,"total_cached_tokens":0,"total_thought_tokens":0,"total_tool_use_tokens":0},"created":"2026-11-02T13:51:51Z","updated":"2026-11-02T13:51:51Z","service_tier":"standard","object":"interaction","model":"fixture-model"}}));
+    let mut out = String::from(": keep-alive\n\n");
+    for event in events {
+        out.push_str(&format!(
+            "event: {}\ndata: {event}\n\n",
+            event["event_type"].as_str().unwrap()
+        ));
+    }
+    out.push_str("event: done\ndata: [DONE]\n\n");
+    out
+}
+
+/// Responses 使用 item 生命周期与完整终态，普通脚本也不依赖 Chat 的 DONE 标记。
+fn render_responses(texts: &[String], calls: &[ScriptedCall]) -> String {
+    use serde_json::json;
+    let mut out = String::new();
+    let mut output = Vec::new();
+    let mut event = |value: Value| push_data(&mut out, &value);
+    event(json!({"type":"response.created","response":{"status":"in_progress","output":[]}}));
+    if !texts.is_empty() {
+        event(
+            json!({"type":"response.output_item.added","output_index":0,"item":{"type":"message","id":"msg_0","role":"assistant","status":"in_progress","phase":"final_answer","content":[]}}),
+        );
+        event(
+            json!({"type":"response.content_part.added","output_index":0,"item_id":"msg_0","content_index":0,"part":{"type":"output_text","text":"","annotations":[],"logprobs":[]}}),
+        );
+        for text in texts {
+            event(
+                json!({"type":"response.output_text.delta","output_index":0,"item_id":"msg_0","content_index":0,"delta":text}),
+            );
+        }
+        event(
+            json!({"type":"response.output_text.done","output_index":0,"item_id":"msg_0","content_index":0,"text":texts.concat()}),
+        );
+        let item = json!({"type":"message","id":"msg_0","role":"assistant","status":"completed","phase":"final_answer","content":[{"type":"output_text","text":texts.concat(),"annotations":[],"logprobs":[]}]});
+        event(json!({"type":"response.output_item.done","output_index":0,"item":item}));
+        output.push(item);
+    }
+    for (id, name, arguments) in calls {
+        let index = output.len();
+        let item_id = format!("item_{index}");
+        let mut item =
+            json!({"type":"function_call","id":item_id,"call_id":id,"name":name,"arguments":""});
+        event(json!({"type":"response.output_item.added","output_index":index,"item":item}));
+        event(
+            json!({"type":"response.function_call_arguments.delta","output_index":index,"item_id":item_id,"delta":arguments}),
+        );
+        event(
+            json!({"type":"response.function_call_arguments.done","output_index":index,"item_id":item_id,"arguments":arguments}),
+        );
+        item["arguments"] = arguments.clone().into();
+        event(json!({"type":"response.output_item.done","output_index":index,"item":item}));
+        output.push(item);
+    }
+    event(
+        json!({"type":"response.completed","response":{"status":"completed","output":output,"usage":{"input_tokens":1,"output_tokens":texts.len().max(calls.len())}}}),
+    );
+    out
 }
 
 /// Anthropic Messages stream: `message_start`, one text block, one
@@ -1628,6 +1876,10 @@ fn render_gemini(texts: &[String], calls: &[ScriptedCall], finish: &str) -> Stri
 fn render_script(script: &SseScript) -> String {
     let mut out = String::new();
     match script {
+        SseScript::WithUsage { .. } | SseScript::NativeEvents { .. } => {
+            return render(Protocol::OpenAi, script)
+                .expect("HTTP/1 scripts use Chat Completions usage");
+        }
         SseScript::Chunks { chunks } => {
             for chunk in chunks {
                 out.push_str(&format!("data: {chunk}\n\n"));
@@ -1845,7 +2097,19 @@ mod tests {
 
     #[test]
     fn render_scripts_preserve_expected_sse_shape() {
-        let rows: [(_, _, &[&str], &[&str], Option<&str>); 4] = [
+        let rows: [(_, _, &[&str], &[&str], Option<&str>); 5] = [
+            (
+                "native_events",
+                SseScript::NativeEvents {
+                    events: vec![(
+                        Some("step.delta".into()),
+                        serde_json::json!({"type":"step.delta","delta":"native"}),
+                    )],
+                },
+                &["event: step.delta\n", "\"delta\":\"native\""],
+                &["[DONE]", "response.completed"],
+                Some("\n\n"),
+            ),
             // The product framer expects content chunks, finish_reason and usage,
             // then the [DONE] marker for a plain-text response.
             (
@@ -1940,6 +2204,189 @@ mod tests {
             captured.tool_names,
             vec!["observe__workspace", "session__todo_write"]
         );
+    }
+
+    #[test]
+    fn responses_native_route_capture_schema_and_usage() {
+        use serde_json::json;
+        assert!(Protocol::route("POST", "/responses") == Some((Protocol::Responses, None)));
+        let body = json!({"model":"model","input":[{"role":"user","content":[]},{"type":"reasoning"},{"type":"function_call"},{"type":"function_call_output"}],"tools":[{"type":"function","name":"observe__workspace","parameters":{"type":"object"},"strict":false}]});
+        let captured = parse_request_body(Protocol::Responses, None, &body.to_string());
+        assert_eq!(captured.provider, "responses");
+        assert_eq!(
+            captured.message_roles,
+            vec!["user", "assistant", "assistant", "tool"]
+        );
+        assert_eq!(captured.tool_names, vec!["observe__workspace"]);
+        assert_eq!(captured.raw, body);
+        assert!(tool_schema_rejection(Protocol::Responses, &body.to_string()).is_none());
+        let mut invalid = body;
+        invalid["tools"][0]["parameters"] = json!({"type":"array"});
+        assert!(tool_schema_rejection(Protocol::Responses, &invalid.to_string()).is_some());
+        let mut assistant_body = json!({"input":[
+            {"role":"user","content":[{"type":"input_text","text":"question"}]},
+            {"type":"message","role":"assistant","content":[
+                {"type":"output_text","text":"answer","annotations":[]},
+                {"type":"refusal","refusal":"declined"}
+            ]}
+        ]});
+        assert!(
+            responses_assistant_content_rejection(Protocol::Responses, &assistant_body.to_string())
+                .is_none()
+        );
+        assistant_body["input"][1]["content"][0]["type"] = json!("input_text");
+        assert_eq!(
+            responses_assistant_content_rejection(Protocol::Responses, &assistant_body.to_string()),
+            Some(
+                "Invalid value: 'input_text'. Supported values are: 'output_text' and 'refusal'."
+                    .into()
+            )
+        );
+        let script = SseScript::WithUsage {
+            script: Box::new(SseScript::plain("hello")),
+            usage: NativeUsage::Responses(json!({"input_tokens":99})),
+        };
+        let sse = render(Protocol::Responses, &script).unwrap();
+        assert!(sse.contains("\"input_tokens\":99"));
+        assert!(sse.contains("response.completed"));
+        assert!(!sse.contains("[DONE]"));
+        for protocol in [
+            Protocol::OpenAi,
+            Protocol::Responses,
+            Protocol::Anthropic,
+            Protocol::Gemini,
+        ] {
+            let events = vec![(None, json!({"event_type":"custom.event"}))];
+            assert_eq!(
+                render(protocol, &SseScript::NativeEvents { events }).unwrap(),
+                "data: {\"event_type\":\"custom.event\"}\n\n"
+            );
+        }
+    }
+
+    #[test]
+    fn interactions_capture_schema_and_native_rendering_follow_current_reference() {
+        use serde_json::json;
+        for path in ["/interactions", "/v1beta/interactions"] {
+            assert!(Protocol::route("POST", path) == Some((Protocol::Interactions, None)));
+        }
+        let mut body = json!({"model":"model","input":[{"type":"user_input"},{"type":"thought"},{"type":"model_output"},{"type":"function_call"},{"type":"function_result"}],"tools":[{"type":"function","name":"observe__workspace","parameters":{"type":"object"}}]});
+        let captured = parse_request_body(Protocol::Interactions, None, &body.to_string());
+        assert_eq!(
+            captured.message_roles,
+            ["user", "assistant", "assistant", "assistant", "tool"]
+        );
+        assert_eq!(captured.tool_names, ["observe__workspace"]);
+        assert_eq!(captured.raw, body);
+        for keyword in [
+            "minLength",
+            "maxLength",
+            "minProperties",
+            "maxProperties",
+            "uniqueItems",
+            "contains",
+            "minContains",
+            "maxContains",
+            "additionalProperties",
+            "const",
+            "oneOf",
+            "anyOf",
+            "allOf",
+            "enum",
+            "not",
+        ] {
+            body["tools"][0]["parameters"] = json!({"type":"object",keyword:{}});
+            assert!(
+                tool_schema_rejection(Protocol::Interactions, &body.to_string()).is_none(),
+                "{keyword}"
+            );
+        }
+        for parameters in [json!("schema"), json!([]), json!(0), Value::Null] {
+            body["tools"][0]["parameters"] = parameters;
+            assert!(tool_schema_rejection(Protocol::Interactions, &body.to_string()).is_some());
+        }
+        body["tools"][0]
+            .as_object_mut()
+            .unwrap()
+            .remove("parameters");
+        assert!(tool_schema_rejection(Protocol::Interactions, &body.to_string()).is_none());
+        for (script, status) in [
+            (SseScript::plain("hello"), "completed"),
+            (
+                SseScript::ToolCall {
+                    call_id: "a".into(),
+                    tool_name: "t".into(),
+                    arguments_json: "{}".into(),
+                },
+                "requires_action",
+            ),
+        ] {
+            let rendered = render(
+                Protocol::Interactions,
+                &SseScript::WithUsage {
+                    script: Box::new(script),
+                    usage: NativeUsage::Interactions(json!({"total_input_tokens":99})),
+                },
+            )
+            .unwrap();
+            assert!(rendered.contains(&format!("\"status\":\"{status}\"")));
+            assert!(rendered.contains("event: step.start\n"));
+            assert!(rendered.contains("\"total_input_tokens\":99"));
+            let events: Vec<Value> = rendered
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .filter(|data| *data != "[DONE]")
+                .map(|data| serde_json::from_str(data).unwrap())
+                .collect();
+            assert_eq!(
+                events[0]["interaction"],
+                json!({"object":"interaction","model":"fixture-model"})
+            );
+            assert_eq!(events[1]["event_type"], "interaction.status_update");
+            assert_eq!(events[1]["status"], "in_progress");
+            let terminal = &events.last().unwrap()["interaction"];
+            assert!(terminal.get("id").is_none());
+            assert!(terminal.get("steps").is_none());
+            assert_eq!(terminal["object"], "interaction");
+            assert_eq!(terminal["model"], "fixture-model");
+            assert!(rendered.starts_with(": keep-alive\n\n"));
+            assert!(rendered.ends_with("event: done\ndata: [DONE]\n\n"));
+        }
+        assert_eq!(
+            render(
+                Protocol::Interactions,
+                &SseScript::NativeEvents {
+                    events: vec![(Some("done".into()), json!("[DONE]"))],
+                },
+            )
+            .unwrap(),
+            "event: done\ndata: [DONE]\n\n"
+        );
+    }
+
+    #[test]
+    fn interactions_invalid_parameters_are_fixture_failures_without_capture() {
+        use serde_json::json;
+        for parameters in [json!("schema"), json!([]), json!(0), Value::Null] {
+            let mut server = FakeLlmServer::start(SseScript::plain("unused")).unwrap();
+            let body = json!({"model":"model","tools":[{"type":"function","name":"t","parameters":parameters}],"input":"hello"}).to_string();
+            let status = runtime().block_on(async {
+                let client = connect(server.local_addr()).await;
+                let response = send(&client, "POST", "/interactions", &[], &body)
+                    .await
+                    .unwrap();
+                let status = response.status().as_u16();
+                read_all(response).await.unwrap();
+                status
+            });
+            assert_eq!(status, 400);
+            assert!(server.captured_requests().is_empty());
+            let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
+            assert!(
+                matches!(error, ServeError::ThreadFailure(ref failure) if failure == "provider would reject the tool definitions: Interactions function parameters must be a JSON object"),
+                "unexpected shutdown error: {error}"
+            );
+        }
     }
 
     /// 自测中每次等待夹具的上限；夹具回归为不响应时测试失败而不是挂住。

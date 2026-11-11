@@ -8,10 +8,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use lattice_conversation::{ModelId, ProviderId};
 use serde::Deserialize;
 use toml::Spanned;
 
-use super::{Auth, ModelCost, ModelMetadata, Provider, builtins, model_ref};
+use super::{Auth, ModelCost, ModelMetadata, Provider, builtins};
 use crate::protocol::Features;
 
 pub(crate) const MAX_PROVIDERS_FILE_BYTES: usize = 1_048_576;
@@ -43,12 +44,14 @@ impl ProviderConfigError {
 
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ProviderRegistry {
-    providers: BTreeMap<String, Provider>,
+    providers: BTreeMap<ProviderId, Provider>,
+    auto_refresh: bool,
 }
 
 impl ProviderRegistry {
     pub(crate) fn builtins() -> Self {
         Self {
+            auto_refresh: true,
             providers: builtins::providers()
                 .into_iter()
                 .map(|provider| (provider.id.clone(), provider))
@@ -108,12 +111,13 @@ impl ProviderRegistry {
         }
 
         let mut registry = Self::builtins();
+        registry.auto_refresh = raw.metadata.is_none_or(|metadata| metadata.0.auto_refresh);
         for (id, raw) in raw.providers {
-            lattice_conversation::validate_provider_id(id.get_ref())
+            let provider_id = ProviderId::parse(id.get_ref())
                 .map_err(|error| error_at(id.span().start, error.to_string()))?;
             let offset = id.span().start;
             let raw = raw.into_inner().0;
-            let builtin = registry.providers.remove(id.get_ref());
+            let builtin = registry.providers.remove(&provider_id);
             // 内置 provider 的协议不可覆盖，即使取值相同；换协议须新建 id。
             if let Some(protocol) = raw.protocol.as_ref().filter(|_| builtin.is_some()) {
                 return Err(error_at(
@@ -121,7 +125,7 @@ impl ProviderRegistry {
                     "built-in provider protocol cannot be overridden; to use another protocol, create a new provider id".to_owned(),
                 ));
             }
-            if id.get_ref() == "chatgpt" {
+            if provider_id == "chatgpt" {
                 let forbidden = raw
                     .base_url
                     .as_ref()
@@ -150,7 +154,7 @@ impl ProviderRegistry {
                 .transpose()?
                 .or_else(|| builtin.as_ref().map(|provider| provider.auth))
                 .unwrap_or_else(|| Auth::default_for(protocol));
-            if auth == Auth::OauthChatgpt && id.get_ref() != "chatgpt" {
+            if auth == Auth::OauthChatgpt && provider_id != "chatgpt" {
                 return Err(error_at(
                     raw.auth.as_ref().map_or(offset, |value| value.span().start),
                     "oauth:chatgpt is reserved for chatgpt".to_owned(),
@@ -186,22 +190,23 @@ impl ProviderRegistry {
                 return Err(error_at(
                     offset,
                     format!(
-                        "provider `{id}` has more than {MAX_MODELS_PER_PROVIDER} handwritten models"
+                        "provider `{provider_id}` has more than {MAX_MODELS_PER_PROVIDER} handwritten models"
                     ),
                 ));
             }
             let mut models = BTreeMap::new();
             for (model, raw) in raw.models {
-                model_ref::validate_model_id(model.get_ref())
+                let model_id = ModelId::parse(model.get_ref())
                     .map_err(|error| error_at(model.span().start, error.to_string()))?;
                 let raw = raw.into_inner().0;
                 let mut model_features = features;
                 apply_features(&mut model_features, raw.features, &error_at)?;
                 models.insert(
-                    model.into_inner(),
+                    model_id,
                     ModelMetadata {
                         context: raw.context,
                         output: raw.output,
+                        reasoning: raw.reasoning,
                         effort: raw
                             .effort
                             .map(|values| {
@@ -217,14 +222,14 @@ impl ProviderRegistry {
                     },
                 );
             }
-            let id = id.into_inner();
             registry.providers.insert(
-                id.clone(),
+                provider_id.clone(),
                 Provider {
-                    id,
+                    id: provider_id,
                     protocol,
                     base_url,
                     auth,
+                    declared: true,
                     catalog,
                     features,
                     models,
@@ -240,6 +245,25 @@ impl ProviderRegistry {
 
     pub(crate) fn iter(&self) -> impl Iterator<Item = &Provider> {
         self.providers.values()
+    }
+
+    /// 候选沿用内置表的顺序，新增 provider 在其后按 id 排序。
+    pub(crate) fn iter_for_candidates(&self) -> impl Iterator<Item = &Provider> {
+        let builtins = builtins::providers();
+        let mut providers: Vec<_> = builtins
+            .iter()
+            .filter_map(|provider| self.get(provider.id.as_str()))
+            .collect();
+        providers.extend(
+            self.providers
+                .values()
+                .filter(|provider| !builtins.iter().any(|builtin| builtin.id == provider.id)),
+        );
+        providers.into_iter()
+    }
+
+    pub(crate) fn auto_refresh_enabled(&self) -> bool {
+        self.auto_refresh
     }
 }
 
@@ -311,7 +335,20 @@ fn apply_features(
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawConfig {
+    metadata: Option<Table<RawMetadata>>,
     providers: BTreeMap<Spanned<String>, Spanned<Table<RawProvider>>>,
+}
+
+#[derive(Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawMetadata {
+    auto_refresh: bool,
+}
+
+impl Default for RawMetadata {
+    fn default() -> Self {
+        Self { auto_refresh: true }
+    }
 }
 
 #[derive(Default, Deserialize)]
@@ -330,6 +367,7 @@ struct RawProvider {
 struct RawModel {
     context: Option<u64>,
     output: Option<u64>,
+    reasoning: Option<bool>,
     effort: Option<Vec<Spanned<String>>>,
     tools: Option<bool>,
     cost: Option<Table<ModelCost>>,

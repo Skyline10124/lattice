@@ -1,44 +1,107 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! OpenAI-compatible provider: request JSON construction, SSE parsing,
-//! and auth headers for the Chat Completions API.
-//!
-//! Supports OpenAI and OpenAI-compatible endpoints (Ollama, vLLM, LiteLLM, etc.).
-//! Uses bounded SSE framing from `crate::sse` and never imports `lattice-core`.
+//! Chat Completions 的请求构造与 SSE 解析。
 
 use std::collections::BTreeMap;
 
-use lattice_conversation::ProviderOrigin;
+use lattice_conversation::{Protocol, ReplayOrigin};
 
-use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use super::{EffortParam, ThinkingBudget, ThinkingToggle};
+use crate::protocol::ChatCompletionsFeatures;
+use crate::protocol::projection::{ProjectionError, request_messages_with_replay};
+use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
-use crate::router::ResolvedModel;
 use crate::types::ChatRequest;
+use lattice_conversation::Effort;
 
-/// Build the JSON body for an OpenAI Chat Completions request.
-///
-/// LATTICE's provider response path is SSE-only — `dispatch_stream` parses
-/// Server-Sent Events and never decodes a non-stream JSON body. The request
-/// is therefore always built as a streaming request, with `stream_options`
-/// asking the provider to include the final usage chunk.
+/// 按模型名构造流式请求，并要求服务端报告用量。
+/// 响应路径只解析 SSE、不解码非流式 JSON，因此固定发送 stream: true。
 pub fn build_request_json(
     request: &ChatRequest,
-    resolved: &ResolvedModel,
+    model: &str,
+    features: ChatCompletionsFeatures,
+    reasoning: Option<ReasoningPlan>,
+    origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_to_wire(ProviderOrigin::OpenAiCompatible, &request.messages)?;
+    let projected =
+        request_messages_with_replay(origin, &request.messages, features.reasoning_replay)?;
     let mut messages = Vec::new();
     if let Some(system) = projected.system {
         messages.push(serde_json::json!({"role": "system", "content": system}));
     }
+    let system_count = messages.len();
     messages.extend(projected.messages);
+    if features.cache_markers {
+        if system_count != 0 {
+            mark_last_content(&mut messages[0]);
+        }
+        if messages.len() > system_count {
+            mark_last_content(messages.last_mut().expect("projected messages exist"));
+        }
+    }
 
     let mut body = serde_json::json!({
-        "model": resolved.provider_model,
+        "model": model,
         "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
     });
+
+    let mut reasoning_object = serde_json::Map::new();
+    if let Some(plan) = reasoning {
+        let toggle = match plan {
+            ReasoningPlan::Effort {
+                effort,
+                enable_toggle,
+            } => {
+                let name = if effort == Effort::Off {
+                    "none"
+                } else {
+                    effort.as_str()
+                };
+                match features.effort_param {
+                    EffortParam::ReasoningEffort => body["reasoning_effort"] = name.into(),
+                    EffortParam::ReasoningObject => {
+                        reasoning_object.insert("effort".into(), name.into());
+                    }
+                }
+                enable_toggle.then_some(true)
+            }
+            ReasoningPlan::Budget {
+                tokens,
+                enable_toggle,
+                ..
+            } => {
+                match features.thinking_budget {
+                    ThinkingBudget::ThinkingBudget => body["thinking_budget"] = tokens.into(),
+                    ThinkingBudget::ReasoningMaxTokens => {
+                        reasoning_object.insert("max_tokens".into(), tokens.into());
+                    }
+                    ThinkingBudget::None => {
+                        unreachable!("resolved budget requires a supported feature")
+                    }
+                }
+                enable_toggle.then_some(true)
+            }
+            ReasoningPlan::Toggle { enabled } => Some(enabled),
+        };
+        if let Some(enabled) = toggle {
+            match features.thinking_toggle {
+                ThinkingToggle::ThinkingType => {
+                    body["thinking"] =
+                        serde_json::json!({"type": if enabled { "enabled" } else { "disabled" }})
+                }
+                ThinkingToggle::EnableThinking => body["enable_thinking"] = enabled.into(),
+                ThinkingToggle::None => {
+                    unreachable!("resolved toggle requires a supported feature")
+                }
+            }
+        }
+    }
+    if !reasoning_object.is_empty() {
+        body["reasoning"] = reasoning_object.into();
+    }
 
     if !request.tools.is_empty() {
         let tools_array: Vec<serde_json::Value> = request
@@ -58,21 +121,20 @@ pub fn build_request_json(
         body["tools"] = serde_json::Value::Array(tools_array);
     }
 
-    if let Some(temperature) = request.temperature {
-        body["temperature"] = serde_json::json!(temperature);
-    }
-
-    if let Some(max_comp_tokens) = request.max_completion_tokens {
-        body["max_completion_tokens"] = serde_json::json!(max_comp_tokens);
-    } else if let Some(max_tokens) = request.max_tokens {
-        body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-
     Ok(body)
 }
 
-pub fn auth_header_value(api_key: &str) -> String {
-    format!("Bearer {}", api_key)
+/// 只标记已有的合法末块；无文本的工具调用不产生缓存块。
+fn mark_last_content(message: &mut serde_json::Value) {
+    let content = &mut message["content"];
+    if let Some(text) = content.as_str().filter(|text| !text.is_empty()) {
+        *content = serde_json::json!([{"type":"text","text":text}]);
+    }
+    if let Some(last) = content.as_array_mut().and_then(|blocks| blocks.last_mut())
+        && last["type"] == "text"
+    {
+        last["cache_control"] = serde_json::json!({"type":"ephemeral"});
+    }
 }
 
 pub(super) enum ContentError {
@@ -149,6 +211,7 @@ pub(super) fn visit_content<E: From<ContentError>>(
 
 #[derive(Default)]
 pub struct OpenAiSseParser {
+    usage: super::usage::UsageSnapshot,
     tool_calls: BTreeMap<u32, usize>,
     current: Option<(usize, PartKind)>,
     next_index: usize,
@@ -225,9 +288,7 @@ impl OpenAiSseParser {
             Ok(None) => return events,
             Err(error) => return vec![error],
         };
-        if let Some(error) =
-            super::common::extract_api_error(ProviderOrigin::OpenAiCompatible, &root)
-        {
+        if let Some(error) = super::common::extract_api_error(Protocol::ChatCompletions, &root) {
             return vec![error];
         }
         if let Some(choices) = root.get("choices").and_then(|value| value.as_array()) {
@@ -271,6 +332,12 @@ impl OpenAiSseParser {
                         let index = if let Some(index) = self.tool_calls.get(&wire_index) {
                             *index
                         } else {
+                            if call["id"].as_str().is_none() {
+                                return vec![ProtocolEvent::error(
+                                    "malformed Chat Completions wire: tool_calls[].id is missing or not a string",
+                                    false,
+                                )];
+                            }
                             self.close_text(&mut events);
                             let index = self.next_index;
                             self.next_index += 1;
@@ -314,7 +381,7 @@ impl OpenAiSseParser {
             }
         }
         if root.get("usage").is_some_and(|usage| !usage.is_null()) {
-            match wire_usage(ProviderOrigin::OpenAiCompatible, &root) {
+            match self.usage.update(Protocol::ChatCompletions, &root) {
                 Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                 Ok(None) => {}
                 Err(error) => {
@@ -341,7 +408,7 @@ mod tests {
     use serde_json::json;
 
     fn parser() -> Parser {
-        Parser::new(ProviderOrigin::OpenAiCompatible)
+        Parser::new(Protocol::ChatCompletions)
     }
     fn delta(parser: &mut Parser, value: serde_json::Value) -> Vec<LlmEvent> {
         parser.parse_chunk(None, &json!({"choices": [{"delta": value}]}).to_string())
@@ -364,7 +431,7 @@ mod tests {
             .collect()
     }
     fn call_delta(index: u32, name: &str, arguments: &str) -> serde_json::Value {
-        json!({"tool_calls": [{"index": index, "function": {"name": name, "arguments": arguments}}]})
+        json!({"tool_calls": [{"index": index, "id":format!("call_{index}"), "function": {"name": name, "arguments": arguments}}]})
     }
     fn assert_limit(events: &[LlmEvent], kind: lattice_conversation::LimitKind) {
         assert_eq!(
@@ -401,7 +468,7 @@ mod tests {
         let input = stream::iter(frames)
             .flat_map(move |frame| stream::iter(parser.parse_chunk(None, &frame)));
         let events = crate::reply_stream::assemble_reply_stream(
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(crate::test_reply::replay_origin(Protocol::ChatCompletions)),
             Box::pin(input),
             crate::StreamControl::default(),
         )
@@ -430,8 +497,7 @@ mod tests {
             {"type":"text","text":"A"}, {"type":"text","text":"B"}
         ]}}]});
         assert_eq!(
-            crate::protocol::projection::wire_to_native(ProviderOrigin::OpenAiCompatible, &wire)
-                .unwrap(),
+            crate::test_reply::wire_to_native(Protocol::ChatCompletions, &wire).unwrap(),
             *message
         );
     }
@@ -466,10 +532,7 @@ mod tests {
             assert!(!format!("{events:?}").contains("private-payload"));
             let wire = json!({"choices":[{"message":{"content":content}}]});
             assert_eq!(
-                crate::protocol::projection::wire_to_native(
-                    ProviderOrigin::OpenAiCompatible,
-                    &wire
-                ),
+                crate::test_reply::wire_to_native(Protocol::ChatCompletions, &wire),
                 Err(ProjectionError::Protocol(error))
             );
         }
@@ -490,7 +553,7 @@ mod tests {
             for late in [false, true] {
                 let mut parser = parser();
                 if late {
-                    assert!(delta(&mut parser, json!({"tool_calls":[{"index":9,"type":"function","function":{"name":"f","arguments":"{"}}]})).is_empty());
+                    assert!(delta(&mut parser, json!({"tool_calls":[{"index":9,"id":"call_9","type":"function","function":{"name":"f","arguments":"{"}}]})).is_empty());
                 }
                 let events = delta(
                     &mut parser,
@@ -506,8 +569,8 @@ mod tests {
                 assert!(!format!("{events:?}").contains("private-payload"));
             }
             assert_eq!(
-                crate::protocol::projection::wire_to_native(
-                    ProviderOrigin::OpenAiCompatible,
+                crate::test_reply::wire_to_native(
+                    Protocol::ChatCompletions,
                     &json!({"choices":[{"message":{"tool_calls":[{"type":kind,"function":{"name":"f","arguments":"{}"}}]}}]}),
                 ),
                 Err(ProjectionError::Protocol(
@@ -526,7 +589,7 @@ mod tests {
         let mut parser = parser();
         delta(
             &mut parser,
-            json!({"tool_calls":[{"index":9,"type":"function","function":{"name":"f","arguments":"{"}}]}),
+            json!({"tool_calls":[{"index":9,"id":"call_9","type":"function","function":{"name":"f","arguments":"{"}}]}),
         );
         delta(
             &mut parser,
@@ -541,14 +604,26 @@ mod tests {
     }
 
     #[test]
-    fn parser_preserves_real_and_missing_ids_without_synthesis() {
+    fn parser_requires_tool_ids() {
         for id in [Some("call_abc"), None] {
             let mut parser = parser();
             let mut call = call_delta(0, "observe__workspace", "{}");
             if let Some(id) = id {
                 call["tool_calls"][0]["id"] = json!(id);
+            } else {
+                call["tool_calls"][0].as_object_mut().unwrap().remove("id");
             }
-            delta(&mut parser, call);
+            let started = delta(&mut parser, call);
+            if id.is_none() {
+                assert_eq!(
+                    crate::test_reply::failure(&started).as_deref(),
+                    Some(
+                        "malformed Chat Completions wire: tool_calls[].id is missing or not a string"
+                    )
+                );
+                assert!(finish(&mut parser).is_empty());
+                continue;
+            }
             assert!(parser.raw.iter().any(|event| matches!(event, ProtocolEvent::Part(PartDelta::ToolMetadata { name: Some(StringPatch::Set(name)), provider_call_id, .. })
                 if name == "observe__workspace" && provider_call_id.as_ref() == id.map(|id| StringPatch::Set(id.into())).as_ref())));
             let events = finish(&mut parser);
@@ -580,7 +655,7 @@ mod tests {
         );
         assert_eq!(labels(completed(&events)), ["T:hello"]);
         assert!(
-            matches!(&events[..], [LlmEvent::Finished { report, .. }] if report.usage.unwrap().total_tokens == 3 && report.finish_reason.as_deref() == Some("stop"))
+            matches!(&events[..], [LlmEvent::Finished { report, .. }] if report.usage.unwrap().context_tokens() == Some(3) && report.finish_reason.as_deref() == Some("stop"))
         );
         assert!(parser.parse_chunk(None, "[DONE]").is_empty());
     }
@@ -590,7 +665,10 @@ mod tests {
         let first = parser.parse_chunk(None, r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"observe__workspace","arguments":"{\"path\""}}]}}]}"#);
         assert!(first.is_empty());
         assert!(parser.raw.iter().any(|event| matches!(event, ProtocolEvent::Part(PartDelta::ToolMetadata { name: Some(StringPatch::Set(name)), provider_call_id: Some(StringPatch::Set(id)), .. }) if name == "observe__workspace" && id == "call_1")));
-        delta(&mut parser, call_delta(0, "", ":\"a\"}"));
+        delta(
+            &mut parser,
+            json!({"tool_calls":[{"index":0,"function":{"arguments":":\"a\"}"}}]}),
+        );
         let events = finish(&mut parser);
         let call = completed(&events).tool_calls().next().unwrap().1;
         assert_eq!(call.name, "observe__workspace");
@@ -653,7 +731,7 @@ mod tests {
         delta(&mut parser, json!({"content":"A"}));
         let events = delta(
             &mut parser,
-            json!({"content":"B","reasoning_content":"R","tool_calls":[{"index":8,"function":{"name":"t","arguments":"{}"}}]}),
+            json!({"content":"B","reasoning_content":"R","tool_calls":[{"index":8,"id":"call_8","function":{"name":"t","arguments":"{}"}}]}),
         );
         assert_eq!(
             events,
@@ -728,7 +806,7 @@ mod tests {
         let mut parser = parser();
         let events = delta(
             &mut parser,
-            json!({"tool_calls":[{"index":9,"function":{"arguments":"{\"path\":"}}]}),
+            json!({"tool_calls":[{"index":9,"id":"real-id","function":{"arguments":"{\"path\":"}}]}),
         );
         assert!(events.is_empty());
         assert!(matches!(
@@ -738,6 +816,7 @@ mod tests {
                     index: 0,
                     kind: PartKind::ToolCall
                 }),
+                ProtocolEvent::Part(PartDelta::ToolMetadata { index: 0, .. }),
                 ProtocolEvent::Part(PartDelta::ToolArguments { index: 0, .. })
             ]
         ));
@@ -745,7 +824,7 @@ mod tests {
         delta(&mut parser, call_delta(2, "second", "{}"));
         delta(
             &mut parser,
-            json!({"tool_calls":[{"index":9,"id":"real-id","function":{"name":"observe__workspace","arguments":"\"a\"}"}}]}),
+            json!({"tool_calls":[{"index":9,"function":{"name":"observe__workspace","arguments":"\"a\"}"}}]}),
         );
         assert!(matches!(
             &parser.raw[..],
@@ -805,9 +884,9 @@ mod tests {
                     None
                 } else {
                     Some(TokenUsage {
-                        prompt_tokens: 1,
-                        completion_tokens: 2,
-                        total_tokens: 3,
+                        input: Some(1),
+                        output: Some(2),
+                        ..Default::default()
                     })
                 }
             );
@@ -842,7 +921,7 @@ mod tests {
     fn ordered_native() -> NativeMessage<lattice_conversation::UnboundToolCall> {
         NativeMessage::new(
             MessageRole::Assistant,
-            Some(ProviderOrigin::OpenAiCompatible),
+            Some(crate::test_reply::replay_origin(Protocol::ChatCompletions)),
             vec![
                 MessagePart::semantic_only(MessageSemantic::Text { text: "A".into() }),
                 MessagePart::semantic_only(MessageSemantic::Reasoning { text: "R".into() }),
@@ -861,7 +940,7 @@ mod tests {
     #[test]
     fn order_f11_request_merges_without_changing_wire_shape() {
         let wire = crate::protocol::projection::native_to_wire(
-            ProviderOrigin::OpenAiCompatible,
+            &crate::test_reply::replay_origin(Protocol::ChatCompletions),
             &ordered_native(),
         )
         .unwrap();
@@ -874,17 +953,20 @@ mod tests {
     fn order_f12_cross_provider_preserves_remaining_order() {
         let source = ordered_native();
         let original = source.clone();
-        let projected =
-            crate::protocol::projection::project_cross_provider(&source, ProviderOrigin::Gemini);
+        let projected = crate::protocol::projection::project_cross_provider(
+            &source,
+            &crate::test_reply::replay_origin(Protocol::GenerateContent),
+        );
         assert_eq!(labels(&projected), ["T:A", "C:observe__workspace", "T:B"]);
-        assert!(
+        assert_eq!(
             projected
                 .tool_calls()
                 .next()
                 .unwrap()
                 .1
                 .provider_call_id
-                .is_none()
+                .as_deref(),
+            Some("real")
         );
         assert_eq!(source, original);
     }

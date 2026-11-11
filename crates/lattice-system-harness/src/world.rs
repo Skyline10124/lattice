@@ -94,6 +94,13 @@ impl ScenarioWorld {
         // #143: durable session state lives under the XDG *state* root.
         let session_store = home.join(".local/state").join("lattice");
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(home.join(".lattice"))?;
+        std::fs::write(
+            home.join(".lattice/providers.toml"),
+            "[metadata]\nauto_refresh = false\n",
+        )?;
         std::fs::create_dir_all(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
 
@@ -116,16 +123,13 @@ impl ScenarioWorld {
             "XDG_CACHE_HOME".into(),
             home.join(".cache").display().to_string(),
         );
-        // Must be explicit because the audit database and private workspace
-        // history resolve through the Linux XDG state directory. Scenarios
-        // name that path directly, so keep it inside the isolated HOME.
+        // 会话持久存储与后台运行锁都通过 Linux XDG state 目录解析，显式指向隔离 HOME 内。
         allowed_env.insert(
             "XDG_STATE_HOME".into(),
             home.join(".local/state").display().to_string(),
         );
-        allowed_env.insert("LATTICE_AGENTS_DIR".into(), String::new());
-        // 提交端经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
-        // 场景默认只信任 harness CA，fake provider 与 TLS 夹具都用它签发的证书。
+        // 后台启动时经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
+        // 场景默认只信任 harness CA，fake provider 默认用它签发的证书。
         let trust = root.path().join("tls-trust");
         std::fs::create_dir_all(trust.join("empty"))?;
         std::fs::write(
@@ -208,21 +212,14 @@ impl ScenarioWorld {
         Ok(())
     }
 
-    /// Write a minimal agent profile to `.lattice/agents/<name>/agent.toml` in
-    /// the project, consolidating the agent-profile fixture that would
-    /// otherwise be hand-rolled in every scenario (issue #45 (Codeberg #23)
-    /// fixture consolidation). The TOML is hand-written rather than produced
-    /// via `lattice-profile` because the harness boundary
-    /// (`cargo xtask harness-boundary`) forbids depending on any product
-    /// crate; the product reads the same file a user would write.
+    /// 向项目内 `.lattice/agents/<name>/agent.toml` 写入最小 agent profile。
     ///
-    /// The profile is the Direct-Local end-state shape: no `[workspace]`
-    /// section (removed in #62, Codeberg #40), no enabled tools. Turn
-    /// scenarios that need catalog tools write their own profile via
-    /// `write_project_file`.
+    /// 因 `cargo xtask harness-boundary` 禁止依赖任何产品 crate，TOML 直接手写，与用户实际编写的
+    /// 文件一致。`[lancet]` 与 `[tools]` 已移除；需要假工具的场景在后台启动前通过
+    /// [`Self::set_env`] 设置 `LATTICE_TEST_TOOLS`。
     pub fn write_agent_profile(&self, name: &str, model: &str) -> Result<(), WorldError> {
         let toml = format!(
-            "schema_version = 1\n\n[agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"harness agent\"\n\n[tools]\nenabled = []\n"
+            "schema_version = 1\n\n[agent]\nname = \"{name}\"\nmodel = \"{model}\"\n\n[prompt]\nsystem = \"harness agent\"\n"
         );
         self.write_project_file(&format!(".lattice/agents/{name}/agent.toml"), &toml)
     }
@@ -358,6 +355,12 @@ impl ScenarioWorld {
     /// 显式收尾用于场景证据；Drop 仍覆盖断言 panic 的路径。预算耗尽时正常 stop 记为失败。
     pub fn stop_daemon(&self) -> Result<(), Vec<String>> {
         self.daemon.cleanup(self.budget.normal_stop_deadline())
+    }
+
+    /// 场景显式 `daemon stop` 干净返回后立即调用：`owner.lock` 已可取得、`api.sock` 已撤下（立即核验）；
+    /// 旧后台组须在有界窗口内退空。
+    pub fn daemon_departed(&self) -> Result<(), Vec<String>> {
+        self.daemon.departed()
     }
 
     /// 进程控制仅作用于经过产物、状态根和组首领核对的后台。

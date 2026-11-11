@@ -7,13 +7,23 @@ use std::{collections::BTreeMap, path::Path, sync::LazyLock};
 
 use serde::{Deserialize, Serialize};
 
-use crate::provider::{Effort, ModelMetadata, Provider, config::ProviderRegistry};
+use crate::provider::{ModelMetadata, Provider, config::ProviderRegistry};
+use lattice_conversation::Effort;
 
+pub(crate) mod chatgpt;
 pub(crate) mod fetch;
-pub use fetch::{MetadataError, fetch_snapshot};
+pub use chatgpt::ChatgptCatalogState;
+pub use fetch::{MetadataError, MetadataRefreshControl, fetch_snapshot};
 
 /// 正式元数据源。
 pub const MODELS_URL: &str = "https://models.dev/api.json";
+
+/// 每次自动触发都按当前完整配置决定是否刷新；无效配置不发起网络请求。
+pub fn metadata_auto_refresh_enabled(config_dir: &Path) -> Result<bool, MetadataError> {
+    ProviderRegistry::load(config_dir.join("providers.toml"))
+        .map(|registry| registry.auto_refresh_enabled())
+        .map_err(|error| MetadataError::Configuration(error.to_string()))
+}
 
 const SNAPSHOT: &[u8] = include_bytes!("snapshot.json");
 static BUILTIN_SNAPSHOT: LazyLock<Catalog> = LazyLock::new(|| {
@@ -44,8 +54,6 @@ pub(crate) struct Cost {
     pub(crate) cache_read: Option<f64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) cache_write: Option<f64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) reasoning: Option<f64>,
 }
 
 /// 远端字段仅按白名单反序列化；effort 只由手写元数据提供。
@@ -92,6 +100,7 @@ impl Model {
         if let Some(output) = handwritten.output {
             self.limit.get_or_insert_default().output = Some(output);
         }
+        self.reasoning = handwritten.reasoning.or(self.reasoning);
         self.effort.clone_from(&handwritten.effort);
         if let Some(tools) = handwritten.tools {
             self.tool_call = Some(tools);
@@ -198,11 +207,10 @@ pub(crate) struct Metadata {
 }
 
 impl Metadata {
+    pub(crate) fn has_catalog(&self, id: &str) -> bool {
+        self.catalog.0.contains_key(id)
+    }
     /// 缓存保留全部 catalog；缺失的内置条目回落快照，不补回缓存删除的模型或字段。
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 L2 元数据尚未接入请求网关")
-    )]
     pub(crate) fn load(config_dir: &Path) -> Self {
         let mut catalog = std::fs::read(config_dir.join("cache/models.json"))
             .ok()
@@ -214,10 +222,6 @@ impl Metadata {
         Self { catalog }
     }
 
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "#315 L2 元数据尚未接入请求网关")
-    )]
     pub(crate) fn merge(&self, provider: &Provider) -> BTreeMap<String, Model> {
         let mut models = provider
             .catalog
@@ -227,9 +231,9 @@ impl Metadata {
             .unwrap_or_default();
         for (id, handwritten) in &provider.models {
             models
-                .entry(id.clone())
+                .entry(id.as_str().to_owned())
                 .or_insert_with(|| Model {
-                    id: id.clone(),
+                    id: id.as_str().to_owned(),
                     ..Model::default()
                 })
                 .overlay(handwritten);

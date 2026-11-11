@@ -10,15 +10,15 @@ use lattice_system_harness::{
     SseScript, StepProgress, merge_segments,
 };
 use serde_json::{Value, json};
-use std::{
-    fs::OpenOptions,
-    os::fd::AsRawFd,
-    time::{Duration, Instant},
-};
+#[cfg(feature = "fake-tools")]
+use std::path::Path;
+use std::time::{Duration, Instant};
+#[cfg(feature = "fake-tools")]
+use support::tool_call;
 use support::{
     Watcher, Wire, assert_accepted_and_closed, assert_clean_send, assert_forced_kill,
-    configuration, direct_world, driver, history, ipc, parse_send_stdout, submit_request,
-    tool_call, turn_closed, turn_lookup, wire_fake_llm, wire_gated_fake_llm,
+    configure_request, direct_world, driver, history, ipc, parse_send_stdout, submit_request,
+    turn_closed, turn_lookup, wire_fake_llm, wire_gated_fake_llm,
 };
 const FIRST: &str = "00000000-0000-4000-8000-000000000001";
 const SECOND: &str = "00000000-0000-4000-8000-000000000002";
@@ -27,6 +27,8 @@ const THIRD: &str = "00000000-0000-4000-8000-000000000003";
 const NEW_SESSION: &str = "5e550000000000000000000000000001";
 /// `watch` 开始时给出的轮数。
 const WATCH_TURNS: usize = 10;
+#[cfg(feature = "fake-tools")]
+const TEST_TOOLS: &str = "LATTICE_TEST_TOOLS";
 fn wait(budget: &ScenarioBudget) -> Duration {
     budget.cap_timeout(Duration::from_secs(30))
 }
@@ -138,6 +140,14 @@ fn conflict(response: &Value) -> Option<&str> {
         .then(|| response["value"]["conflict"].as_str())
         .flatten()
 }
+#[cfg(feature = "fake-tools")]
+fn marker_lines(path: &Path) -> Vec<String> {
+    match std::fs::read_to_string(path) {
+        Ok(content) => content.lines().map(str::to_owned).collect(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => panic!("读取假工具标记文件 {} 失败：{error}", path.display()),
+    }
+}
 fn archive_state(
     world: &ScenarioWorld,
     budget: &ScenarioBudget,
@@ -152,29 +162,8 @@ fn archive_state(
         read(world, budget, evidence, &["--json", "session", "log", sid]);
         let tree = run(world, budget, evidence, &["session", "log", sid]);
         assert!(tree.is_clean_exit(0));
-        read(
-            world,
-            budget,
-            evidence,
-            &[
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                sid,
-                "--turn",
-                turn,
-            ],
-        );
         records.push(record);
     }
-    read(
-        world,
-        budget,
-        evidence,
-        &["--json", "audit", "--tail", "--since", "0"],
-    );
-    read(world, budget, evidence, &["--json", "lancet", "status"]);
     evidence
         .record_json("state-summary", &json!({"list":list,"turns":records}))
         .unwrap();
@@ -190,7 +179,7 @@ fn finish(evidence: ScenarioEvidence, result: std::thread::Result<()>) {
 }
 #[test]
 fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
-    let (world, spec) = direct_world("background-cli-detach", "background", "[]", "");
+    let (world, spec) = direct_world("background-cli-detach", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -265,7 +254,6 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
             let (world, spec) = direct_world(
                 &format!("background-unread-{existing_session}-{restart}"),
                 "background",
-                "[]",
                 "",
             );
             let budget = world.budget(&spec);
@@ -300,23 +288,25 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                 );
                 assert!(bootstrap.is_clean_exit(if existing_session { 0 } else { 1 }));
                 let sid = existing.clone().unwrap_or_else(|| NEW_SESSION.into());
-                let session = if existing_session {
-                    json!({"existing": sid})
-                } else {
-                    json!({"new": sid})
-                };
-                let request = submit_request(
-                    &world,
-                    FIRST,
-                    session,
-                    "identical input",
-                    Some("background"),
-                    configuration(&world, "background", &server.base_url()),
-                );
                 // 先用只读的 `status` 确认后台说同一协议，再进入未读回执窗口；
                 // 协议不符时在这里直接失败，而不是表现为 provider 一直等不到请求。
                 let status = ipc(&world, wait(&budget), json!({"operation":"status"}));
                 assert_eq!(status["response"], "status", "{status}");
+                if !existing_session {
+                    let configured = ipc(
+                        &world,
+                        wait(&budget),
+                        configure_request(
+                            &world,
+                            json!({"new": &sid}),
+                            Some("background"),
+                            None,
+                            None,
+                        ),
+                    );
+                    assert_eq!(configured["response"], "configure", "{configured}");
+                }
+                let request = submit_request(&world, FIRST, &sid, "identical input");
                 let unread = Wire::connect(&world, wait(&budget), &request);
                 gate.wait_until_stalled(1, wait(&budget)).unwrap();
                 // 此连接只写请求，从未读取回执；按 TurnId 查询得到已接受。
@@ -395,7 +385,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
 }
 #[test]
 fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
-    let (world, spec) = direct_world("background-concurrent-stop", "background", "[]", "");
+    let (world, spec) = direct_world("background-concurrent-stop", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -419,18 +409,10 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             .into_iter()
             .find(|(sid, _)| *sid != a)
             .expect("second Session");
-        let config = configuration(&world, "background", &server.base_url());
         let busy = ipc(
             &world,
             wait(&budget),
-            submit_request(
-                &world,
-                THIRD,
-                json!({"existing": a}),
-                "must not queue",
-                None,
-                config.clone(),
-            ),
+            submit_request(&world, THIRD, &a, "must not queue"),
         );
         assert_eq!(busy["value"]["kind"], "busy", "{busy}");
         let second_detail = detail(&world, &budget, &mut evidence, &second_turn);
@@ -442,6 +424,11 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             "backend":world.daemon_pids().unwrap(),"gate_released":false}),
             )
             .unwrap();
+        // 先结束提交这一轮的前端：gate 未放行，这一轮仍在执行，强制结束的是仍在观察的进程。
+        // 放在取消之后会与后台关闭这一轮竞争：前端可能先看到 Cancelled 而自行以 2 退出。
+        let detached = first.kill_and_wait().unwrap();
+        evidence.record_command("detach before cancel", &detached);
+        assert_forced_kill(&detached);
         // 另一个终端按会话取消：CLI 从会话头查出正在执行的那一轮再按 TurnId 取消。
         let cancel = run(
             &world,
@@ -461,9 +448,6 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
                 error: None,
             })]
         );
-        let detached = first.kill_and_wait().unwrap();
-        evidence.record_command("detach after Taken", &detached);
-        assert_forced_kill(&detached);
         assert_eq!(
             closed(&world, &budget, &mut evidence, &first_turn)["summary"]["outcome"],
             "cancelled"
@@ -512,14 +496,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             ipc(
                 &world,
                 wait(&budget),
-                submit_request(
-                    &world,
-                    THIRD,
-                    json!({"existing": a}),
-                    "after stop",
-                    None,
-                    config
-                )
+                submit_request(&world, THIRD, &a, "after stop")
             )["value"]["kind"],
             "stopping"
         );
@@ -548,6 +525,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         evidence.record_command("stop drains", &drained);
         assert!(drained.is_clean_exit(0));
         assert_eq!(lines(&drained)[0]["owners"], 0);
+        world.daemon_departed().unwrap();
         world.stop_daemon().unwrap();
         assert_eq!(
             detail(&world, &budget, &mut evidence, &second_turn)["summary"]["outcome"],
@@ -563,7 +541,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
 }
 #[test]
 fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
-    let (world, spec) = direct_world("background-start-watch", "background", "[]", "");
+    let (world, spec) = direct_world("background-start-watch", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -577,6 +555,7 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
                 SseScript::plain("after"),
             ]),
         );
+        world.stop_daemon().unwrap();
         assert!(
             world.daemon_pids().unwrap().is_empty(),
             "concurrent autostart requires no running daemon"
@@ -649,7 +628,7 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
 }
 #[test]
 fn slow_watcher_cannot_block_execution_and_converges_to_history() {
-    let (world, spec) = direct_world("background-slow-watcher", "background", "[]", "");
+    let (world, spec) = direct_world("background-slow-watcher", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -723,15 +702,12 @@ fn slow_watcher_cannot_block_execution_and_converges_to_history() {
     }));
     support::finish_recorded(evidence, result);
 }
+#[cfg(feature = "fake-tools")]
 #[test]
-fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
+fn shared_daemon_uses_registered_providers_and_freezes_profiles() {
     use lattice_system_harness::{FakeLlmServer, assert_no_secret};
-    let (world, spec) = direct_world(
-        "background-project-config",
-        "background",
-        "[\"session__todo_write\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-project-config", "background", "");
+    world.set_env(TEST_TOOLS, "record_note");
     let budget = world.budget(&spec);
     let key_a = "project-alpha-private-fixture-key";
     let key_b = "project-beta-private-fixture-key";
@@ -740,11 +716,7 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let script = SseScript::Sequence {
             scripts: vec![
-                tool_call(
-                    "todo",
-                    "session__todo_write",
-                    r#"{"todos":[{"content":"isolation","status":"pending"}]}"#,
-                ),
+                tool_call("note", "record_note", r#"{"action":"read"}"#),
                 SseScript::plain("frozen result"),
             ],
         };
@@ -752,18 +724,36 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
         let (b, gb) = FakeLlmServer::start_gated(script).unwrap();
         a.expect_api_key(key_a);
         b.expect_api_key(key_b);
-        world.set_env("OPENAI_COMPATIBLE_BASE_URL", a.base_url());
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", key_a);
+        use lattice_system_harness::{ProviderFixture, ProviderProtocol, ProviderTarget};
+        let alpha = ProviderFixture {
+            protocol: ProviderProtocol::ChatCompletions,
+            target: ProviderTarget::Custom("alpha"),
+            model: "background",
+        };
+        let beta = ProviderFixture {
+            target: ProviderTarget::Custom("beta"),
+            ..alpha
+        };
+        world.wire_provider(alpha, &a, key_a).unwrap();
+        world.wire_provider(beta, &b, key_b).unwrap();
         let project = world.root().join("second-project");
         std::fs::create_dir_all(project.join(".lattice/agents/background")).unwrap();
         let profile = world
             .project_dir()
             .join(".lattice/agents/background/agent.toml");
         std::fs::write(
+            &profile,
+            std::fs::read_to_string(&profile)
+                .unwrap()
+                .replace("local/background", "alpha/background"),
+        )
+        .unwrap();
+        std::fs::write(
             project.join(".lattice/agents/background/agent.toml"),
             std::fs::read_to_string(&profile)
                 .unwrap()
-                .replace("concise test agent", "beta test agent"),
+                .replace("concise test agent", "beta test agent")
+                .replace("alpha/background", "beta/background"),
         )
         .unwrap();
         gix::init(&project).unwrap();
@@ -776,15 +766,12 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             .unwrap();
         let mut cmd = world.command(driver().binary_path());
         cmd.current_dir(&project)
-            .env("OPENAI_COMPATIBLE_BASE_URL", b.base_url())
-            .env("OPENAI_COMPATIBLE_API_KEY", key_b)
             .args(["--json", "run", "beta", "--agent", "background"]);
         let second = RunningCommand::spawn(cmd).unwrap();
         gb.wait_until_stalled(1, budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         assert_eq!(world.daemon_pids().unwrap().len(), 1);
         std::fs::write(profile, "invalid changed profile").unwrap();
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", key_b);
         ga.release(budget.cap_timeout(Duration::from_secs(30)))
             .unwrap();
         gb.release(budget.cap_timeout(Duration::from_secs(30)))
@@ -812,24 +799,16 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             }
             evidence.record_captures(captures);
         }
+        let alpha_detail = detail(&world, &budget, &mut evidence, &alpha_turn);
+        assert_eq!(alpha_detail["steps"][0]["slots"][0]["outcome"], "succeeded");
         archive_state(&world, &budget, &mut evidence, &[&alpha_turn]);
         let beta = detail(&world, &budget, &mut evidence, &beta_turn);
+        assert_eq!(beta["steps"][0]["slots"][0]["outcome"], "succeeded");
         let sid = beta["session_id"].as_str().unwrap();
         for args in [
             vec!["--json", "session", "log", sid],
             vec!["session", "log", sid],
             vec!["--json", "session", "turn", &beta_turn],
-            vec!["--json", "audit", "--tail"],
-            vec![
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                sid,
-                "--turn",
-                &beta_turn,
-            ],
-            vec!["--json", "lancet", "status"],
         ] {
             let mut cmd = world.command(driver().binary_path());
             cmd.current_dir(&project).args(&args);
@@ -841,13 +820,13 @@ fn shared_daemon_keeps_project_endpoints_keys_and_profiles_frozen() {
             assert!(out.is_clean_exit(0), "{}", out.summary());
         }
         evidence.record_json("beta-state", &beta).unwrap();
-        evidence.record_json("parameters", &json!({"turns":[alpha_turn,beta_turn],"prompts":["alpha","beta"],"methods":["session__todo_write"],"final_reply":"frozen result","provider_requests":[2,2],"source_changed_after_both_gates":true})).unwrap();
+        evidence.record_json("parameters", &json!({"turns":[alpha_turn,beta_turn],"prompts":["alpha","beta"],"methods":["record_note"],"final_reply":"frozen result","provider_requests":[2,2],"source_changed_after_both_gates":true})).unwrap();
     }));
     support::finish_recorded(evidence, result);
 }
 #[test]
 fn later_session_driver_keeps_the_scenario_budget_origin() {
-    let (world, spec) = direct_world("background-budget-origin", "background", "[]", "");
+    let (world, spec) = direct_world("background-budget-origin", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -867,7 +846,7 @@ fn later_session_driver_keeps_the_scenario_budget_origin() {
 }
 #[test]
 fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
-    let (world, mut spec) = direct_world("background-budget-exhausted", "background", "[]", "");
+    let (world, mut spec) = direct_world("background-budget-exhausted", "background", "");
     spec.total_timeout_secs = Some(0);
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
@@ -909,26 +888,29 @@ fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
     }));
     finish(evidence, result);
 }
+#[cfg(feature = "fake-tools")]
 #[test]
 fn daemon_restart_reads_closed_result_without_resubmitting() {
-    let (world, spec) = direct_world(
-        "background-restart-read",
-        "background",
-        "[\"session__todo_write\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-restart-read", "background", "");
+    world.set_env(TEST_TOOLS, "write_marker");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let marker_path = world.root().join("restart-tool.marker");
         let server = wire_fake_llm(
             &world,
             "background",
             SseScript::Sequence {
                 scripts: vec![
                     tool_call(
-                        "todo",
-                        "session__todo_write",
-                        r#"{"todos":[{"content":"durable","status":"pending"}]}"#,
+                        "marker",
+                        "write_marker",
+                        &json!({
+                            "action": "append_marker",
+                            "path": marker_path,
+                            "line": "durable\n",
+                        })
+                        .to_string(),
                     ),
                     SseScript::plain("restart answer"),
                     SseScript::plain("answer 中"),
@@ -943,7 +925,9 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         let tid = sent.accepted_turn_id().unwrap();
         let tool_session = send.session_id().unwrap();
         let original = detail(&world, &budget, &mut evidence, tid);
-        // 同项目另建无 Tool 会话，保留空 replay 和单 Step 条目的独立信号。
+        assert_eq!(original["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(marker_lines(&marker_path), vec!["durable"]);
+        // 同项目另建无 Tool 会话，保留空槽位列表和单 Step 条目的独立信号。
         let plain = run(
             &world,
             &budget,
@@ -960,35 +944,9 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         assert!(plain.is_clean_exit(0), "{}", plain.summary());
         let plain_turn = accepted_turn(&plain);
         let plain_before = detail(&world, &budget, &mut evidence, &plain_turn);
+        assert_eq!(plain_before["steps"][0]["slots"], json!([]));
         let sid = plain_before["session_id"].as_str().unwrap();
         world.stop_daemon().unwrap();
-        let projects: Vec<_> = std::fs::read_dir(world.session_store_dir().join("projects"))
-            .unwrap()
-            .map(|entry| entry.unwrap().path())
-            .collect();
-        assert_eq!(projects.len(), 1);
-        let history_path = projects[0].join("workspace-history.git");
-        std::fs::remove_dir_all(&history_path).unwrap();
-        let sentinel = "deliberately invalid; closure must not read";
-        std::fs::write(&history_path, sentinel).unwrap();
-        let key = projects[0].file_name().unwrap();
-        let lock_path = world
-            .session_store_dir()
-            .join("locks/projects")
-            .join(key)
-            .join("workspace.lock");
-        std::fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
-        let workspace_lock = OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .read(true)
-            .write(true)
-            .open(&lock_path)
-            .unwrap();
-        assert_eq!(
-            unsafe { libc::flock(workspace_lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) },
-            0
-        );
         world
             .register_key(
                 lattice_system_harness::ProviderFixture::chat_completions("background"),
@@ -1078,10 +1036,9 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
             },
         );
         assert!(replaced.entries.is_empty());
-        assert_eq!(
-            detail(&world, &budget, &mut evidence, &plain_turn),
-            plain_before
-        );
+        let plain_after = detail(&world, &budget, &mut evidence, &plain_turn);
+        assert_eq!(plain_after, plain_before);
+        assert_eq!(plain_after["steps"][0]["slots"], json!([]));
         let log = read(
             &world,
             &budget,
@@ -1089,26 +1046,12 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
             &["--json", "session", "log", sid],
         );
         assert_eq!(log["nodes"].as_array().unwrap().len(), 3);
-        let replay = read(
-            &world,
-            &budget,
-            &mut evidence,
-            &[
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                sid,
-                "--turn",
-                &plain_turn,
-            ],
-        );
-        assert_eq!(replay["calls"], json!([]));
-        assert_eq!(std::fs::read_to_string(&history_path).unwrap(), sentinel);
+        let markers = marker_lines(&marker_path);
+        assert_eq!(markers, vec!["durable"]);
         evidence
             .record_json(
-                "readonly-with-invalid-history",
-                &json!({"watch":plain_observer.received,"rewind":rewound,"log":log,"replay":replay}),
+                "readonly-after-restart",
+                &json!({"watch":plain_observer.received,"rewind":rewound,"log":log,"markers":markers}),
             )
             .unwrap();
         assert_eq!(server.captured_requests().len(), 3);
@@ -1119,7 +1062,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         evidence
             .record_json(
                 "parameters",
-                &json!({"script":"todo durable then restart answer","turn":tid,"restart":true}),
+                &json!({"script":"write_marker durable then restart answer","turn":tid,"restart":true}),
             )
             .unwrap();
         evidence.record_captures(server.captured_requests());
@@ -1128,7 +1071,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
 }
 #[test]
 fn a_live_new_turn_does_not_block_old_closed_observation() {
-    let (world, spec) = direct_world("background-read-beside-live", "background", "[]", "");
+    let (world, spec) = direct_world("background-read-beside-live", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1144,11 +1087,10 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         assert!(first.has_completed());
         let tid = first.accepted_turn_id().unwrap();
         let old = detail(&world, &budget, &mut evidence, tid);
-        // 重启清除旧 Turn 的 Owner，随后四个带配置的新身份共同争抢空闲 Session。
+        // 重启清除旧 Turn 的 Owner，随后四个新身份共同争抢空闲 Session。
         world.stop_daemon().unwrap();
         detail(&world, &budget, &mut evidence, tid);
         let sid = old["session_id"].as_str().unwrap();
-        let config = configuration(&world, "background", &server.base_url());
         let candidates = [
             SECOND,
             THIRD,
@@ -1160,14 +1102,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             let handles: Vec<_> = candidates
                 .iter()
                 .map(|candidate| {
-                    let request = submit_request(
-                        &world,
-                        candidate,
-                        json!({"existing": sid}),
-                        "second",
-                        None,
-                        config.clone(),
-                    );
+                    let request = submit_request(&world, candidate, sid, "second");
                     let world = &world;
                     let budget = &budget;
                     let barrier = &barrier;
@@ -1206,21 +1141,14 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             &world,
             wait(&budget),
             json!({"operation":"rewind","session_id":sid,
-            "target":0,"workspace":world.project_dir()}),
+            "target":0,"workspace":support::path_bytes(world.project_dir())}),
         );
         assert_eq!(blocked["value"]["kind"], "busy", "{blocked}");
         // 已用的 TurnId 先于 Busy 核对：同一身份重新提交得到 Conflict，不是找回。
         let reused = ipc(
             &world,
             wait(&budget),
-            submit_request(
-                &world,
-                tid,
-                json!({"existing": sid}),
-                "first",
-                None,
-                config.clone(),
-            ),
+            submit_request(&world, tid, sid, "first"),
         );
         assert_eq!(conflict(&reused), Some("turn_id_used"), "{reused}");
         evidence
@@ -1278,280 +1206,390 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
     support::finish_recorded(evidence, result);
 }
 #[test]
-fn frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns() {
-    use lattice_system_harness::{FakeLlmServer, FixtureHttpServer, HttpFixture, TlsIdentity};
+fn backend_tls_roots_are_fixed_until_restart() {
+    use lattice_system_harness::{FakeLlmServer, ProviderFixture, ProviderTarget, TlsIdentity};
     let (world, spec) = direct_world(
-        "background-real-tls",
+        "background-startup-tls",
         "background",
-        "[\"fetch__web\"]",
-        "\n[llm.retry]\nmax_retries = 0\n[lancet.capabilities]\nmax_boundary = \"ex\"\n[lancet.network]\nallow_localhost = true\nallowed_hosts = [\"localhost\"]\n",
+        "\n[llm.retry]\nmax_retries=0\n",
     );
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // 直接启动带专属环境的前端前，先经标准驱动登记产物与后台清理归属。
-        assert!(run(&world, &budget, &mut evidence, &["--help"]).is_clean_exit(0));
-        // 两套互不相干的 CA：每个 Turn 的提交端只信任自己那一套，fetch 端点与 provider 各用其签发的证书。
-        let identities = [
-            TlsIdentity::generate().unwrap(),
-            TlsIdentity::generate().unwrap(),
-        ];
-        let mut roots = Vec::new();
-        let mut fetch = Vec::new();
-        for (name, identity) in ["a", "b"].into_iter().zip(&identities) {
-            let root = world.root().join(format!("tls-{name}"));
-            std::fs::create_dir_all(root.join("empty-certs")).unwrap();
-            std::fs::write(root.join("ca.pem"), identity.ca_pem()).unwrap();
-            fetch.push(
-                FixtureHttpServer::start_tls(HttpFixture::plain("frozen TLS tool body"), identity)
-                    .unwrap(),
-            );
-            roots.push(root);
-        }
-        let urls: Vec<String> = fetch.iter().map(FixtureHttpServer::base_url).collect();
-        let (a, ga) = FakeLlmServer::start_gated_with(
+        let trusted = TlsIdentity::generate().unwrap();
+        let foreign = TlsIdentity::generate().unwrap();
+        let root = world.root().join("startup-ca.pem");
+        let foreign_root = world.root().join("foreign-ca.pem");
+        // 一张可用根与一张损坏证书并存时，后台仍使用可用根。
+        let mut certificates = trusted.ca_pem().to_vec();
+        certificates
+            .extend_from_slice(b"\n-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----\n");
+        std::fs::write(&root, certificates).unwrap();
+        std::fs::write(&foreign_root, foreign.ca_pem()).unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+        let (server, gate) = FakeLlmServer::start_gated_with(
             support::sequence(vec![
-                SseScript::ToolCalls {
-                    calls: vec![
-                        (
-                            "own".into(),
-                            "fetch__web".into(),
-                            json!({"url":format!("{}/own-a",urls[0])}).to_string(),
-                        ),
-                        (
-                            "cross".into(),
-                            "fetch__web".into(),
-                            json!({"url":format!("{}/cross-from-a",urls[1])}).to_string(),
-                        ),
-                    ],
-                },
-                SseScript::plain("TLS alpha complete"),
+                SseScript::plain("trusted startup roots"),
+                SseScript::plain("still trusted"),
             ]),
-            &identities[0],
+            &trusted,
         )
         .unwrap();
-        let (b, gb) = FakeLlmServer::start_gated_with(
-            support::sequence(vec![
-                tool_call(
-                    "denied",
-                    "fetch__web",
-                    &json!({"url":format!("{}/denied-b",urls[1])}).to_string(),
-                ),
-                SseScript::plain("TLS beta complete"),
-            ]),
-            &identities[1],
-        )
-        .unwrap();
-        let provider_urls = [a.base_url(), b.base_url()];
-        let profile = world
-            .project_dir()
-            .join(".lattice/agents/background/agent.toml");
-        let allowed = std::fs::read_to_string(&profile).unwrap();
-        let denied = allowed.replace("allowed_hosts = [\"localhost\"]", "allowed_hosts = []");
-        let beta = world.root().join("beta");
-        std::fs::create_dir_all(beta.join(".lattice/agents/background")).unwrap();
-        let beta_profile = beta.join(".lattice/agents/background/agent.toml");
-        std::fs::write(&beta_profile, &denied).unwrap();
-        gix::init(&beta).unwrap();
-        world.set_env("OPENAI_COMPATIBLE_MODEL", "background");
-        world.set_env("OPENAI_COMPATIBLE_API_KEY", FAKE_API_KEY);
-        let start = |index: usize, project: &std::path::Path| {
-            let mut cmd = world.command(driver().binary_path());
-            cmd.current_dir(project)
-                .env("OPENAI_COMPATIBLE_BASE_URL", &provider_urls[index])
-                .env("SSL_CERT_FILE", roots[index].join("ca.pem"))
-                .env("SSL_CERT_DIR", roots[index].join("empty-certs"))
-                .args([
-                    "--json",
-                    "session",
-                    "send",
-                    "frozen TLS",
-                    "--agent",
-                    "background",
-                ]);
-            RunningCommand::spawn(cmd).unwrap()
-        };
-        let first = start(0, world.project_dir());
-        ga.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        let second = start(1, &beta);
-        gb.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
-            .unwrap();
-        assert_eq!(world.daemon_pids().unwrap().len(), 1);
-        let original_a = std::fs::read(roots[0].join("ca.pem")).unwrap();
-        let original_b = std::fs::read(roots[1].join("ca.pem")).unwrap();
-        std::fs::write(roots[0].join("ca.pem"), &original_b).unwrap();
-        std::fs::write(roots[1].join("ca.pem"), &original_a).unwrap();
-        std::fs::write(&profile, &denied).unwrap();
-        std::fs::write(&beta_profile, &allowed).unwrap();
-        evidence.record_json("frozen-window", &json!({"both_providers_arrived":true,"daemon_pids":world.daemon_pids().unwrap(),
-            "endpoint_a":urls[0],"endpoint_b":urls[1],"root_a_blake3":blake3::hash(&original_a).to_hex().to_string(),
-            "root_b_blake3":blake3::hash(&original_b).to_hex().to_string(),"sources_swapped_after_acceptance":true})).unwrap();
-        ga.release(budget.cap_timeout(spec.step_timeout())).unwrap();
-        gb.release(budget.cap_timeout(spec.step_timeout())).unwrap();
-        let mut turns = Vec::new();
-        for (label, front) in [("alpha frozen TLS", first), ("beta frozen TLS", second)] {
-            let out = front
-                .wait(Some(budget.cap_timeout(spec.step_timeout())))
+        let (foreign_server, foreign_gate) =
+            FakeLlmServer::start_gated_with(SseScript::plain("trusted after restart"), &foreign)
                 .unwrap();
-            evidence.record_command(label, &out);
-            assert!(out.is_clean_exit(0), "{}", out.summary());
-            turns.push(accepted_turn(&out));
-        }
-        let ta = detail(&world, &budget, &mut evidence, &turns[0]);
-        let tb = detail(&world, &budget, &mut evidence, &turns[1]);
-        assert_eq!(ta["steps"][0]["slots"][0]["outcome"], "succeeded");
-        assert_eq!(ta["steps"][0]["slots"][1]["outcome"], "failed");
-        // 跨根请求被策略拒绝：结局是 Failed，错误码属于 Validation/Permission/Guard 错误族。
-        let refused = &tb["steps"][0]["slots"][0];
-        assert_eq!(refused["outcome"], "failed");
-        assert!(
-            matches!(
-                refused["reason"]["value"]["code"].as_str(),
-                Some(
-                    "schema_mismatch"
-                        | "path_containment"
-                        | "type_error"
-                        | "capability_not_granted"
-                        | "project_root_violation"
-                        | "ambient_authority_denied"
-                        | "guard_denied"
-                        | "replan_required"
-                )
-            ),
-            "{refused}"
-        );
-        let own =
-            &ta["steps"][0]["slots"][0]["evidence"]["value"]["effects"]["effects"][0]["network"];
-        assert_eq!(own["transport"]["tls"]["state"], "established");
-        assert_eq!(own["http_status"], 200);
-        let cross =
-            &ta["steps"][0]["slots"][1]["evidence"]["value"]["effects"]["effects"][0]["network"];
-        assert_eq!(cross["transport"]["tls"]["state"], "failed");
-        assert_eq!(cross["failure_phase"], "tls");
-        let policy =
-            &tb["steps"][0]["slots"][0]["evidence"]["value"]["denied"]["denied"][0]["network"];
-        assert_eq!(policy["policy_verdict"], "denied");
-        assert_eq!(policy["resolution"], "not_attempted");
-        assert_eq!(policy["transport"]["tls"]["state"], "not_attempted");
-        assert_eq!(a.captured_requests().len(), 2);
-        assert_eq!(b.captured_requests().len(), 2);
-        // 换根后的新请求不能借用同后台另一个 Turn 的信任。
-        let crossed = start(0, world.project_dir())
-            .wait(Some(budget.cap_timeout(spec.step_timeout())))
+        foreign_gate.release(wait(&budget)).unwrap();
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("background"),
+                &server,
+                FAKE_API_KEY,
+            )
             .unwrap();
-        evidence.record_command("cross-root provider rejected", &crossed);
-        assert!(crossed.is_clean_exit(1));
-        let third = accepted_turn(&crossed);
-        let failed = closed(&world, &budget, &mut evidence, &third);
-        assert_eq!(failed["summary"]["outcome"], "failed");
+        world
+            .wire_provider(
+                ProviderFixture {
+                    target: ProviderTarget::Custom("foreign"),
+                    ..ProviderFixture::chat_completions("background")
+                },
+                &foreign_server,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+        let first = command(
+            &world,
+            &budget,
+            &["--json", "run", "TLS", "--agent", "background"],
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        // 后台已持有 DER；原文件改写与后续前端环境变量切换都不替换运行中后台的信任根。
+        std::fs::write(&root, foreign.ca_pem()).unwrap();
+        world.set_env("SSL_CERT_FILE", foreign_root.display().to_string());
+        gate.release(wait(&budget)).unwrap();
+        let out = first.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("provider startup roots", &out);
+        assert!(out.is_clean_exit(0), "{}", out.summary());
+        assert_eq!(records(&out).reply_text(), "trusted startup roots");
+        let untrusted = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "foreign before restart",
+                "--agent",
+                "background",
+                "--model",
+                "foreign/background",
+            ],
+        );
+        assert!(untrusted.is_clean_exit(1), "{}", untrusted.summary());
+        let untrusted_turn = closed(&world, &budget, &mut evidence, &accepted_turn(&untrusted));
         assert_eq!(
-            failed["steps"][0]["attempts"][0]["end"]["cause"]["cause"],
+            untrusted_turn["steps"][0]["attempts"][0]["end"]["cause"]["cause"],
             "provider_error"
         );
-        assert_eq!(a.captured_requests().len(), 2);
-        let bad_id = "00000000-0000-4000-8000-000000000004";
-        let mut invalid = configuration(&world, "background", &provider_urls[0]);
-        invalid["profile_toml"] = json!(allowed);
-        invalid["connection"]["roots_der"] = json!([[1, 2, 3]]);
-        let bad = ipc(
+        assert!(foreign_server.captured_requests().is_empty());
+        assert!(foreign_server.rejected_handshakes() >= 1);
+        let next = run(
             &world,
-            wait(&budget),
-            submit_request(
-                &world,
-                bad_id,
-                json!({"new": NEW_SESSION}),
-                "invalid root",
-                Some("background"),
-                invalid,
-            ),
+            &budget,
+            &mut evidence,
+            &["--json", "run", "same roots", "--agent", "background"],
         );
-        assert_eq!(bad["value"]["kind"], "bad_request");
-        let missing = turn_lookup(&world, wait(&budget), bad_id);
-        assert_eq!(missing["value"]["kind"], "not_found");
-        evidence
-            .record_json(
-                "invalid-root-before-acceptance",
-                &json!({"submit":bad,"query":missing}),
-            )
-            .unwrap();
-        archive_state(&world, &budget, &mut evidence, &[&turns[0], &third]);
-        let beta_sid = tb["session_id"].as_str().unwrap();
-        for args in [
-            vec!["--json", "audit", "--tail"],
-            vec!["session", "log", beta_sid],
-            vec!["--json", "session", "log", beta_sid],
-            vec!["--json", "session", "turn", &turns[1]],
-            vec![
-                "--json",
-                "audit",
-                "replay",
-                "--session",
-                beta_sid,
-                "--turn",
-                &turns[1],
-            ],
-            vec!["--json", "lancet", "status"],
-        ] {
-            let mut cmd = world.command(driver().binary_path());
-            cmd.current_dir(&beta).args(&args);
-            let out = RunningCommand::spawn(cmd)
-                .unwrap()
-                .wait(Some(budget.cap_timeout(spec.step_timeout())))
-                .unwrap();
-            evidence.record_command(format!("beta {}", args.join(" ")), &out);
-            assert!(out.is_clean_exit(0));
-        }
-        evidence.record_json("parameters", &json!({"test":"frozen_tls_roots_and_policies_are_isolated_between_concurrent_turns",
-            "tls":"two ephemeral CAs; localhost leaves; source roots/policy swapped after both provider gates",
-            "tools_a":["own-a","cross-from-a"],"tools_b":["denied-b"],"turns":[ta,tb,failed]})).unwrap();
-        // alpha 自己的 fetch 只到达 a 端点；跨根 fetch 在 b 端点握手被拒；换根后的
-        // provider 请求在 a 的 provider 端握手被拒，没有进入 capture。
-        let fetched: Vec<Vec<(String, String)>> = fetch
-            .iter()
-            .map(|server| {
-                server
-                    .captured_requests()
-                    .into_iter()
-                    .map(|request| (request.method, request.path))
-                    .collect()
-            })
-            .collect();
+        assert!(next.is_clean_exit(0), "{}", next.summary());
+        assert_eq!(records(&next).reply_text(), "still trusted");
+        assert_eq!(server.captured_requests().len(), 2);
+        world.stop_daemon().unwrap();
+        let changed = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "run", "new roots", "--agent", "background"],
+        );
+        assert!(changed.is_clean_exit(1), "{}", changed.summary());
+        let turn = closed(&world, &budget, &mut evidence, &accepted_turn(&changed));
         assert_eq!(
-            fetched,
-            [vec![("GET".to_string(), "/own-a".to_string())], Vec::new()]
+            turn["steps"][0]["attempts"][0]["end"]["cause"]["cause"],
+            "provider_error"
         );
-        for server in &fetch {
-            assert_eq!(server.first_error(), None);
-        }
-        let rejected = [
-            fetch[0].rejected_handshakes(),
-            fetch[1].rejected_handshakes(),
-            a.rejected_handshakes(),
-            b.rejected_handshakes(),
-        ];
-        assert!(rejected[1] >= 1 && rejected[2] >= 1, "{rejected:?}");
-        evidence
-            .record_json(
-                "tls-stats",
-                &json!({"fetch_paths":fetched,"rejected_handshakes":{
-                "fetch_a":rejected[0],"fetch_b":rejected[1],"provider_a":rejected[2],"provider_b":rejected[3]}}),
-            )
-            .unwrap();
-        evidence.record_captures(a.captured_requests());
-        evidence.record_captures(b.captured_requests());
-        // 两个 provider 都没有记录夹具失败（握手被拒属于对端行为，单独计数）。
-        for mut provider in [a, b] {
-            provider
-                .shutdown(budget.cap_timeout(Duration::from_secs(5)))
-                .unwrap();
-        }
+        assert_eq!(server.captured_requests().len(), 2);
+        assert!(server.rejected_handshakes() >= 1);
+        let reloaded = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "foreign after restart",
+                "--agent",
+                "background",
+                "--model",
+                "foreign/background",
+            ],
+        );
+        assert!(reloaded.is_clean_exit(0), "{}", reloaded.summary());
+        assert_eq!(records(&reloaded).reply_text(), "trusted after restart");
+        assert_eq!(foreign_server.captured_requests().len(), 1);
+        evidence.record_captures(server.captured_requests());
+        evidence.record_captures(foreign_server.captured_requests());
     }));
     support::finish_recorded(evidence, result);
 }
+
+/// 把任意字节编成 PEM 证书块；只用于构造超过 64 KiB 的“证书”，大小检查先于解析。
+fn pem_certificate(der: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::new();
+    for chunk in der.chunks(3) {
+        let bytes = [
+            chunk[0],
+            *chunk.get(1).unwrap_or(&0),
+            *chunk.get(2).unwrap_or(&0),
+        ];
+        let group = u32::from_be_bytes([0, bytes[0], bytes[1], bytes[2]]);
+        for index in 0..4 {
+            if index <= chunk.len() {
+                encoded.push(TABLE[(group >> (18 - 6 * index) & 0x3f) as usize] as char);
+            } else {
+                encoded.push('=');
+            }
+        }
+    }
+    let mut pem = String::from("-----BEGIN CERTIFICATE-----\n");
+    for line in encoded.as_bytes().chunks(64) {
+        pem.push_str(std::str::from_utf8(line).unwrap());
+        pem.push('\n');
+    }
+    pem.push_str("-----END CERTIFICATE-----\n");
+    pem
+}
+
+/// 启动时的根证书全都超过 64 KiB：后台照常启动，https provider 的 `session send`
+/// 在接受前按配置错误拒绝且不发请求；同一后台换成 http provider 照常接受并完成。
+#[test]
+fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
+    use lattice_system_harness::{FakeLlmServer, ProviderFixture};
+    let (world, spec) = direct_world(
+        "background-oversized-roots",
+        "background",
+        "\n[llm.retry]\nmax_retries=0\n",
+    );
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = world.root().join("oversized-roots.pem");
+        let oversized = pem_certificate(&[0x30; 65_537]);
+        std::fs::write(&root, format!("{oversized}{oversized}")).unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+
+        let https = FakeLlmServer::start(SseScript::plain("must not be requested")).unwrap();
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("background"),
+                &https,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+        let rejected = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "session",
+                "send",
+                "https",
+                "--agent",
+                "background",
+            ],
+        );
+        assert!(
+            rejected.is_clean_exit(2),
+            "https provider without usable roots must be rejected at submit: {}",
+            rejected.summary()
+        );
+        let outcome = records(&rejected);
+        assert_eq!(
+            support::rejected_kind(&outcome),
+            Some("bad_request"),
+            "rejection must carry the configuration-error kind"
+        );
+        assert!(
+            outcome.accepted_turn_id().is_none(),
+            "rejected submit must not accept a Turn"
+        );
+        let stdout = String::from_utf8_lossy(&rejected.stdout);
+        assert!(
+            stdout.contains("configuration error")
+                && stdout.contains("no usable TLS root certificates"),
+            "rejection must explain the missing roots: {stdout}"
+        );
+        assert!(
+            https.captured_requests().is_empty(),
+            "https provider must not receive a request"
+        );
+
+        let http = FakeLlmServer::start_plain_http1(SseScript::plain("plain http answer")).unwrap();
+        world
+            .wire_provider(
+                ProviderFixture::chat_completions("background"),
+                &http,
+                FAKE_API_KEY,
+            )
+            .unwrap();
+        let served = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "send", "http", "--agent", "background"],
+        );
+        assert!(
+            served.is_clean_exit(0),
+            "http provider must be served without usable roots: {}",
+            served.summary()
+        );
+        assert!(
+            records(&served).accepted_turn_id().is_some(),
+            "http submit must be accepted"
+        );
+        assert_eq!(
+            http.captured_requests().len(),
+            1,
+            "http provider received exactly one request"
+        );
+        assert!(
+            https.captured_requests().is_empty(),
+            "https provider still untouched"
+        );
+        evidence.record_captures(http.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+/// 启动时的 `SSL_CERT_FILE` 里没有一张证书：没有可用的根证书，https provider 的提交在接受前
+/// 按配置错误拒绝（http 端点照常放行，见 `oversized_startup_roots_reject_https_provider_at_submit_and_serve_http`）。
+fn no_usable_startup_tls_root_rejects_https_submissions_before_acceptance() {
+    let (world, spec) = direct_world("background-no-tls-root", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let root = world.root().join("invalid-ca.pem");
+        std::fs::write(&root, "invalid certificate").unwrap();
+        world.set_env("SSL_CERT_FILE", root.display().to_string());
+        let directory = world.home().join(".lattice");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("providers.toml"), "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='chat-completions'\nbase_url='https://localhost:9/v1'\nauth='none'\n").unwrap();
+        let out = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "run", "no roots", "--agent", "background"],
+        );
+        assert!(
+            out.is_clean_exit(2),
+            "https provider without usable roots exits 2"
+        );
+        let sent = records(&out);
+        let error = sent.rejection().unwrap();
+        assert_eq!(
+            error.kind, "bad_request",
+            "rejected as a configuration error"
+        );
+        assert!(
+            error.message.contains("configuration error")
+                && error.message.contains("no usable TLS root"),
+            "rejection names the missing roots: {}",
+            error.message
+        );
+        assert!(sent.accepted_turn_id().is_none());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[cfg(feature = "fake-tools")]
+#[test]
+fn invalidated_provider_configuration_records_last_resolved_origin_without_sending() {
+    for removed in [false, true] {
+        let (world, spec) = direct_world(
+            if removed {
+                "provider-deleted"
+            } else {
+                "provider-invalid"
+            },
+            "background",
+            "\n[llm.retry]\nmax_retries=3\n",
+        );
+        world.set_env(TEST_TOOLS, "read_note");
+        let budget = world.budget(&spec);
+        let mut evidence = support::evidence(&world, &spec);
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let (server, gate) = wire_gated_fake_llm(
+                &world,
+                "background",
+                support::sequence(vec![
+                    tool_call("note", "read_note", r#"{"action":"read"}"#),
+                    SseScript::plain("must not receive another request"),
+                ]),
+            );
+            let front = command(
+                &world,
+                &budget,
+                &[
+                    "--json",
+                    "run",
+                    "configuration changed",
+                    "--agent",
+                    "background",
+                ],
+            );
+            gate.wait_until_stalled(1, wait(&budget)).unwrap();
+            std::fs::write(
+                world.home().join(".lattice/providers.toml"),
+                if removed {
+                    "[metadata]\nauto_refresh=false\n"
+                } else {
+                    "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='sk-invalid-config-diagnostic-a19bd57f'\n"
+                },
+            )
+            .unwrap();
+            gate.release(wait(&budget)).unwrap();
+            let out = front.wait(Some(wait(&budget))).unwrap();
+            evidence.record_command("configuration invalidated during Turn", &out);
+            assert!(out.is_clean_exit(1));
+            let turn = closed(&world, &budget, &mut evidence, &accepted_turn(&out));
+            assert_eq!(turn["steps"].as_array().unwrap().len(), 2);
+            assert_eq!(turn["steps"][0]["slots"][0]["outcome"], "succeeded");
+            let first = &turn["steps"][0]["attempts"][0];
+            let attempts = turn["steps"][1]["attempts"].as_array().unwrap();
+            assert_eq!(attempts.len(), 1);
+            assert_eq!(attempts[0]["origin"], first["origin"]);
+            assert_eq!(attempts[0]["origin"]["provider_id"], "local");
+            assert_eq!(attempts[0]["origin"]["protocol"], "chat-completions");
+            assert_eq!(attempts[0]["end"]["cause"]["cause"], "provider_error");
+            assert_eq!(attempts[0]["end"]["cause"]["retryable"], false);
+            let diagnostic = attempts[0]["end"]["diagnostic"].as_str().unwrap();
+            assert!(diagnostic.contains("configuration error"));
+            assert!(!diagnostic.contains("sk-invalid-config-diagnostic-a19bd57f"));
+            assert!(
+                turn["summary"]["notice"]["text"]
+                    .as_str()
+                    .unwrap()
+                    .contains(diagnostic)
+            );
+            assert_eq!(server.captured_requests().len(), 1);
+            evidence.record_captures(server.captured_requests());
+        }));
+        support::finish_recorded(evidence, result);
+    }
+}
+
 #[test]
 fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
-    let (world, spec) = direct_world("background-history-pages", "background", "[]", "");
+    let (world, spec) = direct_world("background-history-pages", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1681,11 +1719,12 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
 }
 #[test]
 fn vanished_owner_is_reported_by_the_session_head() {
-    let (world, spec) = direct_world("background-vanished-owner", "background", "[]", "");
+    let (world, spec) = direct_world("background-vanished-owner", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("next"));
+        world.stop_daemon().unwrap();
         let root = world
             .session_store_dir()
             .parent()
@@ -1763,26 +1802,29 @@ fn vanished_owner_is_reported_by_the_session_head() {
     support::finish_recorded(evidence, result);
 }
 
+#[cfg(feature = "fake-tools")]
 #[test]
 fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
-    let (world, spec) = direct_world(
-        "background-global-turn-identity",
-        "background",
-        "[\"session__todo_write\"]",
-        "",
-    );
+    let (world, spec) = direct_world("background-global-turn-identity", "background", "");
+    world.set_env(TEST_TOOLS, "write_marker");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let marker_path = world.root().join("identity-tool.marker");
         let server = wire_fake_llm(
             &world,
             "background",
             SseScript::Cycle {
                 scripts: vec![
                     tool_call(
-                        "todo",
-                        "session__todo_write",
-                        r#"{"todos":[{"content":"shared","status":"pending"}]}"#,
+                        "marker",
+                        "write_marker",
+                        &json!({
+                            "action": "append_marker",
+                            "path": marker_path,
+                            "line": "dispatched\n",
+                        })
+                        .to_string(),
                     ),
                     SseScript::plain("answer"),
                 ],
@@ -1805,39 +1847,48 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
         let a = detail(&world, &budget, &mut evidence, &first_turn);
         let b = detail(&world, &budget, &mut evidence, &second_turn);
         assert_ne!(a["session_id"], b["session_id"]);
-        let config = configuration(&world, "background", &server.base_url());
-        let submit = |turn: &str, session: Value| {
+        let a_sid = a["session_id"].as_str().unwrap();
+        let b_sid = b["session_id"].as_str().unwrap();
+        let submit = |turn: &str, session_id: &str| {
             ipc(
                 &world,
                 wait(&budget),
-                submit_request(&world, turn, session, "alpha", None, config.clone()),
+                submit_request(&world, turn, session_id, "alpha"),
             )
         };
-        // 请求身份表自上而下核对，先符合的一行决定结果：TurnId 先于会话。
-        let used_elsewhere = submit(&first_turn, json!({"existing": b["session_id"]}));
+        // 请求身份表自上而下核对，先符合的一行决定结果：TurnId 先于会话存在性。
+        let used_elsewhere = submit(&first_turn, b_sid);
         assert_eq!(
             conflict(&used_elsewhere),
             Some("turn_id_used"),
             "{used_elsewhere}"
         );
-        let used_new = submit(&first_turn, json!({"new": a["session_id"]}));
-        assert_eq!(conflict(&used_new), Some("turn_id_used"), "{used_new}");
-        let exists = submit(THIRD, json!({"new": a["session_id"]}));
+        let used_missing = submit(&first_turn, NEW_SESSION);
+        assert_eq!(
+            conflict(&used_missing),
+            Some("turn_id_used"),
+            "{used_missing}"
+        );
+        let exists = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new": a_sid}),
+                Some("background"),
+                None,
+                None,
+            ),
+        );
         assert_eq!(conflict(&exists), Some("session_exists"), "{exists}");
-        let missing = submit(THIRD, json!({"existing": NEW_SESSION}));
+        let missing = submit(THIRD, NEW_SESSION);
         assert_eq!(missing["value"]["kind"], "not_found", "{missing}");
         let project = world.root().join("different-project");
         std::fs::create_dir(&project).unwrap();
         gix::init(&project).unwrap();
-        let mut elsewhere = submit_request(
-            &world,
-            THIRD,
-            json!({"existing": a["session_id"]}),
-            "alpha",
-            None,
-            config.clone(),
-        );
-        elsewhere["request"]["workspace"] = json!(project);
+        let mut elsewhere = submit_request(&world, THIRD, a_sid, "alpha");
+        elsewhere["request"]["workspace"] =
+            json!(support::path_bytes(&project.canonicalize().unwrap()));
         let binding = ipc(&world, wait(&budget), elsewhere);
         assert_eq!(conflict(&binding), Some("binding_mismatch"), "{binding}");
         // 被拒绝的请求都没有建立 Turn：THIRD 仍查不到，会话数不变。
@@ -1860,18 +1911,1140 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
         evidence
             .record_json(
                 "identity-conflicts",
-                &json!({"turn_used_elsewhere":used_elsewhere,"turn_used_new":used_new,
+                &json!({"turn_used_elsewhere":used_elsewhere,"turn_used_missing":used_missing,
                     "session_exists":exists,"missing":missing,"binding":binding}),
             )
             .unwrap();
         archive_state(&world, &budget, &mut evidence, &[&first_turn, &second_turn]);
-        evidence.record_json("parameters", &json!({"turns":[first_turn,second_turn],"projects":2,"script":"two todo/final Turns; rejected identities"})).unwrap();
+        evidence.record_json("parameters", &json!({"turns":[first_turn,second_turn],"projects":2,"script":"two write_marker/final Turns; rejected identities"})).unwrap();
         assert_eq!(detail(&world, &budget, &mut evidence, &first_turn), a);
         assert_eq!(detail(&world, &budget, &mut evidence, &second_turn), b);
         assert_eq!(server.captured_requests().len(), 4);
+        assert_eq!(marker_lines(&marker_path), vec!["dispatched", "dispatched"]);
         let inv_a = &a["steps"][0]["slots"][0]["invocation_id"];
         let inv_b = &b["steps"][0]["slots"][0]["invocation_id"];
         assert_ne!(inv_a, inv_b);
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+// 后续提交与静态 head 对比都等待本轮关闭且后台交出执行权。
+fn closed_without_owner(
+    world: &ScenarioWorld,
+    budget: &ScenarioBudget,
+    evidence: &mut ScenarioEvidence,
+    tid: &str,
+) -> Value {
+    let turn = closed(world, budget, evidence, tid);
+    let sid = turn["session_id"].as_str().unwrap();
+    let mut watcher = Watcher::open(world, wait(budget), sid);
+    watcher.until(
+        Instant::now() + wait(budget),
+        "closed Turn without Owner",
+        |view| view.head.as_ref().is_some_and(|head| !head.owner) && turn_closed(view, tid),
+    );
+    turn
+}
+
+#[test]
+fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
+    use lattice_system_harness::{ProviderFixture, ProviderTarget};
+    let (world, spec) = direct_world("background-model-effort-copy", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let server = wire_fake_llm(&world, "background", SseScript::plain("chosen reply"));
+        let other = ProviderFixture {
+            target: ProviderTarget::Custom("other"),
+            ..ProviderFixture::chat_completions("a")
+        };
+        world.wire_provider(other, &server, FAKE_API_KEY).unwrap();
+        let path = world.home().join(".lattice/providers.toml");
+        let mut registry: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        registry["providers"]
+            .as_table_mut()
+            .unwrap()
+            .get_mut("local")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .insert("catalog".into(), "copy-fixture".into());
+        let base = toml::to_string(&registry).unwrap();
+        let cache = world.home().join(".lattice/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(
+                &json!({"copy-fixture":{"models":{"old":{"id":"old","status":"deprecated"}}}}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let metadata = "\n[providers.local.models.a]\neffort=['off','low','high']\n[providers.local.models.b]\neffort=['high']\n[providers.local.models.both]\neffort=['low','high']\n[providers.local.models.c]\neffort=['low']\n[providers.other.models.a]\neffort=['medium']\n";
+        std::fs::write(&path, format!("{base}{metadata}")).unwrap();
+        world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\neffort='low'\n[prompt]\nsystem='copy prompt'\n").unwrap();
+        // `configure(New)` 允许模型为空并保存基准档位；未选模型前 `submit` 被配置拒绝。
+        let draft = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new":NEW_SESSION}),
+                Some("background"),
+                None,
+                None,
+            ),
+        );
+        assert_eq!(draft["response"], "configure", "{draft}");
+        assert_eq!(draft["value"]["head"]["model"], Value::Null);
+        assert_eq!(draft["value"]["head"]["provider"], Value::Null);
+        assert_eq!(draft["value"]["head"]["effort"], "low");
+        let rejected = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, FIRST, NEW_SESSION, "missing model"),
+        );
+        assert_eq!(rejected["response"], "error");
+        assert_eq!(rejected["value"]["kind"], "bad_request");
+        assert!(
+            rejected["value"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("model"),
+            "{rejected}"
+        );
+        assert!(server.captured_requests().is_empty());
+        let configured = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                None,
+                Some("local/a"),
+                Some("high"),
+            ),
+        );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let reply = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, FIRST, NEW_SESSION, "chosen"),
+        );
+        assert_eq!(reply["response"], "acceptance", "{reply}");
+        assert_eq!(
+            closed_without_owner(&world, &budget, &mut evidence, FIRST)["summary"]["outcome"],
+            "completed"
+        );
+        let before = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        let previous_log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        let count = server.captured_requests().len();
+        std::fs::write(
+            &path,
+            format!(
+                "{base}{}",
+                metadata.replace("['off','low','high']", "['low']")
+            ),
+        )
+        .unwrap();
+        // 同模型的已存档位失效时拒绝（无论是直接提交还是 configure 指定同一模型），不能静默改用默认 low。
+        for (label, request) in [
+            (
+                "submit",
+                submit_request(
+                    &world,
+                    "00000000-0000-4000-8000-fffffffffff2",
+                    NEW_SESSION,
+                    "saved effort no longer supported",
+                ),
+            ),
+            (
+                "same-model-configure",
+                configure_request(
+                    &world,
+                    json!({"existing":NEW_SESSION}),
+                    None,
+                    Some("local/a"),
+                    None,
+                ),
+            ),
+        ] {
+            let rejected = ipc(&world, wait(&budget), request);
+            assert_eq!(rejected["response"], "error", "{label}: {rejected}");
+            assert_eq!(rejected["value"]["kind"], "bad_request");
+            assert_eq!(server.captured_requests().len(), count);
+            assert_eq!(
+                ipc(
+                    &world,
+                    wait(&budget),
+                    json!({"operation":"head", "session_id":NEW_SESSION}),
+                ),
+                before
+            );
+            assert_eq!(
+                read(
+                    &world,
+                    &budget,
+                    &mut evidence,
+                    &["--json", "session", "log", NEW_SESSION],
+                ),
+                previous_log
+            );
+        }
+        std::fs::write(&path, format!("{base}{metadata}")).unwrap();
+        std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/background")).unwrap();
+        let cases = [
+            (None, None, "a", Some("high")),
+            (Some("local/b"), None, "b", Some("high")),
+            (Some("local/both"), None, "both", Some("high")),
+            (Some("local/c"), None, "c", Some("low")),
+            (Some("local/unknown"), None, "unknown", None),
+        ];
+        let mut ordinal = 1_u64;
+        let mut submit = |model: Option<&str>,
+                          effort: Option<&str>,
+                          expected_model: &str,
+                          expected_effort: Option<&str>,
+                          provider: &str| {
+            ordinal += 1;
+            let mut args = vec![
+                "--json",
+                "session",
+                "send",
+                "next choice",
+                "--session",
+                NEW_SESSION,
+            ];
+            if let Some(model) = model {
+                args.extend(["--model", model]);
+            }
+            if let Some(effort) = effort {
+                args.extend(["--effort", effort]);
+            }
+            let output = run(&world, &budget, &mut evidence, &args);
+            assert!(output.is_clean_exit(0), "{}", output.summary());
+            assert_accepted_and_closed(&records(&output)).unwrap();
+            let tid = accepted_turn(&output);
+            assert_eq!(
+                closed_without_owner(&world, &budget, &mut evidence, &tid)["summary"]["outcome"],
+                "completed"
+            );
+            let head = ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION}),
+            );
+            assert_eq!(head["value"]["model"], expected_model);
+            assert_eq!(head["value"]["provider"], provider);
+            assert_eq!(head["value"]["effort"], json!(expected_effort));
+            assert!(head["value"]["settings_version"].as_str().is_some());
+            let capture = server.captured_requests().pop().unwrap();
+            assert_eq!(capture.raw["model"], expected_model);
+            assert_eq!(
+                capture.raw["reasoning_effort"],
+                json!(expected_effort.map(|effort| if effort == "off" { "none" } else { effort }))
+            );
+            let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+            let view = watcher.initial();
+            let user = &view.entries[&(2 * ordinal - 1)];
+            assert_eq!(user.raw["content"]["effort"], json!(expected_effort));
+        };
+        for (model, effort, expected_model, expected_effort) in cases {
+            submit(model, effort, expected_model, expected_effort, "local");
+        }
+        // 元数据开始支持默认档位后，同模型的空值仍保持为空。
+        std::fs::write(
+            &path,
+            format!("{base}{metadata}\n[providers.local.models.unknown]\neffort=['low']\n"),
+        )
+        .unwrap();
+        submit(None, None, "unknown", None, "local");
+        submit(Some("local/unknown"), None, "unknown", None, "local");
+        submit(Some("local/a"), None, "a", Some("low"), "local");
+        submit(None, Some("off"), "a", Some("off"), "local");
+        submit(None, None, "a", Some("off"), "local");
+        submit(Some("local/both"), None, "both", Some("low"), "local");
+        submit(Some("local/a"), Some("off"), "a", Some("off"), "local");
+        submit(Some("other/a"), None, "a", None, "other");
+        submit(
+            Some("other/a"),
+            Some("medium"),
+            "a",
+            Some("medium"),
+            "other",
+        );
+        submit(Some("local/org/model"), None, "org/model", None, "local");
+        submit(Some("local/old"), None, "old", None, "local");
+        let before = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        let count = server.captured_requests().len();
+        let previous_log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        let bad = configure_request(
+            &world,
+            json!({"existing":NEW_SESSION}),
+            None,
+            None,
+            Some("max"),
+        );
+        let rejected = ipc(&world, wait(&budget), bad);
+        assert_eq!(rejected["response"], "error");
+        assert_eq!(rejected["value"]["kind"], "bad_request");
+        assert_eq!(server.captured_requests().len(), count);
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            before
+        );
+        assert_eq!(
+            read(
+                &world,
+                &budget,
+                &mut evidence,
+                &["--json", "session", "log", NEW_SESSION]
+            ),
+            previous_log
+        );
+        let rejected_cli = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "unsupported effort",
+                "--session",
+                NEW_SESSION,
+                "--effort",
+                "max",
+            ],
+        );
+        assert!(rejected_cli.is_clean_exit(2));
+        assert_eq!(
+            records(&rejected_cli).rejection().unwrap().kind,
+            "bad_request"
+        );
+        assert_eq!(server.captured_requests().len(), count);
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            before
+        );
+        assert_eq!(
+            read(
+                &world,
+                &budget,
+                &mut evidence,
+                &["--json", "session", "log", NEW_SESSION]
+            ),
+            previous_log
+        );
+        let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+        let view = watcher.initial();
+        let head = view.head.as_ref().unwrap();
+        assert_eq!(head.model.as_deref(), Some("old"));
+        assert_eq!(head.provider.as_deref(), Some("local"));
+        assert_eq!(head.effort, None);
+        world.write_project_file(".lattice/agents/background/agent.toml", "schema_version=1\n[agent]\nname='background'\nmodel='local/a'\neffort='low'\n[prompt]\nsystem='rebuilt prompt'\n").unwrap();
+        let rebuilt_cfg = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                Some("background"),
+                Some("local/b"),
+                None,
+            ),
+        );
+        assert_eq!(rebuilt_cfg["response"], "configure", "{rebuilt_cfg}");
+        let rebuilt_id = "00000000-0000-4000-8000-fffffffffff1";
+        let rebuilt = submit_request(&world, rebuilt_id, NEW_SESSION, "new agent baseline");
+        assert_eq!(
+            ipc(&world, wait(&budget), rebuilt)["response"],
+            "acceptance"
+        );
+        closed_without_owner(&world, &budget, &mut evidence, rebuilt_id);
+        let rebuilt_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(rebuilt_head["value"]["model"], "b");
+        assert_eq!(rebuilt_head["value"]["effort"], Value::Null);
+        let capture = server.captured_requests().pop().unwrap();
+        assert_eq!(capture.raw["messages"][0]["content"], "rebuilt prompt");
+        assert!(capture.raw.get("reasoning_effort").is_none());
+        let source_path = world
+            .project_dir()
+            .join(".lattice/agents/background/agent.toml");
+        let source = std::fs::read(&source_path).unwrap();
+        let explicit = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "explicit agent and choices",
+                "--session",
+                NEW_SESSION,
+                "--agent",
+                "background",
+                "--model",
+                "local/a",
+                "--effort",
+                "off",
+            ],
+        );
+        assert!(explicit.is_clean_exit(0));
+        let head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(head["value"]["model"], "a");
+        assert_eq!(head["value"]["effort"], "off");
+        assert_eq!(
+            server.captured_requests().last().unwrap().raw["reasoning_effort"],
+            "none"
+        );
+        assert_eq!(std::fs::read(&source_path).unwrap(), source);
+        evidence.record_captures(server.captured_requests());
+        evidence.record_json("choices-head", &before).unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[cfg(feature = "fake-tools")]
+#[test]
+fn cli_off_survives_tool_retry_restart_and_provider_failure() {
+    use lattice_system_harness::{FakeLlmServer, ProviderFixture, ProviderTarget};
+    let (world, spec) = direct_world("cli-luna-off-tools", "background", "");
+    world.set_env(TEST_TOOLS, "read_fixture");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let read = || {
+            tool_call(
+                "read-mark",
+                "read_fixture",
+                r#"{"action":"read","value":{"content":"luna-off-226"}}"#,
+            )
+        };
+        let server = FakeLlmServer::start(support::sequence(vec![
+            SseScript::HttpError {
+                status: 503,
+                body: "retry once".into(),
+            },
+            read(),
+            SseScript::plain("file marker: luna-off-226"),
+            read(),
+            SseScript::plain("inherited marker: luna-off-226"),
+            SseScript::HttpError {
+                status: 400,
+                body: "accepted provider failure".into(),
+            },
+            SseScript::plain("saved low"),
+            SseScript::HttpError {
+                status: 400,
+                body: "explicit off provider failure".into(),
+            },
+            SseScript::plain("still off after failure"),
+        ]))
+        .unwrap();
+        let fixture = ProviderFixture {
+            target: ProviderTarget::Custom("openai-chat"),
+            ..ProviderFixture::chat_completions("gpt-6-luna")
+        };
+        world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
+        let configuration = world.home().join(".lattice/providers.toml");
+        let mut providers: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&configuration).unwrap()).unwrap();
+        providers["providers"]["openai-chat"]
+            .as_table_mut()
+            .unwrap()
+            .insert("catalog".into(), "openai".into());
+        std::fs::write(&configuration, toml::to_string(&providers).unwrap()).unwrap();
+        let cache = world.home().join(".lattice/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("models.json"), serde_json::to_vec(&json!({"openai":{"models":{
+            "gpt-6-luna":{"id":"gpt-6-luna", "reasoning_options":[{"type":"effort","values":["none","low"]}]}
+        }}})).unwrap()).unwrap();
+        let profile = "schema_version=1\n[agent]\nname='background'\neffort='low'\n[prompt]\nsystem='Read fixture.txt using the tool.'\n";
+        world
+            .write_project_file(".lattice/agents/background/agent.toml", profile)
+            .unwrap();
+        let first = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "read fixture.txt",
+                "--agent",
+                "background",
+                "--model",
+                "openai-chat/gpt-6-luna",
+                "--effort",
+                "off",
+            ],
+        );
+        assert!(first.is_clean_exit(0), "{}", first.summary());
+        assert_accepted_and_closed(&records(&first)).unwrap();
+        let sid = records(&first).accepted_session_id().unwrap().to_owned();
+        let first_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&first));
+        assert_eq!(
+            first_turn["steps"][0]["attempts"].as_array().unwrap().len(),
+            2
+        );
+        assert_eq!(first_turn["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(server.captured_requests().len(), 3);
+        world.stop_daemon().unwrap();
+        let inherited = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "send", "read again", "--session", &sid],
+        );
+        assert!(inherited.is_clean_exit(0), "{}", inherited.summary());
+        let inherited_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&inherited));
+        assert_eq!(
+            inherited_turn["steps"][0]["slots"][0]["outcome"],
+            "succeeded"
+        );
+        assert_eq!(server.captured_requests().len(), 5);
+        let failure = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "provider fails after acceptance",
+                "--session",
+                &sid,
+            ],
+        );
+        assert!(failure.is_clean_exit(1), "{}", failure.summary());
+        let failed_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&failure));
+        assert_eq!(failed_turn["summary"]["outcome"], "failed");
+        assert_eq!(
+            failed_turn["steps"][0]["attempts"][0]["end"]["cause"],
+            json!({"cause":"provider_error", "retryable":false})
+        );
+        let mut watcher = Watcher::open(&world, wait(&budget), &sid);
+        let view = watcher.initial();
+        let head = view.head.as_ref().unwrap();
+        assert_eq!(head.provider.as_deref(), Some("openai-chat"));
+        assert_eq!(head.model.as_deref(), Some("gpt-6-luna"));
+        assert_eq!(head.effort.as_deref(), Some("off"));
+        for output in [&first, &inherited, &failure] {
+            let sent = records(output);
+            let id = accepted_turn(output);
+            let user = view
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.raw["kind"] == "user_message" && entry.raw["content"]["turn_id"] == id
+                })
+                .unwrap();
+            assert_eq!(user.raw["content"]["model"], "gpt-6-luna");
+            assert_eq!(user.raw["content"]["provider"], "openai-chat");
+            assert_eq!(user.raw["content"]["effort"], "off");
+            assert!(sent.rejection().is_none());
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 6);
+        for capture in &captures {
+            assert_eq!(capture.raw["model"], "gpt-6-luna");
+            assert_eq!(capture.raw["reasoning_effort"], "none");
+            assert!(capture.tool_names.iter().any(|name| name == "read_fixture"));
+            assert!(capture.raw.get("enable_thinking").is_none());
+        }
+        for index in [2, 4] {
+            let messages = captures[index].raw["messages"].as_array().unwrap();
+            let result = messages
+                .iter()
+                .rev()
+                .find(|message| message["role"] == "tool")
+                .unwrap();
+            assert!(result["content"].to_string().contains("luna-off-226"));
+        }
+        let low = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "save low",
+                "--session",
+                &sid,
+                "--effort",
+                "low",
+            ],
+        );
+        assert!(low.is_clean_exit(0), "{}", low.summary());
+        closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&low));
+        let low_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":sid}),
+        );
+        assert_eq!(low_head["value"]["effort"], "low");
+        let failed_off = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "run",
+                "explicit off fails after acceptance",
+                "--session",
+                &sid,
+                "--effort",
+                "off",
+            ],
+        );
+        assert!(failed_off.is_clean_exit(1), "{}", failed_off.summary());
+        let failed_off_turn =
+            closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&failed_off));
+        assert_eq!(failed_off_turn["summary"]["outcome"], "failed");
+        assert_eq!(
+            failed_off_turn["steps"][0]["attempts"][0]["end"]["cause"],
+            json!({"cause":"provider_error", "retryable":false})
+        );
+        let failed_off_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":sid}),
+        );
+        assert_eq!(failed_off_head["value"]["effort"], "off");
+        world.stop_daemon().unwrap();
+        let continued = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &[
+                "--json",
+                "session",
+                "send",
+                "inherit off after failure and restart",
+                "--session",
+                &sid,
+            ],
+        );
+        assert!(continued.is_clean_exit(0), "{}", continued.summary());
+        closed_without_owner(&world, &budget, &mut evidence, &accepted_turn(&continued));
+        let mut watcher = Watcher::open(&world, wait(&budget), &sid);
+        let view = watcher.initial();
+        assert_eq!(view.head.as_ref().unwrap().effort.as_deref(), Some("off"));
+        for (output, effort) in [(&low, "low"), (&failed_off, "off"), (&continued, "off")] {
+            let id = accepted_turn(output);
+            let user = view
+                .entries
+                .values()
+                .find(|entry| {
+                    entry.raw["kind"] == "user_message" && entry.raw["content"]["turn_id"] == id
+                })
+                .unwrap();
+            assert_eq!(user.raw["content"]["effort"], effort);
+        }
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 9);
+        for (index, effort) in [(6, "low"), (7, "none"), (8, "none")] {
+            assert_eq!(captures[index].raw["reasoning_effort"], effort);
+        }
+        assert_eq!(
+            std::fs::read(
+                world
+                    .project_dir()
+                    .join(".lattice/agents/background/agent.toml")
+            )
+            .unwrap(),
+            profile.as_bytes()
+        );
+        evidence.record_captures(captures);
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn session_settings_survive_sources_and_explicit_same_agent_refreshes_profile() {
+    let (world, spec) = direct_world("background-copy-sources", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let first = wire_fake_llm(&world, "background", SseScript::plain("profile reply"));
+        world
+            .write_project_file(
+                ".lattice/agents/background/prompt.md",
+                "original external prompt",
+            )
+            .unwrap();
+        let original = "schema_version=1\n[agent]\nname='background'\nmodel='local/background'\n[prompt]\nsystem_path='prompt.md'\n";
+        world
+            .write_project_file(".lattice/agents/background/agent.toml", original)
+            .unwrap();
+        let mut ordinal = 0_u64;
+        let mut send = |fresh: bool, agent: Option<&str>, sid: &str, prompt: &str| {
+            ordinal += 1;
+            let tid = format!("00000000-0000-4000-8000-{ordinal:012x}");
+            if fresh || agent.is_some() {
+                let session = if fresh {
+                    json!({"new":sid})
+                } else {
+                    json!({"existing":sid})
+                };
+                let configured = ipc(
+                    &world,
+                    wait(&budget),
+                    configure_request(&world, session, agent, None, None),
+                );
+                assert_eq!(configured["response"], "configure", "{configured}");
+            }
+            let reply = ipc(
+                &world,
+                wait(&budget),
+                submit_request(&world, &tid, sid, "check profile"),
+            );
+            assert_eq!(reply["response"], "acceptance", "{reply}");
+            let turn = closed_without_owner(&world, &budget, &mut evidence, &tid);
+            assert_eq!(turn["summary"]["outcome"], "completed");
+            let mut watcher = Watcher::open(&world, wait(&budget), sid);
+            let view = watcher.initial();
+            assert_eq!(
+                view.head.as_ref().unwrap().model.as_deref(),
+                Some(if prompt == "original external prompt" {
+                    "background"
+                } else {
+                    "refreshed"
+                })
+            );
+        };
+        send(
+            true,
+            Some("background"),
+            NEW_SESSION,
+            "original external prompt",
+        );
+        let second = wire_fake_llm(&world, "background", SseScript::plain("profile reply"));
+        world
+            .write_project_file(
+                ".lattice/agents/background/prompt.md",
+                "changed external prompt",
+            )
+            .unwrap();
+        world
+            .write_project_file(
+                ".lattice/agents/background/agent.toml",
+                &original.replace("local/background", "local/refreshed"),
+            )
+            .unwrap();
+        send(false, None, NEW_SESSION, "original external prompt");
+        std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/background")).unwrap();
+        send(false, None, NEW_SESSION, "original external prompt");
+        let before = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        let missing = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                Some("background"),
+                None,
+                None,
+            ),
+        );
+        assert_eq!(missing["response"], "error");
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            before
+        );
+        world
+            .write_project_file(
+                ".lattice/agents/background/agent.toml",
+                "schema_version=1\n[agent]\nname='background'\nmodel='local/refreshed'\n[prompt]\nsystem='refreshed prompt'\n",
+            )
+            .unwrap();
+        send(false, Some("background"), NEW_SESSION, "refreshed prompt");
+        send(
+            true,
+            Some("background"),
+            "5e550000000000000000000000000002",
+            "refreshed prompt",
+        );
+        let first_captures = first.captured_requests();
+        assert_eq!(first_captures.len(), 1);
+        assert_eq!(
+            first_captures[0].raw["messages"][0]["content"],
+            "original external prompt"
+        );
+        assert_eq!(first_captures[0].raw["model"], "background");
+        let captures = second.captured_requests();
+        assert_eq!(captures.len(), 4);
+        for (index, capture) in captures.iter().enumerate() {
+            assert_eq!(
+                capture.raw["messages"][0]["content"],
+                if index < 2 {
+                    "original external prompt"
+                } else {
+                    "refreshed prompt"
+                }
+            );
+            assert_eq!(
+                capture.raw["model"],
+                if index < 2 { "background" } else { "refreshed" }
+            );
+        }
+        evidence.record_captures(first_captures);
+        evidence.record_captures(captures);
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[cfg(feature = "fake-tools")]
+#[test]
+fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
+    let (world, spec) = direct_world("background-effort-reload", "background", "");
+    world.set_env(TEST_TOOLS, "read_note");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let script = SseScript::Sequence {
+            scripts: vec![
+                SseScript::HttpError {
+                    status: 503,
+                    body: "retry later".into(),
+                },
+                tool_call("first-read", "read_note", r#"{"action":"read"}"#),
+                tool_call("second-read", "read_note", r#"{"action":"read"}"#),
+                SseScript::plain("must not run"),
+            ],
+        };
+        let (server, gate) = wire_gated_fake_llm(&world, "background", script);
+        let path = world.home().join(".lattice/providers.toml");
+        let mut config: toml::Table =
+            toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let provider = config
+            .get_mut("providers")
+            .unwrap()
+            .as_table_mut()
+            .unwrap()
+            .get_mut("local")
+            .unwrap()
+            .as_table_mut()
+            .unwrap();
+        provider.insert("catalog".into(), "custom".into());
+        provider.insert(
+            "features".into(),
+            toml::Value::Table(
+                toml::from_str(
+                    "thinking_budget='thinking-budget'\nthinking_toggle='enable-thinking'",
+                )
+                .unwrap(),
+            ),
+        );
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        let cache = world.home().join(".lattice/cache");
+        std::fs::create_dir_all(&cache).unwrap();
+        let metadata = |output| json!({"custom":{"models":{"background":{"id":"background","limit":{"output":output},"reasoning_options":[{"type":"toggle"},{"type":"budget_tokens"}]}}}});
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&metadata(65536)).unwrap(),
+        )
+        .unwrap();
+        let configured = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new":NEW_SESSION}),
+                Some("background"),
+                None,
+                Some("high"),
+            ),
+        );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let request = submit_request(&world, FIRST, NEW_SESSION, "retry and tools");
+        assert_eq!(
+            ipc(&world, wait(&budget), request)["response"],
+            "acceptance"
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        assert_eq!(server.captured_requests()[0].raw["thinking_budget"], 16384);
+        std::fs::write(
+            cache.join("models.json"),
+            serde_json::to_vec(&metadata(24576)).unwrap(),
+        )
+        .unwrap();
+        gate.release_next(wait(&budget)).unwrap();
+        gate.wait_until_stalled(2, wait(&budget)).unwrap();
+        assert_eq!(server.captured_requests()[1].raw["thinking_budget"], 12288);
+        gate.release_next(wait(&budget)).unwrap();
+        gate.wait_until_stalled(3, wait(&budget)).unwrap();
+        assert_eq!(server.captured_requests()[2].raw["thinking_budget"], 12288);
+        config["providers"]["local"]["features"]["thinking_budget"] = "none".into();
+        std::fs::write(&path, toml::to_string(&config).unwrap()).unwrap();
+        gate.release_next(wait(&budget)).unwrap();
+        let turn = closed_without_owner(&world, &budget, &mut evidence, FIRST);
+        assert_eq!(turn["summary"]["outcome"], "failed");
+        assert_eq!(turn["steps"].as_array().unwrap().len(), 3);
+        assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 2);
+        assert_eq!(turn["steps"][0]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(turn["steps"][1]["slots"][0]["outcome"], "succeeded");
+        assert_eq!(server.captured_requests().len(), 3);
+        let head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(head["value"]["effort"], "high");
+        let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+        assert_eq!(
+            watcher.initial().entries[&1].raw["content"]["effort"],
+            "high"
+        );
+        evidence.record_captures(server.captured_requests());
+        evidence
+            .record_json("effort-after-global-change", &head)
+            .unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn draft_without_model_survives_restart_and_enforces_settings_version() {
+    const FOURTH: &str = "00000000-0000-4000-8000-000000000004";
+    let (world, spec) = direct_world("background-draft-restart-settings", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let server = wire_fake_llm(&world, "background", SseScript::plain("draft model reply"));
+        // 改写 agent 配置使其不含 `[agent].model`，经原始 IPC 创建无模型的草稿会话。
+        world
+            .write_project_file(
+                ".lattice/agents/background/agent.toml",
+                "schema_version = 1\n[agent]\nname = \"background\"\n[prompt]\nsystem = \"draft without model\"\n",
+            )
+            .unwrap();
+        let first_epoch =
+            ipc(&world, wait(&budget), json!({"operation":"status"}))["value"]["epoch"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let configured = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new":NEW_SESSION}),
+                Some("background"),
+                None,
+                None,
+            ),
+        );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let initial_head = &configured["value"]["head"];
+        assert_eq!(initial_head["session_id"], NEW_SESSION);
+        assert_eq!(initial_head["position"], 0);
+        assert_eq!(initial_head["agent"], "background");
+        assert_eq!(initial_head["model"], Value::Null);
+        assert_eq!(initial_head["provider"], Value::Null);
+        assert_eq!(initial_head["effort"], Value::Null);
+        let stale_version = initial_head["settings_version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // 停止并重新启动后台：草稿仍在列表中（节点数为 1），会话头照常可读。
+        world.stop_daemon().unwrap();
+        let listed = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "list"],
+        );
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["session_id"], NEW_SESSION);
+        assert_eq!(listed[0]["node_count"], 1);
+        assert_eq!(listed[0]["current"], 0);
+        assert_eq!(listed[0]["unclosed_turn"], Value::Null);
+        let second_epoch =
+            ipc(&world, wait(&budget), json!({"operation":"status"}))["value"]["epoch"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        assert_ne!(second_epoch, first_epoch, "后台重启后必须进入新的实例代");
+        let reopened_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(reopened_head["response"], "head", "{reopened_head}");
+        assert_eq!(reopened_head["value"], *initial_head);
+
+        // 未选模型直接提交：配置拒绝并提示先选择模型，不写节点，设置版本不变。
+        let rejected = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, FIRST, NEW_SESSION, "missing model"),
+        );
+        assert_eq!(rejected["response"], "error", "{rejected}");
+        assert_eq!(rejected["value"]["kind"], "bad_request", "{rejected}");
+        assert!(
+            rejected["value"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("choose one with /model or --model"),
+            "未选模型提交应提示先选择模型：{rejected}"
+        );
+        assert_eq!(
+            turn_lookup(&world, wait(&budget), FIRST)["value"]["kind"],
+            "not_found"
+        );
+        assert!(server.captured_requests().is_empty());
+        let list_after_reject = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "list"],
+        );
+        assert_eq!(list_after_reject[0]["node_count"], 1);
+        let log_after_reject = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        assert_eq!(log_after_reject["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            reopened_head
+        );
+
+        // 为已有草稿选定模型 M 后提交：本轮完成，UserMessage 记录模型 M。
+        let updated = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                None,
+                Some("local/background"),
+                None,
+            ),
+        );
+        assert_eq!(updated["response"], "configure", "{updated}");
+        assert_eq!(updated["value"]["head"]["model"], "background");
+        assert_eq!(updated["value"]["head"]["provider"], "local");
+        let current_version = updated["value"]["head"]["settings_version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(current_version, stale_version);
+
+        let accepted = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, SECOND, NEW_SESSION, "first turn with model"),
+        );
+        assert_eq!(accepted["response"], "acceptance", "{accepted}");
+        assert_eq!(accepted["value"]["acceptance"], "accepted", "{accepted}");
+        let completed = closed_without_owner(&world, &budget, &mut evidence, SECOND);
+        assert_eq!(completed["summary"]["outcome"], "completed");
+        let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+        let view = watcher.initial();
+        assert_eq!(view.entries[&1].raw["content"]["model"], "background");
+        assert_eq!(view.entries[&1].raw["content"]["provider"], "local");
+        assert_eq!(server.captured_requests().len(), 1);
+        assert_eq!(server.captured_requests()[0].raw["model"], "background");
+
+        // 带旧的 SettingsVersion 提交返回 settings_changed 冲突且不写节点；换用当前版本提交成功。
+        let mut stale_submit = submit_request(&world, THIRD, NEW_SESSION, "stale version turn");
+        stale_submit["request"]["expected_settings"] = json!(stale_version);
+        let stale_reply = ipc(&world, wait(&budget), stale_submit);
+        assert_eq!(
+            conflict(&stale_reply),
+            Some("settings_changed"),
+            "{stale_reply}"
+        );
+        assert_eq!(
+            turn_lookup(&world, wait(&budget), THIRD)["value"]["kind"],
+            "not_found"
+        );
+        assert_eq!(server.captured_requests().len(), 1);
+        let log_after_conflict = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        assert_eq!(log_after_conflict["nodes"].as_array().unwrap().len(), 3);
+
+        let mut fresh_submit = submit_request(&world, FOURTH, NEW_SESSION, "fresh version turn");
+        fresh_submit["request"]["expected_settings"] = json!(current_version);
+        let fresh_reply = ipc(&world, wait(&budget), fresh_submit);
+        assert_eq!(fresh_reply["response"], "acceptance", "{fresh_reply}");
+        assert_eq!(
+            fresh_reply["value"]["acceptance"], "accepted",
+            "{fresh_reply}"
+        );
+        let fresh_done = closed_without_owner(&world, &budget, &mut evidence, FOURTH);
+        assert_eq!(fresh_done["summary"]["outcome"], "completed");
+        assert_eq!(server.captured_requests().len(), 2);
+        let first_entries = history(&world, wait(&budget), NEW_SESSION, 3, 1).unwrap();
+        assert_eq!(first_entries[0]["content"]["model"], "background");
+        assert_eq!(first_entries[0]["content"]["provider"], "local");
+        let final_log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        assert_eq!(final_log["nodes"].as_array().unwrap().len(), 5);
+        archive_state(&world, &budget, &mut evidence, &[SECOND, FOURTH]);
         evidence.record_captures(server.captured_requests());
     }));
     support::finish_recorded(evidence, result);

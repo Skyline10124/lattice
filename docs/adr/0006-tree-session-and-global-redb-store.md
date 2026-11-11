@@ -9,7 +9,7 @@ status: accepted
 - 修订：部分取代 ADR 0005，范围见[与 ADR 0005 的关系](#与-adr-0005-的关系)；取代 ADR 0003 的“Rewind”一节
 - 依赖：ADR 0005 未被取代的部分
 - 实施跟踪：GitHub #223（路线图 #217 R2）
-- 部分被取代：ADR 0007（三层记录、ActiveStep、Turn 记录与崩溃后自动关闭等；范围见 ADR 0007 的[与 ADR 0006 的关系](0007-session-tree-as-single-authority.md#与-adr-0006-的关系)）；ADR 0008（第 4 节的新会话 SessionId、`--turn-id` 找回与 `session cancel` 参数，第 10 节的事件窗口、事件游标与重新同步；范围见 ADR 0008 的[与 ADR 0006、ADR 0007 的关系](0008-backend-api-commands-view-queries.md#与-adr-0006adr-0007-的关系)）；ADR 0010（第 4 节中当前 agent 即当前位置所属 Turn 的 agent 的规则；范围见 ADR 0010 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)）
+- 部分被取代：ADR 0007（三层记录、ActiveStep、Turn 记录与崩溃后自动关闭等；范围见 ADR 0007 的[与 ADR 0006 的关系](0007-session-tree-as-single-authority.md#与-adr-0006-的关系)）；ADR 0008（第 4 节的新会话 SessionId、`--turn-id` 找回与 `session cancel` 参数，第 10 节的事件窗口、事件游标与重新同步；范围见 ADR 0008 的[与 ADR 0006、ADR 0007 的关系](0008-backend-api-commands-view-queries.md#与-adr-0006adr-0007-的关系)）；ADR 0009（第 1 节的 `workspace-history.git`、操作员查询与变更序号，以及第 7 节的执行方、Cell evidence 与 `CepError`；范围见 ADR 0009 的[与其他 ADR 的关系](0009-remove-legacy-lancet-tool-executor.md#与其他-adr-的关系)）；ADR 0010（第 4 节中当前 agent 即当前位置所属 Turn 的 agent 的规则；范围见 ADR 0010 的[与 ADR 0005、ADR 0006、ADR 0007、ADR 0008 的关系](0010-protocol-adapters-and-configured-providers.md#与-adr-0005adr-0006adr-0007adr-0008-的关系)）；ADR 0012（第 4 节中会话随首次提交创建及否决显式创建的规则；范围见 ADR 0012 的[与其他 ADR 的关系](0012-backend-owns-session-settings.md#与其他-adr-的关系)）
 
 ## 背景
 
@@ -164,7 +164,7 @@ TurnOutcome = Completed | Failed { reason } | Cancelled
 
 - 取消或失败后，Session 当前位置停在该 Turn 最后写入的节点，已完成的步骤进入之后的上下文。用户取消通常是为了换种说法继续，已完成的工具结果仍有用；需要丢弃时 rewind 到该用户消息之前。
 - 崩溃遗留的进行中 Turn 仍按 closure-only 规则由后台在该 Session 下一次写操作前自动关闭，不请求 provider、不执行 Tool：ActiveStep 处于 `Requesting` 时追加 `Stopped { ProcessExit }`；处于执行时按第 7 节写入各槽位终态并写 Step 节点；随后以 `Stop` 关闭 Step 与 Turn。自动关闭所需事实全部在同一库中，由一个事务完成。
-- 执行中关闭的 `cause` 与 live 执行、读取校验使用同一规则：槽位自身决定的停止优先（`Indeterminate(Cancelled)` 得到 Cancelled，`Indeterminate(Reported)` 得到 `InvocationIndeterminate`），否则取关闭 Step 的外部停止（live 在两次分发之间发现的 Cancelled 或 Deadline，或自动关闭的 ProcessExit）；完整规则见[会话合同](../architecture/session.md#执行中-step-的停止原因)。live 执行决定停止分发时，补写的终态与 Step、Turn 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；崩溃落在某个槽位 Started 之前或之后，Step 原因都是 ProcessExit，崩溃时机不改变结局。
+- 执行中关闭的 `cause` 与 live 执行、读取校验使用同一规则：槽位自身决定的停止优先（`Indeterminate(Cancelled)` 得到 Cancelled，`Indeterminate(Reported)` 得到 `InvocationIndeterminate`），否则取关闭 Step 的外部停止（live 在两次分发之间发现的 Cancelled 或 Deadline，或自动关闭的 ProcessExit）；完整规则见[会话合同](../architecture/session/steps.md#执行中-step-的停止原因)。live 执行决定停止分发时，补写的终态与 Step、Turn 关闭同事务写入，所以已写入的取消或 Deadline 在崩溃后仍得到同一原因；崩溃落在某个槽位 Started 之前或之后，Step 原因都是 ProcessExit，崩溃时机不改变结局。
 
 ### 9. 对外结局呈现
 
@@ -207,7 +207,7 @@ notice = Option<{ level, text }>
 
 - redb 是被使用的成熟库，不做性能资格化，不设阈值。ADR 0005 的资格化针对自研的 Git 编排；真实使用出现延迟问题时再测量。
 - 以 E2E 场景为主要验证手段，使用被测二进制与真实状态根。场景选择中等到困难的组合，每个场景结束产出可核验、可重复的产物。
-  - 2026-09-30 修订：场景通过时不再保留产物。这些成功产物没有被任何流程读取，维护却有成本，维护者裁决删除。场景仍记录状态摘要、树形 `log`、`audit` 输出与所用参数，只在失败时写入失败 bundle。现行规则见[测试工程合同](../development/testing.md#后台与重连场景)，裁决记录见 #230。
+  - 2026-09-30 修订：场景通过时不再保留产物。这些成功产物没有被任何流程读取，维护却有成本，维护者裁决删除。场景仍记录状态摘要、树形 `log`、`audit` 输出与所用参数，只在失败时写入失败 bundle。现行规则见[测试工程合同](../development/scenarios/README.md#自动场景)，裁决记录见 #230。
 - 自有记录层的不变量在 E2E 的崩溃场景中核验：在每个提交点 SIGKILL 后重开，检查树中无未配对节点、一个 Turn 只有最后一个 Step 的 `end` 不是 `Continue`、Turn 记录与最后一个 Step 一致、已写入的取消终态关闭为 Cancelled、有 Owner 执行的进行中 Turn 存在时不同请求的 `send` 与 `rewind` 返回 Busy。
 - 观察在 E2E 场景中核验：多步 Turn 中途新建订阅、故意放慢到落出窗口的订阅者、最后事件与 Turn 关闭同时就绪，三种情况下客户端拼出的内容都与关闭后从 redb 重读的内容一致；模型流中正文与 reasoning 交错到达时（含 OpenAI 兼容 provider），实时段列表与 Step parts 合并相邻同类后一致；后台重启后重连得到自动关闭的结局。
 - 必须隔离测试的部分（如表编码、值版本解析、旧库拒绝），先列出全部失败方式再写实现。

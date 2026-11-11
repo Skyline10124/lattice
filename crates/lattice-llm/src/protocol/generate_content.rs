@@ -1,28 +1,54 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Gemini provider: request JSON construction, SSE parsing,
-//! and auth headers for the Gemini `generateContent` API.
-//!
-//! Uses Gemini-specific wire format: `systemInstruction`, role `"model"`,
-//! `functionCall` / `functionResponse`, and `x-goog-api-key` auth.
+//! generateContent 的请求构造与 SSE 解析。
 
-use lattice_conversation::ProviderOrigin;
+use lattice_conversation::{Protocol, ReplayOrigin};
 
-use crate::protocol::projection::{ProjectionError, request_messages_to_wire, wire_usage};
+use crate::protocol::projection::{ProjectionError, request_messages_to_wire};
+use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
-use crate::router::ResolvedModel;
 use crate::types::ChatRequest;
+use lattice_conversation::Effort;
 
-/// Build the JSON body for a Gemini `streamGenerateContent` request.
+/// 构造 generateContent 请求；模型名由端点路径指定。
 pub fn build_request_json(
     request: &ChatRequest,
-    resolved: &ResolvedModel,
+    reasoning: Option<ReasoningPlan>,
+    model_reasoning: Option<bool>,
+    origin: &ReplayOrigin,
 ) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_to_wire(ProviderOrigin::Gemini, &request.messages)?;
+    let projected = request_messages_to_wire(origin, &request.messages)?;
     let mut body = serde_json::json!({
         "contents": projected.messages,
     });
+
+    let mut config = serde_json::json!({});
+    if let Some(plan) = reasoning {
+        config = match plan {
+            ReasoningPlan::Effort {
+                effort: Effort::Off,
+                ..
+            }
+            | ReasoningPlan::Toggle { enabled: false } => serde_json::json!({"thinkingBudget":0}),
+            ReasoningPlan::Effort { effort, .. } => {
+                serde_json::json!({"thinkingLevel":effort.as_str()})
+            }
+            ReasoningPlan::Budget { tokens, .. } => serde_json::json!({"thinkingBudget":tokens}),
+            ReasoningPlan::Toggle { enabled: true } => serde_json::json!({"thinkingBudget":-1}),
+        };
+    }
+    if model_reasoning == Some(true)
+        && config
+            .get("thinkingBudget")
+            .and_then(serde_json::Value::as_u64)
+            != Some(0)
+    {
+        config["includeThoughts"] = true.into();
+    }
+    if config.as_object().is_some_and(|fields| !fields.is_empty()) {
+        body["generationConfig"] = serde_json::json!({"thinkingConfig":config});
+    }
 
     if let Some(system) = projected.system {
         body["systemInstruction"] = serde_json::json!({
@@ -50,18 +76,6 @@ pub fn build_request_json(
         }]);
     }
 
-    let mut generation_config = serde_json::Map::new();
-    if let Some(temperature) = request.temperature {
-        generation_config.insert("temperature".to_string(), serde_json::json!(temperature));
-    }
-    if let Some(max_tokens) = request.max_tokens {
-        generation_config.insert("maxOutputTokens".to_string(), serde_json::json!(max_tokens));
-    }
-    if !generation_config.is_empty() {
-        body["generationConfig"] = serde_json::Value::Object(generation_config);
-    }
-
-    let _ = resolved;
     Ok(body)
 }
 
@@ -73,11 +87,6 @@ pub fn build_stream_url(base_url: &str, provider_model: &str) -> String {
         base_url.trim_end_matches('/'),
         encoded
     )
-}
-
-/// Build the Gemini auth header value (just the API key).
-pub fn auth_header_value(api_key: &str) -> String {
-    api_key.to_string()
 }
 
 /// Part 的字段名标明其内容类型；诊断不携带字段值或回放元数据。
@@ -93,6 +102,7 @@ pub(super) fn unsupported_part_type(part: &serde_json::Value) -> &str {
 
 #[derive(Default)]
 pub struct GeminiSseParser {
+    usage: super::usage::UsageSnapshot,
     current: Option<(usize, PartKind, bool)>,
     next_index: usize,
     had_tool_calls: bool,
@@ -126,7 +136,18 @@ impl GeminiSseParser {
             Ok(None) => return vec![],
             Err(error) => return vec![error],
         };
-        if let Some(error) = super::common::extract_api_error(ProviderOrigin::Gemini, &root) {
+        let mut events = Vec::new();
+        match self.usage.update(Protocol::GenerateContent, &root) {
+            Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
+            Ok(None) => {}
+            Err(error) => return vec![ProtocolEvent::error(error.to_string(), false)],
+        }
+        events.extend(self.parse_content(&root));
+        events
+    }
+
+    fn parse_content(&mut self, root: &serde_json::Value) -> Vec<ProtocolEvent> {
+        if let Some(error) = super::common::extract_api_error(Protocol::GenerateContent, root) {
             return vec![error];
         }
         let mut events = Vec::new();
@@ -174,18 +195,13 @@ impl GeminiSseParser {
                                 false,
                             )];
                         };
-                        let provider_call_id = match function.get("id") {
-                            Some(serde_json::Value::String(id)) => {
-                                Some(StringPatch::Set(id.clone()))
-                            }
-                            Some(serde_json::Value::Null) | None => None,
-                            _ => {
-                                return vec![ProtocolEvent::error(
-                                    "malformed generateContent wire: functionCall id is not a string",
-                                    false,
-                                )];
-                            }
+                        let Some(id) = function["id"].as_str() else {
+                            return vec![ProtocolEvent::error(
+                                "malformed generateContent wire: functionCall.id is missing or not a string",
+                                false,
+                            )];
                         };
+                        let provider_call_id = Some(StringPatch::Set(id.into()));
                         events.push(ProtocolEvent::Part(PartDelta::ToolMetadata {
                             index,
                             name: Some(StringPatch::Set(name.into())),
@@ -253,7 +269,7 @@ impl GeminiSseParser {
             if let Some(reason) = candidate["finishReason"].as_str() {
                 self.close_text(&mut events);
                 self.completed = true;
-                match wire_usage(ProviderOrigin::Gemini, &root) {
+                match self.usage.finish(Protocol::GenerateContent) {
                     Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
                     Ok(None) => {}
                     Err(error) => {
@@ -270,11 +286,11 @@ impl GeminiSseParser {
                 });
                 return events;
             }
-        }
-        match wire_usage(ProviderOrigin::Gemini, &root) {
-            Ok(Some(usage)) => events.push(ProtocolEvent::Usage(usage)),
-            Ok(None) => {}
-            Err(error) => events.push(ProtocolEvent::error(error.to_string(), false)),
+        } else if let Some(reason) = root["promptFeedback"]["blockReason"].as_str() {
+            events.push(ProtocolEvent::error(
+                format!("generateContent prompt blocked: blockReason={reason}"),
+                false,
+            ));
         }
         events
     }
@@ -309,7 +325,7 @@ mod tests {
         let input = stream::iter(frames)
             .flat_map(move |frame| stream::iter(parser.parse_chunk(None, &frame)));
         let events = crate::reply_stream::assemble_reply_stream(
-            Some(ProviderOrigin::Gemini),
+            Some(crate::test_reply::replay_origin(Protocol::GenerateContent)),
             Box::pin(input),
             crate::StreamControl::default(),
         )
@@ -363,7 +379,7 @@ mod tests {
                 index: 2,
                 block_type: expected,
             };
-            let mut parser = Parser::new(ProviderOrigin::Gemini);
+            let mut parser = Parser::new(Protocol::GenerateContent);
             let events = parser.parse_chunk(None, &wire.to_string());
             assert!(matches!(&events[..], [LlmEvent::Finished {
                 outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Protocol(error)) }, ..
@@ -376,20 +392,30 @@ mod tests {
             );
             assert!(!format!("{events:?}").contains("private-payload"));
             assert_eq!(
-                crate::protocol::projection::wire_to_native(ProviderOrigin::Gemini, &wire),
+                crate::test_reply::wire_to_native(Protocol::GenerateContent, &wire),
                 Err(ProjectionError::Protocol(expected_error)),
             );
         }
     }
 
     #[test]
-    fn parser_preserves_thought_state_and_optional_ids_without_synthesis() {
+    fn parser_requires_tool_ids() {
         for (id_field, expected_id) in [(",\"id\":\"real-id\"", Some("real-id")), ("", None)] {
-            let mut parser = Parser::new(ProviderOrigin::Gemini);
+            let mut parser = Parser::new(Protocol::GenerateContent);
             let chunk = format!(
                 r#"{{"candidates":[{{"content":{{"role":"model","parts":[{{"text":"reason","thought":true,"thoughtSignature":"sig"}},{{"functionCall":{{"name":"observe__workspace","args":{{}}{id_field}}}}}]}},"finishReason":"STOP"}}]}}"#
             );
             let events = parser.parse_chunk(None, &chunk);
+            if expected_id.is_none() {
+                assert_eq!(
+                    crate::test_reply::failure(&events).as_deref(),
+                    Some(
+                        "malformed generateContent wire: functionCall.id is missing or not a string"
+                    )
+                );
+                assert!(parser.parse_chunk(None, &chunk).is_empty());
+                continue;
+            }
             let message = events
                 .iter()
                 .find_map(|event| match event {
@@ -420,7 +446,7 @@ mod tests {
 
     #[test]
     fn parser_completes_usage() {
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         let events = parser.parse_chunk(
             None,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"Done"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":20,"totalTokenCount":30}}"#,
@@ -434,7 +460,7 @@ mod tests {
         )));
         assert!(events.iter().any(|event| matches!(
             event,
-            LlmEvent::Finished { report: crate::AttemptReport { usage: Some(usage), .. }, .. } if usage.total_tokens == 30
+            LlmEvent::Finished { report: crate::AttemptReport { usage: Some(usage), .. }, .. } if usage.context_tokens() == Some(30)
         )));
         assert!(parser
             .parse_chunk(
@@ -446,7 +472,7 @@ mod tests {
 
     #[test]
     fn parser_accumulates_multichunk_reasoning_text_and_signature() {
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         for chunk in [
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"rea","thought":true}]}}]}"#,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"son","thought":true,"thoughtSignature":"sig"}]}}]}"#,
@@ -496,7 +522,7 @@ mod tests {
 
     #[test]
     fn parser_preserves_distinct_signatures_and_rejects_union_parts() {
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         parser.parse_chunk(
             None,
             r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"a","thought":true,"thoughtSignature":"sig-a"}]}}]}"#,
@@ -525,15 +551,25 @@ mod tests {
             "sig-b"
         );
 
-        let mut parser = Parser::new(ProviderOrigin::Gemini);
+        let mut parser = Parser::new(Protocol::GenerateContent);
         let events = parser.parse_chunk(
             None,
-            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe__workspace","args":{}}}]}}]}"#,
+            r#"{"candidates":[{"content":{"role":"model","parts":[{"text":"x","functionCall":{"name":"observe__workspace","args":{}}}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":8,"totalTokenCount":8}}"#,
         );
-        assert!(events.iter().any(|event| matches!(
-            event,
-            LlmEvent::Finished { outcome: ReplyOutcome::Interrupted { reason: ReplyStop::Stream(StreamStop::Provider(failure)) }, .. } if !failure.retryable && failure.message.contains("text and functionCall")
-        )));
+        let Some(LlmEvent::Finished {
+            outcome:
+                ReplyOutcome::Interrupted {
+                    reason: ReplyStop::Stream(StreamStop::Provider(failure)),
+                },
+            report,
+        }) = events.last()
+        else {
+            panic!("{events:?}");
+        };
+        assert!(!failure.retryable && failure.message.contains("text and functionCall"));
+        let usage = report.usage.unwrap();
+        assert_eq!(usage.input, Some(8));
+        assert_eq!(usage.output, None);
         assert!(
             !events
                 .iter()
