@@ -74,4 +74,4 @@ status: active
 ## 并发、找回与生命周期
 
 - **并发与观察**：`configure` 与 `rewind` 相同，占用会话的 `Owner` 槽并取得 `SessionExecutionLock`；会话正在准入或执行一轮时返回 Busy。`configure` 成功后，该会话的 `watch` 观察者收到更新后的会话头。锁与忙碌原因、[草稿会话](../../reference/glossary.md)及逾期清理规则见[操作锁](concurrency.md#操作锁)与[会话状态与草稿清理](concurrency.md#会话状态与草稿清理)。
-- **幂等与找回**：参数相同且所依赖的配置文件没有变化时，`configure` 得到相同的会话设置；后台不维护请求去重表。结果不明时的重发与找回规则见[configure 的找回](recovery.md#configure-的找回)。
+- **幂等与找回**：参数相同且所依赖的配置文件没有变化时，`configure` 得到相同的会话设置；后台不维护请求去重表。结果不明时的处理见[configure 的找回](recovery.md#configure-的找回)。
