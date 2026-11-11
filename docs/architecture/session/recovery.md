@@ -10,11 +10,11 @@ status: active
 
 客户端在提交前生成 TurnId，向已存在的会话 `SessionId` 发起 `submit`（携带 `input`、规范工作区与可选的 `expected_settings`）。新会话先通过 `configure(New)` 显式创建；`submit` 遇到不存在的会话 ID 时返回 NotFound，不会创建新会话。新 TurnId 表示独立请求，即使文本相同。
 
-`submit` 只接受新请求。后台按严格解析校验身份的形状，不合格的在 IPC 解码时拒绝，再按下表自上而下核对身份、资源与库中事实；Conflict 带上原因码（全系统共四种：`turn_id_used`、`session_exists`、`binding_mismatch`、`settings_changed`，其中 `session_exists` 只由 `configure(New)` 返回），前端据此区分：
+`submit` 只接受新请求。后台按严格解析校验身份的形状，不合格的在 IPC 解码时拒绝，下表列出提交时可能遇到的事实以及后台与前端的动作，后台检查的顺序见[实现模块与公开操作](operations.md#实现模块与公开操作)；Conflict 带上原因码（全系统共四种：`turn_id_used`、`session_exists`、`binding_mismatch`、`settings_changed`，其中 `session_exists` 只由 `configure(New)` 返回），前端据此区分：
 
 | 提交时找到的事实 | 后台与前端动作 |
 | --- | --- |
-| TurnId 正在被另一个在途请求使用，或（通过全局 Owner 上限后查得）已在 TurnId 索引中 | 返回 Conflict：`turn_id_used` |
+| TurnId 正在被另一个在途请求使用，或已在 TurnId 索引中 | 返回 Conflict：`turn_id_used` |
 | 会话库尚未初始化，或会话 `S` 不存在 | 返回 NotFound |
 | 会话 `S` 的 `project_path` 与请求工作区不一致 | 返回 Conflict：`binding_mismatch` |
 | 全局 Owner 已满 32、同会话已有 Owner，或 `SessionExecutionLock` 被占用 | 非阻塞返回 Busy；前端保留未提交输入，由用户稍后发送 |
@@ -36,10 +36,15 @@ status: active
 
 ## configure 的找回
 
-- **幂等重发**：参数相同且所依赖的配置文件没有变化时，`configure` 得到相同的会话设置，后台不维护请求去重表；连接建立后结果不明时，以同一参数重发是安全的。
+- **幂等重发**：`configure` 是幂等的，见[并发、找回与生命周期](settings.md#并发找回与生命周期)；结果不明时，以同一参数重发是安全的。
 - **`New` 得到 `session_exists`**：重发 `configure(New)` 返回 Conflict（`session_exists`）说明上一次请求已创建该会话，客户端读取 `head` 后按已配置继续。
 - **`Busy`**：返回 Busy 表示该会话或全局槽位正被占用，稍后再发。
-- **CLI 的自动重发**：CLI 在 `configure` 连接建立后遇到结果不明（传输中断、后台内部或存储恢复错误，或重发期间守护进程未运行）时，以同一参数自动重发，最多 2 次；重发遇到 Busy 时短暂等待后再发，收到 SIGINT 时结束重发并按 `unknown` 处理。
+- **CLI 的自动重发**：CLI 先发一次 `configure`。连接无法建立或后台明确拒绝（包括 Busy）时，结果为 `rejected`，不重发。请求写出后连接中断或读不到回复，或后台回复 `Internal` 错误、恢复原因为 `CommitFailed` 或 `WorkerFailed` 的错误时，结果不明，CLI 以同一参数重发，最多 2 次：
+  - 重发成功，按 `configured` 继续；
+  - `configure(New)` 的重发得到 `session_exists` 时，读取 `head`，按 `configured` 继续；
+  - 重发得到 Busy 或 NotRunning，或读取 `head` 失败时，记下错误，继续下一次重发；第一次重发得到 Busy 时先短暂等待；
+  - 重发得到其他拒绝时，结果为 `rejected`；
+  - 重发用完，或收到 SIGINT 时，结果为 `unknown`。
 
 TUI 不自动重发 `configure`：结果不明时显示 Warn，实际生效的设置以 `watch` 推送的会话头为准，见 [TUI 合同](../tui/README.md)。
 

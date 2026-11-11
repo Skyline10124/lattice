@@ -79,7 +79,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 `rewind N` 只有一种语义：把当前位置移到节点 N 本身，下一次提交的新节点以 N 为父。它只移动这个指针，不在树上写入节点：对树的操作不进入树的记录。改写某条用户消息就是退回到它的父节点再发送，改写第一条消息就是 `rewind 0`。退回到一个没有回复的 Step，与退回到它的父节点，发给模型的上下文相同。会话层不提供“编辑消息”等第二种入口；前端可以把选中消息并改写的交互翻译为这两步。
 
-当前 agent 是会话设置中的 agent（`profile.name`）；每一轮实际使用的 agent 记在它的 UserMessage 节点上。`rewind` 不改变会话设置，所以退回旧节点后当前 agent 不变，也包括退回根节点 `0`。通过 `configure` 指定 agent 会加载该 agent 的 profile 并更新会话设置。
+当前 agent 是会话设置中的 agent（`profile.agent_name`）；每一轮实际使用的 agent 记在它的 UserMessage 节点上。`rewind` 不改变会话设置，所以退回旧节点后当前 agent 不变，也包括退回根节点 `0`。通过 `configure` 指定 agent 会加载该 agent 的 profile 并更新会话设置。
 
 ### 组件与接口
 
