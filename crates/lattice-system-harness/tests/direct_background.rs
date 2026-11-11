@@ -424,6 +424,11 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             "backend":world.daemon_pids().unwrap(),"gate_released":false}),
             )
             .unwrap();
+        // 先结束提交这一轮的前端：gate 未放行，这一轮仍在执行，强制结束的是仍在观察的进程。
+        // 放在取消之后会与后台关闭这一轮竞争：前端可能先看到 Cancelled 而自行以 2 退出。
+        let detached = first.kill_and_wait().unwrap();
+        evidence.record_command("detach before cancel", &detached);
+        assert_forced_kill(&detached);
         // 另一个终端按会话取消：CLI 从会话头查出正在执行的那一轮再按 TurnId 取消。
         let cancel = run(
             &world,
@@ -443,9 +448,6 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
                 error: None,
             })]
         );
-        let detached = first.kill_and_wait().unwrap();
-        evidence.record_command("detach after Taken", &detached);
-        assert_forced_kill(&detached);
         assert_eq!(
             closed(&world, &budget, &mut evidence, &first_turn)["summary"]["outcome"],
             "cancelled"
