@@ -13,7 +13,7 @@ status: active
 ## 操作
 
 1. 新建会话完成首轮提交后，修改 profile 源文件（含 `agent.toml` 与外部系统提示文件）及 `providers.toml` 中该 provider 的 `base_url`；向同一会话不带 `--agent` 提交、显式指定同名 `--agent` 提交，删除 profile 目录后再分别不带 `--agent` 与带 `--agent` 提交，并另开新会话提交。
-2. 在带重试与工具调用的多步 Turn 进行中修改 `base_url` 或使该 provider 配置失效；在两轮之间修改 `[llm]` 预算并显式指定 `--agent` 提交。
+2. 在带重试与工具调用的多步 Turn 进行中修改 `base_url`、改小模型元数据中的输出上限，或使该 provider 配置失效（含关闭 provider 的 `thinking_budget` 能力）。
 3. 两个会话并发提交到不同 provider；提交到证书不受信任的 provider。
 4. 后台运行时，以不同的 `SSL_CERT_FILE` 启动前端提交；执行 `daemon stop` 后由该前端拉起新后台再提交。
 5. 另起后台，分别以不可加载的 `SSL_CERT_FILE` 和只含超过 64 KiB 证书的 `SSL_CERT_FILE` 启动，执行状态查询并分别向 https 与 http provider 提交。
@@ -21,8 +21,8 @@ status: active
 ## 断言
 
 - 后台按启动时固定的配置目录读取 profile、`providers.toml` 与 `auth.json`；场景项目中的 `.env`、`providers.toml` 与前端环境变量既不改变 endpoint，也不提供凭据。
-- 已有会话不带 `--agent` 提交时继续使用已保存会话设置中的系统提示、模型与档位（原 profile 目录删除后照常完成），请求发往修改后的 `base_url`；显式给出 `--agent` 的 `configure`（含同名 `--agent` 与新会话）重新加载当前 profile 快照与 `[llm]` 预算，源文件缺失时拒绝 `configure` 且已有会话设置不变。
-- 同一 Turn 在重试与工具步骤间保持接受时冻结的模型与档位；进行中修改 `base_url` 后，后续模型尝试发往新 endpoint；provider 配置失效时不发网络请求，按上一次已解析的归属记录不可重试的 provider 配置错误。
+- 已有会话不带 `--agent` 提交时继续使用已保存会话设置中的系统提示、模型与档位（原 profile 目录删除后照常完成），请求发往修改后的 `base_url`；显式给出 `--agent` 的 `configure`（含同名 `--agent` 与新会话）重新加载当前 profile 快照，源文件缺失时拒绝 `configure` 且已有会话设置不变。
+- 同一 Turn 在重试与工具步骤间保持接受时冻结的模型与档位；模型元数据按请求重读，输出上限改小后，之后的请求按新上限计算 `thinking_budget`（16384 变为 12288）。进行中修改 `base_url` 后，后续模型尝试发往新 endpoint；provider 配置失效时不发网络请求，按上一次已解析的归属记录不可重试的 provider 配置错误；关闭 provider 的 `thinking_budget` 能力后，下一次请求不发出，这一轮以 failed 结束，会话头与 `UserMessage` 中的档位保持接受时的值。
 - 并发 Turn 的 endpoint 与凭据互不影响；证书不受信任时握手失败，该轮按 provider 错误结束。
 - 后台运行期间前端传入的 `SSL_CERT_FILE` 不改变后台信任根；停止后台并由新前端启动后，新信任根生效。
 - 没有可用启动根证书的后台照常回答查询：https provider 的提交在接受前按配置错误拒绝，provider 收不到请求；http provider 的提交照常接受并完成。HTTP 场景代替不了 TLS 验证。

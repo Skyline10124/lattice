@@ -14,7 +14,7 @@ status: active
 
 1. 对未写 `[agent].model` 且未设默认档位的 agent 经公开 IPC 执行 `configure(New)`，停止并重启后台后查询 `session list` 与 `head`，直接提交一轮；再执行 `configure(Existing, model=M)` 后提交，随后分别携带旧 `SettingsVersion` 与新 `SettingsVersion` 各提交一次。
 2. 用 `--model`、`--effort`（含 `--effort off`）配置并提交，之后不带选择继续提交（含工具重试、后台重启与 provider 失败场景）；请求目标模型不支持的档位；切换到另一 provider 或不同档位集合的模型。
-3. 先对已有会话执行 `configure(Existing)` 修改模型与档位，删除原 profile 目录，再设 `turn_accepted` 崩溃屏障并经未读回执连接提交一轮，触发 SIGKILL 后只读重开查询，随后不带选择继续发送；另在后台设 `configure_committed` 崩溃屏障，用 CLI `--json session send --agent A` 创建新会话触发 SIGKILL，等待前端退出并重启后台后查询会话状态、在同一会话继续发送。
+3. 改写 agent 的 profile（换模型、档位与系统提示）及 `providers.toml` 中该模型的档位集合，在后台设 `turn_accepted` 崩溃屏障；分别对新会话执行 `configure(New)`、对已完成一轮的会话执行 `configure(Existing)`，两者都显式给出该 agent；再经不读回执的连接提交一轮，接受后 SIGKILL 后台。重启后台后查询 `head` 与视图，按 TurnId 查询这一轮并以同一 TurnId 重发；删除 profile 目录后，向同一会话不带选择继续发送；另在后台设 `configure_committed` 崩溃屏障，用 CLI `--json session send --agent A` 创建新会话触发 SIGKILL，等待前端退出并重启后台后查询会话状态、在同一会话继续发送。
 4. 在名字含 `0xff` 字节的项目目录中运行 `lattice session send --agent A`，分别查看 `session list` 文本与 `--json` 输出，再在同一目录与另一目录各自运行 `--session S` 发送。
 5. 在 TUI 中用 `/model`、`/effort` 选定后提交并经历重试、工具与重新打开会话；在一轮执行中通过 `/model` 选定另一模型；待该轮结束后切换到不支持当前档位的模型。
 
@@ -24,7 +24,7 @@ status: active
 - 未选择模型时提交以配置拒绝返回，提示先通过 `/model` 或 `--model` 选择模型，不写入对话节点，会话头与 `SettingsVersion` 不变；选定模型 M 后提交完成，`UserMessage` 记录模型 M。
 - 携带过期 `SettingsVersion` 提交返回 `settings_changed` 冲突且不写节点；携带当前 `SettingsVersion` 提交被接受并完成。
 - 模型与档位选择（含 `off`）经 `configure` 立即保存到会话设置，之后不带选择的提交、重试与重启均沿用；不支持的档位在 `configure` 时被拒绝，会话设置不变；换模型时按[档位规则](../../../architecture/session/settings.md#档位规则)调整档位，换到另一 provider 后会话设置记录新的 provider `id`。
-- 先执行 `configure` 保存设置、再在 `turn_accepted` 屏障崩溃后，只读重开读到已保存的会话设置与冻结了该设置的 `UserMessage`，未关闭的那一轮读出 `failed`（`process_exit`），随后不带选择的发送继续沿用该会话设置。
+- `turn_accepted` 崩溃并重启后，`head` 给出崩溃前 `configure` 保存的模型与档位，并带有 `settings_version`；视图中这一轮的 `UserMessage` 冻结了同一模型与档位，按 TurnId 查询得到该节点，以同一 TurnId 重发返回 `turn_id_used`。删除 profile 目录后，不带选择的发送照常完成，请求使用会话设置中保存的模型、档位与系统提示。新会话与已有会话两种情形结果相同。崩溃后未关闭的那一轮如何读出，见[后台崩溃与执行者消失](crash-and-vanished-executor.md)。
 - `configure_committed` 崩溃后，CLI 第一条 JSONL 为写明身份的 `submit(sending)`；因 `configure_once` 直接连接 socket 而不自动拉起后台，重连得到 `not_running`，后续依次输出 `configure(unknown)` 与 `submit(not_accepted)` 并以退出码 1 退出；重启后台后状态根中只有该草稿会话 S（节点数为 1），后续 `--session S` 发送正常完成，不出现第二个会话或重复轮次。
 - 非 UTF-8 项目目录下创建的会话在 `session list` 文本输出中以替换字符显示路径，在 `--json` 输出中 `project_path` 与规范路径的原始字节数组逐字节一致；同目录续发成功，跨目录以 `--session S` 发送返回 `binding_mismatch` 冲突并以退出码 2 退出。
 - TUI 中 `/model`、`/effort` 选择经 `configure` 保存后在重试、工具与重新打开会话后保持；在一轮执行中选择模型时，Dock 显示说明执行中不能修改设置的 `WARN`，后台 `head` 与 `SettingsVersion` 不变；该轮结束后切换到不支持当前档位的模型时，对话记录出现说明档位调整的 `Info`，statusline 显示新的模型与档位。
