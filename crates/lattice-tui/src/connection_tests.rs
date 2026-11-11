@@ -76,15 +76,11 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     assert!(row(&app, "draft answer final") < row(&app, "between"));
     assert!(row(&app, "between") < row(&app, "second step"));
     assert_eq!(
-        app.current_head()
-            .and_then(|h| h.model.as_ref())
-            .map(ModelId::as_str),
+        app.current_head().model.as_ref().map(ModelId::as_str),
         Some("model-a")
     );
     assert_eq!(
-        app.current_head()
-            .and_then(|h| h.provider.as_ref())
-            .map(ProviderId::as_str),
+        app.current_head().provider.as_ref().map(ProviderId::as_str),
         Some("openai")
     );
     assert_eq!(app.context_tokens, Some(1234));
@@ -1454,7 +1450,7 @@ fn configure_adjustment_shows_info_and_busy_shows_warn() {
     let mut startup = App::new(
         SessionContext {
             session_id: sid(),
-            initial_head: Some(head(0, None, false)),
+            initial_head: head(0, None, false),
             initial_adjustment: Some(lattice_api::local::EffortAdjustment {
                 from: Some(High),
                 to: Some(Medium),

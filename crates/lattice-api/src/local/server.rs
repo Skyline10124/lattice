@@ -414,91 +414,98 @@ impl Backend {
         let sid = request.session.id();
         let is_new = matches!(request.session, ConfigureSession::New(_));
 
-        if is_new {
-            if let Some(api) = &api
-                && api.read(move |r| r.find_session(sid)).await?.is_some()
-            {
-                return Err(conflict(ConflictReason::SessionExists));
-            }
-            if request.agent.is_none() {
-                return Err(LocalError::new(
-                    LocalErrorKind::BadRequest,
-                    "new Session requires explicit agent",
-                ));
-            }
-        } else {
-            let api = api.as_ref().ok_or_else(not_found)?;
-            let record = match api.read(move |r| r.session(sid)).await {
-                Ok(record) => record,
-                Err(crate::ApiError::Store(error))
-                    if matches!(
-                        error.as_ref(),
-                        lattice_session::store::StoreError::NotFound { .. }
-                    ) =>
-                {
-                    return Err(not_found());
-                }
-                Err(error) => return Err(error.into()),
-            };
-            if record.project_path != workspace.project_path() {
-                return Err(conflict(ConflictReason::BindingMismatch));
-            }
+        enum BaseSource {
+            Agent(crate::AgentName),
+            Current(lattice_session::store::SessionSettings),
         }
 
-        let mut io = if let Some(api) = &api {
-            Some(
-                CoordinatorStoreIo::acquire_api(api.clone(), sid)
+        let (mut io, base_source) = match request.session {
+            ConfigureSession::New(_) => {
+                if let Some(api) = &api
+                    && api.read(move |r| r.find_session(sid)).await?.is_some()
+                {
+                    return Err(conflict(ConflictReason::SessionExists));
+                }
+                let Some(agent_name) = request.agent else {
+                    return Err(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "new Session requires explicit agent",
+                    ));
+                };
+                let io = match &api {
+                    Some(api) => Some(
+                        CoordinatorStoreIo::acquire_api(api.clone(), sid)
+                            .await
+                            .map_err(crate::ApiError::from)?,
+                    ),
+                    None => None,
+                };
+                (io, BaseSource::Agent(agent_name))
+            }
+            ConfigureSession::Existing(_) => {
+                let api = api.as_ref().ok_or_else(not_found)?;
+                let record = match api.read(move |r| r.session(sid)).await {
+                    Ok(record) => record,
+                    Err(crate::ApiError::Store(error))
+                        if matches!(
+                            error.as_ref(),
+                            lattice_session::store::StoreError::NotFound { .. }
+                        ) =>
+                    {
+                        return Err(not_found());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if record.project_path != workspace.project_path() {
+                    return Err(conflict(ConflictReason::BindingMismatch));
+                }
+                let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
                     .await
-                    .map_err(crate::ApiError::from)?,
-            )
-        } else {
-            None
-        };
-
-        let current = if is_new {
-            None
-        } else {
-            let io_ref = io.as_ref().expect("Existing session opened store");
-            Some(
-                io_ref
+                    .map_err(crate::ApiError::from)?;
+                let current = io
                     .read(move |read| {
                         read.session(sid)?;
                         read.session_settings(sid)
                     })
                     .await
-                    .map_err(crate::ApiError::from)?,
-            )
+                    .map_err(crate::ApiError::from)?;
+                let base_source = match request.agent {
+                    Some(agent_name) => BaseSource::Agent(agent_name),
+                    None => BaseSource::Current(current),
+                };
+                (Some(io), base_source)
+            }
         };
 
         let directory = super::auth::directory(self.home.as_deref())?;
         let workspace_for_load = workspace.clone();
-        let agent_name = request.agent;
         let cmd_model = request.model;
         let cmd_effort = request.effort;
         let (settings, adjustment) = blocking(move || {
             let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-            let loaded_agent = if let Some(name) = agent_name {
-                let loaded = crate::profile::load_for_turn(&name, &workspace_for_load, &directory)?;
-                Some(crate::configure::LoadedAgent {
-                    profile: crate::profile::TurnProfile::from_loaded(&loaded),
-                    source_path: loaded.path,
-                })
-            } else {
-                None
+            let base = match base_source {
+                BaseSource::Agent(name) => {
+                    let loaded =
+                        crate::profile::load_for_turn(&name, &workspace_for_load, &directory)?;
+                    crate::configure::SettingsBase::Agent(crate::configure::LoadedAgent {
+                        profile: crate::profile::TurnProfile::from_loaded(&loaded),
+                        source_path: loaded.path,
+                    })
+                }
+                BaseSource::Current(ref current) => {
+                    crate::configure::SettingsBase::Current(current)
+                }
             };
-            let (settings, adjustment) = crate::configure::resolve_settings(
-                current.as_ref(),
-                loaded_agent,
-                cmd_model,
-                cmd_effort,
-                |target| lattice_llm::model_supported_efforts(&directory, target),
-            )
-            .map_err(|rejection| {
-                crate::ApiError::Configuration(crate::ConfigRejection::new(
-                    &rejection.to_string(),
-                    Some(&auth),
-                ))
-            })?;
+            let (settings, adjustment) =
+                crate::configure::resolve_settings(base, cmd_model, cmd_effort, |target| {
+                    lattice_llm::model_supported_efforts(&directory, target)
+                })
+                .map_err(|rejection| {
+                    crate::ApiError::Configuration(crate::ConfigRejection::new(
+                        &rejection.to_string(),
+                        Some(&auth),
+                    ))
+                })?;
             settings.validate().map_err(crate::ApiError::from)?;
             Ok((settings, adjustment))
         })

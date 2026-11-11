@@ -10,18 +10,21 @@ use std::collections::VecDeque;
 
 const LIMIT: usize = 5;
 
-/// 排队消息对应的预期设置版本：入队时固定的快照，或等待本客户端在途 configure 的回复。
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// 排队消息对应的预期设置版本：入队时固定的快照，或绑定入队时在途 configure 的代次。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueuedSettings {
-    Snapshot(Option<lattice_api::local::SettingsVersion>),
-    PendingConfigure(u64),
+    Snapshot(lattice_api::local::SettingsVersion),
+    PendingConfigure {
+        generation: u64,
+        fallback: lattice_api::local::SettingsVersion,
+    },
 }
 
 /// 仅由输入文字和已验证锚点的草稿组成，不从历史消息恢复可编辑草稿。
 #[derive(Clone)]
 pub(crate) struct Outgoing {
     pub(crate) message: Message,
-    pub(crate) expected_settings: Option<lattice_api::local::SettingsVersion>,
+    pub(crate) expected_settings: lattice_api::local::SettingsVersion,
 }
 impl std::ops::Deref for Outgoing {
     type Target = Message;
@@ -93,11 +96,10 @@ impl Queue {
         if self.paused || self.is_editing() || self.awaiting.is_some() {
             return None;
         }
-        let message = self.messages.pop_front()?;
-        let expected_settings = match &message.settings {
-            QueuedSettings::Snapshot(version) => *version,
-            QueuedSettings::PendingConfigure(_) => None,
+        let QueuedSettings::Snapshot(expected_settings) = self.messages.front()?.settings else {
+            return None;
         };
+        let message = self.messages.pop_front()?;
         let payload = Outgoing {
             message: message.message.clone(),
             expected_settings,
@@ -292,21 +294,24 @@ impl Queue {
             .saturating_add(usize::from(self.awaiting.is_some()))
             >= LIMIT
     }
+    fn drain_message(&mut self, text: String) -> Message {
+        self.drafts.sort_by_key(|d| d.comment.n);
+        Message {
+            text: if text.trim().is_empty() {
+                String::new()
+            } else {
+                text
+            },
+            comments: self.drafts.drain(..).map(|d| d.comment).collect(),
+        }
+    }
     pub(crate) fn take_message(
         &mut self,
         text: String,
-        expected_settings: Option<lattice_api::local::SettingsVersion>,
+        expected_settings: lattice_api::local::SettingsVersion,
     ) -> Outgoing {
-        self.drafts.sort_by_key(|d| d.comment.n);
         Outgoing {
-            message: Message {
-                text: if text.trim().is_empty() {
-                    String::new()
-                } else {
-                    text
-                },
-                comments: self.drafts.drain(..).map(|d| d.comment).collect(),
-            },
+            message: self.drain_message(text),
             expected_settings,
         }
     }
@@ -314,7 +319,7 @@ impl Queue {
         if self.is_full() || (text.trim().is_empty() && self.drafts.is_empty()) {
             return false;
         }
-        let message = self.take_message(text, None).message;
+        let message = self.drain_message(text);
         self.messages.push_back(QueuedMessage {
             id,
             message,
@@ -322,30 +327,30 @@ impl Queue {
         });
         true
     }
-    pub(crate) fn rebind_pending_configure(&mut self, generation: u64) {
-        for message in &mut self.messages {
-            if matches!(message.settings, QueuedSettings::PendingConfigure(_)) {
-                message.settings = QueuedSettings::PendingConfigure(generation);
-            }
-        }
-        if let Some(Editor {
-            target: EditTarget::Queued { message, .. },
-            ..
-        }) = &mut self.editor
-            && matches!(message.settings, QueuedSettings::PendingConfigure(_))
-        {
-            message.settings = QueuedSettings::PendingConfigure(generation);
-        }
-    }
     pub(crate) fn resolve_configure(
         &mut self,
-        generation: u64,
-        version: Option<lattice_api::local::SettingsVersion>,
+        target: u64,
+        version: lattice_api::local::SettingsVersion,
+    ) -> bool {
+        self.resolve_configure_with(target, |_| version)
+    }
+    pub(crate) fn fail_configure(&mut self, target: u64) -> bool {
+        self.resolve_configure_with(target, |fallback| fallback)
+    }
+    fn resolve_configure_with(
+        &mut self,
+        target: u64,
+        pick: impl Fn(lattice_api::local::SettingsVersion) -> lattice_api::local::SettingsVersion,
     ) -> bool {
         let mut resolved = false;
         for message in &mut self.messages {
-            if message.settings == QueuedSettings::PendingConfigure(generation) {
-                message.settings = QueuedSettings::Snapshot(version);
+            if let QueuedSettings::PendingConfigure {
+                generation,
+                fallback,
+            } = message.settings
+                && generation == target
+            {
+                message.settings = QueuedSettings::Snapshot(pick(fallback));
                 resolved = true;
             }
         }
@@ -353,9 +358,13 @@ impl Queue {
             target: EditTarget::Queued { message, .. },
             ..
         }) = &mut self.editor
-            && message.settings == QueuedSettings::PendingConfigure(generation)
+            && let QueuedSettings::PendingConfigure {
+                generation,
+                fallback,
+            } = message.settings
+            && generation == target
         {
-            message.settings = QueuedSettings::Snapshot(version);
+            message.settings = QueuedSettings::Snapshot(pick(fallback));
             resolved = true;
         }
         resolved

@@ -13,12 +13,12 @@ use lattice_api::local::{
 
 pub(crate) struct SessionContext {
     pub session_id: SessionId,
-    pub initial_head: Option<lattice_api::local::SessionHead>,
+    pub initial_head: lattice_api::local::SessionHead,
     pub initial_adjustment: Option<lattice_api::local::EffortAdjustment>,
 }
 
 /// 启动会话上下文：不带会话时 `configure(New)` 创建草稿；带会话与 `--agent` 时 `configure(Existing)`；
-/// 只读打开已有会话时校验项目路径，不读取 log。
+/// 只读打开已有会话时先校验项目路径，再读取一次会话头，不读取 log。
 pub(crate) async fn open_or_create(
     options: &TuiOptions,
     workspace: &lattice_api::LocalWorkspaceRoot,
@@ -65,13 +65,14 @@ pub(crate) async fn open_or_create(
                 })?;
             return Ok(SessionContext {
                 session_id: session.session_id,
-                initial_head: Some(reply.head),
+                initial_head: reply.head,
                 initial_adjustment: reply.adjustment,
             });
         }
+        let initial_head = client.session_head(session.session_id).await?;
         return Ok(SessionContext {
             session_id: session.session_id,
-            initial_head: None,
+            initial_head,
             initial_adjustment: None,
         });
     }
@@ -94,7 +95,7 @@ pub(crate) async fn open_or_create(
         .await?;
     Ok(SessionContext {
         session_id,
-        initial_head: Some(reply.head),
+        initial_head: reply.head,
         initial_adjustment: reply.adjustment,
     })
 }

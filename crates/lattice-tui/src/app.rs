@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::time::Duration;
 
@@ -136,7 +136,7 @@ pub(crate) struct PendingConfigure {
 }
 
 pub(crate) struct App {
-    pub(crate) ctx: SessionContext,
+    pub(crate) session_id: SessionId,
     pub(crate) blocks: BlockList,
     /// 启动横幅固定在对话记录最上方。它不是状态消息，也不在 `blocks` 中，
     /// 条目替换与 Dock 都碰不到它；身份只供浏览光标锚定。
@@ -154,7 +154,7 @@ pub(crate) struct App {
     query_generation: u64,
     model_query: Option<ModelQuery>,
     configure_generation: u64,
-    pub(crate) configure_in_flight: Option<u64>,
+    pub(crate) configure_in_flight: BTreeSet<u64>,
     pub(crate) configure_request: Option<PendingConfigure>,
     send_after_configure: bool,
     pub(crate) turn_usage: Option<UsageSummary>,
@@ -164,9 +164,9 @@ pub(crate) struct App {
     pub(crate) view_wanted: bool,
     pub(crate) older_request: Option<OlderRequest>,
     cancelling: bool,
-    /// 最新收到的会话头（来自启动 configure、运行中 configure 回复或视图推送），
+    /// 最新收到的会话头（来自启动读取/configure、运行中 configure 回复或视图推送），
     /// 供状态行、选择面板和 expected_settings 读取。
-    latest_head: Option<SessionHead>,
+    latest_head: SessionHead,
     /// 已确认的会话头：它当前位置的条目已经到达。各轮是否结束与正在执行的一轮只按它判定；
     /// 视图开始前为空。
     pub(crate) head: Option<SessionHead>,
@@ -215,18 +215,21 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(mut ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
-        let initial_head = ctx.initial_head.take();
-        let initial_adjustment = ctx.initial_adjustment.take();
+    pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
+        let SessionContext {
+            session_id,
+            initial_head,
+            initial_adjustment,
+        } = ctx;
         let mut app = Self {
             view_wanted: true,
             query_generation: 0,
             model_query: None,
             configure_generation: 0,
-            configure_in_flight: None,
+            configure_in_flight: BTreeSet::new(),
             configure_request: None,
             send_after_configure: false,
-            ctx,
+            session_id,
             blocks: BlockList::default(),
             banner: None,
             markdown_cache: Default::default(),
@@ -401,13 +404,12 @@ impl App {
                     };
                     self.configure_generation = self.configure_generation.saturating_add(1);
                     let generation = self.configure_generation;
-                    self.configure_in_flight = Some(generation);
+                    self.configure_in_flight.insert(generation);
                     self.configure_request = Some(PendingConfigure {
                         generation,
                         model,
                         effort,
                     });
-                    self.queue.rebind_pending_configure(generation);
                     self.dock.close_panel();
                 }
                 DockIntent::None => {}
@@ -487,27 +489,25 @@ impl App {
         }
     }
 
-    pub(crate) fn current_head(&self) -> Option<&SessionHead> {
-        self.latest_head.as_ref()
+    pub(crate) fn current_head(&self) -> &SessionHead {
+        &self.latest_head
     }
 
     pub(crate) fn current_effort(&self) -> Option<Effort> {
-        self.current_head().and_then(|head| head.effort)
+        self.current_head().effort
     }
 
     pub(crate) fn current_target(&self) -> Option<ModelRef> {
-        let head = self.current_head()?;
+        let head = self.current_head();
         Some(ModelRef::new(head.provider.clone()?, head.model.clone()?))
     }
 
     pub(crate) fn current_agent(&self) -> String {
-        self.current_head()
-            .map(|head| head.agent.clone())
-            .unwrap_or_default()
+        self.current_head().agent.clone()
     }
 
-    fn current_settings_version(&self) -> Option<lattice_api::local::SettingsVersion> {
-        self.current_head().map(|head| head.settings_version)
+    fn current_settings_version(&self) -> lattice_api::local::SettingsVersion {
+        self.current_head().settings_version
     }
 
     fn sync_head_panels(&mut self) {
@@ -532,29 +532,31 @@ impl App {
         generation: u64,
         result: lattice_api::local::Result<ConfigureReply>,
     ) {
-        if generation != self.configure_generation {
-            return;
-        }
-        self.configure_in_flight = None;
+        self.configure_in_flight.remove(&generation);
+        let is_latest = generation == self.configure_generation;
         match result {
             Ok(reply) => {
-                let version = Some(reply.head.settings_version);
-                self.latest_head = Some(reply.head);
-                self.sync_head_panels();
-                self.queue.resolve_configure(generation, version);
-                if let Some(adjustment) = reply.adjustment {
-                    self.push_status(effort_changed_status(adjustment.from, adjustment.to));
+                self.queue
+                    .resolve_configure(generation, reply.head.settings_version);
+                if is_latest {
+                    self.latest_head = reply.head;
+                    self.sync_head_panels();
+                    if let Some(adjustment) = reply.adjustment {
+                        self.push_status(effort_changed_status(adjustment.from, adjustment.to));
+                    }
                 }
             }
             Err(error) => {
-                self.send_after_configure = false;
-                if self
-                    .queue
-                    .resolve_configure(generation, self.current_settings_version())
-                {
+                let bound = self.queue.fail_configure(generation);
+                if bound {
+                    self.send_after_configure = false;
                     self.queue.pause();
+                } else if is_latest {
+                    self.send_after_configure = false;
                 }
-                self.push_status(configure_failed_status(&error));
+                if bound || is_latest {
+                    self.push_status(configure_failed_status(&error));
+                }
             }
         }
     }
@@ -1050,7 +1052,7 @@ impl App {
         let raw = self.input.text();
         if raw.trim().is_empty() && self.queue.draft_count() == 0 {
             if self.phase == TurnPhase::Idle
-                && self.configure_in_flight.is_none()
+                && self.configure_in_flight.is_empty()
                 && self.input.is_empty()
             {
                 self.queue.resume();
@@ -1063,15 +1065,23 @@ impl App {
             self.input.clear();
             return None;
         }
-        if self.phase != TurnPhase::Idle || self.configure_in_flight.is_some() {
+        if self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty() {
             let id = self.blocks.allocate_id();
-            let settings = match self.configure_in_flight {
-                Some(generation) => crate::queue::QueuedSettings::PendingConfigure(generation),
-                None => crate::queue::QueuedSettings::Snapshot(self.current_settings_version()),
+            let current_version = self.current_settings_version();
+            let settings = if self
+                .configure_in_flight
+                .contains(&self.configure_generation)
+            {
+                crate::queue::QueuedSettings::PendingConfigure {
+                    generation: self.configure_generation,
+                    fallback: current_version,
+                }
+            } else {
+                crate::queue::QueuedSettings::Snapshot(current_version)
             };
             if self.queue.enqueue(id, raw, settings) {
                 self.input.clear();
-                if self.phase == TurnPhase::Idle && self.configure_in_flight.is_some() {
+                if self.phase == TurnPhase::Idle && !self.configure_in_flight.is_empty() {
                     self.send_after_configure = true;
                 }
             }
@@ -1086,7 +1096,8 @@ impl App {
     }
 
     fn auto_submit(&mut self) -> Option<String> {
-        if self.should_quit || self.phase != TurnPhase::Idle || self.configure_in_flight.is_some() {
+        if self.should_quit || self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty()
+        {
             return None;
         }
         if self.send_after_configure {
@@ -1113,7 +1124,8 @@ impl App {
     }
 
     fn send_queue_head(&mut self) -> Option<String> {
-        if self.should_quit || self.phase != TurnPhase::Idle || self.configure_in_flight.is_some() {
+        if self.should_quit || self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty()
+        {
             return None;
         }
         self.check_comments_before_send();
@@ -1248,7 +1260,7 @@ impl App {
         if starts {
             self.initial = true;
         }
-        self.ctx.session_id = head.session_id;
+        self.session_id = head.session_id;
         self.connected = true;
         if head.diagnostic != self.diagnostic {
             if let Some(error) = &head.diagnostic {
@@ -1258,7 +1270,7 @@ impl App {
         }
         // 当前位置是根节点时没有对应的条目，会话头立即确认。
         let root = head.position == NodeId(0);
-        self.latest_head = Some(head.clone());
+        self.latest_head = head.clone();
         self.pending_head = Some(head);
         self.sync_head_panels();
         if root {
@@ -1496,7 +1508,7 @@ impl App {
         if self.viewport.scroll() != 0 || self.older_pending {
             return;
         }
-        let session_id = self.ctx.session_id;
+        let session_id = self.session_id;
         let Some((before, ordinal)) = self.entries.iter().find_map(|(node, entry)| match entry {
             ConversationEntry::UserMessage { ordinal, .. } => Some((*node, *ordinal)),
             ConversationEntry::Step { .. } => None,
@@ -1595,7 +1607,7 @@ impl App {
     /// 这次提交的身份：会话在启动时已存在或经 `configure(New)` 建立。
     pub(crate) fn submission_identity(&self) -> Option<(TurnId, SessionId)> {
         let (turn_id, _) = self.submitted.as_ref()?;
-        Some((*turn_id, self.ctx.session_id))
+        Some((*turn_id, self.session_id))
     }
 
     /// 这一轮已经结束：最后一步已关闭，或者会话头说明它不在执行（当前位置在别处，或没有 Owner）。
@@ -1728,7 +1740,7 @@ where
     let result = loop {
         if std::mem::take(&mut app.view_wanted) && !app.should_quit {
             // 重新开始 watch 用新的句柄，旧连接上尚未读出的推送随旧句柄丢弃。
-            view = Some(client.observe(app.ctx.session_id));
+            view = Some(client.observe(app.session_id));
             app.begin_view();
         }
         if let Some(target) = app.cancel_requested.take() {
@@ -1769,7 +1781,7 @@ where
         }
         if let Some(request) = app.configure_request.take() {
             let client = client.clone();
-            let session = ConfigureSession::Existing(app.ctx.session_id);
+            let session = ConfigureSession::Existing(app.session_id);
             let workspace = options.project_root.clone();
             configures.push(
                 async move {
@@ -1903,17 +1915,13 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
 
 fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<TurnRequest> {
     let (turn_id, session) = app.submission_identity()?;
-    let expected_settings = app
-        .submitted
-        .as_ref()
-        .filter(|(id, _)| *id == turn_id)
-        .and_then(|(_, message)| message.expected_settings);
+    let (_, message) = app.submitted.as_ref().filter(|(id, _)| *id == turn_id)?;
     Some(TurnRequest {
         turn_id,
         session,
         workspace: options.project_root.clone(),
         input: prompt,
-        expected_settings,
+        expected_settings: Some(message.expected_settings),
     })
 }
 

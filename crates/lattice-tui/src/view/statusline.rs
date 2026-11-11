@@ -16,19 +16,14 @@ pub(super) fn line(app: &App, width: usize) -> Line<'static> {
         return Line::from(Span::styled(" ".repeat(width), dim));
     }
     let below = app.viewport.hidden_below();
-    let session = session_field(app.ctx.session_id);
+    let session = session_field(app.session_id);
     let head = app.current_head();
-    let effort = head
-        .and_then(|head| head.effort)
-        .map(|effort| effort.to_string());
+    let effort = head.effort.map(|effort| effort.to_string());
     let mut left = [
         Some(session.as_str()),
-        head.map(|head| head.agent.as_str())
-            .filter(|agent| !agent.is_empty()),
-        head.and_then(|head| head.model.as_ref())
-            .map(|model| model.as_str()),
-        head.and_then(|head| head.provider.as_ref())
-            .map(|provider| provider.as_str()),
+        (!head.agent.is_empty()).then_some(head.agent.as_str()),
+        head.model.as_ref().map(|model| model.as_str()),
+        head.provider.as_ref().map(|provider| provider.as_str()),
         effort.as_deref(),
     ];
     let mut right = [

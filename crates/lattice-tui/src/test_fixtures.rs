@@ -53,7 +53,7 @@ pub(super) fn test_app(_existing: bool) -> App {
     App::new(
         SessionContext {
             session_id: sid(),
-            initial_head: None,
+            initial_head: head(0, None, false),
             initial_adjustment: None,
         },
         false,

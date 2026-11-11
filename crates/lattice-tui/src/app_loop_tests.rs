@@ -1243,7 +1243,7 @@ fn frame(app: &App) -> Frame {
     let panel = buffer_text(terminal.backend().buffer());
     Frame {
         phase: app.phase,
-        session: app.ctx.session_id,
+        session: app.session_id,
         connected: app.connected,
         input: app.input.text(),
         text: transcript(app),
@@ -1282,15 +1282,25 @@ impl Harness {
             session_dir: root.path().join("history"),
             project_root: root.path().into(),
         };
-        let app = App::new(
+        Self::with_context(
+            options,
             SessionContext {
                 session_id: sid(),
-                initial_head: None,
+                initial_head: SessionHead {
+                    agent: "startup".into(),
+                    model: None,
+                    provider: None,
+                    effort: None,
+                    settings_version: settings_version(0x01),
+                    ..head(0, None, false)
+                },
                 initial_adjustment: None,
             },
-            false,
-            &options.session_dir,
-        );
+            root,
+        )
+    }
+    fn with_context(options: TuiOptions, ctx: SessionContext, root: tempfile::TempDir) -> Self {
+        let app = App::new(ctx, false, &options.session_dir);
         let (keys, events) = unbounded();
         let (observer, frames) = watch::channel(frame(&app));
         Self {
@@ -2389,6 +2399,7 @@ async fn readonly_open_rejects_mismatched_project_path_before_watch() {
     };
     let seen = peer.wait(|seen| count(seen, "resolve_session") == 1).await;
     assert_eq!(count(&seen, "watch"), 0, "项目路径不一致时不得开始 watch");
+    assert_eq!(count(&seen, "head"), 0, "项目路径不一致时不得读取 head");
     assert_eq!(
         count(&seen, "log"),
         0,
@@ -2411,7 +2422,7 @@ async fn readonly_open_rejects_mismatched_project_path_before_watch() {
 
 #[tokio::test]
 async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() {
-    for succeed in [true, false] {
+    for c1_succeed in [true, false] {
         let views = Views::default();
         let view_tx = views.clone();
         let (cfg1_tx, cfg1_rx) = oneshot::channel();
@@ -2421,10 +2432,13 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
             "watch" => views.subscribe(),
             "models" => Reply::Now(model_reply(&r["query"])),
             "configure" => Reply::Hold(cfgs.next().unwrap().unwrap()),
-            "submit" => Reply::Now(error_reply(local_error(
-                LocalErrorKind::Busy,
-                "submitted after configure",
-            ))),
+            "submit" => Reply::Now(error_reply(LocalError {
+                conflict: Some(lattice_api::local::ConflictReason::SettingsChanged),
+                ..local_error(
+                    LocalErrorKind::Conflict,
+                    "session settings changed before turn acceptance",
+                )
+            })),
             _ => Reply::Never,
         });
         let mut h = Harness::new(true);
@@ -2436,7 +2450,7 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
             })]);
             remote.wait(|f| f.statusline.contains("unused")).await;
 
-            // 第一次 /model 选择并发出在途 configure。
+            // 第一次 /model 选择并发出在途 configure C1。
             remote.line("/model");
             remote.wait(|f| f.panel.contains("p/chosen")).await;
             remote
@@ -2449,7 +2463,7 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
             remote.press(KeyCode::Enter, KeyModifiers::NONE);
             peer.wait(|s| count(s, "configure") == 1).await;
 
-            // configure 在途时 Dock 提示 Enter 排队，按 Enter 入队而不直接提交。
+            // C1 在途时 Dock 提示 Enter 排队，按 Enter 入队并绑定 C1 的代次。
             remote.wait(|f| f.panel.contains("Enter 排队")).await;
             remote.line("queued during configure");
             let queued_frame = remote.wait(|f| f.text.contains("排队")).await;
@@ -2460,32 +2474,35 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
             );
             assert!(queued_frame.input.is_empty());
 
-            // 在第一次回复到达前再次 /effort 发出新代次 configure，旧回复必须按代次丢弃。
+            // C1 回复前再次 /effort 发出 C2；消息不改绑到 C2，面板与状态行只采用最新代次 C2。
             remote.line("/effort");
             remote.wait(|f| f.panel.contains("off")).await;
             remote.press(KeyCode::Enter, KeyModifiers::NONE);
             peer.wait(|s| count(s, "configure") == 2).await;
 
-            cfg1_tx
-                .send(configure_reply(
-                    SessionHead {
-                        provider: Some(ProviderId::parse("p").unwrap()),
-                        model: Some(ModelId::parse("chosen").unwrap()),
-                        settings_version: settings_version(0x99),
-                        ..head(0, None, false)
-                    },
-                    None,
-                ))
-                .unwrap();
-            let after_stale = remote.processed().await;
-            assert_eq!(
-                count(&peer.seen.borrow(), "submit"),
-                0,
-                "过期 configure 回复不能触发出队或改写状态"
-            );
-            assert!(!after_stale.statusline.contains("chosen"));
+            if c1_succeed {
+                cfg1_tx
+                    .send(configure_reply(
+                        SessionHead {
+                            provider: Some(ProviderId::parse("p").unwrap()),
+                            model: Some(ModelId::parse("chosen").unwrap()),
+                            settings_version: settings_version(0x99),
+                            ..head(0, None, false)
+                        },
+                        None,
+                    ))
+                    .unwrap();
+                let after_c1 = remote.processed().await;
+                assert_eq!(
+                    count(&peer.seen.borrow(), "submit"),
+                    0,
+                    "C2 仍在途时不能提前出队提交"
+                );
+                assert!(
+                    !after_c1.statusline.contains("chosen"),
+                    "面板与状态行不采用非最新代次 C1 的回复"
+                );
 
-            if succeed {
                 cfg2_tx
                     .send(configure_reply(
                         SessionHead {
@@ -2503,30 +2520,65 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
                 assert_eq!(submit["input"], "queued during configure");
                 assert_eq!(
                     submit["expected_settings"],
-                    json!(settings_version(0x44)),
-                    "在途 configure 成功后应用其回复中的版本发送"
+                    json!(settings_version(0x99)),
+                    "排队消息必须携带入队时绑定的 C1 版本发出"
                 );
-                remote
-                    .wait(|f| f.dock.contains("submitted after configure"))
-                    .await;
+                let rejected = remote.wait(|f| f.dock.contains("会话设置已变更")).await;
+                assert!(
+                    rejected.statusline.contains("chosen") && rejected.statusline.contains("off"),
+                    "状态行应采用最新代次 C2 的回复：{}",
+                    rejected.statusline
+                );
+                assert!(
+                    rejected.text.contains("暂停")
+                        && rejected.text.contains("queued during configure"),
+                    "后台返回 SettingsChanged 后消息应保留在暂停的队列中：{}",
+                    rejected.text
+                );
                 remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
             } else {
-                cfg2_tx
+                cfg1_tx
                     .send(error_reply(local_error(
                         LocalErrorKind::BadRequest,
-                        "bad effort choice",
+                        "bad model choice",
                     )))
                     .unwrap();
-                let failed = remote.wait(|f| f.dock.contains("bad effort choice")).await;
+                let failed = remote.wait(|f| f.dock.contains("bad model choice")).await;
                 assert_eq!(
                     count(&peer.seen.borrow(), "submit"),
                     0,
-                    "configure 失败时排队消息不能发出"
+                    "绑定的 C1 失败时排队消息不能发出"
                 );
                 assert!(
                     failed.text.contains("暂停") && failed.text.contains("queued during configure"),
-                    "消息仍留在暂停的队列中：{}",
+                    "C1 失败时消息应留在暂停的队列中：{}",
                     failed.text
+                );
+                cfg2_tx
+                    .send(configure_reply(
+                        SessionHead {
+                            provider: Some(ProviderId::parse("p").unwrap()),
+                            model: Some(ModelId::parse("chosen").unwrap()),
+                            effort: Some(lattice_api::Effort::Off),
+                            settings_version: settings_version(0x44),
+                            ..head(0, None, false)
+                        },
+                        None,
+                    ))
+                    .unwrap();
+                let after_c2 = remote
+                    .wait(|f| f.statusline.contains("chosen") && f.statusline.contains("off"))
+                    .await;
+                assert_eq!(
+                    count(&peer.seen.borrow(), "submit"),
+                    0,
+                    "后续 C2 成功也不能自动发出已因 C1 失败而暂停的消息"
+                );
+                assert!(
+                    after_c2.text.contains("暂停")
+                        && after_c2.text.contains("queued during configure"),
+                    "消息仍留在暂停的队列中：{}",
+                    after_c2.text
                 );
                 remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
             }
@@ -2538,10 +2590,98 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
         })
         .await;
         assert!(exit.result.is_ok());
-        if !succeed {
-            assert!(h.app.queue.is_paused(), "configure 失败时队列应暂停");
-        }
+        assert!(h.app.queue.is_paused(), "拒绝或失败后队列应保持暂停");
     }
+}
+
+#[tokio::test]
+async fn submit_before_first_watch_head_carries_startup_head_version() {
+    let dir = tempfile::tempdir().expect("创建工作区目录");
+    let workspace = lattice_api::LocalWorkspaceRoot::from_path(dir.path()).expect("解析工作区");
+    let raw_cwd = workspace.project_path().as_bytes().to_vec();
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str() {
+        Some("resolve_session") => Reply::Now(json!({
+            "response": "session",
+            "value": {
+                "session_id": sid(),
+                "project_path": raw_cwd.as_slice(),
+                "current": 0,
+                "created_at": "2026-10-17T00:00:00Z",
+                "updated_at": "2026-10-17T00:00:01Z"
+            }
+        })),
+        Some("head") => Reply::Now(response(
+            "head",
+            serde_json::to_value(SessionHead {
+                agent: "readonly-agent".into(),
+                settings_version: settings_version(0x77),
+                ..head(0, None, false)
+            })
+            .unwrap(),
+        )),
+        Some("watch") => views.subscribe(),
+        Some("submit") => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let options = crate::TuiOptions {
+        session_id: Some(SESSION.into()),
+        agent: None,
+        session_dir: dir.path().join("state"),
+        project_root: workspace.canonical_path().to_path_buf(),
+    };
+    let ctx = crate::session::open_or_create(&options, &workspace, &peer.client)
+        .await
+        .expect("只读打开已有会话应读取启动会话头");
+    {
+        let seen = peer.seen.borrow();
+        assert_eq!(count(&seen, "resolve_session"), 1);
+        assert_eq!(count(&seen, "head"), 1);
+        assert_eq!(count(&seen, "configure"), 0);
+        assert_eq!(count(&seen, "watch"), 0);
+    }
+    assert_eq!(ctx.initial_head.settings_version, settings_version(0x77));
+
+    let mut h = Harness::with_context(options, ctx, dir);
+    let remote = h.remote.clone();
+    let driver = async {
+        peer.wait(|s| count(s, "watch") == 1).await;
+        remote
+            .wait(|f| f.statusline.contains("readonly-agent"))
+            .await;
+
+        // 推迟首个 watch 会话头到达，此时按 Enter 立即提交。
+        remote.line("before first watch head");
+        let seen = peer.wait(|s| count(s, "submit") == 1).await;
+        let submit_req = requests(&seen, "submit").next().unwrap();
+        let accepted_turn = request_turn(submit_req);
+        assert_eq!(submit_req["request"]["input"], "before first watch head");
+        assert_eq!(
+            submit_req["request"]["expected_settings"],
+            json!(settings_version(0x77)),
+            "首个 watch 会话头到达前发出的提交必须携带启动时会话头的版本"
+        );
+
+        view_tx.push([
+            head_reply(SessionHead {
+                agent: "readonly-agent".into(),
+                settings_version: settings_version(0x77),
+                ..head(2, Some(accepted_turn), false)
+            }),
+            entry_reply(user(1, accepted_turn, 1, "before first watch head")),
+            entry_reply(step(2, accepted_turn, 0).text("done").finished().entry()),
+        ]);
+        remote
+            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains("done"))
+            .await;
+        remote.ctrl('d');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
 }
 
 #[tokio::test]
@@ -2647,10 +2787,7 @@ async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watc
     let created_ctx = crate::session::open_or_create(&new_opts, &workspace, &ok_peer.client)
         .await
         .expect("configure(New) 成功");
-    assert_eq!(
-        created_ctx.initial_head.as_ref().map(|h| h.agent.as_str()),
-        Some("coder")
-    );
+    assert_eq!(created_ctx.initial_head.agent.as_str(), "coder");
     assert!(created_ctx.initial_adjustment.is_some());
 
     // 3. `lattice tui S --agent A` 遇到 Busy 时写明会话正在执行一轮、稍后再试，并退出。

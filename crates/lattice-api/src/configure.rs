@@ -37,36 +37,41 @@ impl EffortSource {
     }
 }
 
+/// `resolve_settings` 的计算基准：显式给定的 agent profile，或已有会话的当前设置。
+pub(crate) enum SettingsBase<'a> {
+    Agent(LoadedAgent),
+    Current(&'a SessionSettings),
+}
+
 /// 纯函数计算新的会话设置与档位调整；不访问文件系统、会话库或网络。
 pub(crate) fn resolve_settings(
-    current: Option<&SessionSettings>,
-    agent: Option<LoadedAgent>,
+    base: SettingsBase<'_>,
     cmd_model: Option<ModelRef>,
     cmd_effort: Option<Effort>,
     supported_efforts: impl FnOnce(&ModelRef) -> Result<Vec<Effort>, lattice_llm::LlmError>,
 ) -> Result<(SessionSettings, Option<EffortAdjustment>), ConfigRejection> {
     let (profile, system_prompt, base_model, base_effort, default_effort, same_model_source) =
-        if let Some(loaded) = agent {
-            let base_model = loaded.profile.effective.default_model.clone();
-            let base_effort = loaded.profile.effective.default_effort;
-            (
-                loaded.profile.effective,
-                loaded.profile.system_prompt,
-                base_model,
-                base_effort,
-                base_effort,
-                EffortSource::ProfileFile(loaded.source_path),
-            )
-        } else {
-            let current = current.expect("Existing session must supply current SessionSettings");
-            (
+        match base {
+            SettingsBase::Agent(loaded) => {
+                let base_model = loaded.profile.effective.default_model.clone();
+                let base_effort = loaded.profile.effective.default_effort;
+                (
+                    loaded.profile.effective,
+                    loaded.profile.system_prompt,
+                    base_model,
+                    base_effort,
+                    base_effort,
+                    EffortSource::ProfileFile(loaded.source_path),
+                )
+            }
+            SettingsBase::Current(current) => (
                 current.profile.clone(),
                 current.system_prompt.clone(),
                 current.model.clone(),
                 current.effort,
                 current.profile.default_effort,
                 EffortSource::SessionSettings,
-            )
+            ),
         };
 
     let model = cmd_model.or_else(|| base_model.clone());
@@ -190,12 +195,20 @@ mod tests {
             model: Some(model_ref("local/current")),
             effort: Some(High),
         };
+        let existing_no_effort = SessionSettings {
+            effort: None,
+            ..existing.clone()
+        };
+        let existing_no_model = SessionSettings {
+            model: None,
+            effort: None,
+            ..existing.clone()
+        };
         let agent_path = "/workspace/.lattice/agents/coder/agent.toml";
 
-        struct SuccessCase {
+        struct SuccessCase<'a> {
             label: &'static str,
-            current: Option<SessionSettings>,
-            agent: Option<LoadedAgent>,
+            base: SettingsBase<'a>,
             model: Option<&'static str>,
             effort: Option<Effort>,
             supported: &'static [Effort],
@@ -210,8 +223,7 @@ mod tests {
         let cases = [
             SuccessCase {
                 label: "新建会话给出 agent：沿用 [agent].model 与受支持的 [agent].effort",
-                current: None,
-                agent: Some(loaded_agent(
+                base: SettingsBase::Agent(loaded_agent(
                     "coder",
                     Some("local/sonnet"),
                     Some(Medium),
@@ -230,8 +242,7 @@ mod tests {
             },
             SuccessCase {
                 label: "给出 agent 同时换模型：当前基准不支持且默认也不支持时调整为空",
-                current: Some(existing.clone()),
-                agent: Some(loaded_agent(
+                base: SettingsBase::Agent(loaded_agent(
                     "coder",
                     Some("local/sonnet"),
                     Some(High),
@@ -253,8 +264,7 @@ mod tests {
             },
             SuccessCase {
                 label: "不给 agent 同模型：严格保留当前档位，无调整",
-                current: Some(existing.clone()),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: Some("local/current"),
                 effort: None,
                 supported: &[Low, High],
@@ -267,8 +277,7 @@ mod tests {
             },
             SuccessCase {
                 label: "换模型且新模型支持原档位：保留原档位，无调整",
-                current: Some(existing.clone()),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: Some("other/both"),
                 effort: None,
                 supported: &[Low, High],
@@ -281,8 +290,7 @@ mod tests {
             },
             SuccessCase {
                 label: "换模型且原档位不支持：回退到快照中的 [agent].effort 并报告调整",
-                current: Some(existing.clone()),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: Some("other/low-only"),
                 effort: None,
                 supported: &[Low],
@@ -298,11 +306,7 @@ mod tests {
             },
             SuccessCase {
                 label: "换模型且原档位为空、默认档位受支持：回退到默认档位并报告调整",
-                current: Some(SessionSettings {
-                    effort: None,
-                    ..existing.clone()
-                }),
-                agent: None,
+                base: SettingsBase::Current(&existing_no_effort),
                 model: Some("other/low-only"),
                 effort: None,
                 supported: &[Low],
@@ -318,8 +322,7 @@ mod tests {
             },
             SuccessCase {
                 label: "显式给出受支持档位：即使与原档位不同也不计为自动调整",
-                current: Some(existing.clone()),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: None,
                 effort: Some(Low),
                 supported: &[Low],
@@ -332,8 +335,13 @@ mod tests {
             },
             SuccessCase {
                 label: "模型为空且未显式给 effort：照搬基准档位且不查询模型能力",
-                current: None,
-                agent: Some(loaded_agent("modeless", None, Some(Low), "p", agent_path)),
+                base: SettingsBase::Agent(loaded_agent(
+                    "modeless",
+                    None,
+                    Some(Low),
+                    "p",
+                    agent_path,
+                )),
                 model: None,
                 effort: None,
                 supported: &[],
@@ -349,8 +357,7 @@ mod tests {
         for case in cases {
             let mut queried = None;
             let (settings, adjustment) = resolve_settings(
-                case.current.as_ref(),
-                case.agent,
+                case.base,
                 case.model.map(model_ref),
                 case.effort,
                 |target| {
@@ -395,10 +402,9 @@ mod tests {
             );
         }
 
-        struct ErrorCase {
+        struct ErrorCase<'a> {
             label: &'static str,
-            current: Option<SessionSettings>,
-            agent: Option<LoadedAgent>,
+            base: SettingsBase<'a>,
             model: Option<&'static str>,
             effort: Option<Effort>,
             query_result: Result<Vec<Effort>, lattice_llm::LlmError>,
@@ -409,8 +415,7 @@ mod tests {
         let error_cases = [
             ErrorCase {
                 label: "显式 --effort 不被模型支持时标明 (from --effort)",
-                current: Some(existing.clone()),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: Some("other/low-only"),
                 effort: Some(Max),
                 query_result: Ok(vec![Low]),
@@ -419,8 +424,7 @@ mod tests {
             },
             ErrorCase {
                 label: "给出 agent 且同模型不支持 [agent].effort 时标明 profile 路径",
-                current: None,
-                agent: Some(loaded_agent(
+                base: SettingsBase::Agent(loaded_agent(
                     "coder",
                     Some("local/sonnet"),
                     Some(Off),
@@ -435,8 +439,7 @@ mod tests {
             },
             ErrorCase {
                 label: "沿用当前设置且同模型档位失效时标明 (from session settings)",
-                current: Some(existing.clone()),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: None,
                 effort: None,
                 query_result: Ok(vec![Low]),
@@ -445,12 +448,7 @@ mod tests {
             },
             ErrorCase {
                 label: "模型为空但显式给了 effort 时拒绝并提示先选择模型",
-                current: Some(SessionSettings {
-                    model: None,
-                    effort: None,
-                    ..existing.clone()
-                }),
-                agent: None,
+                base: SettingsBase::Current(&existing_no_model),
                 model: None,
                 effort: Some(High),
                 query_result: Ok(vec![High]),
@@ -459,8 +457,7 @@ mod tests {
             },
             ErrorCase {
                 label: "档位能力查询报错时以配置拒绝返回",
-                current: Some(existing),
-                agent: None,
+                base: SettingsBase::Current(&existing),
                 model: Some("missing/model"),
                 effort: None,
                 query_result: Err(lattice_llm::LlmError::Config {
@@ -472,13 +469,9 @@ mod tests {
         ];
 
         for case in error_cases {
-            let err = resolve_settings(
-                case.current.as_ref(),
-                case.agent,
-                case.model.map(model_ref),
-                case.effort,
-                |_| case.query_result,
-            )
+            let err = resolve_settings(case.base, case.model.map(model_ref), case.effort, |_| {
+                case.query_result
+            })
             .expect_err(&format!("{} 应被拒绝", case.label));
             let text = err.to_string();
             assert!(
