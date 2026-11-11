@@ -38,7 +38,7 @@ status: active
 | `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，以及下一行之外的后台错误（如 `Busy`、`Stopping`、`Transport`） |
 | `2` | 使用错误或取消：参数错误，后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
 
-- `configure` 结果不明时，CLI 在连接建立后最多自动重发 2 次，仍不明时输出 `configure` 的 `unknown` 记录与 `submit` 的 `not_accepted` 回执并退出 `1`（提交尚未发出）；参数与配置文件不变时，以同一参数重发 `configure` 是安全的。TUI 遇到 `configure` 结果不明时显示警告，实际生效的设置以 `watch` 推送的会话头为准。规则见 [configure 的找回](../architecture/session/recovery.md#configure-的找回)。
+- `configure` 只发一次：结果不明时，CLI 输出 `configure` 的 `unknown` 记录与 `submit` 的 `not_accepted` 回执并退出 `1`（提交尚未发出），由用户重跑命令；TUI 显示警告，实际生效的设置以 `watch` 推送的会话头为准。规则见 [configure 的找回](../architecture/session/recovery.md#configure-的找回)。
 - `submit` 的接受结果不明时，按第一条 `submit` 记录中的 TurnId 查询（`session turn`）。查到即已接受；在途就稍后再查；NotFound 才重新发送，重新发送会生成新的 TurnId。规则见[请求身份与找回](../architecture/session/recovery.md#请求身份与找回)。
 - 过滤执行测试时，从输出确认目标测试实际运行；需要完整名称时加 `-- --exact`。
 

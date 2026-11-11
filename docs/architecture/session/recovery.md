@@ -36,17 +36,14 @@ status: active
 
 ## configure 的找回
 
-- **幂等重发**：`configure` 是幂等的，见[并发、找回与生命周期](settings.md#并发找回与生命周期)；结果不明时，以同一参数重发是安全的。
-- **`New` 得到 `session_exists`**：重发 `configure(New)` 返回 Conflict（`session_exists`）说明上一次请求已创建该会话，客户端读取 `head` 后按已配置继续。
-- **`Busy`**：返回 Busy 表示该会话或全局槽位正被占用，稍后再发。
-- **CLI 的自动重发**：CLI 先发一次 `configure`。连接无法建立或后台明确拒绝（包括 Busy）时，结果为 `rejected`，不重发。请求写出后连接中断或读不到回复，或后台回复 `Internal` 错误、恢复原因为 `CommitFailed` 或 `WorkerFailed` 的错误时，结果不明，CLI 以同一参数重发，最多 2 次：
-  - 重发成功，按 `configured` 继续；
-  - `configure(New)` 的重发得到 `session_exists` 时，读取 `head`，按 `configured` 继续；
-  - 重发得到 Busy 或 NotRunning，或读取 `head` 失败时，记下错误，继续下一次重发；第一次重发得到 Busy 时先短暂等待；
-  - 重发得到其他拒绝时，结果为 `rejected`；
-  - 重发用完，或收到 SIGINT 时，结果为 `unknown`。
-
-TUI 不自动重发 `configure`：结果不明时显示 Warn，实际生效的设置以 `watch` 推送的会话头为准，见 [TUI 合同](../tui/README.md#configure-结果不明与设置同步)。
+- **幂等。** `configure` 是幂等的，见[并发、找回与生命周期](settings.md#并发找回与生命周期)。以同一参数重发是安全的：
+  - 对已存在的 `S` 执行 `configure(New)`，返回 `session_exists`，重发方由此知道上一次请求已经建好 `S`；
+  - Busy 表示会话或全局槽位正被占用，稍后再发。
+- **CLI。** 只发一次 `configure`：
+  - 无法建立连接，或后台明确拒绝：结果为 `rejected`。
+  - 结果不明：结果为 `unknown`，输出 `configure` 的 `unknown` 记录与 `submit` 的 `not_accepted` 回执，退出 1。结果不明包括四种情况：写出请求时连接中断、读不到回复、后台回复 `Internal` 错误或恢复原因为 `CommitFailed`、`WorkerFailed` 的错误、`configure` 期间收到 SIGINT。
+  - 结果不明之后由用户重跑命令。带 `--session S` 重跑，执行幂等的 `configure(Existing)`；不带 `--session` 重跑，会创建新会话，丢失请求可能留下的草稿会话由[草稿清理](concurrency.md#会话状态与草稿清理)删除。
+- **TUI。** 只发一次 `configure`：结果不明时显示 Warn，实际生效的设置以 `watch` 推送的会话头为准，见 [TUI 合同](../tui/README.md#configure-结果不明与设置同步)。
 
 ## 观察与重连
 

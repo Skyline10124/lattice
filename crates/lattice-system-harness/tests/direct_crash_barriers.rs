@@ -3111,8 +3111,8 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
         evidence.record_command("frontend observes configure crash", &disconnected);
         assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
 
-        // `configure_once` 直接连接 socket 而不自动拉起后台；原后台被杀后两次重试均得到 `not_running`，
-        // 因此 CLI 输出 `configure(unknown)` 与 `submit(not_accepted)`，以退出码 1 结束。
+        // 后台在持久提交后、回复前被杀，单次 `configure` 读不到回复而得到 `transport` 错误，
+        // CLI 依次输出 `configure(unknown)` 与 `submit(not_accepted)`，以退出码 1 结束。
         let parsed = parse_send_stdout(&disconnected.stdout, disconnected.exit_code());
         assert!(
             parsed.malformed_lines.is_empty(),
@@ -3134,7 +3134,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
                 result: ConfigureResult::Unknown(Some(error)),
             }) => {
                 assert_eq!(session_id, &sid);
-                assert_eq!(error.kind, "not_running", "{error:?}");
+                assert_eq!(error.kind, "transport", "{error:?}");
             }
             other => panic!("第二条 JSONL 必须是 configure(unknown)：{other:?}"),
         }

@@ -51,8 +51,8 @@ lattice --json session turn "$TURN_ID"
 | `submit`：`rejected`（`configure` 已成功或跳过） | 会话已经存在，本轮未建立；例如没有模型的草稿会话首次提交因 `bad_request` 被拒，选定模型后可对同一 `SessionId` 继续提交 |
 | `rejected`（`busy`） | 同会话或全局槽位正忙；空闲后重发 |
 | `rejected`（`bad_request` / `not_found`） | 参数、配置、档位或会话不存在被拒；按诊断修正后重发 |
-| `rejected`（`conflict`） | 按原因码分流：`turn_id_used` 用 `session turn <TURN_ID>` 查询；`binding_mismatch` 表示会话属于另一个项目；`settings_changed` 表示会话设置已被修改，查看最新会话头核对后再重发；`session_exists` 表示 `configure(New)` 的 `SessionId` 已存在（CLI 自动重发遇到该码时读取会话头继续） |
-| `configure`：`unknown`（紧跟 `submit`：`not_accepted`） | CLI 自动重发最多 2 次后配置结果仍不明，本次提交尚未发出；参数与配置文件不变时，以同一参数重发是安全的 |
+| `rejected`（`conflict`） | 按原因码分流：`turn_id_used` 用 `session turn <TURN_ID>` 查询；`binding_mismatch` 表示会话属于另一个项目；`settings_changed` 表示会话设置已被修改，查看最新会话头核对后再重发；`session_exists` 表示 `configure(New)` 的 `SessionId` 已存在 |
+| `configure`：`unknown`（紧跟 `submit`：`not_accepted`） | 单次 `configure` 结果不明，本次提交尚未发出；由用户重跑命令，见 [configure 的找回](../../../architecture/session/recovery.md#configure-的找回) |
 | `submit`：`not_accepted` | 确定未被接受（发送前中断、前置 `configure` 结果为 `unknown`，或按 `TurnId` 查询为 `not_found`）；原工作区使用新 `TurnId` 重发 |
 | `submit`：`unknown` | 提交发出后接受结果不明；按下表以首条 `submit` 记录中的 `turn_id` 查询找回 |
 | TUI 启动时带 `--agent` | 在进入界面前的启动 `configure` 中立即生效并持久保存；之后的提交沿用当前会话设置 |

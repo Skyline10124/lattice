@@ -25,7 +25,7 @@ status: active
 - 携带过期 `SettingsVersion` 提交返回 `settings_changed` 冲突且不写节点；携带当前 `SettingsVersion` 提交被接受并完成。
 - 模型与档位选择（含 `off`）经 `configure` 立即保存到会话设置，之后不带选择的提交、重试与重启均沿用；不支持的档位在 `configure` 时被拒绝，会话设置不变；换模型时按[档位规则](../../../architecture/session/settings.md#档位规则)调整档位，换到另一 provider 后会话设置记录新的 provider `id`。
 - `turn_accepted` 崩溃并重启后，`head` 给出崩溃前 `configure` 保存的模型与档位，并带有 `settings_version`；视图中这一轮的 `UserMessage` 冻结了同一模型与档位，按 TurnId 查询得到该节点，以同一 TurnId 重发返回 `turn_id_used`。删除 profile 目录后，不带选择的发送照常完成，请求使用会话设置中保存的模型、档位与系统提示。新会话与已有会话两种情形结果相同。崩溃后未关闭的那一轮如何读出，见[后台崩溃与执行者消失](crash-and-vanished-executor.md)。
-- `configure_committed` 崩溃后，CLI 第一条 JSONL 为写明身份的 `submit(sending)`；因 `configure_once` 直接连接 socket 而不自动拉起后台，重连得到 `not_running`，后续依次输出 `configure(unknown)` 与 `submit(not_accepted)` 并以退出码 1 退出；重启后台后状态根中只有该草稿会话 S（节点数为 1），后续 `--session S` 发送正常完成，不出现第二个会话或重复轮次。
+- `configure_committed` 崩溃后，CLI 第一条 JSONL 为写明身份的 `submit(sending)`；CLI 读不到回复，依次输出 `configure(unknown)`（错误种类为 `transport`）与 `submit(not_accepted)`，退出码 1；之后重启后台，状态根中只有该草稿会话 S（节点数为 1），后续 `--session S` 发送正常完成，不出现第二个会话或重复轮次。
 - 非 UTF-8 项目目录下创建的会话在 `session list` 文本输出中以替换字符显示路径，在 `--json` 输出中 `project_path` 与规范路径的原始字节数组逐字节一致；同目录续发成功，跨目录以 `--session S` 发送返回 `binding_mismatch` 冲突并以退出码 2 退出。
 - TUI 中 `/model`、`/effort` 选择经 `configure` 保存后在重试、工具与重新打开会话后保持；在一轮执行中选择模型时，Dock 显示说明执行中不能修改设置的 `WARN`，后台 `head` 与 `SettingsVersion` 不变；该轮结束后切换到不支持当前档位的模型时，对话记录出现说明档位调整的 `Info`，statusline 显示新的模型与档位。
 

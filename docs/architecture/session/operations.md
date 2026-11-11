@@ -56,7 +56,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
    | `rejected` | 先输出 `configure` 的 `rejected` 记录，再以同一个错误输出 `submit` 的 `rejected` 回执；退出码按提交被拒的规则 |
    | `unknown` | 先输出 `configure` 的 `unknown` 记录，再输出 `submit` 的 `not_accepted` 回执；退出码为 1 |
 
-4. `configure` 连接建立后结果不明时，以同一参数重发，最多 2 次；重发与冲突处理见[configure 的找回](recovery.md#configure-的找回)。
+4. `configure` 只发一次，结果不明时按上表的 `unknown` 处理；重跑命令是安全的，见[configure 的找回](recovery.md#configure-的找回)。
 
 `session send` 与 `session turn --follow` 的 `--json` 输出 JSONL，只含所提交或所跟的那一轮，共有八种记录：`submit`（发出请求前一条写明 TurnId 与 SessionId，结束时一条写明回执结果）、`configure`（会话配置结果：`configured`、`rejected` 或 `unknown`）、`cancel`（取消回执）、`head`（会话头）、`entry`（对话条目，读者按 `node` 覆盖）、`text`（生成中的文字）、`connection` 与 `error`。向已有会话发送且未给出 `--agent`、`--model`、`--effort` 时，或工作区在 `configure` 之前失败与中断时，没有 `configure` 记录；`session turn --follow` 不会配置会话，也不输出 `configure` 记录。结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另设结束记录。
 
