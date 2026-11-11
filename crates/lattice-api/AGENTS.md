@@ -26,7 +26,7 @@
 | 修改的内容 | 读取 |
 | --- | --- |
 | 任何改动 | [会话与 Turn](../../docs/architecture/session/README.md)、[实现模块与公开操作](../../docs/architecture/session/operations.md)、[工程规范](../../docs/development/engineering.md) |
-| 提交准入、配置冻结、脱敏与重试预算 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md)、[会话的 profile 副本](../../docs/architecture/session/settings.md) |
+| 提交准入、配置冻结、脱敏与重试预算 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md)、[会话设置](../../docs/architecture/session/settings.md) |
 | Step 事务、调用槽位、锁与故障停写 | [Step 执行与结果保存](../../docs/architecture/session/steps.md)、[会话存储与并发](../../docs/architecture/session/concurrency.md)、[私有存储与持久化](../../docs/architecture/storage.md#锁与并发语义) |
 | 找回、视图观察、取消与后台 `stop` | [重开、取消与未完成状态](../../docs/architecture/session/recovery.md) |
 | 模型候选、元数据调度与凭据交换 | [模型接入](../../docs/architecture/llm/README.md)、[模型引用与元数据](../../docs/architecture/llm/models.md#元数据的来源与合并)、[凭据与 Sign in with ChatGPT](../../docs/architecture/llm/credentials.md) |
@@ -36,10 +36,10 @@
 
 - `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的模型驱动与工具分发路径；阻塞式会话库访问放入 `spawn_blocking`，写事务内不等待模型、工具执行器或网络。
 - `submit` 只接受新请求，找回统一走按 `TurnId` 查询；`observer.rs` 为每个观察者维护最新待推条目与文字游标并以非阻塞通知解耦观察背压、实时排空与持久提交；Step 重试提示与 `TurnSummary` notice 按[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)生成，接受与观察交接见[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)与[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。
-- `local/server.rs` 的 `configure(New)` 在响应写回连接后触发受后台监督的草稿清理，并在准入锁边界与 `watch` 观察者登记串行；`stop` 先取消元数据刷新任务并调用 `stop_logins`，待已接管 Turn 与在途草稿清理收尾后再关闭认证生命周期并排空连接，交接顺序见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
+- `local/server.rs` 的 `configure(New)` 在请求处理完毕并尝试写回响应后（无论请求成功或被拒、响应写出成功或失败）触发受后台监督的草稿会话清理，并在准入锁边界与 `watch` 观察者登记串行，见[会话状态与草稿清理](../../docs/architecture/session/concurrency.md#会话状态与草稿清理)；`stop` 先取消元数据刷新任务并调用 `stop_logins`，待已接管 Turn 与在途草稿会话清理收尾后再关闭认证生命周期并排空连接，交接顺序见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
 - `ToolExecutor` 经构造参数注入后台与执行入口，不使用全局变量：生产默认注入空目录的 `NoTools`（发给模型的请求不带工具定义）；开启 `test-fake-tools` feature 的构建仅在后台启动环境设置了 `LATTICE_TEST_TOOLS` 时启用 `FakeToolExecutor`，未设置时仍使用 `NoTools`。接受事务前调用 `open_turn` 冻结本轮工具目录，协调层用同一份目录驱动模型请求与 `InvalidBatch` 批次校验。
 - 调用分发前先检查取消与本轮 deadline，提交 `start_invocation` 后调用 `TurnTools::execute` 并传入同一取消标志与 deadline：`ToolOutcome::Deadline` 不调用 `finish_invocation`，直接以 `DispatchStop::Deadline` 关闭 Step（槽位保持 `Started`，读出 `Indeterminate(NoResult)`）；其余四种结果映射为 `ToolReply` 写入终态。写事务提交失败时经 `stores.rs` 立即停写全库、排空在途工作后关闭重开，见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)与[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)。
-- 执行者消失后的 Turn 保留原持久状态，`rewind` 只将当前节点指针移到目标 `NodeId` 并保留原分叉、工作区文件与会话 profile 副本，见[执行者消失后的 Turn](../../docs/architecture/session/recovery.md#执行者消失后的-turn)与[会话的 profile 副本](../../docs/architecture/session/settings.md#会话的-profile-副本)。
+- 执行者消失后的 Turn 保留原持久状态，`rewind` 只将当前节点指针移到目标 `NodeId` 并保留原分叉、工作区文件与会话设置，见[执行者消失后的 Turn](../../docs/architecture/session/recovery.md#执行者消失后的-turn)与[会话设置](../../docs/architecture/session/settings.md#设置与一轮的配置)。
 - `session.rs` 解析 `SessionId` 时先精确匹配再按已存前缀匹配，歧义时最多列出 5 个候选并拒绝空白输入，内部与持久层始终使用 32 位十六进制规范 `SessionId`。
 - 本 crate 之外：profile 字段与目录权限校验由 `lattice-profile` 负责；会话库表与事务原语由 `lattice-session` 负责；provider wire 协议与认证生命周期由 `lattice-llm` 负责；终端与命令行呈现由 `lattice-tui` 和 `lattice-cli` 负责。
 

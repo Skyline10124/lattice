@@ -11,7 +11,7 @@
 | `src/availability.rs` | 统一的 provider 与模型 `Availability`（`Ready` / `Unconfigured` / `Invalid`）判定与补救提示 |
 | `src/protocol/` | 五种协议适配器（`chat_completions.rs`、`responses.rs`、`anthropic_messages.rs`、`generate_content.rs`、`interactions.rs`）、`features.rs`、`usage.rs`、`common.rs` 及唯一生产消息投影 `projection/`（含工具结果与 `ToolError` 载荷编码） |
 | `src/provider/` | 内置 provider 表（`builtins.rs`）、`providers.toml` 严格解析与合并（`config.rs`，含显式声明 `declared` 事实）及按 `ProviderId` 查找 |
-| `src/metadata/`、`src/models.rs`、`src/reasoning.rs` | 内置快照、`models.dev` 与 ChatGPT 账号目录单次拉取与缓存合并、`ModelCandidateQuery` 候选查询及可用推理档位推导与映射 |
+| `src/metadata/`、`src/models.rs`、`src/reasoning.rs` | 内置快照、`models.dev` 与 ChatGPT 账号目录单次拉取与缓存合并、`ModelCandidateQuery` 候选查询、不需要凭据且返回 `Result` 的 `model_supported_efforts` 档位能力查询，以及可用推理档位推导与映射 |
 | `src/auth/` | `auth.json` 读写、脱敏已知凭据值提取，以及 `siwc/` 下的 Sign in with ChatGPT 登录、单飞刷新、登出与分阶段收尾（`stop_logins` / `shutdown`） |
 | `src/tls.rs`、`src/client.rs`、`src/transport.rs`、`src/sse.rs`、`src/types.rs` | 平台根 DER 原始加载、单 Turn 地址固定与 HTTP 客户端复用、请求头与未处理请求重发策略、错误诊断与 Retry-After 解析、SSE 解析及请求/事件类型 |
 | `src/reply.rs`、`src/reply_stream.rs` | 同步回复累积器（有序片段、实时增量、字节限额）与惰性流包装器（取消、deadline、唯一终态交付） |
