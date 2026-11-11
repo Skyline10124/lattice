@@ -1107,9 +1107,18 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             text.contains("MODEL") && text.matches("local/preview").count() == 2
         });
         assert!(!restored.contains("ignored"));
-        tui.send_keys(b"\x1b").unwrap();
+        // 一轮执行中用 `/model` 选定新模型：屏幕上出现 Warn 说明执行中不能修改设置，会话头不变。
+        tui.send_keys(b"\r").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
-            !text.contains("MODEL") && text.contains("gpt-6-luna") && text.contains("off")
+            !text.contains("MODEL")
+                && text.contains("WARN")
+                && text.contains("这一轮执行中不能修改设置")
+        });
+        let busy_head = support::ipc(&world, step(), json!({"operation":"head","session_id":sid}));
+        assert_eq!(busy_head, head);
+        tui.send_keys(b" ").unwrap();
+        wait_pty_frame(&mut tui, step(), |text| {
+            !text.contains("WARN") && text.contains("gpt-6-luna") && text.contains("off")
         });
         gate.release_next(step()).unwrap();
         gate.wait_until_stalled(3, step()).unwrap();
@@ -1162,7 +1171,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             text.contains("gpt-6-luna") && text.contains("off") && text.contains("idle")
         });
         assert_eq!(server.captured_requests().len(), 4);
-        // `/model` 立即向后台发送 `configure(Existing)` 并推送新会话头，不写新的对话节点。
+        // 轮次结束后切换到不支持当前档位 `off` 的模型：出现档位调整 Info，statusline 显示新模型与档位。
         tui.send_line("/model").unwrap();
         wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
         tui.send_keys(b"local/preview").unwrap();
@@ -1171,7 +1180,9 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         });
         tui.send_keys(b"\r").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
-            !text.contains("MODEL") && text.contains("preview") && text.contains("low")
+            !text.contains("MODEL")
+                && text.contains("换模型后推理档位由 off 改为 low")
+                && text.contains("preview · local · low")
         });
         let preview_head =
             support::ipc(&world, step(), json!({"operation":"head","session_id":sid}));

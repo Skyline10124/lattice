@@ -33,6 +33,7 @@ status: active
 | [停止后台与排空](harness/stop-and-drain.md) | stop 关闭新准入，等已接管的工作收尾 |
 | [后台崩溃与执行者消失](harness/crash-and-vanished-executor.md) | 任一提交点崩溃后，重开不经写入即可读到结局 |
 | [配置来源与 profile 副本](harness/config-and-profile-copy.md) | 后台按启动时的配置目录读取配置，已有会话按副本执行 |
+| [会话设置与草稿](harness/session-settings-and-drafts.md) | 草稿跨重启保留、`SettingsVersion` 与项目绑定字节生效、执行中禁改设置与档位调整可见 |
 
 ## 手动操作
 

@@ -2847,3 +2847,203 @@ fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
     }));
     support::finish_recorded(evidence, result);
 }
+
+#[test]
+fn draft_without_model_survives_restart_and_enforces_settings_version() {
+    const FOURTH: &str = "00000000-0000-4000-8000-000000000004";
+    let (world, spec) = direct_world("background-draft-restart-settings", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let server = wire_fake_llm(&world, "background", SseScript::plain("draft model reply"));
+        // 改写 agent 配置使其不含 `[agent].model`，经原始 IPC 创建无模型的草稿会话。
+        world
+            .write_project_file(
+                ".lattice/agents/background/agent.toml",
+                "schema_version = 1\n[agent]\nname = \"background\"\n[prompt]\nsystem = \"draft without model\"\n",
+            )
+            .unwrap();
+        let first_epoch =
+            ipc(&world, wait(&budget), json!({"operation":"status"}))["value"]["epoch"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        let configured = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"new":NEW_SESSION}),
+                Some("background"),
+                None,
+                None,
+            ),
+        );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let initial_head = &configured["value"]["head"];
+        assert_eq!(initial_head["session_id"], NEW_SESSION);
+        assert_eq!(initial_head["position"], 0);
+        assert_eq!(initial_head["agent"], "background");
+        assert_eq!(initial_head["model"], Value::Null);
+        assert_eq!(initial_head["provider"], Value::Null);
+        assert_eq!(initial_head["effort"], Value::Null);
+        let stale_version = initial_head["settings_version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        // 停止并重新启动后台：草稿仍在列表中（节点数为 1），会话头照常可读。
+        world.stop_daemon().unwrap();
+        let listed = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "list"],
+        );
+        assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+        assert_eq!(listed[0]["session_id"], NEW_SESSION);
+        assert_eq!(listed[0]["node_count"], 1);
+        assert_eq!(listed[0]["current"], 0);
+        assert_eq!(listed[0]["unclosed_turn"], Value::Null);
+        let second_epoch =
+            ipc(&world, wait(&budget), json!({"operation":"status"}))["value"]["epoch"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+        assert_ne!(second_epoch, first_epoch, "后台重启后必须进入新的实例代");
+        let reopened_head = ipc(
+            &world,
+            wait(&budget),
+            json!({"operation":"head", "session_id":NEW_SESSION}),
+        );
+        assert_eq!(reopened_head["response"], "head", "{reopened_head}");
+        assert_eq!(reopened_head["value"], *initial_head);
+
+        // 未选模型直接提交：配置拒绝并提示先选择模型，不写节点，设置版本不变。
+        let rejected = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, FIRST, NEW_SESSION, "missing model"),
+        );
+        assert_eq!(rejected["response"], "error", "{rejected}");
+        assert_eq!(rejected["value"]["kind"], "bad_request", "{rejected}");
+        assert!(
+            rejected["value"]["message"]
+                .as_str()
+                .unwrap()
+                .contains("choose one with /model or --model"),
+            "未选模型提交应提示先选择模型：{rejected}"
+        );
+        assert_eq!(
+            turn_lookup(&world, wait(&budget), FIRST)["value"]["kind"],
+            "not_found"
+        );
+        assert!(server.captured_requests().is_empty());
+        let list_after_reject = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "list"],
+        );
+        assert_eq!(list_after_reject[0]["node_count"], 1);
+        let log_after_reject = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        assert_eq!(log_after_reject["nodes"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            ipc(
+                &world,
+                wait(&budget),
+                json!({"operation":"head", "session_id":NEW_SESSION})
+            ),
+            reopened_head
+        );
+
+        // 为已有草稿选定模型 M 后提交：本轮完成，UserMessage 记录模型 M。
+        let updated = ipc(
+            &world,
+            wait(&budget),
+            configure_request(
+                &world,
+                json!({"existing":NEW_SESSION}),
+                None,
+                Some("local/background"),
+                None,
+            ),
+        );
+        assert_eq!(updated["response"], "configure", "{updated}");
+        assert_eq!(updated["value"]["head"]["model"], "background");
+        assert_eq!(updated["value"]["head"]["provider"], "local");
+        let current_version = updated["value"]["head"]["settings_version"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+        assert_ne!(current_version, stale_version);
+
+        let accepted = ipc(
+            &world,
+            wait(&budget),
+            submit_request(&world, SECOND, NEW_SESSION, "first turn with model"),
+        );
+        assert_eq!(accepted["response"], "acceptance", "{accepted}");
+        assert_eq!(accepted["value"]["acceptance"], "accepted", "{accepted}");
+        let completed = closed_without_owner(&world, &budget, &mut evidence, SECOND);
+        assert_eq!(completed["summary"]["outcome"], "completed");
+        let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
+        let view = watcher.initial();
+        assert_eq!(view.entries[&1].raw["content"]["model"], "background");
+        assert_eq!(view.entries[&1].raw["content"]["provider"], "local");
+        assert_eq!(server.captured_requests().len(), 1);
+        assert_eq!(server.captured_requests()[0].raw["model"], "background");
+
+        // 带旧的 SettingsVersion 提交返回 settings_changed 冲突且不写节点；换用当前版本提交成功。
+        let mut stale_submit = submit_request(&world, THIRD, NEW_SESSION, "stale version turn");
+        stale_submit["request"]["expected_settings"] = json!(stale_version);
+        let stale_reply = ipc(&world, wait(&budget), stale_submit);
+        assert_eq!(
+            conflict(&stale_reply),
+            Some("settings_changed"),
+            "{stale_reply}"
+        );
+        assert_eq!(
+            turn_lookup(&world, wait(&budget), THIRD)["value"]["kind"],
+            "not_found"
+        );
+        assert_eq!(server.captured_requests().len(), 1);
+        let log_after_conflict = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        assert_eq!(log_after_conflict["nodes"].as_array().unwrap().len(), 3);
+
+        let mut fresh_submit = submit_request(&world, FOURTH, NEW_SESSION, "fresh version turn");
+        fresh_submit["request"]["expected_settings"] = json!(current_version);
+        let fresh_reply = ipc(&world, wait(&budget), fresh_submit);
+        assert_eq!(fresh_reply["response"], "acceptance", "{fresh_reply}");
+        assert_eq!(
+            fresh_reply["value"]["acceptance"], "accepted",
+            "{fresh_reply}"
+        );
+        let fresh_done = closed_without_owner(&world, &budget, &mut evidence, FOURTH);
+        assert_eq!(fresh_done["summary"]["outcome"], "completed");
+        assert_eq!(server.captured_requests().len(), 2);
+        let first_entries = history(&world, wait(&budget), NEW_SESSION, 3, 1).unwrap();
+        assert_eq!(first_entries[0]["content"]["model"], "background");
+        assert_eq!(first_entries[0]["content"]["provider"], "local");
+        let final_log = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "log", NEW_SESSION],
+        );
+        assert_eq!(final_log["nodes"].as_array().unwrap().len(), 5);
+        archive_state(&world, &budget, &mut evidence, &[SECOND, FOURTH]);
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}

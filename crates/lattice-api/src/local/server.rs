@@ -691,9 +691,16 @@ impl Backend {
 
         owner.started.store(true, Ordering::Release);
         if is_new {
-            io.create_session(workspace.project_path(), settings)
+            let session = io
+                .create_session(workspace.project_path(), settings)
                 .await
                 .map_err(crate::ApiError::from)?;
+            #[cfg(feature = "test-crash-barriers")]
+            crate::turn::crash_barrier::configure_hit(&session)
+                .await
+                .map_err(crate::ApiError::from)?;
+            #[cfg(not(feature = "test-crash-barriers"))]
+            let _ = session;
         } else {
             io.update_settings(workspace.project_path(), settings)
                 .await
