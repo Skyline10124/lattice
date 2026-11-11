@@ -38,7 +38,7 @@ impl Peer {
             client: LocalClient::new(layout),
         }
     }
-    async fn request(&self, op: &str) -> Wire {
+    async fn next_request(&self) -> Wire {
         let (mut stream, _) = self.listener.accept().await.unwrap();
         let mut magic = [0; 8];
         stream.read_exact(&mut magic).await.unwrap();
@@ -47,14 +47,37 @@ impl Peer {
         let mut bytes = vec![0; length as usize];
         stream.read_exact(&mut bytes).await.unwrap();
         let request: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(request["operation"], op);
-        if op == "watch" || op == "head" {
-            assert_eq!(request["session_id"], SESSION);
-        }
         Wire {
             stream,
             sequence: 0,
             request,
+        }
+    }
+    async fn request(&self, op: &str) -> Wire {
+        let wire = self.next_request().await;
+        assert_eq!(wire.request["operation"], op);
+        if op == "watch" || op == "head" {
+            assert_eq!(wire.request["session_id"], SESSION);
+        }
+        wire
+    }
+    async fn assert_no_pending_request(&self) {
+        let polled =
+            std::future::poll_fn(|cx| std::task::Poll::Ready(self.listener.poll_accept(cx))).await;
+        if let Ok((mut stream, _)) = match polled {
+            std::task::Poll::Ready(res) => res,
+            std::task::Poll::Pending => return,
+        } {
+            let mut magic = [0; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            let length = stream.read_u32().await.unwrap();
+            let mut bytes = vec![0; length as usize];
+            stream.read_exact(&mut bytes).await.unwrap();
+            let extra: Value = serde_json::from_slice(&bytes).unwrap();
+            panic!(
+                "单次 configure 结束后不应残留未消费的 IPC 请求，实际收到: {}",
+                extra["operation"]
+            );
         }
     }
 }
@@ -827,49 +850,78 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
 }
 
 #[tokio::test]
-async fn send_configure_outcomes_retries_and_exit_codes() {
+async fn send_configure_outcomes_and_exit_codes() {
     let _guard = signal_guard().await;
-    // 1. configure 被拒绝：先输出 configure(rejected)，再输出同一个错误的 submit(rejected)，不再发 submit；配置错误退出 2，存储不可用退出 1。
-    for (kind, expected_exit) in [("bad_request", 2u8), ("store_unavailable", 1u8)] {
+    // 1. configure 被拒绝：只发一次 configure，依次输出 configure(rejected) 与同一错误的 submit(rejected)，不发 submit。
+    for (kind, expected_exit) in [
+        ("bad_request", 2u8),
+        ("conflict", 2u8),
+        ("store_unavailable", 1u8),
+        ("busy", 1u8),
+    ] {
         let peer = Peer::new();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let workspace = peer._root.path().to_path_buf();
-        let send = run_session_prompt_with_io(
-            &peer.client,
-            super::super::session::SendArgs {
-                prompt: "hello".into(),
-                session_id: None,
-                agent: Some(lattice_api::AgentName::parse("test").unwrap()),
-                model: None,
-                effort: None,
-            },
-            false,
-            true,
-            Some(workspace),
-            &mut out,
-            &mut err,
-        );
-        let driver = async {
-            let mut cfg = peer.request("configure").await;
-            let new_sid = cfg.request["request"]["session"]["new"]
-                .as_str()
-                .expect("新建会话发 configure(new)")
-                .to_string();
-            assert!(SessionId::parse(&new_sid).is_ok());
-            assert_eq!(cfg.request["request"]["agent"], "test");
-            cfg.reply(
-                "error",
-                json!({"kind":kind,"message":"exact configure failure","recovery":null,"store":null}),
-            )
-            .await;
-            new_sid
+        let (result, new_sid) = {
+            let send = run_session_prompt_with_io(
+                &peer.client,
+                super::super::session::SendArgs {
+                    prompt: "hello".into(),
+                    session_id: None,
+                    agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+                    model: None,
+                    effort: None,
+                },
+                false,
+                true,
+                Some(workspace),
+                &mut out,
+                &mut err,
+            );
+            tokio::pin!(send);
+            let new_sid = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    res = &mut send => panic!("configure 被消费前命令不应提前退出：{res:?}"),
+                    mut cfg = peer.request("configure") => {
+                        let sid_str = cfg.request["request"]["session"]["new"]
+                            .as_str()
+                            .expect("新建会话必须发送 configure(new)")
+                            .to_string();
+                        assert!(SessionId::parse(&sid_str).is_ok(), "SessionId 格式无效：{sid_str}");
+                        assert_eq!(cfg.request["request"]["agent"], "test");
+                        cfg.reply(
+                            "error",
+                            json!({"kind":kind,"message":"exact configure failure","recovery":null,"store":null}),
+                        )
+                        .await;
+                        sid_str
+                    }
+                }
+            })
+            .await
+            .expect("等待首次 configure 请求超时");
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    res = &mut send => res,
+                    extra = peer.next_request() => {
+                        panic!(
+                            "configure({kind}) 被拒后只应发一次 configure 且不发 submit，实际又收到 IPC 请求：{}",
+                            extra.request["operation"]
+                        );
+                    }
+                }
+            })
+            .await
+            .expect("configure 被拒后命令未在时限内退出");
+            (result, new_sid)
         };
-        let (result, new_sid) =
-            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(send, driver) })
-                .await
-                .unwrap();
-        assert_eq!(result.unwrap(), std::process::ExitCode::from(expected_exit));
+        peer.assert_no_pending_request().await;
+        assert_eq!(
+            result.unwrap(),
+            std::process::ExitCode::from(expected_exit),
+            "{kind} 退出码不符"
+        );
         let records: Vec<Value> = String::from_utf8(out)
             .unwrap()
             .lines()
@@ -878,7 +930,7 @@ async fn send_configure_outcomes_retries_and_exit_codes() {
         assert_eq!(
             records.len(),
             3,
-            "被拒绝时应输出 sending + configure(rejected) + receipt(rejected)"
+            "{kind} 被拒时应恰好输出 sending + configure(rejected) + receipt(rejected)：{records:?}"
         );
         assert_eq!(records[0]["type"], "submit");
         assert_eq!(records[0]["stage"], "sending");
@@ -886,246 +938,188 @@ async fn send_configure_outcomes_retries_and_exit_codes() {
         assert_eq!(records[1]["type"], "configure");
         assert_eq!(records[1]["session_id"], new_sid);
         assert_eq!(records[1]["result"], "rejected");
+        assert_eq!(records[1]["error"]["kind"], kind);
         assert_eq!(records[1]["error"]["message"], "exact configure failure");
         assert_eq!(records[2]["type"], "submit");
         assert_eq!(records[2]["stage"], "receipt");
+        assert_eq!(records[2]["turn_id"], records[0]["turn_id"]);
         assert_eq!(records[2]["result"], "rejected");
-        assert_eq!(records[2]["error"]["message"], "exact configure failure");
+        assert_eq!(records[2]["recovered"], false);
+        assert_eq!(records[2]["error"], records[1]["error"]);
     }
 
-    // 2. configure(New) 结果不明 -> 重发得到 SessionExists -> 查 head 继续提交，退出 0。
-    {
+    // 2. configure 结果不明（请求写出后连接关闭、读不到回复）：新建与已有会话均只发一次 configure，输出 configure(unknown) 与 submit(not_accepted)，退出 1，不发 submit。
+    for existing in [false, true] {
         let peer = Peer::new();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let workspace = peer._root.path().to_path_buf();
-        let send = run_session_prompt_with_io(
-            &peer.client,
-            super::super::session::SendArgs {
-                prompt: "after unknown".into(),
-                session_id: None,
-                agent: Some(lattice_api::AgentName::parse("test").unwrap()),
-                model: None,
-                effort: None,
-            },
-            false,
-            true,
-            Some(workspace),
-            &mut out,
-            &mut err,
-        );
-        let driver = async {
-            let first = peer.request("configure").await;
-            let created_sid: SessionId = first.request["request"]["session"]["new"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap();
-            let first_req = first.request.clone();
-            drop(first);
-            let mut retry = peer.request("configure").await;
-            assert_eq!(retry.request, first_req, "重发必须保持同一参数");
-            retry
-                .reply(
-                    "error",
-                    json!({"kind":"conflict","conflict":"session_exists","message":"session already exists","recovery":null,"store":null}),
-                )
-                .await;
-            let (mut head_stream, _) = peer.listener.accept().await.unwrap();
-            let mut magic = [0; 8];
-            head_stream.read_exact(&mut magic).await.unwrap();
-            let len = head_stream.read_u32().await.unwrap();
-            let mut buf = vec![0; len as usize];
-            head_stream.read_exact(&mut buf).await.unwrap();
-            let head_req: Value = serde_json::from_slice(&buf).unwrap();
-            assert_eq!(head_req["operation"], "head");
-            assert_eq!(head_req["session_id"], created_sid.to_string());
-            let mut head_wire = Wire {
-                stream: head_stream,
-                sequence: 0,
-                request: head_req,
-            };
-            let mut draft_head = head(lattice_api::local::new_turn_id(), false);
-            draft_head.session_id = created_sid;
-            draft_head.position = NodeId(0);
-            draft_head.turn_id = None;
-            head_wire.reply_head(draft_head).await;
-
-            let mut submit = peer.request("submit").await;
-            let turn_id: TurnId = submit.request["request"]["turn_id"]
-                .as_str()
-                .unwrap()
-                .parse()
-                .unwrap();
-            assert_eq!(
-                submit.request["request"]["session"],
-                created_sid.to_string()
+        let (result, target_sid) = {
+            let send = run_session_prompt_with_io(
+                &peer.client,
+                super::super::session::SendArgs {
+                    prompt: "reply lost".into(),
+                    session_id: existing.then(|| "1111".into()),
+                    agent: (!existing).then(|| lattice_api::AgentName::parse("test").unwrap()),
+                    model: existing
+                        .then(|| lattice_api::ModelRef::parse("local/org/model").unwrap()),
+                    effort: None,
+                },
+                false,
+                true,
+                Some(workspace),
+                &mut out,
+                &mut err,
             );
-            assert!(submit.request["request"]["expected_settings"].is_null());
-            let mut detail_val = detail(turn_id, "completed");
-            detail_val.session_id = created_sid;
-            submit
-                .reply(
-                    "acceptance",
-                    json!({"acceptance":"accepted","turn":TurnView::from(&detail_val)}),
-                )
-                .await;
-
-            let (mut watch_stream, _) = peer.listener.accept().await.unwrap();
-            watch_stream.read_exact(&mut magic).await.unwrap();
-            let wlen = watch_stream.read_u32().await.unwrap();
-            let mut wbuf = vec![0; wlen as usize];
-            watch_stream.read_exact(&mut wbuf).await.unwrap();
-            let wreq: Value = serde_json::from_slice(&wbuf).unwrap();
-            assert_eq!(wreq["operation"], "watch");
-            let mut watch = Wire {
-                stream: watch_stream,
-                sequence: 0,
-                request: wreq,
-            };
-            let mut done_head = head(turn_id, false);
-            done_head.session_id = created_sid;
-            watch.view(ViewUpdate::Head(done_head)).await;
-            watch
-                .view(ViewUpdate::Entry {
-                    entry: entry(turn_id, "completed"),
-                })
-                .await;
+            tokio::pin!(send);
+            let target_sid = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    res = &mut send => panic!("configure 断连前命令不应提前退出：{res:?}"),
+                    sid_str = async {
+                        if existing {
+                            resolve_session(&peer).await;
+                        }
+                        let wire = peer.request("configure").await;
+                        let sid_str = if existing {
+                            assert_eq!(
+                                wire.request["request"]["session"],
+                                json!({"existing":sid()})
+                            );
+                            SESSION.to_string()
+                        } else {
+                            wire.request["request"]["session"]["new"]
+                                .as_str()
+                                .expect("新建会话必须发送 configure(new)")
+                                .to_string()
+                        };
+                        drop(wire);
+                        sid_str
+                    } => sid_str,
+                }
+            })
+            .await
+            .expect("等待 configure 请求超时");
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    res = &mut send => res,
+                    extra = peer.next_request() => {
+                        panic!(
+                            "configure 结果不明后不应重发 configure、查询 head 或发送 submit（existing={existing}），实际收到 IPC 请求：{}",
+                            extra.request["operation"]
+                        );
+                    }
+                }
+            })
+            .await
+            .expect("configure 结果不明后命令未在时限内退出");
+            (result, target_sid)
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(send, driver) })
-                .await
-                .unwrap();
-        assert_eq!(result.unwrap(), std::process::ExitCode::SUCCESS);
-        let records: Vec<Value> = String::from_utf8(out)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(records[0]["stage"], "sending");
-        assert_eq!(records[1]["type"], "configure");
-        assert_eq!(records[1]["result"], "configured");
-        assert_eq!(records[2]["stage"], "receipt");
-        assert_eq!(records[2]["result"], "accepted");
-    }
-
-    // 3. configure(Existing) 结果不明 -> 首次重发 Busy -> 第二次重发成功，继续提交。
-    {
-        let peer = Peer::new();
-        let mut out = Vec::new();
-        let mut err = Vec::new();
-        let workspace = peer._root.path().to_path_buf();
-        let send = run_session_prompt_with_io(
-            &peer.client,
-            super::super::session::SendArgs {
-                prompt: "busy retry".into(),
-                session_id: Some("1111".into()),
-                agent: None,
-                model: Some(lattice_api::ModelRef::parse("local/org/model").unwrap()),
-                effort: None,
-            },
-            false,
-            true,
-            Some(workspace),
-            &mut out,
-            &mut err,
-        );
-        let driver = async {
-            resolve_session(&peer).await;
-            let first = peer.request("configure").await;
-            assert_eq!(
-                first.request["request"]["session"],
-                json!({"existing":sid()})
-            );
-            drop(first);
-            let mut retry1 = peer.request("configure").await;
-            retry1
-                .reply(
-                    "error",
-                    json!({"kind":"busy","message":"session has a turn in progress"}),
-                )
-                .await;
-            let mut retry2 = peer.request("configure").await;
-            let configured_head = head(lattice_api::local::new_turn_id(), false);
-            retry2
-                .reply(
-                    "configure",
-                    json!({"head":configured_head,"adjustment":{"from":"high","to":"medium"}}),
-                )
-                .await;
-            let mut submit = peer.request("submit").await;
-            submit
-                .reply(
-                    "error",
-                    json!({"kind":"bad_request","message":"missing credential"}),
-                )
-                .await;
-        };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(send, driver) })
-                .await
-                .unwrap();
-        assert_eq!(result.unwrap(), std::process::ExitCode::from(2));
-        let records: Vec<Value> = String::from_utf8(out)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(records[1]["type"], "configure");
-        assert_eq!(records[1]["result"], "configured");
+        peer.assert_no_pending_request().await;
         assert_eq!(
-            records[1]["adjustment"],
-            json!({"from":"high","to":"medium"})
+            result.unwrap(),
+            std::process::ExitCode::from(1),
+            "configure 结果不明必须以退出码 1 结束（existing={existing}）"
         );
+        let records: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(
+            records.len(),
+            3,
+            "configure 结果不明时应恰好输出 sending + configure(unknown) + receipt(not_accepted)：{records:?}"
+        );
+        assert_eq!(records[0]["type"], "submit");
+        assert_eq!(records[0]["stage"], "sending");
+        assert_eq!(records[0]["session_id"], target_sid);
+        assert_eq!(records[1]["type"], "configure");
+        assert_eq!(records[1]["session_id"], target_sid);
+        assert_eq!(records[1]["result"], "unknown");
+        assert_eq!(records[1]["error"]["kind"], "transport");
+        assert_eq!(records[2]["type"], "submit");
         assert_eq!(records[2]["stage"], "receipt");
-        assert_eq!(records[2]["result"], "rejected");
+        assert_eq!(records[2]["turn_id"], records[0]["turn_id"]);
+        assert_eq!(records[2]["result"], "not_accepted");
+        assert_eq!(records[2]["recovered"], false);
     }
 
-    // 4. configure 结果不明，重发最多 2 次（共 3 次请求）后仍不明 -> 输出 configure(unknown) + receipt(not_accepted)，退出 1。
+    // 3. configure 等待回复期间收到 SIGINT：输出无错误的 configure(unknown) 与 submit(not_accepted)，退出 1，不重发且不发 submit。
     {
         let peer = Peer::new();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let workspace = peer._root.path().to_path_buf();
-        let send = run_session_prompt_with_io(
-            &peer.client,
-            super::super::session::SendArgs {
-                prompt: "still unknown".into(),
-                session_id: Some("1111".into()),
-                agent: None,
-                model: Some(lattice_api::ModelRef::parse("local/org/model").unwrap()),
-                effort: None,
-            },
-            false,
-            true,
-            Some(workspace),
-            &mut out,
-            &mut err,
-        );
-        let driver = async {
-            resolve_session(&peer).await;
-            for _ in 0..3 {
-                let wire = peer.request("configure").await;
-                drop(wire);
-            }
+        let (result, new_sid) = {
+            let send = run_session_prompt_with_io(
+                &peer.client,
+                super::super::session::SendArgs {
+                    prompt: "interrupted configure".into(),
+                    session_id: None,
+                    agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+                    model: None,
+                    effort: None,
+                },
+                false,
+                true,
+                Some(workspace),
+                &mut out,
+                &mut err,
+            );
+            tokio::pin!(send);
+            let held_wire = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    res = &mut send => panic!("收到 SIGINT 前命令不应退出：{res:?}"),
+                    wire = peer.request("configure") => wire,
+                }
+            })
+            .await
+            .expect("等待 configure 请求超时");
+            let new_sid = held_wire.request["request"]["session"]["new"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            assert!(
+                std::process::Command::new("kill")
+                    .args(["-INT", &std::process::id().to_string()])
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+            let result = tokio::time::timeout(Duration::from_secs(3), async {
+                tokio::select! {
+                    res = &mut send => res,
+                    extra = peer.next_request() => {
+                        panic!(
+                            "configure 期间收到 SIGINT 后不应再发起 IPC 请求，实际收到：{}",
+                            extra.request["operation"]
+                        );
+                    }
+                }
+            })
+            .await
+            .expect("SIGINT 中断 configure 后命令未在时限内退出");
+            drop(held_wire);
+            (result, new_sid)
         };
-        let (result, ()) =
-            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(send, driver) })
-                .await
-                .unwrap();
+        peer.assert_no_pending_request().await;
         assert_eq!(result.unwrap(), std::process::ExitCode::from(1));
         let records: Vec<Value> = String::from_utf8(out)
             .unwrap()
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(records.len(), 3);
+        assert_eq!(records.len(), 3, "{records:?}");
         assert_eq!(records[0]["stage"], "sending");
+        assert_eq!(records[0]["session_id"], new_sid);
         assert_eq!(records[1]["type"], "configure");
+        assert_eq!(records[1]["session_id"], new_sid);
         assert_eq!(records[1]["result"], "unknown");
-        assert_eq!(records[1]["error"]["kind"], "transport");
+        assert!(records[1]["error"].is_null(), "{:?}", records[1]);
         assert_eq!(records[2]["stage"], "receipt");
+        assert_eq!(records[2]["turn_id"], records[0]["turn_id"]);
         assert_eq!(records[2]["result"], "not_accepted");
+        assert_eq!(records[2]["recovered"], false);
     }
 }
 

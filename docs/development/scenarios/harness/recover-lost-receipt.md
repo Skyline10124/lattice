@@ -14,15 +14,15 @@ status: active
 
 1. 在未读回执窗口断开提交连接，按 TurnId 查询。
 2. 以同一身份重新提交一次。
-3. 分别覆盖：向已有 Session 提交、不带 `--session` 的首次提交、后台持续运行与后台重启后的找回，以及原请求仍在准入时的查询。
+3. 分别覆盖：向已有 Session 提交、不带 `--session` 的首次发送（先经 `configure(New)` 建立草稿会话、再提交）、后台持续运行与后台重启后的找回，以及原请求仍在准入时的查询。
 
 ## 断言
 
 - 已接受的请求能按 TurnId 查到；原请求仍在准入时查询返回在途，准入结束后返回已接受或 NotFound。
 - 以同一身份重新提交返回 Conflict，模型循环与工具执行次数（含假工具 `append_marker` 标记文件行数）不变。
-- 不带 `--session` 的首次提交之后，只有一个 Session 与一个 Turn。
+- 不带 `--session` 的首次发送被接受之后，只有一个 Session 与一个 Turn；准入窗口内提交端离开而未准入时，草稿会话停在根节点且没有已接受的 Turn。
 - 执行者消失的 Turn 停在已写入的进度，后续写操作直接进行。
 - 回执丢失由未读回执窗口证明；provider 收到请求之后才杀前端，证明不了回执丢失。
-- [请求身份与找回](../../../architecture/session/recovery.md#请求身份与找回)表中的其余各行由局部测试覆盖。
+- [请求身份与找回](../../../architecture/session/recovery.md#请求身份与找回)表中的其余各行由局部测试覆盖；`configure` 的幂等重发与找回见 [configure 的找回](../../../architecture/session/recovery.md#configure-的找回)。
 - 记录未读回执窗口的证据、查询结果、重新提交的回执、`session turn` 详情、`list` 输出与 provider 请求计数。
 - 收尾：先让在途提交与回执驱动退场，再分别核验前后台清理与证据完整性。

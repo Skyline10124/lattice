@@ -356,8 +356,7 @@ pub(super) async fn run_session_prompt_with_io(
             model: args.model,
             effort: args.effort,
         };
-        let configure_result =
-            configure_with_retry(api, session_id, configure_req, &mut signal).await;
+        let configure_result = configure_once_or_interrupt(api, configure_req, &mut signal).await;
         render_update(
             &LocalUpdate::Configure {
                 session_id,
@@ -419,80 +418,23 @@ pub(super) async fn run_session_prompt_with_io(
     let turn = api.start_turn(request);
     consume(turn, None, state, verbose, json, signal, out, err).await
 }
-async fn configure_with_retry(
+async fn configure_once_or_interrupt(
     api: &LocalClient,
-    session_id: SessionId,
     request: ConfigureRequest,
     signal: &mut tokio::signal::unix::Signal,
 ) -> ConfigureResult {
-    let first = tokio::select! {
+    let outcome = tokio::select! {
         biased;
         _ = signal.recv() => return ConfigureResult::Unknown { error: None },
-        outcome = api.configure_once(request.clone()) => outcome,
+        outcome = api.configure_once(request) => outcome,
     };
-    let mut last_error = match first {
-        ConfigureOutcome::Configured(reply) => {
-            return ConfigureResult::Configured {
-                head: reply.head,
-                adjustment: reply.adjustment,
-            };
-        }
-        ConfigureOutcome::Rejected(error) => return ConfigureResult::Rejected { error },
-        ConfigureOutcome::Unknown(error) => error,
-    };
-    for attempt in 0..2 {
-        let outcome = tokio::select! {
-            biased;
-            _ = signal.recv() => break,
-            outcome = api.configure_once(request.clone()) => outcome,
-        };
-        match outcome {
-            ConfigureOutcome::Configured(reply) => {
-                return ConfigureResult::Configured {
-                    head: reply.head,
-                    adjustment: reply.adjustment,
-                };
-            }
-            ConfigureOutcome::Rejected(error)
-                if matches!(request.session, ConfigureSession::New(_))
-                    && error.conflict == Some(ConflictReason::SessionExists) =>
-            {
-                let head = tokio::select! {
-                    biased;
-                    _ = signal.recv() => break,
-                    head = api.session_head(session_id) => head,
-                };
-                match head {
-                    Ok(head) => {
-                        return ConfigureResult::Configured {
-                            head,
-                            adjustment: None,
-                        };
-                    }
-                    Err(err) => last_error = err,
-                }
-            }
-            ConfigureOutcome::Rejected(error) if error.kind == LocalErrorKind::Busy => {
-                last_error = error;
-                if attempt == 0 {
-                    tokio::select! {
-                        biased;
-                        _ = signal.recv() => break,
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(50)) => {}
-                    }
-                }
-            }
-            ConfigureOutcome::Rejected(error) if error.kind == LocalErrorKind::NotRunning => {
-                last_error = error;
-            }
-            ConfigureOutcome::Rejected(error) => return ConfigureResult::Rejected { error },
-            ConfigureOutcome::Unknown(error) => {
-                last_error = error;
-            }
-        }
-    }
-    ConfigureResult::Unknown {
-        error: Some(last_error),
+    match outcome {
+        ConfigureOutcome::Configured(reply) => ConfigureResult::Configured {
+            head: reply.head,
+            adjustment: reply.adjustment,
+        },
+        ConfigureOutcome::Rejected(error) => ConfigureResult::Rejected { error },
+        ConfigureOutcome::Unknown(error) => ConfigureResult::Unknown { error: Some(error) },
     }
 }
 pub(super) async fn follow_with_output(

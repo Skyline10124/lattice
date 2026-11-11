@@ -29,7 +29,7 @@ status: active
 
 - 每个档位只用产生它的那一项对应的字段表达，不跨类型回退：来自 toggle 项的 `off` 与 `high` 只写开关字段，来自 effort 项的档位（包括取值 `none` 得到的 `off`）只写档位字段，来自 budget_tokens 项的档位只写预算字段。所选协议与 features 写不出某一档时，它不出现在可用档位中。
 - `reasoning` 为 true 而没有 `reasoning_options` 的模型总在推理，没有可选档位。
-- 按严格策略请求模型不支持的档位时，在接受前按配置错误拒绝，不降级到相近档位；换模型未显式选档位时的回退策略见[会话合同](../session/settings.md#会话的-profile-副本)。
+- 按严格规则请求模型不支持的档位时，在 `configure` 或提交准入阶段按配置错误拒绝，不降级到相近档位；换模型未显式选档位时的回退规则见[会话合同](../session/settings.md#档位规则)。
 - profile 的 `[agent].effort` 设默认档位；没有档位时不发送档位参数，由 provider 使用默认推理强度。Responses、generateContent 与 Interactions 请求推理文字与是否选择档位无关，不改变推理强度；Messages 的例外见下方映射。
 
 按 token 数限制的档位取以下预算：

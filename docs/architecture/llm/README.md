@@ -17,7 +17,7 @@ status: active
 - 用户用 `lattice auth set deepseek` 录入 DeepSeek 的 key，在 profile 中写 `model = "deepseek/deepseek-v4-pro"`、`effort = "high"`，然后提交任务。后台按内置表找到 DeepSeek 的协议与 endpoint，从 `auth.json` 取 key，把档位换成 DeepSeek 的推理参数，请求结束后把用量换算为统一口径并估算费用。
 - 用户用 `lattice auth login chatgpt` 登录 ChatGPT 账号，在 TUI 中用 `/model` 选 `chatgpt/<模型>`。后台用订阅登录的 access token 请求 Responses API，快过期时在请求前刷新。
 
-本合同是协议、provider 配置、features、模型元数据、推理档位、用量换算、凭据保存与订阅登录规则的唯一出处。会话如何持有配置（profile 副本）、一轮冻结哪些配置，以及用量如何保存在节点上，由[会话合同](../session/README.md)维护；TUI 的选择面板由 [TUI 合同](../tui/README.md)维护。
+本合同是协议、provider 配置、features、模型元数据、推理档位、用量换算、凭据保存与订阅登录规则的唯一出处。`configure` 如何加载 profile 写入会话设置、提交如何读取会话设置冻结一轮配置，以及用量如何保存在节点上，由[会话合同](../session/README.md)维护；TUI 的选择面板由 [TUI 合同](../tui/README.md)维护。
 
 ## 概念
 
@@ -38,14 +38,14 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 
 | 部分 | 负责的工作 |
 | --- | --- |
-| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、档位策略或推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件、用量与费用估算。协议适配、注册表、元数据、凭据与可用性判定都在网关内部 |
+| 请求网关（`lattice-llm`） | 对外唯一的模型请求入口：调用方给出 provider `id`、模型 `id`、推理档位、对话与工具定义、SessionId 及取消与 deadline，得到流式事件、用量与费用估算；并提供无凭据的模型档位能力查询（`model_supported_efforts`）。协议适配、注册表、元数据、凭据与可用性判定都在网关内部 |
 | 协议适配器（网关内部） | 按协议与 features 构造请求、解析流式事件、换算用量；把线上事件翻译为部件增量，交给回复组装 |
 | provider 注册表（网关内部） | 合并内置表与 `providers.toml`，记录声明事实并校验字段，按 `id` 找到 provider |
 | 元数据（网关内部） | 合并内置快照、缓存与 `providers.toml` 中手写的元数据；后台定时刷新缓存 |
 | 凭据库（网关内部） | 读写 `auth.json`；SIWC 的登录、刷新与撤销 |
-| 可用性与请求准备（网关内部） | 统一判定 provider 与模型的可用性（`ready`、`unconfigured`、`invalid`）；`GatewayTurn::prepare` 单次读取配置完成准入核对与档位选择 |
-| 后台（`lattice-api`） | 接受 Turn 时读取 profile，经请求网关完成模型准备与档位选择；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
-| 前端（CLI、TUI） | 交出用户的选择；凭据录入与登录只负责界面，经私有 IPC 交给后台 |
+| 可用性与请求准备（网关内部） | 统一判定 provider 与模型的可用性（`ready`、`unconfigured`、`invalid`）；`model_supported_efforts` 只读取 `providers.toml`、模型元数据与 provider features 而不读取凭据；`GatewayTurn::prepare` 单次读取配置与凭据完成提交准入核对 |
+| 后台（`lattice-api`） | `configure` 加载 profile 并经无凭据档位能力查询计算会话设置；提交时使用会话设置，经请求网关完成模型与凭据准备；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
+| 前端（CLI、TUI） | 发起会话配置与任务提交；凭据录入与登录只负责界面，经私有 IPC 交给后台 |
 
 调用方不接触 endpoint、key 与 features。网关每次请求按当前的内置表、`providers.toml`、元数据与凭据解析，不按 Turn 冻结；一轮固定的只有记在 UserMessage 节点上的 provider `id`、模型 `id` 与推理档位，见[会话合同](../session/acceptance.md#执行配置冻结)。地址固定与连接复用由网关内部按 Turn 维护，规则见[会话合同的模型 HTTP 传输](../session/concurrency.md#输入与传输限制)。
 

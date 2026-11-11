@@ -8,31 +8,30 @@ status: active
 
 ## 请求接受
 
-执行核心持有 SessionExecutionLock 后核对身份、项目绑定与输入；新接受还验证用户消息、工具目录及执行限制。接受事务写入以下事实：
+接受事务只作用于已有会话。执行核心持有 SessionExecutionLock 后核对请求身份、项目绑定、设置版本与输入，并验证用户消息、工具目录及执行限制；不创建 Session 记录，也不写会话设置。接受事务写入以下事实：
 
-- UserMessage 节点，父节点为 Session 当前位置；新会话先写入根节点 `0`，第一条 UserMessage 为 `1`、父节点为 `0`。
-- UserMessage 节点同时记下 `turn_id`、接受时间、agent 名、模型、provider、推理档位、执行限制和配置摘要。系统提示与工具目录按摘要写入配置表，已有同一摘要时不再写。项目绑定取自 Session 记录，不另存。
+- UserMessage 节点，父节点为 Session 当前位置（草稿会话的第一条 UserMessage 为 `1`、父节点为根节点 `0`）。
+- UserMessage 节点同时记下 `turn_id`、接受时间、agent 名、模型、provider、推理档位、执行限制和配置摘要。系统提示与工具目录按摘要写入配置表，表中已有同一摘要时直接复用。项目绑定取自 Session 记录，不另存。
 - TurnId 索引：TurnId 指向这个 UserMessage 节点。
 - 预留的第 0 步，父节点为 UserMessage：没有尝试和回复，停在 `Reserved`。
-- Session 记录的当前位置指向预留的 Step；新会话的 Session 记录与根节点在同一事务创建。
-- profile 副本：新会话、提交指定了 agent，或这一轮的模型与档位和副本中的不同时，写入这一轮所用的副本，规则见[会话的 profile 副本](settings.md#会话的-profile-副本)。
+- Session 记录的当前位置指向预留的 Step，并更新 `updated_at`（写入时再核对一次项目绑定与设置版本）。
 
 这个事务提交是请求接受的持久边界。用户消息为 User 角色的 text parts，大小规则见[输入与传输限制](concurrency.md#输入与传输限制)。
 
 | 接受时停在哪里 | 已知事实 | 后台责任与用户下一步 |
 | --- | --- | --- |
-| 输入、绑定、配置等在事务前被拒绝 | 尚未建立 Turn，也未发送 provider 请求 | 返回类型化拒绝；前端保留输入供用户修正。配置类拒绝给出的说明见[配置拒绝的原因](#配置拒绝的原因) |
+| 输入、绑定、设置版本、配置等在事务前被拒绝 | 尚未建立 Turn，也未发送 provider 请求 | 返回类型化拒绝；前端保留输入供用户修正。配置类拒绝给出的说明见[配置拒绝的原因](#配置拒绝的原因) |
 | 事务 `commit` 返回错误 | 接受结果未知：事务要么完整生效，要么完全未生效 | 后台按[事务失败](concurrency.md#事务与一致性)关闭并重开会话库，不启动 provider；LocalTurn 按原 TurnId 查询找回，见[请求身份与找回](recovery.md#请求身份与找回) |
 | 事务已提交 | 请求已接受，原用户消息及冻结事实已保存 | 后台执行并关闭原 Turn；读回这一轮或转交回执失败时回复接受结果未知，LocalTurn 按原 TurnId 查询找回；之后的失败与取消走相应关闭路径，进程退出时 Turn 停在已写入的进度 |
 
 ## 执行配置冻结
 
-后台在准入时读取 profile，冻结进这一轮。冻结把“以后再读某个文件”变成“这次 Turn 使用的确定值”，使执行中的一轮不受 profile 文件修改的影响。provider 配置、模型元数据与凭据是后台持有的全局状态，不冻结：请求网关每次请求时按当前值解析，见[模型接入合同](../llm/README.md#组成与归属)。前端只交出选择，不读取 profile、provider 配置、元数据或凭据。
+后台在准入时读取当前会话设置与本轮工具目录，冻结进这一轮。冻结把会话下一轮的配置固定为这次 Turn 使用的确定值，使执行中的一轮不受后续设置变更的影响。provider 配置、模型元数据与凭据是后台持有的全局状态，不冻结：请求网关每次请求时按当前值解析，见[模型接入合同](../llm/README.md#组成与归属)。前端只交出配置或提交请求，不读取 profile、provider 配置、元数据或凭据。
 
-配置的来源：
+冻结配置的来源：
 
-- **profile。** 会话的 profile 副本；新会话或提交指定了 agent 时，由 `lattice-profile::load_agent_profile` 发现并加载该 agent 的 profile（先查项目内的 `.lattice/agents/<名字>/agent.toml`，再查配置目录下的 agents 目录，核对全局目录与文件权限，仅接受 `schema_version = 1`、`[agent]`、`[prompt]` 与可选 `[llm]`，解析字段与系统提示；出现已移除的 `[lancet]` 或 `[tools]` 时直接拒绝，见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#6-profile-删除-lancet-与-tools)）。
-- **provider、模型、元数据与凭据。** 提交的选择或副本中的 `ModelRef`；接受时由 `GatewayTurn::prepare` 在一次准备中读取当前配置，核对 provider 与模型处于 `ready`（满足声明、凭据与端点校验，见[可用性判定](../llm/models.md#可用性判定)），并按本次档位策略选定推理档位（见[会话的 profile 副本](settings.md#会话的-profile-副本)）。输出上限、推理预算与凭据本身不在接受时冻结，由请求网关每次请求时按当前状态取得，见[元数据的来源与合并](../llm/models.md#元数据的来源与合并)与[凭据](../llm/credentials.md#凭据)。
+- **会话设置。** 会话库中的 `SessionSettings`（含 `EffectiveProfile`、内联系统提示、当前的模型与推理档位）；profile 文件的查找、加载与档位规则在 `configure` 中完成，见[会话设置](settings.md#configure-的计算基准与保存)与[档位规则](settings.md#档位规则)。
+- **provider、模型、元数据与凭据。** 会话设置中的 `ModelRef` 与 `Effort`；提交准入时先核对模型非空，再由 `GatewayTurn::prepare` 在一次准备中读取当前全局配置，核对 provider 与模型处于 `ready`（满足声明、凭据与端点校验，见[可用性判定](../llm/models.md#可用性判定)），并以严格模式复核会话设置中的推理档位受该模型支持。输出上限、推理预算与凭据本身不在接受时冻结，由请求网关每次请求时按当前状态取得，见[元数据的来源与合并](../llm/models.md#元数据的来源与合并)与[凭据](../llm/credentials.md#凭据)。
 - **工具目录。** 接受事务前由注入的 `ToolExecutor::open_turn(session_id, workspace)` 打开本轮 `TurnTools`，把给出的 `ToolSpec` 列表转换为 `ToolCatalogSnapshot` 冻结进配置表；生产后台默认注入空目录的 `NoTools`，冻结目录为空，发给模型的请求不带工具定义（见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）。
 - **TLS 根证书。** 后台启动时载入，见[配置来源与后台启动](#配置来源与后台启动)。
 
@@ -40,25 +39,24 @@ status: active
 
 | 字段类别 | 来源 | 冻结时点 | 接收/持有者 | 是否持久化 | 用途 |
 | --- | --- | --- | --- | --- | --- |
-| 提交的选择 | 前端：agent、模型、推理档位，都可以不选 | 提交时 | 后台准入 | 不单独保存；生效的值写入副本与 UserMessage 节点 | 用户在本次提交中的选择 |
-| 有效 profile | profile 副本，或 agent 的 profile | 接受事务前 | 执行核心 | 是，在 profile 副本中 | 固定 agent、默认模型与档位、LLM 重试与超时 |
+| 会话设置 | `configure` 解析并写入的 `SessionSettings` | `configure` 时保存，接受事务前读取 | 会话库、执行核心 | 是，在会话设置表中 | 提供下一轮的 agent 快照、系统提示、模型与推理档位 |
 | 凭据 | `auth.json` | 不冻结；请求网关每次请求时取得，SIWC 的 access token 按需刷新，见[刷新](../llm/credentials.md#刷新) | 请求网关，只在内存中 | 否 | 认证 provider 请求 |
 | TLS 根证书 | 后台启动时载入的内容 | 后台启动时 | 请求网关与 provider 连接 | 否 | 验证 TLS 连接 |
-| `FrozenTurnConfig.agent_name/model/provider/effort` | 有效 profile、模型解析与档位选择的结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份、模型与推理档位 |
-| `FrozenTurnConfig.system_prompt` | 有效 profile 加载的系统提示 | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
+| `FrozenTurnConfig.agent_name/model/provider/effort` | 会话设置与 `GatewayTurn::prepare` 核验结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份、模型与推理档位 |
+| `FrozenTurnConfig.system_prompt` | 会话设置中的 `system_prompt` | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
 | `FrozenTurnConfig.catalog` | `ToolExecutor::open_turn` 给出的本轮 `ToolSpec` 列表（生产默认 `NoTools` 为空目录） | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存按工具名排序的 entries 及摘要；entry 含名称、不透明工具身份 `tool_identity`、描述、规范输入 schema（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。模型请求使用同一份目录，`NoTools` 下不发送工具定义；回复含目录外工具名时按 `InvalidBatch` 整批拒绝 |
-| `FrozenTurnConfig.limits` | profile 超时、每步尝试数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
+| `FrozenTurnConfig.limits` | 会话设置中 `profile` 的超时、重试次数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
 
 持久冻结事实的类型由 `lattice-session` 维护，接受接线见[接受接线](../../../crates/lattice-api/src/turn/live.rs)。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。
 
 ### 配置来源与后台启动
 
-后台使用启动它的进程的环境，在启动时读一次，此后不随提交变化，连接到同一后台的前端共用这份配置。显式运行 `lattice daemon serve` 与前端自动启动的后台行为相同，自动启动的后台继承拉起它的前端的环境。
+后台使用启动它的进程的环境，在启动时读一次，此后不随请求变化，连接到同一后台的前端共用这份配置。显式运行 `lattice daemon serve` 与前端自动启动的后台行为相同，自动启动的后台继承拉起它的前端的环境。
 
 | 项 | 来源 |
 | --- | --- |
 | 配置目录 | 后台环境中的 `$HOME/.lattice`；其中有 `providers.toml`、`auth.json`、`cache/` 与 `agents/` |
-| agents 目录 | 项目内的 `.lattice/agents` 与配置目录下的 `agents`，查找顺序见[执行配置冻结](#执行配置冻结)；没有其他覆盖方式 |
+| agents 目录 | 项目内的 `.lattice/agents` 与配置目录下的 `agents`，查找顺序见[会话设置](settings.md#configure-的计算基准与保存)；没有其他覆盖方式 |
 | TLS 根证书 | 平台根证书，按 `rustls-native-certs` 的规则从后台环境加载，所以 `SSL_CERT_FILE`、`SSL_CERT_DIR` 有效 |
 
 - **全局 agents 目录的权限。** 配置目录下 `agents` 中的 profile 只在可信时使用：`agents` 目录、`<名字>` 目录与 `agent.toml` 都属于当前用户，不可被同组或其他用户写入（权限与 0o022 无交集，所以默认的 0755 目录与 0644 文件可用），路径的最后一段不是符号链接。外部系统提示文件位于全局 agents 目录内时，按同一规则检查。发现属主不符、同组或其他用户可写或是符号链接时，按配置错误拒绝并说明原因，不自动修改。只检查路径的最后一段，上级目录中的符号链接（例如指向别处的 `$HOME`）不受影响。项目内的 `.lattice/agents` 属于所在工作区，不做这项检查。
@@ -70,13 +68,16 @@ status: active
 
 ### 配置安全边界
 
-后台按 Turn 冻结 profile，执行中不重读它，不切换共享环境或 cwd。provider 配置与凭据由请求网关每次请求时取得，SIWC 的 access token 在请求前按需刷新，见[模型接入合同](../llm/credentials.md#刷新)。凭据只在 `auth.json` 与后台内存中，不进入会话库、profile 副本、公开 DTO、Debug、错误回显或日志。
+后台按 Turn 冻结会话设置中的 profile 与系统提示，执行中不重读配置文件，不切换共享环境或 cwd。provider 配置与凭据由请求网关每次请求时取得，SIWC 的 access token 在请求前按需刷新，见[模型接入合同](../llm/credentials.md#刷新)。凭据只在 `auth.json` 与后台内存中，不进入会话库、会话设置、公开 DTO、Debug、错误回显或日志。
 
 请求网关持有后台启动时载入的 TLS 根证书内容，供各 provider 连接与元数据刷新使用。
 
 ### 配置拒绝的原因
 
-新执行的配置在接受前被拒绝时，用户需要知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端，包括 profile 的查找、权限校验、已移除或禁止的顶层节（如 `[lancet]`、`[tools]`）、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、`providers.toml` 与 `auth.json` 的解析、provider 与模型未满足的可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效）、模型引用与带来源归属的推理档位错误（`--effort`、`agent.toml` 的 `[agent].effort` 或会话 profile 副本），以及没有可用的根证书时所选 provider 的端点是 https。`session send`、`run` 与 TUI 内提交对同一问题给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2。
+配置错误按发生时点分为两处拒绝，用户由此知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端；同一问题在 CLI 与 TUI 中给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2：
+
+- **`configure` 时拒绝**：profile 的查找、全局 `agents` 权限校验、未知或禁止的顶层节（如 `[lancet]`、`[tools]`）、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、系统提示文件缺失或超限、`providers.toml` 与模型元数据的解析失败，以及档位规则拒绝（模型为空时给出了 `effort`，或模型不支持所求档位，诊断来源为 `(from --effort)`、`(from [agent].effort in <路径>)` 或 `(from session settings)`，见[档位规则](settings.md#档位规则)）。
+- **提交时拒绝**：会话设置中的模型为空，`providers.toml` 或 `auth.json` 解析失败，provider 与模型未满足可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效），没有可用的根证书时所选 provider 的端点是 https，以及全局配置或元数据变更后模型不支持会话设置中的推理档位（诊断来源为 `(from session settings)`）。
 
 说明由 [`ConfigRejection`](../../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
@@ -113,7 +114,7 @@ cause = ProviderError { retryable }
 
 | 尝试结果 | 保存什么及下一动作 |
 | --- | --- |
-| `Stopped { ProviderError { retryable: true } }`，该步骤尝试预算未尽 | 同一事务写入终态与等待时长，等待后以下一尝试序号请求。等待时间取冻结的指数退避与 provider 建议等待（`retry-after-ms` 或 `retry-after`）中较长者；`max_delay_ms` 只限制指数退避，不限制建议等待。已收到多少流内容不影响重试资格，流在结束事件之前中断也可重试。事务提交后，视图推送这个 Step 的新值，条目中这次尝试带有重试提示，表示重试已经安排；下一次尝试开始时，条目中出现新的 `Sent` 尝试。等待期间收到取消或 Turn deadline 已到时不再请求，按[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)以相应原因停止 |
+| `Stopped { ProviderError { retryable: true } }`，该步骤尝试预算未尽 | 同一事务写入终态与等待时长，等待后以下一尝试序号请求。等待时间取冻结的指数退避与 provider 建议等待（`retry-after-ms` 或 `retry-after`）中较长者；`max_delay_ms` 只限制指数退避，不限制建议等待。已收到多少流内容不影响重试资格，流在结束事件之前中断也可重试。事务提交后，视图推送这个 Step 的新值，条目中这次尝试带有重试提示，表示重试已经安排；下一次尝试开始时，条目中出现新的 `Sent` 尝试。等待期间收到取消或 Turn deadline 已到时停止发起新请求，按[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)以相应原因停止 |
 | `Stopped`，原因不可重试，或可重试但该步骤尝试预算已尽 | 写入终态，同一事务以 `Stop` 关闭 Step，Turn 随之关闭，`cause` 取自该尝试。这次失败没有重试提示，由 `TurnSummary` 的 notice 说明，同一次失败只有一条面向用户的说明 |
 | provider 建议等待超过 60 秒，或不短于 Turn 剩余时间 | 该尝试记为 `Stopped { ProviderError { retryable: false } }`，立即以 `Stop` 关闭，不等到 deadline，也不截短等待后重发；诊断保留 provider 的原因与建议等待，用户看到的是限流而不是超时 |
 | `Completed`，回复无工具调用 | 尝试终态、回复与 Step 的 `Finish` 关闭在同一事务写入，见[关闭 Step 与 Turn](steps.md#关闭-step-与-turn) |
@@ -121,7 +122,7 @@ cause = ProviderError { retryable }
 | 完整输出的批次校验失败 | 写入 `Stopped { InvalidBatch }`，整批拒绝、不重试，以 `Stop` 关闭 |
 | 进程突然退出，实际结果未保存 | 这次尝试停在 `Sent`，结论为 `Stopped { ProcessExit }`；Step 停在 `Requesting`，结论同为进程退出，此后没有写入，见[执行者消失后的 Turn](recovery.md#执行者消失后的-turn) |
 
-被重试取代的失败尝试留在 Step 节点里，连同为它安排的等待时长。带有等待时长的尝试就是安排过重试的尝试：Step 条目为每个这样的尝试带一条重试提示，Warn 级，文字取该尝试的诊断，并带上等待时长。视图与历史查询给出同一种条目，所以重新打开会话后看到的重试提示与实时一致。导致 Step 停止的那次尝试没有等待时长，不另给提示，由 Turn 结局的 notice 说明。
+触发过重试的失败尝试留在 Step 节点里，连同为它安排的等待时长。带有等待时长的尝试就是安排过重试的尝试：Step 条目为每个这样的尝试带一条重试提示，Warn 级，文字取该尝试的诊断，并带上等待时长。视图与历史查询给出同一种条目，所以重新打开会话后看到的重试提示与实时一致。导致 Step 停止的那次尝试没有等待时长，不另给提示，由 Turn 结局的 notice 说明。
 
 流式阶段没有副作用，工具只在完整回复后执行，所以重发一段半截回复只花费 token 与时间；半截文字不保存。实时观察者可能先看到一段部分文字，随后看到新尝试从头开始，前端按尝试边界处理。`Deadline`（Turn 墙钟上限）与 `OutputLimit`（单次回复字节上限）沿用现有门禁，只作为原因记录；它们的数值与粒度由 [#222](https://github.com/Skyline10124/lattice/issues/222) 另行裁决。
 

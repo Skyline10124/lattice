@@ -21,9 +21,14 @@ _Avoid_: Lower, Turn Workspace, guest workspace, authoritative snapshot
 _Avoid_: command, script, plugin, executable, untyped tool string
 
 **Session**:
-持续对话的容器，以 SessionId 标识并绑定一个项目，保存一棵会话树和当前位置；不带 Session 的首次提交在接受事务中创建它。
+持续对话的容器，以 SessionId 标识并绑定一个项目，保存一棵会话树、当前位置与会话设置；由 `configure(New)` 显式创建为草稿会话，接受第一轮后成为已使用会话。
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: terminal connection, background process, workspace copy
+
+**草稿会话**:
+英文名 Draft session。由 `configure(New)` 创建、整棵会话树只有根节点 `0` 的会话；照常出现在 `list` 中并可被观察，接受第一轮后成为已使用会话，逾期且无观察者时由后台整体删除。
+见[会话状态与草稿清理](../architecture/session/concurrency.md#会话状态与草稿清理)。
+_Avoid_: 评论草稿（TUI）, 空会话, 临时会话
 
 **会话树**:
 Session 内由根节点 `0`、UserMessage 与 Step 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录对话与工具调用历史，不拥有 Local Workspace 内容。
@@ -106,7 +111,7 @@ _Avoid_: production fallback tool, mock LLM server
 _Avoid_: token replay, layout body width, frozen configuration
 
 **视图**:
-后台按会话推送的“这个会话现在的样子”：会话头（当前位置、当前 agent、profile 副本中的模型与推理档位、当前位置所属那一轮有没有 Owner 及执行诊断）、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字。观察者变慢时只少收中间版本，不需要重新同步。
+后台按会话推送的“这个会话现在的样子”：会话头（当前 agent、会话设置中的模型与推理档位、设置版本、当前位置及其所属那一轮有没有 Owner、执行诊断等，完整字段清单见[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)）、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字。观察者变慢时只少收中间版本，不需要重新同步。
 见[观察与重连](../architecture/session/recovery.md#观察与重连)。
 _Avoid_: snapshot, event window, subscription cursor, Gap
 
@@ -116,7 +121,7 @@ _Avoid_: snapshot, event window, subscription cursor, Gap
 _Avoid_: TurnEvent, HistoryEntry, per-call item
 
 **Rewind**:
-把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不恢复工作区文件。
+把 Session 当前位置移到会话树上任意已有节点本身；之后的提交以该节点为父分叉，原分支保留。改写一条用户消息即退回到它的父节点再提交（第一条消息为 `rewind 0`）。它只切换对话位置，不修改会话设置，也不恢复工作区文件。
 见[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)。
 _Avoid_: branch, checkout, reset, file restore, workspace rollback
 
@@ -140,7 +145,7 @@ _Avoid_: ModelRouter, connection material, per-Turn LlmConnection
 见[推理档位](../architecture/llm/reasoning.md#推理档位)。
 _Avoid_: thinking budget, reasoning mode, effort string
 
-**profile 副本**:
-会话持有的一份有效 profile，以及当前的 provider `id`、模型 `id` 与推理档位，新会话首次被接受时写入；之后的提交只用副本，原 profile 的修改只对新会话生效。provider 配置与凭据不在副本中。
-见[会话的 profile 副本](../architecture/session/settings.md#会话的-profile-副本)。
+**会话设置**:
+英文名 Session settings。会话保存在会话库中的下一轮配置记录（`SessionSettings`），含有效 profile、内联系统提示、可选的模型与可选推理档位，内容摘要构成设置版本（`SettingsVersion`）；由 `configure` 写入或更新，接受一轮时从中冻结本轮配置。provider 配置与凭据不在会话设置中。
+见[会话设置](../architecture/session/settings.md#会话设置)。
 _Avoid_: frozen configuration, current agent lookup, session config cache

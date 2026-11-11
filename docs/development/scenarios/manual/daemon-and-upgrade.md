@@ -54,6 +54,6 @@ lattice --json daemon status
 | 尝试费用 | `estimated_cost_usd` | `cost: { usd, exact } \| null` |
 | Turn 汇总 | 三项合计与估算费用 | `attempts`、`partial_attempts`、五项 `{ known, complete, overflowed }`、`cost`、`kind` |
 | `session usage` | `total` | `path_total`、`session_total` |
-| 提交、`head`、`UserMessage` | 无覆盖字段 | 提交可选 `model`、`effort`；`head` 含当前与默认档位；`UserMessage` 存档位 |
+| `configure`、提交、`head`、`UserMessage` | 无设置操作与档位字段 | `configure` 返回 `head` 与 `adjustment`；提交可选 `expected_settings`；`head` 含 `agent`、`provider`、`model`、`effort`、`settings_version`；`UserMessage` 存档位 |
 | `models` | 无档位与状态 | 含 `supported_efforts`、`availability`；表增 `EFFORTS`、`AUTH` |
 | `session turn` 槽位与工具错误 | `descriptor_identity`、`evidence`、分类错误对象 | `tool_identity`（无 `evidence`）；失败载荷为 `ToolError { code, message }` |

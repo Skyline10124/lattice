@@ -29,4 +29,5 @@ lattice session send "改写后的第一条消息。" --session "$SESSION_ID" --
 | --- | --- |
 | 输出 `current=<NODE_ID>` | 已移至目标节点，原分支与原 `TurnId` 查询保留；后续提交从此分叉 |
 | `Busy` | 同 Session 正运行，位置不变；等待结束或先取消 |
-| `BadRequest` / `NotFound` | 节点不存在、目录与绑定项目不符或会话不存在，位置不变 |
+| `Conflict`（`binding_mismatch`） | 当前工作区与会话绑定的项目不一致，位置不变 |
+| `BadRequest` / `NotFound` | 目标节点不存在、工作区无效或会话不存在，位置不变 |
