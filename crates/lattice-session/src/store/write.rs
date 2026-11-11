@@ -231,7 +231,7 @@ impl SessionStore {
     ) -> Result<T> {
         self.check_lock(lock, lock.session_id)?;
         // 必须在 begin_write 前取得健康锁；commit 释放 redb 写者后仍不能让等待者抢跑。
-        let mut disabled = self.execution_health()?;
+        let disabled = self.execution_health()?;
         let mut tx = self.db.begin_write()?;
         tx.set_durability(redb::Durability::Immediate)?;
         let (before, scope) =
@@ -243,6 +243,15 @@ impl SessionStore {
             return Ok(value);
         }
         codec::attach_path(&self.path, codec::persist(&tx, &before, &after))?;
+        self.commit_write(disabled, tx, value)
+    }
+
+    fn commit_write<T>(
+        &self,
+        mut disabled: std::sync::MutexGuard<'_, bool>,
+        tx: redb::WriteTransaction,
+        value: T,
+    ) -> Result<T> {
         #[cfg(test)]
         write_probe(WriteStage::BeforeCommit);
         #[cfg(any(test, feature = "test-utils", feature = "test-crash-barriers"))]
@@ -332,6 +341,32 @@ impl SessionStore {
             r.session_settings.insert(s, settings);
             Ok(record)
         })
+    }
+
+    pub fn delete_draft(&self, lock: &SessionExecutionLock, cutoff: Timestamp) -> Result<bool> {
+        let s = lock.session_id;
+        self.check_lock(lock, s)?;
+        let disabled = self.execution_health()?;
+        let mut tx = self.db.begin_write()?;
+        tx.set_durability(redb::Durability::Immediate)?;
+        let (before, scope) =
+            codec::attach_path(&self.path, local::write(&tx, s, Selection::Session))?;
+        validate::local(&before, &scope)?;
+        let Some(session) = before.sessions.get(&s) else {
+            return Ok(false);
+        };
+        // 按节点范围的最大键判断整棵树只有根节点，不看局部加载条数或 current == 0。
+        if before.node_tip != Some(NodeId(0)) || session.updated_at >= cutoff {
+            return Ok(false);
+        }
+        let mut after = before;
+        after.sessions.remove(&s);
+        after.nodes.remove(&(s, NodeId(0)));
+        after.session_settings.remove(&s);
+        after.node_tip = None;
+        validate::local(&after, &scope)?;
+        codec::attach_path(&self.path, codec::delete_draft(&tx, s))?;
+        self.commit_write(disabled, tx, true)
     }
 
     pub fn accept_turn(

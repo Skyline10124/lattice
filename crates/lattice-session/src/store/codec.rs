@@ -330,6 +330,22 @@ pub(super) fn persist(
     }
     Ok(())
 }
+
+pub(super) fn delete_draft(tx: &redb::WriteTransaction, session: SessionId) -> Result<()> {
+    // 草稿清理只删这三张表中的单会话记录，不扩展成通用差量删除。
+    let id = session.to_string();
+    tx.open_table(SESSIONS)
+        .map_err(table_error)?
+        .remove(id.as_str())?;
+    tx.open_table(NODES)
+        .map_err(table_error)?
+        .remove(node_key(session, NodeId(0)).as_slice())?;
+    tx.open_table(SESSION_SETTINGS)
+        .map_err(table_error)?
+        .remove(id.as_str())?;
+    Ok(())
+}
+
 #[cfg(test)]
 pub(super) fn replace_all_for_test(tx: &redb::WriteTransaction, r: &Records) -> Result<()> {
     tx.open_table(SESSIONS)

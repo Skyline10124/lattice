@@ -14,6 +14,9 @@ pub(super) struct Gates {
     pub capture_checked: Mutex<Option<Gate>>,
     pub watch_wait: Mutex<Option<Gate>>,
     pub watch_done: Mutex<Option<Gate>>,
+    pub watch_waiting_owner: Mutex<Option<Gate>>,
+    pub cleanup_scanned: Mutex<Option<Gate>>,
+    pub cleanup_claimed: Mutex<Option<Gate>>,
     /// 回执与排空之后、关闭 listener 之前。
     pub listener_close: Mutex<Option<Gate>>,
     /// socket 已撤下、实例锁尚未释放。
@@ -174,7 +177,7 @@ fn invalid(dir: &std::path::Path) {
 async fn idle(backend: &Backend) {
     let mut changed = backend.changed.subscribe();
     bounded(async {
-        while backend.status().owners != 0 {
+        while backend.has_active_work() {
             changed.changed().await.unwrap();
         }
     })

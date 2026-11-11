@@ -3906,7 +3906,7 @@ fn value_versions_and_schema_rejections_name_the_database() {
 
 #[test]
 fn transaction_failure_matrix() {
-    for phase in 0..13 {
+    for phase in 0..14 {
         for point in [
             FaultPoint::Poisoned,
             FaultPoint::UnknownBefore,
@@ -3914,14 +3914,25 @@ fn transaction_failure_matrix() {
         ] {
             let (_dir, layout, db) = store();
             let lock = db.try_lock_session(sid(1)).unwrap();
-            if phase != 11 {
+            if phase == 13 {
+                let other_lock = db.try_lock_session(sid(2)).unwrap();
+                accept_prepared(&db, &other_lock, accept(sid(2), tid(20))).unwrap();
+                drop(other_lock);
+                db.create_session(
+                    &lock,
+                    project(1),
+                    SessionSettings::for_test(&config()),
+                    now(),
+                )
+                .unwrap();
+            } else if phase != 11 {
                 accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
             }
-            if phase > 0 && !matches!(phase, 10..=12) {
+            if phase > 0 && !matches!(phase, 10..=13) {
                 db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
                     .unwrap();
             }
-            let calls = if phase >= 4 && !matches!(phase, 8 | 10..=12) {
+            let calls = if phase >= 4 && !matches!(phase, 8 | 10..=13) {
                 Some(
                     db.register_calls(&lock, reply(key(tid(1), 0, 0), 2), &[iid(1), iid(2)], now())
                         .unwrap(),
@@ -3929,11 +3940,11 @@ fn transaction_failure_matrix() {
             } else {
                 None
             };
-            if phase >= 5 && !matches!(phase, 8 | 10..=12) {
+            if phase >= 5 && !matches!(phase, 8 | 10..=13) {
                 db.start_invocation(&lock, &calls.as_ref().unwrap().bindings[0], now())
                     .unwrap();
             }
-            if phase >= 6 && !matches!(phase, 8 | 10..=12) {
+            if phase >= 6 && !matches!(phase, 8 | 10..=13) {
                 db.finish_invocation(
                     &lock,
                     TerminalInput {
@@ -4026,6 +4037,9 @@ fn transaction_failure_matrix() {
                     )
                     .map(|_| ())
                 }
+                13 => db
+                    .delete_draft(&lock, now() + chrono::Duration::seconds(1))
+                    .map(|deleted| assert!(deleted, "删除过期草稿应返回 true")),
                 _ => unreachable!(),
             });
             let expected_kind = if point == FaultPoint::Poisoned {
@@ -4038,21 +4052,63 @@ fn transaction_failure_matrix() {
                     result,
                     Err(StoreError::CommitFailed { kind, .. }) if kind == expected_kind
                 ),
-                "phase {phase} point {point:?}: {result:?}"
+                "阶段 {phase} 故障点 {point:?} 应返回预期提交失败：{result:?}"
             );
-            assert!(before == codec::load_read(&read.tx).unwrap());
+            assert!(
+                before == codec::load_read(&read.tx).unwrap(),
+                "已打开的只读事务快照不应受失败或提交影响"
+            );
             let after = codec::load_read(&db.begin_read().unwrap().tx).unwrap();
             assert_eq!(
                 before == after,
                 point != FaultPoint::UnknownAfter,
-                "phase {phase} point {point:?}"
+                "阶段 {phase} 故障点 {point:?} 的提交前后状态不符合预期"
             );
+            if phase == 13 {
+                let retained = point != FaultPoint::UnknownAfter;
+                assert_eq!(
+                    after.sessions.contains_key(&sid(1)),
+                    retained,
+                    "故障点 {point:?} 下草稿 sessions 记录存在性与预期不符"
+                );
+                assert_eq!(
+                    after.nodes.contains_key(&(sid(1), NodeId(0))),
+                    retained,
+                    "故障点 {point:?} 下草稿根节点存在性与预期不符"
+                );
+                assert_eq!(
+                    after.session_settings.contains_key(&sid(1)),
+                    retained,
+                    "故障点 {point:?} 下草稿 session_settings 记录存在性与预期不符"
+                );
+                assert_eq!(
+                    after.sessions.get(&sid(2)),
+                    before.sessions.get(&sid(2)),
+                    "其他会话的 sessions 记录不应受草稿删除事务影响"
+                );
+                assert_eq!(
+                    after.session_settings.get(&sid(2)),
+                    before.session_settings.get(&sid(2)),
+                    "其他会话的 session_settings 记录不应受草稿删除事务影响"
+                );
+                assert_eq!(
+                    after.turn_index, before.turn_index,
+                    "其他会话的 turn_index 不应受草稿删除事务影响"
+                );
+                assert_eq!(
+                    after.configs, before.configs,
+                    "配置表 configs 不应受草稿删除事务影响"
+                );
+            }
             validate::records(&after).unwrap();
             drop(read);
             drop(lock);
             drop(db);
             let reopened = SessionStore::open(&layout).unwrap();
-            assert!(after == codec::load_read(&reopened.begin_read().unwrap().tx).unwrap());
+            assert!(
+                after == codec::load_read(&reopened.begin_read().unwrap().tx).unwrap(),
+                "重开会话库后的数据应与故障后快照完全一致"
+            );
         }
     }
 }
@@ -5376,5 +5432,168 @@ fn non_utf8_project_path_persists_across_reopen() {
     assert_eq!(
         log.session.project_path, non_utf8,
         "重开后会话日志中的非 UTF-8 项目路径应保持不变"
+    );
+}
+
+#[test]
+fn delete_draft_checks_strict_cutoff_and_passes_reopen_validation() {
+    let (_dir, layout, db) = store();
+    let cutoff = now() + chrono::Duration::hours(24);
+    let settings = SessionSettings::for_test(&config());
+
+    let lock_expired = db.try_lock_session(sid(1)).expect("锁定过期草稿");
+    db.create_session(
+        &lock_expired,
+        project(1),
+        settings.clone(),
+        cutoff - chrono::Duration::seconds(1),
+    )
+    .expect("创建严格早于截止时间的草稿");
+
+    let lock_equal = db.try_lock_session(sid(2)).expect("锁定等于截止时间的草稿");
+    db.create_session(&lock_equal, project(1), settings.clone(), cutoff)
+        .expect("创建等于截止时间的草稿");
+
+    let lock_newer = db.try_lock_session(sid(3)).expect("锁定晚于截止时间的草稿");
+    db.create_session(
+        &lock_newer,
+        project(1),
+        settings,
+        cutoff + chrono::Duration::seconds(1),
+    )
+    .expect("创建晚于截止时间的草稿");
+
+    let lock_missing = db.try_lock_session(sid(4)).expect("锁定不存在的会话");
+
+    assert_eq!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .expired_drafts(cutoff)
+            .expect("扫描过期草稿"),
+        vec![sid(1)],
+        "只读扫描应仅返回 updated_at 严格早于截止时间的草稿"
+    );
+
+    assert!(
+        !db.delete_draft(&lock_missing, cutoff)
+            .expect("删除不存在的草稿不应报错"),
+        "不存在的会话调用 delete_draft 应返回 false"
+    );
+    assert!(
+        db.delete_draft(&lock_expired, cutoff)
+            .expect("删除严格早于截止时间的草稿"),
+        "updated_at 严格早于截止时间的草稿应被删除"
+    );
+    assert!(
+        !db.delete_draft(&lock_equal, cutoff)
+            .expect("检查等于截止时间的草稿"),
+        "updated_at 等于截止时间的草稿应保留"
+    );
+    assert!(
+        !db.delete_draft(&lock_newer, cutoff)
+            .expect("检查晚于截止时间的草稿"),
+        "updated_at 晚于截止时间的草稿应保留"
+    );
+
+    let lock_file = layout.session_lock(&format!("{}.lock", sid(1)));
+    drop(lock_expired);
+    drop(lock_equal);
+    drop(lock_newer);
+    drop(lock_missing);
+    drop(db);
+
+    assert!(lock_file.exists(), "删除草稿不应删除会话锁文件");
+
+    let reopened = SessionStore::open(&layout).expect("删除草稿后重新打开会话库应通过严格校验");
+    let read = reopened.begin_read().expect("开启只读事务");
+    assert!(
+        read.find_session(sid(1)).expect("查询已删草稿").is_none(),
+        "已删草稿不应再有 Session 记录"
+    );
+    assert!(
+        matches!(
+            read.session_settings(sid(1)),
+            Err(StoreError::NotFound { .. })
+        ),
+        "已删草稿不应再有会话设置记录"
+    );
+    let listed: Vec<SessionId> = read
+        .list(None, 10)
+        .expect("列出会话")
+        .items
+        .into_iter()
+        .map(|row| row.session_id)
+        .collect();
+    assert_eq!(
+        listed,
+        vec![sid(2), sid(3)],
+        "会话列表中应不再包含已删草稿且保留等于或晚于截止时间的草稿"
+    );
+}
+
+#[test]
+fn delete_draft_keeps_sessions_with_turns_even_after_rewind_to_root() {
+    let (_dir, layout, db) = store();
+    let cutoff = now() + chrono::Duration::hours(24);
+    let lock = db.try_lock_session(sid(1)).expect("锁定会话");
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).expect("接受首轮");
+
+    assert!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .expired_drafts(cutoff)
+            .expect("扫描过期草稿")
+            .is_empty(),
+        "有轮次的会话不应出现在过期草稿扫描结果中"
+    );
+    assert!(
+        !db.delete_draft(&lock, cutoff)
+            .expect("有轮次的会话调用 delete_draft"),
+        "有轮次的会话不应被作为草稿删除"
+    );
+
+    db.rewind(
+        &lock,
+        NodeId(0),
+        &project(1),
+        now() + chrono::Duration::seconds(1),
+    )
+    .expect("回退到根节点");
+    assert_eq!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .session(sid(1))
+            .expect("读取回退后的会话")
+            .current,
+        NodeId(0),
+        "回退后当前位置应在根节点"
+    );
+    assert!(
+        db.begin_read()
+            .expect("开启只读事务")
+            .expired_drafts(cutoff)
+            .expect("回退到根节点后扫描过期草稿")
+            .is_empty(),
+        "回退到根节点后整棵树仍有轮次节点，不应被扫描为草稿"
+    );
+    assert!(
+        !db.delete_draft(&lock, cutoff)
+            .expect("回退到根节点后调用 delete_draft"),
+        "rewind 0 后当前位置在根节点的会话仍不应被删除"
+    );
+
+    drop(lock);
+    drop(db);
+    let reopened = SessionStore::open(&layout).expect("重开会话库应通过严格校验");
+    assert_eq!(
+        reopened
+            .begin_read()
+            .expect("开启只读事务")
+            .log(sid(1))
+            .expect("读取会话日志")
+            .nodes
+            .len(),
+        3,
+        "回退到根节点的会话整棵树节点应完整保留"
     );
 }

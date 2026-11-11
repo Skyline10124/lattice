@@ -146,6 +146,11 @@ impl CoordinatorStoreIo {
         .await
     }
 
+    pub(crate) async fn delete_draft(&self, cutoff: Timestamp) -> Result<bool> {
+        self.write(move |store, lock| store.delete_draft(lock, cutoff))
+            .await
+    }
+
     pub(crate) async fn accept(&self, input: AcceptTurn) -> Result<AcceptedTurn> {
         self.write(move |store, lock| store.accept_turn(lock, input))
             .await

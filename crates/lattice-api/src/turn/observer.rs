@@ -94,6 +94,11 @@ impl ObserverSink {
         state.watchers.push(Arc::downgrade(&cursor));
         cursor
     }
+    pub(crate) fn has_watchers(&self) -> bool {
+        let mut state = self.state.lock().expect("observation lock");
+        state.watchers.retain(|watcher| watcher.strong_count() != 0);
+        !state.watchers.is_empty()
+    }
     fn mark(state: &mut ObservationState, nodes: &[NodeId], replace: bool) {
         state.watchers.retain(|watcher| {
             let Some(watcher) = watcher.upgrade() else {

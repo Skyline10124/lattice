@@ -593,6 +593,39 @@ impl SessionRead {
         Ok(items)
     }
 
+    /// 只读扫描所有会话，返回只有根节点且 `updated_at < cutoff` 的草稿候选。
+    pub fn expired_drafts(&self, cutoff: Timestamp) -> Result<Vec<SessionId>> {
+        let sessions = self.tx.open_table(SESSIONS).map_err(table_error)?;
+        let nodes = self.tx.open_table(NODES).map_err(table_error)?;
+        let mut drafts = Vec::new();
+        for entry in sessions.range::<&str>(..)? {
+            let (key, value) = entry?;
+            let id = SessionId::parse(key.value())
+                .map_err(|_| corrupt("sessions", "key", "invalid id"))?;
+            let session: SessionRecord = self.decode("sessions", key.value(), value.value())?;
+            if session.session_id != id {
+                return Err(corrupt("sessions", key.value(), "key/value mismatch"));
+            }
+            if session.updated_at >= cutoff {
+                continue;
+            }
+            let tip = nodes
+                .range(
+                    node_key(id, NodeId(0)).as_slice()..=node_key(id, NodeId(u64::MAX)).as_slice(),
+                )?
+                .next_back()
+                .transpose()?
+                .map(|(k, _)| attach_path(&self.path, decode_node_key(k.value())))
+                .transpose()?
+                .map(|(_, node)| node)
+                .ok_or_else(|| corrupt("nodes", &format!("{id}/0"), "missing root node"))?;
+            if tip == NodeId(0) {
+                drafts.push(id);
+            }
+        }
+        Ok(drafts)
+    }
+
     pub fn list(
         &self,
         after: Option<SessionId>,

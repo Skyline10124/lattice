@@ -50,6 +50,7 @@ struct Admission {
     turns: HashMap<TurnId, Arc<Owner>>,
     sessions: HashMap<SessionId, Arc<Owner>>,
     owners: Vec<Arc<Owner>>,
+    cleanups: usize,
     diagnostics: HashMap<TurnId, LocalError>,
     unconfirmed_operations: usize,
 }
@@ -93,6 +94,19 @@ impl Drop for ObserverLease {
         if entry.leases == 0 {
             cache.remove(&self.session_id);
         }
+    }
+}
+const DRAFT_TTL_HOURS: i64 = 24;
+/// 同时登记的 Owner 上限；新的提交、configure、rewind 与草稿清理达到上限时都不再占位。
+const MAX_OWNERS: usize = 32;
+struct CleanupGuard {
+    backend: Arc<Backend>,
+}
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.backend.admission);
+        state.cleanups -= 1;
+        self.backend.changed.send_modify(|v| *v += 1);
     }
 }
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
@@ -215,6 +229,159 @@ impl Backend {
             unconfirmed_operations: state.unconfirmed_operations,
         }
     }
+    fn has_active_work(&self) -> bool {
+        let state = lock(&self.admission);
+        !state.owners.is_empty() || state.cleanups != 0
+    }
+    #[cfg(test)]
+    fn has_cleanups(&self) -> bool {
+        lock(&self.admission).cleanups != 0
+    }
+    fn has_watchers(&self, session_id: SessionId) -> bool {
+        let sink = lock(&self.observers)
+            .get(&session_id)
+            .map(|entry| entry.sink.clone());
+        sink.is_some_and(|sink| sink.has_watchers())
+    }
+    fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
+        let mut state = lock(&self.admission);
+        if state.stopping {
+            return None;
+        }
+        state.cleanups += 1;
+        Some(CleanupGuard {
+            backend: self.clone(),
+        })
+    }
+    fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let _guard = guard;
+            backend.cleanup_drafts().await;
+        });
+    }
+    async fn cleanup_drafts(self: &Arc<Self>) {
+        if lock(&self.admission).stopping {
+            return;
+        }
+        let api = match self.open().await {
+            Ok(api) => api,
+            Err(error)
+                if uninitialized(&error)
+                    || error
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled) =>
+            {
+                return;
+            }
+            Err(error) => {
+                tracing::warn!("草稿清理打开会话库失败：{}", error.message);
+                return;
+            }
+        };
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(DRAFT_TTL_HOURS);
+        let candidates = match api.read(move |read| read.expired_drafts(cutoff)).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let local = LocalError::from(error);
+                tracing::warn!("草稿清理扫描候选会话失败：{}", local.message);
+                return;
+            }
+        };
+        #[cfg(test)]
+        tests::pause(&self.gates.cleanup_scanned).await;
+
+        for sid in candidates {
+            let owner = {
+                let mut state = lock(&self.admission);
+                if state.stopping {
+                    return;
+                }
+                if state.owners.len() >= MAX_OWNERS
+                    || state.sessions.contains_key(&sid)
+                    || self.has_watchers(sid)
+                {
+                    continue;
+                }
+                let owner = Arc::new(Owner {
+                    identity: None,
+                    session: Some(sid),
+                    reply: watch::channel(None).0,
+                    done: watch::channel(None).0,
+                    observer: self.observer(sid),
+                    execution_cancel: Arc::default(),
+                    started: AtomicBool::new(false),
+                    core: Mutex::new(None),
+                    store: Mutex::new(Some(api.clone())),
+                });
+                state.sessions.insert(sid, owner.clone());
+                owner.observer.owner_changed();
+                state.owners.push(owner.clone());
+                owner
+            };
+            let step = std::panic::AssertUnwindSafe(async {
+                #[cfg(test)]
+                tests::pause(&self.gates.cleanup_claimed).await;
+                let io = match CoordinatorStoreIo::acquire_api(api.clone(), sid).await {
+                    Ok(io) => io,
+                    Err(crate::turn::coordinator::CoordinatorIoError::Store(
+                        lattice_session::store::StoreError::Busy { .. },
+                    )) => return Ok(()),
+                    Err(error) => return Err(crate::ApiError::from(error)),
+                };
+                owner.started.store(true, Ordering::Release);
+                io.delete_draft(cutoff)
+                    .await
+                    .map(|_| ())
+                    .map_err(crate::ApiError::from)
+            })
+            .catch_unwind()
+            .await;
+            let reopen =
+                matches!(&step, Ok(Err(error)) if error.requires_reopen()) || step.is_err();
+            let result: Result<()> = match step {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => {
+                    let local = LocalError::from(error);
+                    tracing::warn!("清理草稿会话 {sid} 失败：{}", local.message);
+                    Err(local)
+                }
+                Err(_) => {
+                    let local = internal();
+                    tracing::warn!("清理草稿会话 {sid} 时发生内部错误");
+                    Err(local)
+                }
+            };
+            {
+                let mut state = lock(&self.admission);
+                if let Err(error) = &result
+                    && matches!(
+                        error.kind,
+                        LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
+                    )
+                    && (owner.started.load(Ordering::Acquire) || error.recovery.is_some())
+                {
+                    state.unconfirmed_operations += 1;
+                }
+                if state
+                    .sessions
+                    .get(&sid)
+                    .is_some_and(|o| Arc::ptr_eq(o, &owner))
+                {
+                    state.sessions.remove(&sid);
+                    owner.observer.owner_changed();
+                }
+                state.owners.retain(|o| !Arc::ptr_eq(o, &owner));
+                owner.done.send_replace(Some(result));
+                self.changed.send_modify(|v| *v += 1);
+            }
+            drop(lock(&owner.store).take());
+            if reopen {
+                break;
+            }
+        }
+    }
     async fn open(&self) -> Result<crate::SessionApi> {
         self.stores.acquire(false).await.map_err(Into::into)
     }
@@ -264,7 +431,7 @@ impl Backend {
                     "backend is draining",
                 ));
             }
-            if state.owners.len() >= 32 {
+            if state.owners.len() >= MAX_OWNERS {
                 return Err(busy());
             }
             let owner = Arc::new(Owner {
@@ -872,7 +1039,7 @@ impl Backend {
                 let mut changed = self.changed.subscribe();
                 self.begin_stop();
                 self.metadata.drain().await;
-                while self.status().owners != 0 {
+                while self.has_active_work() {
                     changed.changed().await.map_err(|_| internal())?;
                 }
                 if let Ok(auth) = self.chatgpt_auth() {
@@ -983,9 +1150,39 @@ impl Backend {
     ) -> Result<()> {
         let _permit = self.subscriptions.try_acquire().map_err(|_| busy())?;
         let observer = self.observer(session_id);
-        let cursor = observer.register();
-        let mut changed = observer.subscribe();
         let mut closed = self.closed.subscribe();
+        // 与草稿清理占位共用准入锁边界：发现无身份 Owner 时先等待其结束再登记并重读。
+        let cursor = loop {
+            if *closed.borrow() {
+                return Ok(());
+            }
+            let blocking_owner = {
+                let state = lock(&self.admission);
+                match state
+                    .sessions
+                    .get(&session_id)
+                    .filter(|owner| owner.identity.is_none())
+                    .cloned()
+                {
+                    Some(owner) => Some(owner),
+                    None => break observer.register(),
+                }
+            };
+            if let Some(owner) = blocking_owner {
+                #[cfg(test)]
+                tests::pause(&self.gates.watch_waiting_owner).await;
+                let mut done = owner.done.subscribe();
+                while done.borrow_and_update().is_none() {
+                    tokio::select! {
+                        changed = done.changed() => {
+                            changed.map_err(|_| internal())?;
+                        }
+                        _ = closed.changed() => return Ok(()),
+                    }
+                }
+            }
+        };
+        let mut changed = observer.subscribe();
         let mut first = true;
         let mut last_head: Option<SessionHead> = None;
         loop {
@@ -1193,6 +1390,15 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
         }
         return Ok(());
     }
+    let cleanup_after_reply = matches!(
+        &request,
+        Request::Configure {
+            request: ConfigureRequest {
+                session: ConfigureSession::New(_),
+                ..
+            }
+        }
+    );
     let response = if matches!(request, Request::Submit { .. }) {
         let socket = stream.into_std()?;
         let submitter = UnixStream::from_std(socket.try_clone()?)?;
@@ -1204,9 +1410,18 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     } else {
         backend.dispatch(request).await
     };
-    writer
+    let cleanup_guard = if cleanup_after_reply {
+        backend.begin_cleanup()
+    } else {
+        None
+    };
+    let write_result = writer
         .write(&mut stream, &response.unwrap_or_else(Response::Error))
-        .await
+        .await;
+    if let Some(guard) = cleanup_guard {
+        backend.spawn_cleanup_drafts(guard);
+    }
+    write_result
 }
 /// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
@@ -1249,8 +1464,7 @@ async fn serve_with_backend(
     let mut connections = JoinSet::new();
     let mut failure = None;
     loop {
-        let status = backend.status();
-        if status.stopping && status.owners == 0 {
+        if backend.status().stopping && !backend.has_active_work() {
             break;
         }
         tokio::select! {
@@ -1269,7 +1483,7 @@ async fn serve_with_backend(
         failure.get_or_insert_with(internal);
     }
     backend.metadata.drain().await;
-    while backend.status().owners != 0 {
+    while backend.has_active_work() {
         changed.changed().await.map_err(|_| internal())?;
     }
     if let Ok(auth) = backend.chatgpt_auth()
