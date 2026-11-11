@@ -375,7 +375,7 @@ fn require_endpoint_without_tls_roots(base_url: &str) -> Result<(), PrepareError
     }
 }
 
-fn configuration_error(message: impl std::fmt::Display) -> LlmError {
+pub(crate) fn configuration_error(message: impl std::fmt::Display) -> LlmError {
     LlmError::Config {
         message: message.to_string(),
     }
