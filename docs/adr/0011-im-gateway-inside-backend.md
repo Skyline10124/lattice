@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # ADR 0011：IM 网关作为本地后台的可选组件，首个平台为 Telegram
@@ -51,6 +51,7 @@ status: proposed
   - IM 发起的轮次不设专用的工具门禁；
   - 被 SIGKILL 的后台不自动重启；
   - 修改 IM 的配置或凭据不需要重启后台。
+- 2026-11-11：维护者在 #333 中批准本 ADR。
 
 ## 决策
 
