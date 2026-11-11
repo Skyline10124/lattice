@@ -910,9 +910,10 @@ async fn cleanup_drafts_and_watch_registration_serialize_in_both_orders() {
         client.session_head(watch_first).await.is_ok(),
         "watch 先登记时清理必须跳过该草稿"
     );
-    drop(watcher_handle);
 
     // 顺序二：清理先占位，watch 在准入锁边界看到无身份 Owner 后等待其结束并得到 NotFound。
+    // watch_first 的观察者保持到测试结束：它仍是过期草稿，若失去观察者就会成为候选，
+    // 而候选按随机的 SessionId 排序，一次性门控可能停在它上面；保持观察使唯一可占位的候选是 cleanup_first。
     let cleanup_first = super::super::new_session_id();
     seed_draft(
         &backend,
@@ -954,6 +955,11 @@ async fn cleanup_drafts_and_watch_registration_serialize_in_both_orders() {
         LocalErrorKind::NotFound,
         "清理先占位删除会话后，watch 重读必须返回 NotFound"
     );
+    assert!(
+        client.session_head(watch_first).await.is_ok(),
+        "仍在观察中的 watch_first 不应被第二次清理删除"
+    );
+    drop(watcher_handle);
     idle(&backend).await;
 
     let _ = provider.finish().await;
