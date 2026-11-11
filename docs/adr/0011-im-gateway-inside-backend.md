@@ -48,7 +48,8 @@ status: proposed
 - 2026-11-11，本 ADR 按 ADR 0009、ADR 0012 实施后的代码改写时确定：
   - 实施分为停机、拆分、托管、IM 四个阶段；
   - `lattice daemon stop` 仍以 socket 撤下、`owner.lock` 可取得为返回条件，不等后台进程退出；
-  - IM 发起的轮次不设专用的工具门禁。
+  - IM 发起的轮次不设专用的工具门禁；
+  - 被 SIGKILL 的后台不自动重启。
 
 ## 决策
 
@@ -108,18 +109,24 @@ SIGTERM、SIGINT 与 IPC `stop` 走同一个停机顺序：
   StartLimitBurst=5
 
   [Service]
+  Type=notify
   ExecStart=<lattice 同目录下 lattice-daemon 的绝对路径> --state-root <安装时解析出的状态根> --drain-timeout <时长>
   TimeoutStopSec=<排空上限加 30 秒>
   NotifyAccess=main
   Restart=on-failure
   RestartSec=5
-  RestartPreventExitStatus=2 3 4
+  RestartPreventExitStatus=2 3 4 SIGKILL
 
   [Install]
   WantedBy=default.target
   ```
 
-  `TimeoutStopSec` 是整秒时写秒（默认 `90s`，与 systemd 的默认值相同），否则写毫秒（排空上限 `300ms` 时为 `30300ms`）；SIGKILL 只作兜底。`NotifyAccess=main` 让 systemd 接收后台发出的 `STOPPING=1`（第 2 节）。同目录下没有可执行的 `lattice-daemon` 时，`install` 以 BadRequest 退出 `2`，不写 unit，也不调用 `systemctl`。开机后无人登录时也要运行，由用户执行 `loginctl enable-linger`。
+  - **就绪。** 后台绑定 socket、能接受连接之后，经 `$NOTIFY_SOCKET` 发出 `READY=1`。`systemctl --user start|restart lattice` 与 `enable --now` 等到这时才返回；后台在就绪之前退出时（例如以 `3` 退出），它们返回失败。`NotifyAccess=main` 让 systemd 只接收后台主进程发出的 `READY=1` 与 `STOPPING=1`（第 2 节）。
+  - **`TimeoutStopSec`** 是整秒时写秒（默认 `90s`，与 systemd 的默认值相同），否则写毫秒（排空上限 `300ms` 时为 `30300ms`）；SIGKILL 只作兜底。
+  - **`install` 的失败。**
+    - 同目录下没有可执行的 `lattice-daemon`：以 BadRequest 退出 `2`，不写 unit，也不调用 `systemctl`。
+    - `enable --now` 失败：unit 已写入并启用。`install` 查询一次后台状态；状态根上有后台应答时，它是别处启动的（旧版本自动拉起的，或手动运行的），`install` 报出对端 pid，提示先执行 `lattice daemon stop`，再执行 `systemctl --user start lattice`。没有后台应答时，提示用 `systemctl --user status lattice` 查看。两种情况都退出 `1`。
+  - 开机后无人登录时也要运行，由用户执行 `loginctl enable-linger`。
 - `lattice-daemon` 的退出码：
 
   | 退出码 | 含义 | systemd 的处理 |
@@ -129,6 +136,7 @@ SIGTERM、SIGINT 与 IPC `stop` 走同一个停机顺序：
   | `2` | 参数错误 | 不重启 |
   | `3` | 状态根已被另一个后台占用（取不到 `owner.lock`）；socket 能连上时附对端 pid，只用于显示 | 不重启 |
   | `4` | 排空超时，或排空中又收到停机信号；在途 turn 成为执行者消失 | 不重启，unit 进入 failed，在 `systemctl --user status` 与 journal 中可见 |
+  | 被 SIGKILL | 停机超过硬期限，由 systemd 杀死；或被内核 OOM 等外部原因杀死 | 不重启，unit 进入 failed |
 
 - **环境。** 后台的环境来自 systemd user manager 与 unit：`HOME` 由 user manager 给出，`XDG_STATE_HOME`、`SSL_CERT_FILE`、`SSL_CERT_DIR` 写进 unit 或 user manager 的环境才生效。配置目录仍是后台环境中的 `$HOME/.lattice`，TLS 根证书仍在启动时按后台环境载入一次。
 - **一个用户一个后台。** 同一用户的 CLI、TUI 与 IM 连同一个后台，只有一个 unit `lattice.service`。`owner.lock` 排除同一状态根上的第二个后台；同一用户在另一个状态根上再运行后台，不在支持范围内。unit 固定 `--state-root`，前端按自己的 `HOME` 与 `XDG_STATE_HOME` 定位 socket。
@@ -137,7 +145,10 @@ SIGTERM、SIGINT 与 IPC `stop` 走同一个停机顺序：
 ### 4. 前端连接已经运行的后台
 
 - `ensure_running` 删除。前端连不上后台时报 `not_running`，退出码 `1`，提示用 `systemctl --user start lattice` 启动或用 `lattice daemon install` 安装，并说明前端与后台的状态根可能不一致。
-- **升级。** 第一次从自动启动升级时，旧版本拉起的后台仍占着 `owner.lock`，systemd 拉起的 `lattice-daemon` 以 `3` 退出；用户用旧二进制执行 `lattice daemon stop`，再启动 unit。之后的升级用 `systemctl --user restart lattice`。前端遇到版本不兼容的后台时给出这两种处理，并附对端 pid（经 `SO_PEERCRED` 取得，只用于显示）。
+- **升级。**
+  - 第一次从自动启动升级时，旧版本拉起的后台仍占着 `owner.lock`，systemd 拉起的 `lattice-daemon` 以 `3` 退出，`lattice daemon install` 随之报错并给出处理（第 3 节）：执行 `lattice daemon stop` 停掉旧后台，再执行 `systemctl --user start lattice`。
+  - 托管阶段不改协议版本（第 15 节），新的 `lattice` 与旧后台兼容，可以直接停它。跨过 IM 阶段升级时协议版本不同，前端按现有的版本校验报错，提示用旧二进制执行 `lattice daemon stop`，并附对端 pid（经 `SO_PEERCRED` 取得，只用于显示）。
+  - 之后的升级用 `systemctl --user restart lattice`。
 
 ### 5. crate 拆分与依赖规则
 
@@ -208,7 +219,7 @@ stateDiagram-v2
     Registered --> Accepted: 后台接受这一轮
     Registered --> Delivered: 明确拒绝，已回复原因
     Registered --> Delivered: 恢复时查询返回 NotFound，已回复“该消息未被执行”
-    Accepted --> Delivered: 最终回复已发出
+    Accepted --> Delivered: 最终回复已发出，或平台拒收
     Delivered --> [*]: 超过平台的重投窗口后清理
 ```
 
@@ -216,7 +227,7 @@ stateDiagram-v2
 | --- | --- |
 | `Registered` | 已持久登记、已确认平台，还没有准入结果 |
 | `Accepted` | 后台已接受这一轮，等它结束后发最终回复 |
-| `Delivered` | 给用户的最后一条回复已发出 |
+| `Delivered` | 给用户的最后一条回复已发出，或平台拒收（第 13 节） |
 
 - **清理。** 只清理超过平台最长重投窗口的 `Delivered` 条目（Telegram 取略大于 24 小时，由 Telegram 模块给出），在 IM 挂载时进行；窗口之内重投的事件由这些条目识别。chat 绑定保留。
 
@@ -227,7 +238,7 @@ stateDiagram-v2
 ```text
 收到白名单内的私聊消息 m:
     if m 没有 text:                                # 图片、贴纸、语音、文件等, 带说明文字的也算
-        回复“只支持文本消息”, 确认 m, 结束
+        确认 m, 回复“只支持文本消息”, 结束
     new = 这个 chat 没有绑定
     s = new ? 新的 SessionId : 绑定的会话
     t = 新的 TurnId
@@ -248,7 +259,7 @@ stateDiagram-v2
     return c                                      # 按上面同一张表处理
 ```
 
-- **没有文本的消息**不写台账，不建会话，也不提交；重投时再回复一次。
+- **没有文本的消息**不写台账，不建会话，也不提交；确认与回复的规则同不写台账的命令（第 12 节）。
 - **先登记，再提交。** TurnId 照常随机生成。台账先持久记下 `InboundId → TurnId` 再提交，所以平台重投与后台崩溃都只会找回同一个 Turn。逐条处理也保证同一个 chat 不会同时新建两个会话。
 - **Busy 以后台准入为准**，包括 TUI 或 CLI 正在同一会话上执行一轮的情况；IM 回复“正在忙，可发 /cancel”，由用户决定何时重发。观察与回复在准入之后并行进行，所以执行中到达的下一条消息会得到这个回复。
 - **恢复。** IM 挂载时、开始轮询之前，对台账中每个 `Registered` 与 `Accepted` 条目按相位恢复；运行中停在 `Registered` 的条目，由处理它的任务稍后按同一规则恢复：
@@ -260,8 +271,8 @@ stateDiagram-v2
 ### 10. Telegram 的确认与 offset
 
 - offset 只保存在 Telegram 模块的内存中。重启后第一次调用 `getUpdates` 不带 offset，Telegram 从最早未确认的更新开始重投，重复的由台账识别。
-- 网关对每条事件确认一次：写入台账的事件（普通消息与 `/new`）在写入之后确认，其余命令与没有文本的消息在回复之后确认，被拒的消息在计数之后确认。
-- Telegram 模块只在从当前 offset 起形成连续的已确认前缀时推进 offset，中间有未确认的事件就等待。未确认的更新会在下一次 `getUpdates` 中再次返回，网关跳过其中正在处理的那些。
+- 网关对每条事件确认一次，确认只依赖本地动作：写入台账的事件（普通消息与 `/new`）在写入之后确认；其余事件收到即确认，然后处理，包括其余命令、没有文本的消息、停止事件，以及名单之外或非私聊的消息。回复能否发出不影响 offset。
+- Telegram 模块只在从当前 offset 起形成连续的已确认前缀时推进 offset，中间有未确认的事件就等待。未确认的更新会在下一次 `getUpdates` 中再次返回，网关跳过其中正在处理的那些。能挡住前缀的只有一种事件：排在同一个 chat 的前一条之后、还没轮到登记的普通消息或 `/new`。
 - IM 停机超过 24 小时，尚未写入台账的更新会被 Telegram 丢弃。
 
 ### 11. 授权
@@ -280,7 +291,7 @@ stateDiagram-v2
 | `/usage` | 绑定会话的用量摘要 |
 | `/help`、`/start` | 回复命令列表：`/new`、`/cancel`、`/status`、`/usage` 与 `/help` 各一行，另有一行说明直接发送文字就是向当前会话提交一轮。两个命令的回复相同，都不建会话，也不读写绑定。`/start` 后面带的参数忽略 |
 
-- 命令只对白名单内的发送者生效，执行中也可以使用。`/new` 记下自己的 InboundId，重投时只确认，所以不会清掉之后才建立的绑定；`/cancel`、`/status`、`/usage`、`/help` 与 `/start` 不写台账，重投时再回复一次。
+- 命令只对白名单内的发送者生效，执行中也可以使用。`/new` 记下自己的 InboundId，重投时只确认，所以不会清掉之后才建立的绑定；`/cancel`、`/status`、`/usage`、`/help` 与 `/start` 不写台账，收到即确认，回复不跨重启补发：后台在回复发出之前退出时，由用户重发命令。确认随下一次 `getUpdates` 到达 Telegram，在这之前后台退出的，重启后重投，网关再处理一次。
 - 表中命令之外的文本都是普通消息，按第 9 节处理，包括以 `/` 开头的其他文本；TUI 对不认识的 `/` 输入也是照常提交。
 - `/cancel` 的目标按 SessionId 从会话头取得，所以 TUI 或 CLI 在绑定会话上发起的一轮同样可以取消。
 - 网关在内存中按 TurnId 持有它自己提交的每个进行中轮次的句柄与 `draft_id`，用于推送草稿和响应停止按钮，这一轮结束时只删除它自己的句柄。`/new` 之后，同一个 chat 可能同时有旧会话与当前会话各一轮在执行：`/cancel` 只取当前绑定会话的那一轮，旧会话的那一轮用它草稿上的停止按钮取消。
@@ -296,6 +307,7 @@ stateDiagram-v2
 - **执行中**用 `sendMessageDraft` 推送助手正文的纯文本草稿。每轮取一个非零 `draft_id`，`draft_id → 轮次句柄` 只在内存中。正文不变时也在草稿失效之前刷新，刷新遵守单个 chat 每秒一条。草稿正文超过 4096 字符时，只预览末尾的 4096 字符。
 - **停止按钮。** 草稿带 `can_stop`。收到 `stopped_message_generation` 时，按 `chat` 与 `draft_id` 找到这一轮，调用 `cancel(turn_id)`，按 `/cancel` 的规则回复；找不到时（这一轮已结束，或后台重启过）只确认。
 - **最终回复。** 这一轮结束后，用 `sendMessage` 发送最后一步的助手正文，纯文本，不设 `parse_mode`。超过 4096 字符时按段落、其次按行、最后硬切成多条，按顺序发送。结局不是 Completed 时附一行说明，诊断经过脱敏。最终回复不附用量，用量看 `/usage`。
+- **发送失败。** Telegram 以 429、5xx 回应或传输出错时，网关退避后重试；草稿不重试，等下一次刷新。Telegram 以 400 或 403 回应时（例如用户拉黑了 bot）重试不会成功，算作平台拒收：网关记日志，不再重试，台账中的条目记为 `Delivered`。
 
 ### 14. 工具
 
@@ -309,7 +321,7 @@ IM 发起的轮次与其他前端的轮次一样，由后台注入的 `ToolExecu
 | --- | --- | --- |
 | 停机 | `lattice daemon serve` 处理 SIGTERM 与 SIGINT，按第 2 节停机，带 `--drain-timeout`、停写、各段上限与退出码 `4`；harness 能向后台发 SIGTERM，并按选项识别后台的参数 | `daemon serve` 的新参数与退出码 `4`；排空超时时 `daemon stop` 退出 `1` |
 | 拆分 | `lattice-ipc`、`lattice-local`、`lattice-server` 取代 `lattice-api`，线上形状快照与拆分前的基线逐字相同；依赖边界合同与对应的检查；清理无用依赖与只供测试的公开入口；IPC 的系统调用统一改用 rustix（`crates/lattice-api/src/local/ipc.rs:72-74` 的注释把它留给了这次拆分） | 无；命令的输出、退出码与线上格式都不变，可以单独回滚 |
-| 托管 | `lattice-daemon` 及其退出码，停机时向 systemd 发 `STOPPING=1`，`lattice daemon install`；`daemon serve` 与 `ensure_running` 删除；harness 的每个场景显式启动后台 | 后台改由 systemd 托管；不提供降级 |
+| 托管 | `lattice-daemon` 及其退出码，就绪与停机时向 systemd 发 `READY=1`、`STOPPING=1`，`lattice daemon install`；`daemon serve` 与 `ensure_running` 删除；harness 的每个场景显式启动后台 | 后台改由 systemd 托管；不提供降级 |
 | IM | 进程内服务 API、组件挂载与 `components`，`im_auth` 与 `lattice im auth`，私有文件模块下沉，`lattice-im` 与 IM 合同；协议版本加一 | 默认关闭，配置后启用 |
 
 停机、拆分与托管三个阶段不改线上形状，协议版本只在 IM 阶段加一。
@@ -356,6 +368,8 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 | 入口在关闭 runtime 之后主动释放实例锁 | 关闭 runtime 超时后阻塞任务仍可能在写文件，锁一放开，新后台就可能与它们同时写；锁随进程退出释放时，这些任务已随进程结束 |
 | 只把 `TimeoutStopSec` 调大或设为 `infinity` | 停机可能无限期挂住，长 turn 的时长又没有上限 |
 | 排空超时后 abort 在途 turn，再正常关闭会话库 | abort 只在 await 点生效，挡不住已在阻塞任务里的写入；关库还要等所有持有者放手。停写直接保证不再写入 |
+| unit 用默认的 `Type=simple` | 进程一启动就算启动成功：后台以 `3` 退出时 `enable --now` 仍返回成功，`install` 报不出错；`restart` 返回时 socket 可能还没绑定，紧接着的命令会遇到 `not_running` |
+| 硬期限之后由 systemd 重启后台（`RestartPreventExitStatus` 不含 SIGKILL） | 用户执行了 `lattice daemon stop`，后台却在 5 秒后回来。代价是被内核 OOM 杀死后也不重启。维护者 2026-11-11 确定 |
 | 加 `SuccessExitStatus=4` | 排空超时丢弃了在途 turn，unit 进入 failed 才会被用户看到 |
 | 组件 panic 后在同一次运行内自动重启 | panic 是缺陷，自动重启可能反复崩溃、反复处理同一批更新；已接受而未回复的轮在重启后台后由台账补发 |
 | 拆分阶段预建进程内服务 API 与组件挂载 | 只有 IM 使用；随 IM 阶段直接写在 `lattice-server` 中 |
@@ -372,6 +386,7 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 | 去重放进 `lattice.redb` | 要改后台提交接口与会话库格式；IM 自己的台账即可 |
 | offset 写入台账或落盘 | 平台私有状态混进通用台账；Telegram 服务端已记录确认位置 |
 | 后台接受或明确拒绝之后才确认平台 | 处理期间这条更新会在每次 `getUpdates` 中返回，重投与原处理并发；崩溃后的恢复还要依赖 Telegram 在 24 小时内重投。写入台账之后就确认，恢复只看台账 |
+| 不写台账的命令在回复发出之后才确认 | 回复被限流或被平台拒收时，这条更新一直未确认，offset 停住，之后所有 chat 的更新每次 `getUpdates` 都重投。收到即确认后，后台恰好在回复之前退出时这条命令没有回复，用户重发即可 |
 | 排空超时用 `owners` 或新增字段告知 `stop` | `owners` 统计的是 Owner 槽，草稿会话清理卡住时可能为 0；新增字段要在停机阶段升协议版本。`unconfirmed_operations` 的现有定义已涵盖被放弃的操作 |
 | 提交前先查会话头判断 Busy，或在 IM 本地拦截 | 查询与提交之间别的前端可能抢先，最终仍要处理后台的 Busy；本地判定会成为第二条 Busy 规则 |
 | IM 专用的工具门禁（提交时约束，或按冻结目录拒绝） | 生产只有 `NoTools`，门禁没有检查对象；IM 能用的工具由接回新 LANCET 的 ADR 决定。维护者 2026-11-11 确定 |
@@ -412,7 +427,7 @@ v1 的 IM 是 Telegram 私聊中的纯文本对话。以下事项需要时另行
 
 - 后台由 systemd 托管，不再随前端启动；第一次使用前执行 `lattice daemon install`。
 - 后台的环境来自 unit，不再继承前端。
-- 托管时，停机最长等待排空上限加 30 秒，之后由 systemd 发 SIGKILL；排空超时后在途 turn 成为执行者消失，unit 以 failed 结束。
+- 托管时，停机最长等待排空上限加 30 秒，之后由 systemd 发 SIGKILL；排空超时后在途 turn 成为执行者消失，unit 以 failed 结束。被 SIGKILL 的后台不自动重启，包括被内核 OOM 杀死的情况。
 - 一个用户只运行一个后台。
 - 配置 IM 后，可以在 Telegram 私聊中驱动会话，会话可在 IM、TUI 与 CLI 之间接续。
 - 托管阶段以后不提供降级。
