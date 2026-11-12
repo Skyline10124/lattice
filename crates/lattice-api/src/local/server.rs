@@ -1061,7 +1061,8 @@ impl Backend {
             Request::AuthSet { provider, key } => {
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {
-                    auth.set(&provider, &key.0).map_err(super::auth::error)?;
+                    auth.set(&provider, key.as_str())
+                        .map_err(super::auth::error)?;
                     Ok(Response::AuthUpdated)
                 })
                 .await
@@ -1075,7 +1076,7 @@ impl Backend {
                         .map_err(super::auth::error)?;
                     return Ok(Response::AuthRemoved(AuthRemoval {
                         removed: result.removed,
-                        revocation: Some(result.revocation),
+                        revocation: Some(super::presentation::revocation_status(result.revocation)),
                     }));
                 }
                 let auth = super::auth::store(self.home.as_deref())?;
@@ -1095,19 +1096,23 @@ impl Backend {
                     .logout()
                     .await
                     .map_err(super::auth::error)?;
-                Ok(Response::AuthLoggedOut(AuthLoggedOut { revocation }))
+                Ok(Response::AuthLoggedOut(AuthLoggedOut {
+                    revocation: super::presentation::revocation_status(revocation),
+                }))
             }
             Request::AuthLogin { .. } => Err(super::client::protocol()),
             Request::AuthStatus {} => {
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {
                     auth.status()
+                        .map(super::presentation::auth_status)
                         .map(Response::AuthStatus)
                         .map_err(super::auth::error)
                 })
                 .await
             }
             Request::Models { query } => {
+                let llm_query = super::presentation::model_query(&query);
                 let directory = super::auth::directory(self.home.as_deref())?;
                 let mut warning = None;
                 let ready_only = match &query {
@@ -1116,7 +1121,7 @@ impl Backend {
                         ready_only,
                     } if provider.as_ref().is_none_or(|id| id == "chatgpt") => {
                         let check_directory = directory.clone();
-                        let check_query = query.clone();
+                        let check_query = llm_query.clone();
                         // 先校验本地请求，错误配置或非法筛选不能触发目录网络请求。
                         blocking(move || {
                             let auth = lattice_llm::auth::AuthStore::new(check_directory.clone());
@@ -1140,7 +1145,7 @@ impl Backend {
                 };
                 blocking(move || {
                     let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-                    lattice_llm::model_candidates(&directory, &query)
+                    lattice_llm::model_candidates(&directory, &llm_query)
                         .map(|mut candidates| {
                             if let Some(message) = warning {
                                 let chatgpt_in_scope = ready_only != Some(true)
@@ -1161,7 +1166,7 @@ impl Backend {
                                 }
                             }
                             redact_model_candidates(&mut candidates, &auth);
-                            Response::Models(candidates)
+                            Response::Models(super::presentation::model_candidates(candidates))
                         })
                         .map_err(|error| {
                             crate::ApiError::Configuration(crate::ConfigRejection::new(

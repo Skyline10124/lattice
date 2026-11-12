@@ -68,7 +68,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最后已知的提交、取消与诊断，或由 Drop 停止本地后续工作；两者都不新增取消。`LocalTurn::turn_id` 给出提交与取消共用的身份。
 
-公开类型与方法见[本地连接与读取](../../../crates/lattice-api/src/local/client.rs)、[LocalTurn](../../../crates/lattice-api/src/local/operation.rs)和[结果类型](../../../crates/lattice-api/src/local/types.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
+公开类型与方法见[本地连接与读取](../../../crates/lattice-api/src/local/client.rs)、[LocalTurn](../../../crates/lattice-api/src/local/operation.rs)、[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)及[客户端结果类型](../../../crates/lattice-api/src/local/types.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
 
 ## 凭据命令与私有交换
 

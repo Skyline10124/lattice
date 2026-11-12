@@ -2267,6 +2267,7 @@ dependencies = [
  "lattice-agent",
  "lattice-api",
  "lattice-conversation",
+ "lattice-ipc",
  "lattice-llm",
  "lattice-profile",
  "lattice-session",
@@ -2320,6 +2321,21 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lattice-ipc"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "lattice-conversation",
+ "lattice-session",
+ "rustix",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tokio",
+ "zeroize",
 ]
 
 [[package]]

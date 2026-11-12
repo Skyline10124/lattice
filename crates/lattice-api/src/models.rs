@@ -4,7 +4,7 @@
 pub use lattice_conversation::{
     ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId, ProviderIdError,
 };
-pub use lattice_llm::{
+pub use lattice_ipc::{
     Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery, ModelCandidates,
     ModelPrice, ModelWarning,
 };

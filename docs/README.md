@@ -17,6 +17,7 @@
 ## 架构
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围。
+- [Crate 职责与依赖边界](architecture/crates.md)：`lattice-ipc` 与 `lattice-api` 的职责切分、展示类型转换、内部依赖白名单与线上形状快照门禁。
 - [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、后台单例、锁序与持久性边界。
 - [会话与 Turn](architecture/session/README.md)：会话树、Step/Turn 与调用槽位、显式配置、会话设置与草稿会话、提交、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [模型接入](architecture/llm/README.md)：协议适配器、provider 配置与 features、模型引用与元数据、推理档位、用量与费用估算、凭据与 Sign in with ChatGPT。

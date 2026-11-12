@@ -56,7 +56,7 @@ status: active
 
 - 本地目录及 socket 核验类型、所有者和私有权限，通信双方均核对 Linux peer UID。IPC 限于本机 Unix socket；身份检查或版本不兼容时拒绝连接，不开放远程入口。
 - 只有实例锁持有者可绑定、替换或清理 socket，也只有它打开会话库。不按 PID、mtime、连接数或超时抢占所有权，也不终止身份或协议不兼容的已有后台；客户端报告错误，交由用户处理。
-- 版本化帧、长度检查和有界队列限制请求与观察资源。实现入口为[本地 IPC](../../crates/lattice-api/src/local/ipc.rs)，具体计量及超限行为见[输入与传输限制](session/concurrency.md#输入与传输限制)。
+- 版本化帧、长度检查和有界队列限制请求与观察资源。分帧与协议版本实现入口为 [`lattice-ipc`](../../crates/lattice-ipc/src/ipc.rs)，实例锁与端点寻址见[本地端点与实例锁](../../crates/lattice-api/src/local/ipc.rs)，具体计量及超限行为见[输入与传输限制](session/concurrency.md#输入与传输限制)。
 - 后台启动不创建或修复缺失领域库，也不写入未关闭的 Turn。常驻句柄继续遵守各领域的身份、严格打开和发布规则，不增加第二份请求状态库。
 - 单例锁只排除第二个后台，不串行化各 Session 的 Turn。短准入管理与领域锁分开，常驻持库不改变[锁序与持有期限](#锁与并发语义)。
 

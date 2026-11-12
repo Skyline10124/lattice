@@ -56,6 +56,53 @@ async fn credential_cleanup_preserves_each_remote_revocation_result() {
             within(async { tokio::join!(client, server) }).await;
         }
     }
+
+    // 经真实后台、Unix socket 与 LocalClient 核验凭据展示类型接线。
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".lattice");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let layout = crate::StateLayout::in_state_root(home.path());
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    let backend_home = home.path().to_path_buf();
+    let backend_layout = layout.clone();
+    let backend_task = tokio::spawn(async move {
+        let exit = serve_for_test(
+            backend_layout,
+            Some(backend_home),
+            Duration::from_secs(60),
+            stop_rx,
+        )
+        .await?;
+        drop(exit.instance);
+        exit.failure.map_or(Ok(()), Err)
+    });
+    let client = LocalClient::new(layout);
+    within(async {
+        while client.status().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    client
+        .auth_set("openai", "sk-test-presentation-key".into())
+        .await
+        .unwrap();
+    let status = client.auth_status().await.unwrap();
+    assert_eq!(status.providers_path, config.join("providers.toml"));
+    assert!(status.providers.iter().any(|row| {
+        row.provider == "openai" && row.availability == Availability::Ready && row.email.is_none()
+    }));
+    assert_eq!(
+        client.auth_logout("chatgpt").await.unwrap(),
+        RevocationStatus::NotNeeded
+    );
+    let removed = client.auth_remove("chatgpt").await.unwrap();
+    assert!(!removed.removed);
+    assert_eq!(removed.revocation, Some(RevocationStatus::NotNeeded));
+    client.stop().await.unwrap();
+    within(backend_task).await.unwrap().unwrap();
 }
 
 #[tokio::test]
@@ -137,6 +184,60 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
     let error = result.unwrap_err();
     assert_eq!(error.kind, LocalErrorKind::BadRequest);
     assert_eq!(error.message, "provider is not registered");
+
+    // 经真实后台、Unix socket 与 LocalClient 核验模型查询与展示类型接线。
+    use std::os::unix::fs::PermissionsExt;
+    let home = tempfile::tempdir().unwrap();
+    let config = home.path().join(".lattice");
+    std::fs::create_dir_all(&config).unwrap();
+    std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let layout = crate::StateLayout::in_state_root(home.path());
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    let backend_home = home.path().to_path_buf();
+    let backend_layout = layout.clone();
+    let backend_task = tokio::spawn(async move {
+        let exit = serve_for_test(
+            backend_layout,
+            Some(backend_home),
+            Duration::from_secs(60),
+            stop_rx,
+        )
+        .await?;
+        drop(exit.instance);
+        exit.failure.map_or(Ok(()), Err)
+    });
+    let client = LocalClient::new(layout);
+    within(async {
+        while client.status().await.is_err() {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    let openai_models = client
+        .models(ModelCandidateQuery::List {
+            provider: Some(ProviderId::parse("openai").unwrap()),
+            ready_only: false,
+        })
+        .await
+        .unwrap();
+    assert!(!openai_models.models.is_empty());
+    assert!(openai_models.models.iter().all(|candidate| {
+        candidate.provider == "openai"
+            && candidate.availability
+                == crate::Availability::Unconfigured {
+                    requirement: crate::ConfigurationRequirement::ApiKey,
+                }
+    }));
+    let target_model =
+        ModelRef::parse(&format!("openai/{}", openai_models.models[0].model)).unwrap();
+    let targeted = client
+        .models(ModelCandidateQuery::Target(target_model))
+        .await
+        .unwrap();
+    assert_eq!(targeted.models.len(), 1);
+    assert_eq!(targeted.models[0].model, openai_models.models[0].model);
+    client.stop().await.unwrap();
+    within(backend_task).await.unwrap().unwrap();
 }
 struct Wire {
     socket: UnixStream,

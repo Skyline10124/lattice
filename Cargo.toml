@@ -3,6 +3,7 @@ resolver = "3"
 members = [
     "crates/net-guard",
     "crates/lattice-store",
+    "crates/lattice-ipc",
     "crates/lattice-llm",
     "crates/lattice-api",
     "crates/lattice-session",
@@ -26,6 +27,7 @@ authors = ["Ast Rin"]
 # Internal crates
 net-guard       = { path = "crates/net-guard" }
 lattice-store    = { path = "crates/lattice-store" }
+lattice-ipc      = { path = "crates/lattice-ipc" }
 lattice-llm      = { path = "crates/lattice-llm" }
 lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }
@@ -62,6 +64,7 @@ uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
 # 凭据文件读写与所有权核验（`lattice-llm`：openat/renameat/unlinkat/geteuid）、
+# 本地 IPC 对端身份核验（`lattice-ipc`：geteuid/socket_peercred）、
 # 会话库创建时带 `NOREPLACE` 的原子发布重命名（`lattice-session`），以及测试构造 FIFO。
 rustix = { version = "1.1.4", features = ["fs"] }
 rustls = "0.23"

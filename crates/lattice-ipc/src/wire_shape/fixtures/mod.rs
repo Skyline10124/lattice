@@ -17,7 +17,7 @@ use lattice_conversation::{InvocationId, ModelId, ProviderId, SessionId, TurnId}
 use lattice_session::store::{AgentName, ProjectPath, SettingsVersion, TurnTimeout};
 
 use super::CaseBook;
-use crate::{ModelRef, local::auth::AuthKey};
+use crate::{AuthKey, ModelRef};
 
 /// 固定的冻结配置摘要（64 位小写十六进制）。
 pub(super) const CONFIG_DIGEST_HEX: &str =

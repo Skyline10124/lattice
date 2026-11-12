@@ -1,0 +1,23 @@
+[package]
+name = "lattice-ipc"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "LATTICE 本地 IPC 协议类型、分帧编解码与对端身份核验"
+
+[dependencies]
+chrono = { workspace = true, features = ["serde"] }
+lattice-conversation = { workspace = true }
+lattice-session = { workspace = true }
+rustix = { workspace = true, features = ["net", "process"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+zeroize = { workspace = true }
+
+[features]
+default = []
+test-utils = []

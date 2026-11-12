@@ -1,6 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 use super::*;
+use lattice_llm::auth::RevocationStatus;
 type Gate = (oneshot::Sender<()>, oneshot::Receiver<()>);
 #[derive(Default)]
 pub(super) struct Gates {

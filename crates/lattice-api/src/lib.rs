@@ -45,3 +45,12 @@ pub use turn::{
     ToolSpec, TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution, TurnRef, TurnTools,
     start_turn,
 };
+
+/// 将 IPC 展示层的 [`Availability`] 转回 `lattice_llm::Availability` 并生成诊断文案。
+pub fn availability_diagnostic(
+    availability: &lattice_ipc::Availability,
+    provider: &str,
+    providers_path: &std::path::Path,
+) -> Option<String> {
+    local::presentation::llm_availability(availability).diagnostic(provider, providers_path)
+}

@@ -1,10 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
-
 pub(super) mod login;
+
+pub(super) use lattice_ipc::AuthKey;
 
 pub(super) fn require_chatgpt(provider: &str) -> super::Result<()> {
     if provider == "chatgpt" {
@@ -30,11 +29,6 @@ pub(super) fn directory(home: Option<&std::path::Path>) -> super::Result<std::pa
     };
     Err(crate::ApiError::Configuration(crate::ConfigRejection::new(reason, None)).into())
 }
-
-/// 私有 IPC 录入材料，不提供 Debug，也不进入公开响应。
-#[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
-#[serde(transparent)]
-pub(super) struct AuthKey(pub(super) String);
 
 pub(super) fn error(error: lattice_llm::auth::AuthError) -> super::LocalError {
     let kind = match &error {

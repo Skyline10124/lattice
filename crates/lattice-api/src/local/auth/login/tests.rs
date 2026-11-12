@@ -2,7 +2,6 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
-use crate::local::Availability;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -26,11 +25,24 @@ async fn exchange<A: LoginAttempt>(
     .await
 }
 
+use crate::local::{Availability, ConfigurationRequirement, ProviderAuthStatus};
+
 struct Attempt {
     url: SensitiveLoginUrl,
-    finished: watch::Sender<Option<std::result::Result<ProviderAuthStatus, LoginError>>>,
+    finished: watch::Sender<
+        Option<std::result::Result<lattice_llm::auth::ProviderAuthStatus, LoginError>>,
+    >,
     callbacks: mpsc::UnboundedSender<String>,
     cancelled: Arc<AtomicBool>,
+}
+
+fn llm_signed_in() -> lattice_llm::auth::ProviderAuthStatus {
+    lattice_llm::auth::ProviderAuthStatus {
+        provider: "chatgpt".into(),
+        availability: lattice_llm::Availability::Ready,
+        email: Some("user@example.com".into()),
+        expires_at: None,
+    }
 }
 
 fn signed_in() -> ProviderAuthStatus {
@@ -66,7 +78,9 @@ impl LoginAttempt for Attempt {
             }
         });
     }
-    fn wait(&self) -> BoxFuture<'_, std::result::Result<ProviderAuthStatus, LoginError>> {
+    fn wait(
+        &self,
+    ) -> BoxFuture<'_, std::result::Result<lattice_llm::auth::ProviderAuthStatus, LoginError>> {
         let mut receiver = self.finished.subscribe();
         Box::pin(async move {
             receiver
@@ -204,7 +218,7 @@ async fn one_socket_delivers_authorization_callback_and_final_result() {
             .unwrap()
             .contains("private-code")
     );
-    finished.send_replace(Some(Ok(signed_in())));
+    finished.send_replace(Some(Ok(llm_signed_in())));
     assert!(matches!(
         bounded(login.next()).await.unwrap(),
         Some(AuthLoginEvent::Finished(AuthLoginOutcome::SignedIn { .. }))
@@ -221,7 +235,7 @@ async fn browser_completion_needs_no_frontend_message_and_wins_late_cancel() {
     let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
     let mut login = LocalAuthLogin::from_stream(client);
     authorization(&mut login).await;
-    finished.send_replace(Some(Ok(signed_in())));
+    finished.send_replace(Some(Ok(llm_signed_in())));
     let _ = login.cancel().await;
     assert!(matches!(
         bounded(login.next()).await.unwrap(),
@@ -261,7 +275,7 @@ async fn saved_login_waits_for_the_directory_result_and_directory_failure_keeps_
         let mut login = LocalAuthLogin::from_stream(client);
         authorization(&mut login).await;
         assert!(calls.try_recv().is_err(), "保存成功之前不刷新目录");
-        saved.send_replace(Some(Ok(signed_in())));
+        saved.send_replace(Some(Ok(llm_signed_in())));
         bounded(calls.recv()).await.unwrap();
         assert!(
             timeout(Duration::from_millis(1), login.next())
@@ -342,7 +356,7 @@ async fn interrupted_ui_poll_keeps_partial_authorization_frame() {
     let (client, mut server) = UnixStream::pair().unwrap();
     let mut login = LocalAuthLogin::from_stream(client);
     let payload = serde_json::to_vec(&serde_json::json!({"message_id":0,"offset":0,"complete":true,
-        "json_fragment":serde_json::to_string(&LoginResponse::AuthLoginAuthorization { authorization_url: AuthKey(URL.into()) }).unwrap()})).unwrap();
+        "json_fragment":serde_json::to_string(&LoginResponse::AuthLoginAuthorization { authorization_url: AuthKey::new(URL.into()) }).unwrap()})).unwrap();
     server.write_all(ipc::MAGIC).await.unwrap();
     server.write_u32(payload.len() as u32).await.unwrap();
     server.write_all(&payload[..7]).await.unwrap();
@@ -423,7 +437,7 @@ async fn human_wait_remains_usable_after_the_reader_waits_over_300_seconds() {
         .write(
             &mut server,
             &LoginResponse::AuthLoginAuthorization {
-                authorization_url: AuthKey(URL.into()),
+                authorization_url: AuthKey::new(URL.into()),
             },
         )
         .await
@@ -457,7 +471,7 @@ async fn client_rejects_duplicate_authorization_and_signed_in_before_authorizati
                 .write(
                     &mut server,
                     &LoginResponse::AuthLoginAuthorization {
-                        authorization_url: AuthKey(URL.into()),
+                        authorization_url: AuthKey::new(URL.into()),
                     },
                 )
                 .await
@@ -467,7 +481,7 @@ async fn client_rejects_duplicate_authorization_and_signed_in_before_authorizati
                 .write(
                     &mut server,
                     &LoginResponse::AuthLoginAuthorization {
-                        authorization_url: AuthKey(URL.into()),
+                        authorization_url: AuthKey::new(URL.into()),
                     },
                 )
                 .await
@@ -514,4 +528,76 @@ async fn second_legal_callback_cancels_attempt_and_is_not_delivered() {
     bounded(task).await.unwrap().unwrap();
     assert!(cancelled.load(Ordering::SeqCst));
     assert!(callbacks.try_recv().is_err());
+}
+
+#[tokio::test]
+async fn login_success_frame_converts_provider_auth_status_variants_and_fields() {
+    for (llm_status, expected_status) in [
+        (
+            lattice_llm::auth::ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                availability: lattice_llm::Availability::Ready,
+                email: Some("dev@example.com".into()),
+                expires_at: Some("2026-12-01T00:00:00Z".into()),
+            },
+            ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                availability: Availability::Ready,
+                email: Some("dev@example.com".into()),
+                expires_at: Some("2026-12-01T00:00:00Z".into()),
+            },
+        ),
+        (
+            lattice_llm::auth::ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                availability: lattice_llm::Availability::Unconfigured {
+                    requirement: lattice_llm::ConfigurationRequirement::ChatgptLogin,
+                },
+                email: None,
+                expires_at: None,
+            },
+            ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                availability: Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::ChatgptLogin,
+                },
+                email: None,
+                expires_at: None,
+            },
+        ),
+        (
+            lattice_llm::auth::ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                availability: lattice_llm::Availability::Invalid {
+                    reason: "expired token".into(),
+                },
+                email: Some("stale@example.com".into()),
+                expires_at: None,
+            },
+            ProviderAuthStatus {
+                provider: "chatgpt".into(),
+                availability: Availability::Invalid {
+                    reason: "expired token".into(),
+                },
+                email: Some("stale@example.com".into()),
+                expires_at: None,
+            },
+        ),
+    ] {
+        let (client, server) = UnixStream::pair().unwrap();
+        let (attempt, _callbacks) = attempt();
+        let finished = attempt.finished.clone();
+        let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
+        let mut login = LocalAuthLogin::from_stream(client);
+        authorization(&mut login).await;
+        finished.send_replace(Some(Ok(llm_status)));
+        let Some(AuthLoginEvent::Finished(AuthLoginOutcome::SignedIn { status, catalog })) =
+            bounded(login.next()).await.unwrap()
+        else {
+            panic!("登录成功帧必须返回转换后的 ProviderAuthStatus");
+        };
+        assert_eq!(status, expected_status);
+        assert_eq!(catalog, AuthCatalogOutcome::Refreshed { model_count: 0 });
+        bounded(task).await.unwrap().unwrap();
+    }
 }

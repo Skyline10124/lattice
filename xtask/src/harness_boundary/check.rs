@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::Path;
 use std::sync::LazyLock;
 
-use cargo_metadata::{DependencyKind, Metadata, MetadataCommand, PackageId};
+use cargo_metadata::{DependencyKind, Metadata, PackageId};
 use regex::Regex;
 use toml::Value;
 
@@ -62,7 +62,7 @@ pub fn manifest_workspace_inheritance(manifest_path: &Path) -> anyhow::Result<Ve
 }
 
 pub fn metadata_transitive_workspace_members(repo_root: &Path) -> anyhow::Result<Vec<String>> {
-    let metadata = load_metadata(repo_root)?;
+    let metadata = crate::workspace_metadata::load_full(repo_root)?;
     transitive_workspace_member_hits(&metadata)
 }
 
@@ -110,13 +110,6 @@ pub fn transitive_workspace_member_hits(metadata: &Metadata) -> anyhow::Result<V
         }
     }
     Ok(hits)
-}
-
-fn load_metadata(repo_root: &Path) -> anyhow::Result<Metadata> {
-    MetadataCommand::new()
-        .current_dir(repo_root)
-        .exec()
-        .map_err(|e| anyhow::anyhow!("failed to read workspace metadata: {e}"))
 }
 
 fn under_crates_dir(resolved: &Path, crates_dir: &Path) -> bool {
@@ -176,11 +169,7 @@ fn iter_dep_tables<'a>(table: &'a Value, prefix: &str) -> Vec<(String, &'a str, 
 /// 按 feature 名的 `test-` 前缀识别，不维护枚举列表，任何 crate 新增的 `test-*` feature 都自动
 /// 纳入检查。
 pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<String>> {
-    let metadata = MetadataCommand::new()
-        .current_dir(repo_root)
-        .no_deps()
-        .exec()
-        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))?;
+    let metadata = crate::workspace_metadata::load_no_deps(repo_root)?;
 
     let packages: BTreeMap<_, _> = metadata
         .packages
