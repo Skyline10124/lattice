@@ -10,7 +10,7 @@ pub fn load_full(repo_root: &Path) -> anyhow::Result<Metadata> {
     MetadataCommand::new()
         .current_dir(repo_root)
         .exec()
-        .map_err(|e| anyhow::anyhow!("failed to read workspace metadata: {e}"))
+        .map_err(|e| anyhow::anyhow!("读取 workspace metadata 失败：{e}"))
 }
 
 /// 读取仅包含 workspace 成员声明（`--no-deps`）的 metadata。
@@ -19,5 +19,5 @@ pub fn load_no_deps(repo_root: &Path) -> anyhow::Result<Metadata> {
         .current_dir(repo_root)
         .no_deps()
         .exec()
-        .map_err(|e| anyhow::anyhow!("cargo metadata --no-deps --format-version 1 failed: {e}"))
+        .map_err(|e| anyhow::anyhow!("读取 workspace metadata（--no-deps）失败：{e}"))
 }

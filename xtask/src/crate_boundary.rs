@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 受控 workspace 成员直接内部依赖白名单门禁。
+//! 受控 crate 的内部直接依赖白名单检查。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
