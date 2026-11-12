@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 受控 workspace 成员直接内部依赖与普通依赖闭包门禁。
+//! 受控 crate 的内部直接依赖与普通依赖闭包检查。
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -535,7 +535,7 @@ mod tests {
         }
     }
 
-    /// 对指定受检包逐一构造普通、build、改名、target+optional 四种违规写法，验证生产 `RULES` 均只命中 1 条。
+    /// 对指定的受检包逐一构造四种违规写法：普通依赖、build 依赖、改名依赖，以及 target 专属的可选依赖；验证生产 `RULES` 每次只命中 1 条。
     fn assert_direct_rule_rejects_all_forms(
         ws: &TestWorkspace,
         package: &str,
@@ -784,7 +784,7 @@ mod tests {
             "基线状态下每个受检包只依赖允许成员与外部 path crate，结果应为空：{baseline_hits:?}"
         );
 
-        // 允许白名单成员改名/optional，且每条生产规则在仅通过 [dev-dependencies] 引入禁用成员时都不报错
+        // 白名单成员可以改名或设为可选；禁用成员只出现在 `[dev-dependencies]` 时，每条生产规则都不报错。
         let mut ipc_spec = CrateSpec::with_deps(concat!(
             "lattice-session = { path = \"../lattice-session\" }\n",
             "conv_alias = { package = \"lattice-conversation\", path = \"../lattice-conversation\" }\n",
@@ -939,7 +939,7 @@ mod tests {
     #[test]
     fn closure_rule_lattice_local_rejects_non_default_optional_dependency() {
         let ws = TestWorkspace::new();
-        // 断开 lattice-tui -> lattice-local，使本用例单独锁定 CLOSURE_RULES 中 lattice-local 规则与 --all-features
+        // 断开 `lattice-tui -> lattice-local`，让本用例只检验 `CLOSURE_RULES` 中 `lattice-local` 的规则与 `--all-features` 的读取。
         ws.write_member(
             "lattice-tui",
             &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
@@ -1013,7 +1013,7 @@ mod tests {
     #[test]
     fn closure_workspace_reports_full_path_through_intermediate_workspace_members() {
         let ws = TestWorkspace::new();
-        // 清空 lattice-api 自身的下游禁用依赖，精确核对经中间 workspace 成员传递到 lattice-api 的完整路径
+        // 清空 `lattice-api` 自己的禁用依赖，只核对经中间成员传递到 `lattice-api` 的完整路径。
         ws.write_member("lattice-api", &CrateSpec::default());
 
         let mut ipc_spec = baseline_spec("lattice-ipc");
@@ -1139,7 +1139,7 @@ mod tests {
 
     #[test]
     fn closure_ignores_dev_and_build_only_edges_and_follows_mixed_normal_dev_edges() {
-        // dev-only 与 build-only 边不应进入普通闭包；lattice-session 与 redb 允许出现在普通闭包里
+        // 只含 dev 或只含 build 的边不进入普通依赖闭包；`lattice-session` 与 `redb` 允许出现在普通依赖闭包中。
         let clean = build_graph_metadata(
             &[
                 "lattice-tui",
@@ -1163,10 +1163,10 @@ mod tests {
         let hits = check_metadata_normal_closure(&clean, CLOSURE_RULES).unwrap();
         assert!(
             hits.is_empty(),
-            "dev-only/build-only 边不应进入闭包且 session/redb 应被允许，实际：{hits:?}"
+            "只含 dev 或只含 build 的边不应进入普通依赖闭包，lattice-session 与 redb 应被允许，实际：{hits:?}"
         );
 
-        // normal + dev 混合边必须进入普通闭包
+        // 同时含 normal 与 dev 的边进入普通依赖闭包。
         let mixed = build_graph_metadata(
             &["lattice-tui", "lattice-local", "lattice-api"],
             &[],
@@ -1177,7 +1177,11 @@ mod tests {
             true,
         );
         let hits = check_metadata_normal_closure(&mixed, CLOSURE_RULES).unwrap();
-        assert_eq!(hits.len(), 2, "normal+dev 混合边必须进入普通闭包：{hits:?}");
+        assert_eq!(
+            hits.len(),
+            2,
+            "同时含 normal 与 dev 的边应进入普通依赖闭包，实际：{hits:?}"
+        );
         assert!(
             hits.iter()
                 .any(|h| h.contains("lattice-tui -> lattice-local -> lattice-api")),
