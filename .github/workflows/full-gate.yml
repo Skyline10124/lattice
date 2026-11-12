@@ -48,6 +48,7 @@ jobs:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       - run: cargo xtask harness-boundary
+      - run: cargo xtask crate-boundary
       - name: alpha rollout (locked release binary, JSON record)
         run: cargo xtask rollout --channel alpha
       # rollout 在被拒绝或失败时也会写出记录，因此无条件上传 target/rollout/

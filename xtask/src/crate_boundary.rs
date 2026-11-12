@@ -84,11 +84,11 @@ pub fn run() -> anyhow::Result<()> {
     let direct_hits = check_workspace_rules(&root, RULES)?;
     let closure_hits = check_workspace_normal_closure(&root, CLOSURE_RULES)?;
     boundary_report::run_groups(
-        "crate dependency boundary check passed",
-        "crate dependency boundary check failed",
+        "crate 依赖边界检查通过",
+        "crate 依赖边界检查失败",
         &[
-            ("direct workspace dependencies", direct_hits),
-            ("normal dependency closure", closure_hits),
+            ("内部直接依赖", direct_hits),
+            ("普通依赖闭包", closure_hits),
         ],
     )
 }
@@ -122,12 +122,12 @@ pub fn check_metadata_rules(
     for member_id in &metadata.workspace_members {
         let pkg = packages_by_id.get(member_id).copied().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: workspace member id '{member_id}' missing from metadata.packages"
+                "crate 依赖边界：workspace_members 中的成员 '{member_id}' 未出现在 packages 中"
             )
         })?;
         let manifest_dir = pkg.manifest_path.parent().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: manifest path '{}' has no parent directory",
+                "crate 依赖边界：manifest_path '{}' 没有父目录",
                 pkg.manifest_path
             )
         })?;
@@ -140,7 +140,7 @@ pub fn check_metadata_rules(
     for rule in rules {
         let checked_pkg = members_by_name.get(rule.package).copied().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: checked workspace package '{}' not found in workspace_members",
+                "crate 依赖边界：受检包 '{}' 未出现在 workspace_members 中",
                 rule.package
             )
         })?;
@@ -152,7 +152,7 @@ pub fn check_metadata_rules(
                 DependencyKind::Build => "build-dependencies",
                 DependencyKind::Unknown => {
                     anyhow::bail!(
-                        "crate boundary: {}: unable to identify dependency kind for '{}'",
+                        "crate 依赖边界：{}: 无法识别依赖 '{}' 的 kind",
                         checked_pkg.name,
                         dep.name
                     );
@@ -161,7 +161,7 @@ pub fn check_metadata_rules(
 
             if dep.name.trim().is_empty() {
                 anyhow::bail!(
-                    "crate boundary: {}: dependency entry has empty package name",
+                    "crate 依赖边界：{}: dependencies 条目的包名为空",
                     checked_pkg.name
                 );
             }
@@ -172,7 +172,7 @@ pub fn check_metadata_rules(
                     if let Some(member_pkg) = members_by_dir.get(&norm_dep_dir).copied() {
                         if member_pkg.name.as_str() != dep.name.as_str() {
                             anyhow::bail!(
-                                "crate boundary: {}: dependency path '{}' resolves to workspace member '{}' instead of declared package '{}'",
+                                "crate 依赖边界：{}: 依赖路径 '{}' 解析到内部成员 '{}'，与声明的包名 '{}' 不一致",
                                 checked_pkg.name,
                                 dep_path,
                                 member_pkg.name,
@@ -183,10 +183,10 @@ pub fn check_metadata_rules(
                     } else {
                         if !norm_dep_dir.join("Cargo.toml").is_file() {
                             anyhow::bail!(
-                                "crate boundary: {}: unable to identify path dependency '{}' at '{}'",
+                                "crate 依赖边界：{}: 无法识别位于 '{}' 的路径依赖 '{}'",
                                 checked_pkg.name,
-                                dep.name,
-                                dep_path
+                                dep_path,
+                                dep.name
                             );
                         }
                         None
@@ -195,7 +195,7 @@ pub fn check_metadata_rules(
                 (None, Some(_)) => None,
                 (None, None) => {
                     anyhow::bail!(
-                        "crate boundary: {}: unable to identify dependency '{}' (missing both path and source in metadata)",
+                        "crate 依赖边界：{}: 无法识别依赖 '{}'（metadata 中同时缺少 path 与 source）",
                         checked_pkg.name,
                         dep.name
                     );
@@ -210,18 +210,12 @@ pub fn check_metadata_rules(
                 WorkspaceDependencyPolicy::AllowOnly(allowed)
                     if !allowed.contains(&workspace_dep_name) =>
                 {
-                    Some(format!(
-                        "allowed workspace dependencies: [{}]",
-                        allowed.join(", ")
-                    ))
+                    Some(format!("允许的内部依赖：[{}]", allowed.join(", ")))
                 }
                 WorkspaceDependencyPolicy::Forbid(forbidden)
                     if forbidden.contains(&workspace_dep_name) =>
                 {
-                    Some(format!(
-                        "forbidden workspace dependencies: [{}]",
-                        forbidden.join(", ")
-                    ))
+                    Some(format!("禁止的内部依赖：[{}]", forbidden.join(", ")))
                 }
                 _ => None,
             };
@@ -236,12 +230,12 @@ pub fn check_metadata_rules(
                 }
                 let identity = match dep.rename.as_deref() {
                     Some(alias) if alias != workspace_dep_name => {
-                        format!("'{workspace_dep_name}' (renamed as '{alias}')")
+                        format!("'{workspace_dep_name}'（改名为 '{alias}'）")
                     }
                     _ => format!("'{workspace_dep_name}'"),
                 };
                 hits.push(format!(
-                    "{}: {} forbidden workspace dependency {}; {}",
+                    "{}: {} 出现不允许的内部依赖 {}；{}",
                     checked_pkg.name,
                     qualifiers.join(" "),
                     identity,
@@ -258,9 +252,10 @@ pub fn check_metadata_normal_closure(
     metadata: &Metadata,
     rules: &[NormalClosureRule],
 ) -> anyhow::Result<Vec<String>> {
-    let resolve = metadata.resolve.as_ref().ok_or_else(|| {
-        anyhow::anyhow!("crate boundary: metadata is missing resolved dependency graph (`resolve`)")
-    })?;
+    let resolve = metadata
+        .resolve
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("crate 依赖边界：metadata 缺少依赖解析图（`resolve`）"))?;
 
     let packages_by_id: BTreeMap<&PackageId, &Package> =
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
@@ -269,7 +264,7 @@ pub fn check_metadata_normal_closure(
     for member_id in &metadata.workspace_members {
         let pkg = packages_by_id.get(member_id).copied().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: workspace member id '{member_id}' missing from metadata.packages"
+                "crate 依赖边界：workspace_members 中的成员 '{member_id}' 未出现在 metadata.packages 中"
             )
         })?;
         members_by_name.insert(pkg.name.as_str(), pkg);
@@ -279,7 +274,7 @@ pub fn check_metadata_normal_closure(
     for node in &resolve.nodes {
         if !packages_by_id.contains_key(&node.id) {
             anyhow::bail!(
-                "crate boundary: dangling resolve node '{}' missing from metadata.packages",
+                "crate 依赖边界：悬空解析节点 '{}' 未出现在 metadata.packages 中",
                 node.id
             );
         }
@@ -290,14 +285,14 @@ pub fn check_metadata_normal_closure(
     for rule in rules {
         let root_pkg = members_by_name.get(rule.package).copied().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: checked workspace package '{}' not found in workspace_members",
+                "crate 依赖边界：受检包 '{}' 未出现在 workspace_members 中",
                 rule.package
             )
         })?;
         let root_id = &root_pkg.id;
         if !nodes_by_id.contains_key(root_id) {
             anyhow::bail!(
-                "crate boundary: checked package '{}' ('{root_id}') missing from resolve.nodes",
+                "crate 依赖边界：受检包 '{}'（'{root_id}'）未出现在 resolve.nodes 中",
                 rule.package
             );
         }
@@ -311,13 +306,11 @@ pub fn check_metadata_normal_closure(
         while let Some(curr_id) = queue.pop_front() {
             let curr_pkg = packages_by_id.get(curr_id).copied().ok_or_else(|| {
                 anyhow::anyhow!(
-                    "crate boundary: dangling package id '{curr_id}' missing from metadata.packages"
+                    "crate 依赖边界：悬空包 ID '{curr_id}' 未出现在 metadata.packages 中"
                 )
             })?;
             let curr_node = nodes_by_id.get(curr_id).copied().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "crate boundary: dangling package id '{curr_id}' missing from resolve.nodes"
-                )
+                anyhow::anyhow!("crate 依赖边界：悬空包 ID '{curr_id}' 未出现在 resolve.nodes 中")
             })?;
 
             if curr_id != root_id && rule.forbidden_packages.contains(&curr_pkg.name.as_str()) {
@@ -335,7 +328,7 @@ pub fn check_metadata_normal_closure(
                 }
                 chain.reverse();
                 hits.push(format!(
-                    "{}: forbidden package '{}' reachable in normal dependency closure via {}",
+                    "{}: 普通依赖闭包中可达禁止的包 '{}'，路径：{}",
                     rule.package,
                     curr_pkg.name,
                     chain.join(" -> ")
@@ -350,7 +343,7 @@ pub fn check_metadata_normal_closure(
                         DependencyKind::Development | DependencyKind::Build => {}
                         DependencyKind::Unknown => {
                             anyhow::bail!(
-                                "crate boundary: {}: unknown dep_kind on edge to '{}'",
+                                "crate 依赖边界：{}: 指向 '{}' 的依赖边存在未知 dep_kind",
                                 curr_pkg.name,
                                 dep.pkg
                             );
@@ -364,7 +357,7 @@ pub fn check_metadata_normal_closure(
                 let target_id = &dep.pkg;
                 if !packages_by_id.contains_key(target_id) || !nodes_by_id.contains_key(target_id) {
                     anyhow::bail!(
-                        "crate boundary: {}: normal dependency edge points to dangling node '{target_id}'",
+                        "crate 依赖边界：{}: 普通依赖边指向悬空节点 '{target_id}'",
                         curr_pkg.name
                     );
                 }
@@ -571,19 +564,25 @@ mod tests {
             (
                 "普通依赖",
                 normal_spec,
-                &["[dependencies]", &format!("'{forbidden_dep}'")],
+                &[
+                    "[dependencies]",
+                    &format!("出现不允许的内部依赖 '{forbidden_dep}'"),
+                ],
             ),
             (
                 "build 依赖",
                 build_spec,
-                &["[build-dependencies]", &format!("'{forbidden_dep}'")],
+                &[
+                    "[build-dependencies]",
+                    &format!("出现不允许的内部依赖 '{forbidden_dep}'"),
+                ],
             ),
             (
                 "改名依赖",
                 renamed_spec,
                 &[
                     "[dependencies]",
-                    &format!("'{forbidden_dep}' (renamed as 'forbidden_alias')"),
+                    &format!("出现不允许的内部依赖 '{forbidden_dep}'（改名为 'forbidden_alias'）"),
                 ],
             ),
             (
@@ -593,7 +592,7 @@ mod tests {
                     "[dependencies]",
                     "target 'cfg(windows)'",
                     "optional",
-                    &format!("'{forbidden_dep}'"),
+                    &format!("出现不允许的内部依赖 '{forbidden_dep}'"),
                 ],
             ),
         ];
@@ -834,7 +833,7 @@ mod tests {
             &ws,
             "lattice-ipc",
             "lattice-llm",
-            "allowed workspace dependencies: [lattice-session, lattice-conversation, lattice-store]",
+            "允许的内部依赖：[lattice-session, lattice-conversation, lattice-store]",
         );
         assert_direct_normal_violation(&ws, "lattice-ipc", "plain-helper");
     }
@@ -846,7 +845,7 @@ mod tests {
             &ws,
             "lattice-tui",
             "lattice-api",
-            "allowed workspace dependencies: [lattice-local]",
+            "允许的内部依赖：[lattice-local]",
         );
         assert_direct_normal_violation(&ws, "lattice-tui", "plain-helper");
     }
@@ -858,7 +857,7 @@ mod tests {
             &ws,
             "lattice-local",
             "lattice-session",
-            "allowed workspace dependencies: [lattice-ipc, lattice-conversation, lattice-store]",
+            "允许的内部依赖：[lattice-ipc, lattice-conversation, lattice-store]",
         );
         assert_direct_normal_violation(&ws, "lattice-local", "plain-helper");
     }
@@ -870,7 +869,7 @@ mod tests {
             &ws,
             "lattice-api",
             "lattice-local",
-            "forbidden workspace dependencies: [lattice-local]",
+            "禁止的内部依赖：[lattice-local]",
         );
     }
 
@@ -888,8 +887,8 @@ mod tests {
         ipc_pkg.dependencies[0].source = None;
         let err = check_metadata_rules(&metadata, RULES).unwrap_err();
         assert!(
-            err.to_string().contains("unable to identify dependency"),
-            "{err}"
+            err.to_string().contains("无法识别依赖"),
+            "报错应指出无法识别依赖：{err}"
         );
 
         let members_without_api: Vec<&str> = WORKSPACE_MEMBERS
@@ -899,7 +898,10 @@ mod tests {
             .collect();
         TestWorkspace::write_workspace_toml(&ws.ws_root, &members_without_api);
         let err = check_workspace_rules(&ws.ws_root, RULES).unwrap_err();
-        assert!(err.to_string().contains("lattice-api"), "{err}");
+        assert!(
+            err.to_string().contains("受检包 'lattice-api'"),
+            "报错应指出缺失的受检包：{err}"
+        );
     }
 
     #[test]
@@ -954,7 +956,7 @@ mod tests {
         assert_eq!(
             hits,
             vec![
-                "lattice-local: forbidden package 'lattice-llm' reachable in normal dependency closure via lattice-local -> lattice-llm"
+                "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-llm'，路径：lattice-local -> lattice-llm"
             ],
             "仅经非默认 feature 启用的 optional 依赖必须被 --all-features 闭包检出"
         );
@@ -983,7 +985,7 @@ mod tests {
         assert_eq!(
             hits,
             vec![
-                "lattice-local: forbidden package 'lattice-profile' reachable in normal dependency closure via lattice-local -> lattice-profile"
+                "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-profile'，路径：lattice-local -> lattice-profile"
             ],
             "仅经非当前平台 target 专属依赖引入的禁用 crate 必须被闭包检出"
         );
@@ -1002,7 +1004,7 @@ mod tests {
         assert_eq!(
             hits,
             vec![
-                "lattice-tui: forbidden package 'lattice-agent' reachable in normal dependency closure via lattice-tui -> lattice-agent"
+                "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-agent'，路径：lattice-tui -> lattice-agent"
             ],
             "经改名依赖引入的禁用 crate 必须被 lattice-tui 闭包规则检出"
         );
@@ -1033,13 +1035,13 @@ mod tests {
         );
         assert!(
             hits.iter().any(|h| {
-                h == "lattice-local: forbidden package 'lattice-api' reachable in normal dependency closure via lattice-local -> lattice-ipc -> plain-helper -> lattice-api"
+                h == "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-api'，路径：lattice-local -> lattice-ipc -> plain-helper -> lattice-api"
             }),
             "应写出从 lattice-local 经中间 workspace 成员到达 lattice-api 的完整路径，实际：{hits:?}"
         );
         assert!(
             hits.iter().any(|h| {
-                h == "lattice-tui: forbidden package 'lattice-api' reachable in normal dependency closure via lattice-tui -> lattice-local -> lattice-ipc -> plain-helper -> lattice-api"
+                h == "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-api'，路径：lattice-tui -> lattice-local -> lattice-ipc -> plain-helper -> lattice-api"
             }),
             "应写出从 lattice-tui 经中间 workspace 成员到达 lattice-api 的完整路径，实际：{hits:?}"
         );
@@ -1179,7 +1181,7 @@ mod tests {
         assert!(
             hits.iter()
                 .any(|h| h.contains("lattice-tui -> lattice-local -> lattice-api")),
-            "{hits:?}"
+            "混合边闭包应报告从 lattice-tui 到 lattice-api 的完整路径，实际：{hits:?}"
         );
     }
 
@@ -1192,11 +1194,17 @@ mod tests {
             false,
         );
         let err = check_metadata_normal_closure(&missing_resolve, CLOSURE_RULES).unwrap_err();
-        assert!(err.to_string().contains("missing resolved"), "{err}");
+        assert!(
+            err.to_string().contains("缺少依赖解析图"),
+            "报错应指出缺少 resolve：{err}"
+        );
 
         let missing_pkg = build_graph_metadata(&["lattice-tui"], &[], &[], true);
         let err = check_metadata_normal_closure(&missing_pkg, CLOSURE_RULES).unwrap_err();
-        assert!(err.to_string().contains("lattice-local"), "{err}");
+        assert!(
+            err.to_string().contains("受检包 'lattice-local'"),
+            "报错应指出缺失的受检包：{err}"
+        );
 
         let dangling = build_graph_metadata(
             &["lattice-tui", "lattice-local"],
@@ -1208,6 +1216,9 @@ mod tests {
             true,
         );
         let err = check_metadata_normal_closure(&dangling, CLOSURE_RULES).unwrap_err();
-        assert!(err.to_string().contains("dangling node"), "{err}");
+        assert!(
+            err.to_string().contains("悬空节点"),
+            "报错应指出悬空节点：{err}"
+        );
     }
 }

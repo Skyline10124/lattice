@@ -3,10 +3,10 @@
 
 //! LATTICE 本地 IPC 协议类型、模型与凭据展示类型、分帧编解码与对端 UID 核验。
 
-pub mod auth;
+mod auth;
 pub mod ipc;
-pub mod models;
-pub mod types;
+mod models;
+mod types;
 
 #[cfg(test)]
 mod wire_shape;

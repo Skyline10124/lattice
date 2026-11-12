@@ -19,7 +19,7 @@ pub fn load_full_all_features(repo_root: &Path) -> anyhow::Result<Metadata> {
         .current_dir(repo_root)
         .features(CargoOpt::AllFeatures)
         .exec()
-        .map_err(|e| anyhow::anyhow!("failed to read workspace metadata (--all-features): {e}"))
+        .map_err(|e| anyhow::anyhow!("读取 workspace metadata（--all-features）失败：{e}"))
 }
 
 /// 读取仅包含 workspace 成员声明（`--no-deps`）的 metadata。

@@ -57,7 +57,6 @@ pub struct LocalTurn {
     commands: watch::Sender<Commands>,
     external_view: Option<mpsc::Sender<(ViewUpdate, oneshot::Sender<()>)>>,
     updates: mpsc::Receiver<LocalUpdate>,
-    session_id: SessionId,
     turn_id: Option<TurnId>,
     task: Option<JoinHandle<DetachReport>>,
 }
@@ -135,16 +134,11 @@ impl LocalTurn {
                 commands,
                 external_view: None,
                 updates,
-                session_id,
                 turn_id,
                 task: None,
             },
             worker,
         )
-    }
-
-    pub fn session_id(&self) -> SessionId {
-        self.session_id
     }
 
     pub fn turn_id(&self) -> Option<TurnId> {
@@ -155,6 +149,7 @@ impl LocalTurn {
         self.commands.send_modify(|c| c.cancel += 1);
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn reconnect(&self) {
         self.commands.send_modify(|c| c.reconnect += 1);
     }
@@ -297,7 +292,7 @@ impl Worker {
         self.nodes.clear();
         let client = self.client.clone();
         let sid = self.report.session_id;
-        self.connection = Some(tokio::spawn(async move { client.watch(sid).await }));
+        self.connection = Some(tokio::spawn(async move { client.open_watch(sid).await }));
         self.idle_deadline = Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS);
     }
 

@@ -9,7 +9,9 @@ mod logging;
 mod login;
 mod operation;
 
-pub use client::{LocalClient, LocalWatch};
+pub use client::LocalClient;
+#[cfg(any(test, feature = "test-utils"))]
+pub use client::LocalWatch;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
 pub use lattice_conversation::{

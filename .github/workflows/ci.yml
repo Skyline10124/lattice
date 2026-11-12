@@ -78,9 +78,10 @@ jobs:
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
-      # Dependency / architecture boundary checks (same contracts `cargo
-      # xtask ci` runs locally).
+      # 依赖与架构边界检查（与本地 `cargo xtask ci` 执行同一组检查）。
       - run: cargo xtask harness-boundary
+        if: steps.changes.outputs.code != 'false'
+      - run: cargo xtask crate-boundary
         if: steps.changes.outputs.code != 'false'
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: failure()

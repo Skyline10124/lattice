@@ -304,16 +304,27 @@ impl LocalClient {
         }
     }
 
-    /// 对话向前翻页时默认取得十轮，显式轮数使用 history。
+    /// 对话向前翻页，一次取得 `HISTORY_TURNS` 轮。
     pub async fn history_before(
         &self,
         session_id: SessionId,
         before: NodeId,
     ) -> Result<LocalHistory> {
-        self.history(session_id, before, HISTORY_TURNS).await
+        self.fetch_history(session_id, before, HISTORY_TURNS).await
     }
 
+    /// 指定轮数的翻页，只供测试使用。
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn history(
+        &self,
+        session_id: SessionId,
+        before: NodeId,
+        turns: u32,
+    ) -> Result<LocalHistory> {
+        self.fetch_history(session_id, before, turns).await
+    }
+
+    async fn fetch_history(
         &self,
         session_id: SessionId,
         before: NodeId,
@@ -332,6 +343,7 @@ impl LocalClient {
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn submit(&self, request: TurnRequest) -> Result<Acceptance> {
         match self.call(Request::Submit { request }).await? {
             Response::Acceptance(value) => Ok(value),
@@ -369,6 +381,7 @@ impl LocalClient {
         }
     }
 
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn cancel_session(&self, session_id: SessionId) -> Result<(Option<TurnId>, bool)> {
         let head = self.session_head(session_id).await?;
         match head.turn_id.filter(|_| head.owner) {
@@ -377,7 +390,13 @@ impl LocalClient {
         }
     }
 
+    /// 直接观察会话视图，只供测试使用；前端经 `LocalTurn` 观察。
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn watch(&self, session_id: SessionId) -> Result<LocalWatch> {
+        self.open_watch(session_id).await
+    }
+
+    pub(crate) async fn open_watch(&self, session_id: SessionId) -> Result<LocalWatch> {
         let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(&mut stream, &Request::Watch { session_id }).await?;
         Ok(LocalWatch::from_stream(stream))
