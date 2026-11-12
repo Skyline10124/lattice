@@ -134,7 +134,7 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
     let workspace = LocalWorkspaceRoot::from_path(workspace_dir.path()).unwrap();
     let projects_dir = layout.projects_dir();
 
-    let serving = tokio::spawn(serve_for_test(layout.clone(), Some(home.path().into())));
+    let serving = spawn_test_server(layout.clone(), Some(home.path().into()));
     let client = LocalClient::new(layout);
     wait_backend_ready(&client).await;
 
@@ -193,6 +193,19 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
     assert_eq!(provider.finish().await, 2);
 }
 
+fn spawn_test_server(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+) -> tokio::task::JoinHandle<lattice_api::local::Result<()>> {
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let exit =
+            serve_for_test(layout, home, std::time::Duration::from_secs(60), stop_rx).await?;
+        drop(exit.instance);
+        exit.failure.map_or(Ok(()), Err)
+    })
+}
+
 #[tokio::test]
 async fn preexisting_workspace_history_directory_is_left_untouched_across_turns() {
     let state = tempfile::tempdir().unwrap();
@@ -213,7 +226,7 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
     std::fs::write(&head_sentinel, "not-a-valid-git-head\n").unwrap();
     std::fs::write(&extra_sentinel, "legacy-history-bytes").unwrap();
 
-    let serving = tokio::spawn(serve_for_test(layout.clone(), Some(home.path().into())));
+    let serving = spawn_test_server(layout.clone(), Some(home.path().into()));
     let client = LocalClient::new(layout);
     wait_backend_ready(&client).await;
 

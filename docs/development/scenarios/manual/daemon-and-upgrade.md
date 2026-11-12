@@ -17,7 +17,7 @@ status: active
 ```sh
 lattice --json daemon status
 lattice --json daemon stop
-lattice daemon serve --state-root /tmp/lattice-isolated-state
+lattice daemon serve --state-root /tmp/lattice-isolated-state --drain-timeout 30s
 ```
 
 ### 升级与输出字段适配
@@ -34,9 +34,9 @@ lattice --json daemon status
 | 结果 | 含义与下一步 |
 | --- | --- |
 | `unconfirmed_operations == 0` | 输出 `epoch`、`stopping`、`owners` 与计数；`stop` 后可立即起新后台 |
-| `unconfirmed_operations != 0` | 曾有未收尾操作；查相关 Session |
+| `unconfirmed_operations != 0` | 有未确认收尾的操作（`daemon stop` 退出 `1` 并在标准错误提示）；查相关 Session |
 | `stopping` / `not_running` | 锁未放开或断连（`daemon status` 复核），或无后台运行 |
-| `daemon serve` | 前台运行（`--state-root` 须绝对路径，其下用 `lattice/`，相对路径退出 `2`）；故障注入限于隔离目录 |
+| `daemon serve` | 前台运行（`--state-root` 须绝对路径，其下用 `lattice/`；`--drain-timeout` 默认 `60s`，无效参数退出 `2`）；按 Ctrl-C（`SIGINT`）或发 `SIGTERM` 进入有界停机，排空完成退出 `0`，排空超时或排空中再次按 Ctrl-C 退出 `4`；故障注入限于隔离目录 |
 
 ### 升级与输出字段适配
 

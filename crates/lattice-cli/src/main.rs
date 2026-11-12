@@ -115,16 +115,98 @@ fn main() -> std::process::ExitCode {
             return std::process::ExitCode::from(if help { 0 } else { 2 });
         }
     };
-    async_main(cli)
+    run_with_runtime(cli)
 }
 
-#[tokio::main]
-async fn async_main(cli: Cli) -> std::process::ExitCode {
+fn run_with_runtime(cli: Cli) -> std::process::ExitCode {
     let json = cli.json;
     let _ = lattice_api::init_logging(cli.verbose);
-    match run_commands(cli).await {
-        Ok(exit_code) => exit_code,
-        Err(error) => commands::run::report_error(&error, json),
+    let runtime = match tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(runtime) => runtime,
+        Err(error) => return commands::run::report_error(&error.into(), json),
+    };
+    if let Some(Commands::Daemon {
+        action:
+            commands::daemon::DaemonAction::Serve {
+                state_root,
+                drain_timeout,
+            },
+    }) = cli.command
+    {
+        return run_daemon_serve(runtime, state_root, drain_timeout, json);
+    }
+    let exit_code = runtime.block_on(async move {
+        match run_commands(cli).await {
+            Ok(exit_code) => exit_code,
+            Err(error) => commands::run::report_error(&error, json),
+        }
+    });
+    drop(runtime);
+    exit_code
+}
+
+fn run_daemon_serve(
+    runtime: tokio::runtime::Runtime,
+    state_root: Option<std::path::PathBuf>,
+    drain_timeout: std::time::Duration,
+    json: bool,
+) -> std::process::ExitCode {
+    let outcome = runtime.block_on(async move {
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
+        let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+        let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(32);
+        let signal_task = tokio::spawn(async move {
+            loop {
+                let received = tokio::select! {
+                    res = sigterm.recv() => res,
+                    res = sigint.recv() => res,
+                };
+                if received.is_none() || stop_tx.send(()).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let result = commands::daemon::serve(state_root.as_deref(), drain_timeout, stop_rx).await;
+        signal_task.abort();
+        result
+    });
+    match outcome {
+        Ok(lattice_api::local::ServeExit {
+            drain,
+            failure,
+            instance,
+            shutdown_deadline,
+        }) => {
+            let has_failure = failure.is_some();
+            if let Some(error) = failure {
+                commands::run::report_daemon_failure(&error);
+            }
+            let code = match drain {
+                lattice_api::local::DrainOutcome::TimedOut => 4,
+                lattice_api::local::DrainOutcome::Completed => {
+                    if has_failure {
+                        1
+                    } else {
+                        0
+                    }
+                }
+            };
+            // 关闭 runtime 用第 6 步剩余的时间；实例锁持有到进程退出，由内核在关闭文件描述符时释放。
+            runtime.shutdown_timeout(
+                shutdown_deadline.saturating_duration_since(std::time::Instant::now()),
+            );
+            let _held_until_exit = &instance;
+            std::process::exit(code);
+        }
+        Err(error) => {
+            let code = commands::run::report_error(&error, json);
+            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
+            code
+        }
     }
 }
 
@@ -139,7 +221,14 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
             .await;
         }
         Some(Commands::Daemon { action }) => {
-            return commands::daemon::run(action, cli.json).await;
+            let is_stop = match action {
+                commands::daemon::DaemonAction::Status => false,
+                commands::daemon::DaemonAction::Stop => true,
+                commands::daemon::DaemonAction::Serve { .. } => {
+                    unreachable!("daemon serve 由专用入口执行")
+                }
+            };
+            return commands::daemon::run_client(is_stop, cli.json).await;
         }
         Some(Commands::Auth { action }) => {
             return commands::auth::run(action, cli.json).await;
@@ -398,5 +487,90 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["lattice", "audit"]).is_err());
         assert!(Cli::try_parse_from(["lattice", "lancet"]).is_err());
+    }
+
+    #[test]
+    fn daemon_serve_drain_timeout_accepts_units_and_rejects_invalid_values() {
+        use std::time::Duration;
+
+        let default_cli = Cli::try_parse_from(["lattice", "daemon", "serve"]).unwrap();
+        match default_cli.command {
+            Some(Commands::Daemon {
+                action:
+                    crate::commands::daemon::DaemonAction::Serve {
+                        state_root,
+                        drain_timeout,
+                    },
+            }) => {
+                assert_eq!(state_root, None, "默认不应设置 state_root");
+                assert_eq!(
+                    drain_timeout,
+                    Duration::from_secs(60),
+                    "默认排空上限应为 60s"
+                );
+            }
+            _ => panic!("应解析为 daemon serve"),
+        }
+
+        for (raw, expected) in [
+            ("300ms", Duration::from_millis(300)),
+            ("60s", Duration::from_secs(60)),
+            ("2m", Duration::from_secs(120)),
+            ("60", Duration::from_secs(60)),
+            ("0", Duration::ZERO),
+            ("0ms", Duration::ZERO),
+            ("0s", Duration::ZERO),
+            ("0m", Duration::ZERO),
+        ] {
+            let cli = Cli::try_parse_from(["lattice", "daemon", "serve", "--drain-timeout", raw])
+                .unwrap_or_else(|err| panic!("{raw} 应被接受，但失败：{err}"));
+            match cli.command {
+                Some(Commands::Daemon {
+                    action: crate::commands::daemon::DaemonAction::Serve { drain_timeout, .. },
+                }) => assert_eq!(drain_timeout, expected, "{raw} 解析结果不符"),
+                _ => panic!("应解析为 daemon serve"),
+            }
+        }
+
+        for invalid in [
+            "-1",
+            "1h",
+            "1.5s",
+            "+5",
+            " 60s",
+            "60s ",
+            "60 s",
+            "\t60",
+            "",
+            "ms",
+            "s",
+            "m",
+            "18446744073709551616",
+            "307445734561825861m",
+        ] {
+            let arg = format!("--drain-timeout={invalid}");
+            let err = Cli::try_parse_from(["lattice", "daemon", "serve", &arg])
+                .err()
+                .unwrap_or_else(|| panic!("{invalid:?} 应被拒绝"));
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ValueValidation,
+                "{invalid:?} 应报 ValueValidation"
+            );
+            assert!(
+                Cli::try_parse_from(["lattice", "daemon", "serve", "--drain-timeout", invalid])
+                    .is_err(),
+                "分开传参时 {invalid:?} 也应被拒绝"
+            );
+        }
+
+        let mut root = Cli::command();
+        let daemon = root.find_subcommand_mut("daemon").unwrap();
+        let serve = daemon.find_subcommand_mut("serve").unwrap();
+        let help = serve.render_long_help().to_string();
+        assert!(
+            help.contains("--drain-timeout"),
+            "daemon serve 帮助文本应包含 --drain-timeout: {help}"
+        );
     }
 }

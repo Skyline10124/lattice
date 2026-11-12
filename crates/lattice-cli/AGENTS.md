@@ -6,11 +6,11 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/main.rs` | `lattice` 入口、`clap` 命令定义、参数解析错误脱敏、日志初始化与进程退出码 |
+| `src/main.rs` | `lattice` 入口、显式多线程 Tokio runtime 构建、`clap` 命令定义、参数解析错误脱敏、日志初始化，`daemon serve` 的 `SIGTERM`/`SIGINT` 转发、`shutdown_timeout` 与持有 `InstanceLock` 下的 `0`/`1`/`2`/`4` 进程退出（见[停止后台](../../docs/architecture/session/recovery.md#停止后台)） |
 | `src/commands/mod.rs` | 子命令模块导出 |
 | `src/commands/run.rs` | 请求身份预生成与输出、`configure` 会话创建/设置更新、`LocalTurn` 提交/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
 | `src/commands/session.rs` | `session` 子命令（`send`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）参数处理、后台调用与用量费用渲染 |
-| `src/commands/daemon.rs` | `daemon serve`、`status`、`stop` 入口与私有状态根解析 |
+| `src/commands/daemon.rs` | `daemon serve`（含 `--drain-timeout` 解析）、`status`、`stop`（含未确认收尾标准错误提示）入口与私有状态根解析 |
 | `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、无回显终端或标准输入读取密钥、SIWC 登录浏览器与粘贴交互（`login.rs`）、可唤醒输入线程（`login/input.rs`）及信号下终端模式恢复（`terminal.rs`） |
 | `src/commands/models.rs` | `models` 候选列表渲染、配置问题 stderr 提示与 `models refresh` |
 

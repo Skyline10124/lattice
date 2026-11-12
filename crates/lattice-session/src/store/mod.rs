@@ -88,6 +88,22 @@ impl SessionStore {
         Ok(start())
     }
 
+    /// 置位写闸，等待正在进行的提交结束后阻止后续全部写入；重复调用幂等。
+    pub fn disable_writes(&self) {
+        #[cfg(test)]
+        if matches!(
+            self.write_disabled.try_lock(),
+            Err(std::sync::TryLockError::WouldBlock)
+        ) {
+            write_probe(WriteStage::HealthLockContended);
+        }
+        let mut disabled = self
+            .write_disabled
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        *disabled = true;
+    }
+
     fn execution_health(&self) -> Result<std::sync::MutexGuard<'_, bool>> {
         #[cfg(test)]
         if matches!(

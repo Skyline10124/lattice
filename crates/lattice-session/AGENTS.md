@@ -8,7 +8,7 @@
 | --- | --- |
 | `src/lib.rs` | 重导出领域字段类型、`SessionStore` 读写接口及 `test-utils` 测试辅助 |
 | `src/model/mod.rs`、`src/model/project_path.rs` | 独立于存储机制的纯数据领域类型（`AgentName`、`TurnTimeout`、`RetryPolicy`、`ProjectPath`）与构造校验 |
-| `src/store/mod.rs`、`src/store/types.rs` | `SessionStore`、`SessionRead`、`SessionExecutionLock`、`ToolReply`、槽位详情状态（`SlotDetail`、`SlotState`、`SlotReason`）与错误 |
+| `src/store/mod.rs`、`src/store/types.rs` | `SessionStore`（含幂等写闸 `disable_writes`）、`SessionRead`、`SessionExecutionLock`、`ToolReply`、槽位详情状态（`SlotDetail`、`SlotState`、`SlotReason`）与错误 |
 | `src/store/binding.rs` | 调用槽位绑定事实（`InvocationBinding`、`BindingIdentity`），经 `store` 导出 |
 | `src/store/codec.rs`、`src/store/open.rs`、`src/store/validate.rs` | redb 表与格式版本 `9` 编解码、首次创建与严格打开、存在 `sessions.git` 或 `invocations.git` 时的拒绝及全库跨记录一致性校验 |
 | `src/store/write.rs`、`src/store/close.rs` | 单步 `Durability::Immediate` 领域写事务（含草稿会话整体删除 `delete_draft`），`ToolReply` 终态准备（`prepare_terminal`），以及从持久 `progress` 推导尝试、槽位与 Step 结论的纯函数 |

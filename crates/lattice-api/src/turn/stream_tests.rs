@@ -193,10 +193,20 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
         ..
     } = fixture;
     drop((api, store));
-    let serving = tokio::spawn(crate::local::serve_for_test(
-        layout.clone(),
-        Some(_state.path().into()),
-    ));
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    let serving_layout = layout.clone();
+    let serving_home = Some(_state.path().into());
+    let serving = tokio::spawn(async move {
+        let exit = crate::local::serve_for_test(
+            serving_layout,
+            serving_home,
+            Duration::from_secs(60),
+            stop_rx,
+        )
+        .await?;
+        drop(exit.instance);
+        exit.failure.map_or(Ok(()), Err)
+    });
     let client = crate::local::LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(10), async {
         while client.status().await.is_err() {

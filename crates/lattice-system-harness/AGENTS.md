@@ -7,8 +7,8 @@
 | 模块 | 负责 |
 | --- | --- |
 | `src/lib.rs` | 重导出场景世界、进程驱动、fake 服务、预算与断言辅助接口 |
-| `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离、环境变量白名单、后台归属登记、有序 `stop` 与进程组回收 |
-| `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 路径解析、独立进程组命令执行、超时终止、`CommandOutcome` 采集与快速 CLI 辅助 |
+| `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离、环境变量白名单、后台归属登记、`daemon serve` 命令行选项识别、有序 `stop` 与进程组回收 |
+| `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 路径解析、独立进程组命令执行、`terminate`（`SIGTERM`）与超时终止、`CommandOutcome` 采集及快速 CLI 辅助 |
 | `src/scenario.rs` | 场景分层与单命令、整场景时长预算计算 |
 | `src/fake_llm.rs`、`src/provider.rs`、`src/tls.rs` | 五协议 TLS + HTTP/2 `FakeLlmServer`、`ResponseGate`、工具 schema 校验、临时 CA 签发及经 `providers.toml` 与 `lattice auth set` 的正式配置接入 |
 | `src/session_send.rs` | `lattice --json session send` JSONL 解析（含 `configure`、`submit` 等公开记录，保留未知有效记录为 `Unknown` 并单独记录畸形行）与 `0`/`1`/`2` 退出码核验 |

@@ -29,8 +29,13 @@ enum StoreState {
     Quiescing {
         generation: u64,
         reason: RecoveryReason,
+        old: Option<Arc<SessionStore>>,
     },
     Unavailable(ApiError),
+    /// 停机排空超时后的终态；停写的库句柄留在这里，随 `StoreManager` 最终释放时关闭会话库。
+    Stopped {
+        _store: Option<Arc<SessionStore>>,
+    },
 }
 
 pub(crate) struct StoreLease {
@@ -65,6 +70,13 @@ impl StoreManager {
 
     pub(crate) fn subscribe(&self) -> watch::Receiver<u64> {
         self.changed.subscribe()
+    }
+
+    pub(crate) fn is_stopped(&self) -> bool {
+        matches!(
+            *self.state.lock().expect("store manager poisoned"),
+            StoreState::Stopped { .. }
+        )
     }
 
     #[cfg(test)]
@@ -108,7 +120,9 @@ impl StoreManager {
                     store,
                     shutdown,
                 } => return Ok(self.api(*generation, store.clone(), shutdown.clone(), read)),
-                StoreState::Quiescing { .. } => return Err(StoreError::WriteDisabled.into()),
+                StoreState::Quiescing { .. } | StoreState::Stopped { .. } => {
+                    return Err(StoreError::WriteDisabled.into());
+                }
                 StoreState::Unavailable(error) => return Err(error.clone()),
                 StoreState::Unopened => {}
             }
@@ -128,7 +142,9 @@ impl StoreManager {
                     } => {
                         return Ok(manager.api(*generation, store.clone(), shutdown.clone(), read));
                     }
-                    StoreState::Quiescing { .. } => return Err(StoreError::WriteDisabled.into()),
+                    StoreState::Quiescing { .. } | StoreState::Stopped { .. } => {
+                        return Err(StoreError::WriteDisabled.into());
+                    }
                     StoreState::Unavailable(error) => return Err(error.clone()),
                     StoreState::Unopened => {}
                 }
@@ -136,12 +152,27 @@ impl StoreManager {
             let opened = manager.open_store(create);
             match opened {
                 Ok(store) => {
-                    let store = Arc::new(store);
                     let shutdown = Arc::default();
-                    *manager.state.lock().expect("store manager poisoned") = StoreState::Ready {
-                        generation: 0,
-                        store: store.clone(),
-                        shutdown: Arc::clone(&shutdown),
+                    let published = {
+                        let mut state = manager.state.lock().expect("store manager poisoned");
+                        if matches!(*state, StoreState::Stopped { .. }) {
+                            Err(store)
+                        } else {
+                            let store = Arc::new(store);
+                            *state = StoreState::Ready {
+                                generation: 0,
+                                store: store.clone(),
+                                shutdown: Arc::clone(&shutdown),
+                            };
+                            Ok(store)
+                        }
+                    };
+                    let store = match published {
+                        Ok(store) => store,
+                        Err(discarded) => {
+                            drop(discarded);
+                            return Err(StoreError::WriteDisabled.into());
+                        }
                     };
                     manager.notify();
                     Ok(manager.api(0, store, shutdown, read))
@@ -151,15 +182,27 @@ impl StoreManager {
                     let unknown = matches!(error, StoreError::CreationDurabilityUnknown { .. });
                     let error = ApiError::from(error);
                     if unknown {
-                        *manager.state.lock().expect("store manager poisoned") =
-                            StoreState::Quiescing {
-                                generation: 0,
-                                reason: RecoveryReason::CreationDurabilityUnknown,
-                            };
-                        manager.recover(0, None);
+                        let should_recover = {
+                            let mut state = manager.state.lock().expect("store manager poisoned");
+                            if matches!(*state, StoreState::Stopped { .. }) {
+                                false
+                            } else {
+                                *state = StoreState::Quiescing {
+                                    generation: 0,
+                                    reason: RecoveryReason::CreationDurabilityUnknown,
+                                    old: None,
+                                };
+                                true
+                            }
+                        };
+                        if should_recover {
+                            manager.recover(0);
+                        }
                     } else if !missing {
-                        *manager.state.lock().expect("store manager poisoned") =
-                            StoreState::Unavailable(error.clone());
+                        let mut state = manager.state.lock().expect("store manager poisoned");
+                        if !matches!(*state, StoreState::Stopped { .. }) {
+                            *state = StoreState::Unavailable(error.clone());
+                        }
                     }
                     Err(error)
                 }
@@ -187,36 +230,73 @@ impl StoreManager {
         )
     }
 
-    pub(crate) fn fail(self: &Arc<Self>, generation: u64) {
-        let previous = {
+    /// 停机排空超时后置位租约停机标志与会话库写闸，进入不再重开的终态。
+    /// 停写的库句柄留在 `Stopped` 中随 `StoreManager` 最终释放，不在停写等待点顺带关库。
+    pub(crate) async fn disable_writes(self: &Arc<Self>) {
+        let store = {
             let mut state = self.state.lock().expect("store manager poisoned");
-            match &*state {
+            let store = match &mut *state {
+                StoreState::Stopped { .. } => return,
                 StoreState::Ready {
-                    generation: current,
-                    shutdown,
-                    ..
-                } if *current == generation => shutdown.store(true, Ordering::Release),
-                _ => return,
-            }
-            std::mem::replace(
-                &mut *state,
-                StoreState::Quiescing {
-                    generation,
-                    reason: RecoveryReason::Commit,
-                },
-            )
+                    store, shutdown, ..
+                } => {
+                    shutdown.store(true, Ordering::Release);
+                    Some(store.clone())
+                }
+                StoreState::Quiescing { old, .. } => old.take(),
+                StoreState::Unopened | StoreState::Unavailable(_) => None,
+            };
+            *state = StoreState::Stopped {
+                _store: store.clone(),
+            };
+            store
         };
-        if let StoreState::Ready { store, .. } = previous {
-            self.notify();
-            self.recover(generation, Some(store));
+        self.notify();
+        if let Some(store) = store {
+            let _ = tokio::task::spawn_blocking(move || {
+                store.disable_writes();
+            })
+            .await;
         }
     }
 
-    fn recover(self: &Arc<Self>, generation: u64, old: Option<Arc<SessionStore>>) {
+    pub(crate) fn fail(self: &Arc<Self>, generation: u64) {
+        let should_recover = {
+            let mut state = self.state.lock().expect("store manager poisoned");
+            let store = match &*state {
+                StoreState::Ready {
+                    generation: current,
+                    store,
+                    shutdown,
+                } if *current == generation => {
+                    shutdown.store(true, Ordering::Release);
+                    store.clone()
+                }
+                _ => return,
+            };
+            *state = StoreState::Quiescing {
+                generation,
+                reason: RecoveryReason::Commit,
+                old: Some(store),
+            };
+            true
+        };
+        if should_recover {
+            self.notify();
+            self.recover(generation);
+        }
+    }
+
+    fn recover(self: &Arc<Self>, generation: u64) {
         let manager = self.clone();
         tokio::spawn(async move {
             // 排他租约等所有真实 worker/Owner 释放；不依赖 Arc 计数、sleep 或 abort。
             let drained = manager.leases.clone().write_owned().await;
+            if manager.is_stopped() {
+                drop(drained);
+                manager.notify();
+                return;
+            }
             #[cfg(feature = "test-crash-barriers")]
             crate::turn::crash_barrier::schedule(
                 "store_reopen",
@@ -226,34 +306,46 @@ impl StoreManager {
             let worker_manager = manager.clone();
             let result = tokio::task::spawn_blocking(move || {
                 let _drained = drained;
-                drop(old);
-                let reason = {
-                    let state = worker_manager.state.lock().expect("store manager poisoned");
-                    match &*state {
+                let (reason, old) = {
+                    let mut state = worker_manager.state.lock().expect("store manager poisoned");
+                    match &mut *state {
+                        StoreState::Stopped { .. } => return,
                         StoreState::Quiescing {
                             generation: current,
                             reason,
-                        } if *current == generation => *reason,
+                            old,
+                        } if *current == generation => (*reason, old.take()),
                         _ => panic!("reopen must replace its own quiescing generation"),
                     }
                 };
+                drop(old);
                 let opened = worker_manager
                     .open_store(matches!(reason, RecoveryReason::CreationDurabilityUnknown))
                     .map_err(ApiError::from);
-                let mut state = worker_manager.state.lock().expect("store manager poisoned");
-                *state = match opened {
-                    Ok(store) => StoreState::Ready {
-                        generation: generation + 1,
-                        store: Arc::new(store),
-                        shutdown: Arc::default(),
-                    },
-                    Err(error) => StoreState::Unavailable(error),
+                let discarded = {
+                    let mut state = worker_manager.state.lock().expect("store manager poisoned");
+                    if matches!(*state, StoreState::Stopped { .. }) {
+                        opened.ok()
+                    } else {
+                        *state = match opened {
+                            Ok(store) => StoreState::Ready {
+                                generation: generation + 1,
+                                store: Arc::new(store),
+                                shutdown: Arc::default(),
+                            },
+                            Err(error) => StoreState::Unavailable(error),
+                        };
+                        None
+                    }
                 };
+                drop(discarded);
             })
             .await;
             if result.is_err() {
-                *manager.state.lock().expect("store manager poisoned") =
-                    StoreState::Unavailable(ApiError::WorkerFailed);
+                let mut state = manager.state.lock().expect("store manager poisoned");
+                if !matches!(*state, StoreState::Stopped { .. }) {
+                    *state = StoreState::Unavailable(ApiError::WorkerFailed);
+                }
             }
             manager.notify();
         });
@@ -416,5 +508,182 @@ mod tests {
             StoreState::Quiescing { .. }
         ));
         drop(api);
+    }
+
+    #[tokio::test]
+    async fn disable_writes_from_ready_marks_shutdown_blocks_store_and_stops_acquire() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(StateLayout::in_state_root(tmp.path()));
+        let api = manager.acquire(true).await.expect("首次创建会话库");
+        let shutdown = api.shutdown().clone();
+        let store_weak = Arc::downgrade(&api.store);
+        assert!(!shutdown.load(Ordering::Acquire));
+        drop(api);
+        assert_eq!(
+            store_weak.strong_count(),
+            1,
+            "释放租约后应只剩 StoreManager 持有会话库句柄"
+        );
+
+        manager.disable_writes().await;
+
+        assert!(
+            shutdown.load(Ordering::Acquire),
+            "Ready 停写后租约 shutdown 应已置位"
+        );
+        let retained = store_weak
+            .upgrade()
+            .expect("停写阻塞任务结束时不应顺带丢掉最后一个库引用");
+        assert!(
+            matches!(
+                retained.with_execution_start(|| ()),
+                Err(StoreError::WriteDisabled)
+            ),
+            "Ready 停写后底层会话库的写闸应已置位"
+        );
+        drop(retained);
+        assert_eq!(
+            store_weak.strong_count(),
+            1,
+            "Stopped 状态应保留库句柄直至 StoreManager 最终释放"
+        );
+        let err = manager
+            .acquire(false)
+            .await
+            .err()
+            .expect("Stopped 状态下 acquire 应失败");
+        assert!(
+            matches!(err, ApiError::Store(ref e) if matches!(e.as_ref(), StoreError::WriteDisabled)),
+            "Stopped 状态下 acquire 应返回 WriteDisabled"
+        );
+        drop(manager);
+        assert_eq!(
+            store_weak.strong_count(),
+            0,
+            "最终释放 StoreManager 后会话库句柄应一并释放"
+        );
+    }
+
+    #[tokio::test]
+    async fn disable_writes_while_quiescing_disables_old_store_and_prevents_reopen() {
+        let tmp = tempfile::tempdir().unwrap();
+        let manager = StoreManager::new(StateLayout::in_state_root(tmp.path()));
+        let api = manager.acquire(true).await.expect("首次创建会话库");
+
+        // WorkerFailed 触发 Quiescing 且不会自行置位旧库写闸；api 持有租约阻止恢复立即重开。
+        api.report_failure(&ApiError::WorkerFailed);
+        assert!(
+            matches!(*manager.state.lock().unwrap(), StoreState::Quiescing { .. }),
+            "汇报 WorkerFailed 后应进入 Quiescing"
+        );
+        assert!(
+            api.store.with_execution_start(|| ()).is_ok(),
+            "停写前 WorkerFailed 旧库的写闸尚未置位"
+        );
+
+        manager.disable_writes().await;
+
+        assert!(
+            matches!(
+                api.store.with_execution_start(|| ()),
+                Err(StoreError::WriteDisabled)
+            ),
+            "Quiescing 停写应置位旧库的写闸"
+        );
+        assert!(
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: Some(_) }
+            ),
+            "停写后状态应为保留旧库句柄的 Stopped"
+        );
+
+        let mut updates = manager.subscribe();
+        drop(api);
+        tokio::time::timeout(std::time::Duration::from_secs(3), updates.changed())
+            .await
+            .expect("释放租约后等待中的恢复任务应退出并发送通知")
+            .unwrap();
+
+        assert!(
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: Some(_) }
+            ),
+            "放开租约后状态仍应保持 Stopped，不能重开"
+        );
+        assert_eq!(manager.ready_generation(), None);
+        let err = manager
+            .acquire(false)
+            .await
+            .err()
+            .expect("恢复退出后 acquire 仍应拒绝");
+        assert!(
+            matches!(err, ApiError::Store(ref e) if matches!(e.as_ref(), StoreError::WriteDisabled)),
+            "Stopped 状态下 acquire 应返回 WriteDisabled"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn disable_writes_during_initial_open_keeps_stopped_and_discards_opened_store() {
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let manager = StoreManager::new(layout.clone());
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let gate = Mutex::new(Some((entered_tx, release_rx)));
+        *manager.creation_sync_probe.lock().unwrap() = Some(Arc::new(move || {
+            if let Some((entered_tx, release_rx)) = gate.lock().unwrap().take() {
+                entered_tx.send(()).unwrap();
+                release_rx
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap();
+            }
+            false
+        }));
+
+        let open_task = tokio::spawn({
+            let manager = manager.clone();
+            async move { manager.acquire(true).await }
+        });
+
+        tokio::task::spawn_blocking(move || {
+            entered_rx
+                .recv_timeout(std::time::Duration::from_secs(3))
+                .expect("首次打开应进入 creation_sync_probe");
+        })
+        .await
+        .unwrap();
+
+        manager.disable_writes().await;
+        assert!(
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: None }
+            ),
+            "首次打开进行中停写应将状态置为 Stopped"
+        );
+
+        release_tx.send(()).unwrap();
+        let err = open_task
+            .await
+            .unwrap()
+            .err()
+            .expect("停写后首次打开应返回错误");
+        assert!(
+            matches!(err, ApiError::Store(ref e) if matches!(e.as_ref(), StoreError::WriteDisabled)),
+            "首次打开遇到 Stopped 应返回 WriteDisabled"
+        );
+        assert!(
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: None }
+            ),
+            "打开结束后状态仍应保持 Stopped"
+        );
+
+        let reopened =
+            SessionStore::open(&layout).expect("刚打开的库句柄应已被丢弃并释放底层文件锁");
+        drop(reopened);
     }
 }

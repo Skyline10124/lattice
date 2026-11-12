@@ -9,10 +9,10 @@
 | `src/lib.rs`、`src/root.rs`、`src/models.rs` | 公开接口重导出、规范本地工作区根路径解析 `resolve_local_workspace_root`、模型候选类型重导出与日志初始化转发 |
 | `src/session.rs` | `SessionApi` 会话列表、树形日志、退回、历史、用量、详情读取与 `SessionId` 精确/前缀解析 |
 | `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
-| `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写、在途工作排空与关闭重开 |
-| `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地控制面入口、IPC 消息定义、16 MiB 单帧分帧/拼回及 Unix socket 权限与对端 UID 核验 |
+| `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写与关闭重开、以及排空超时停写终态（`disable_writes`） |
+| `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地控制面入口、IPC 消息定义、16 MiB 单帧分帧/拼回、`InstanceLock` 实例锁句柄及 Unix socket 权限与对端 UID 核验 |
 | `src/local/client.rs`、`src/local/operation.rs` | `LocalClient` 连接、自动启动后台、`configure` 与视图/查询转发、`stop` 收到回执后等待 socket 撤下与 `owner.lock` 释放；`LocalTurn` 提交、取消回执与 `detach` 退出交接 |
-| `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与草稿清理（`cleanup_drafts`）、提交准入、视图推送、`Owner` 独立监督及有序 `stop` 收尾 |
+| `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与草稿清理（`cleanup_drafts`）、提交准入、视图推送、`Owner` 独立监督，以及信号与 IPC `stop` 共用的有界停机顺序（返回 `ServeExit`） |
 | `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令转发、敏感材料传输、错误映射与同连接 SIWC 登录句柄 |
 | `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
 | `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、生产后台接线 `start_turn` 及 `test-utils` 复用的 `run_turn` |
@@ -36,9 +36,9 @@
 
 - `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的模型驱动与工具分发路径；阻塞式会话库访问放入 `spawn_blocking`，写事务内不等待模型、工具执行器或网络。
 - `submit` 只接受新请求，找回统一走按 `TurnId` 查询；`observer.rs` 为每个观察者维护最新待推条目与文字游标并以非阻塞通知解耦观察背压、实时排空与持久提交；Step 重试提示与 `TurnSummary` notice 按[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)生成，接受与观察交接见[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)与[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。
-- `local/server.rs` 的 `configure(New)` 在请求处理完毕并尝试写回响应后（无论请求成功或被拒、响应写出成功或失败）触发受后台监督的草稿会话清理，并在准入锁边界与 `watch` 观察者登记串行，见[会话状态与草稿清理](../../docs/architecture/session/concurrency.md#会话状态与草稿清理)；`stop` 先取消元数据刷新任务并调用 `stop_logins`，待已接管 Turn 与在途草稿会话清理收尾后再关闭认证生命周期并排空连接，交接顺序见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
+- `local/server.rs` 的 `configure(New)` 在请求处理完毕并尝试写回响应后（无论请求成功或被拒、响应写出成功或失败）触发受后台监督的草稿会话清理，并在准入锁边界与 `watch` 观察者登记串行，见[会话状态与草稿清理](../../docs/architecture/session/concurrency.md#会话状态与草稿清理)；`serve_with_backend` 作为唯一的停机执行点处理信号与 IPC `stop`、单次持锁排空判定、超时停写、尾段连接服务与收尾及阻塞线程最终释放（最终释放与撤下 socket 共用第 6 步期限，经 `ServeExit` 把实例锁与该期限交给进程入口），见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
 - `ToolExecutor` 经构造参数注入后台与执行入口，不使用全局变量：生产默认注入空目录的 `NoTools`（发给模型的请求不带工具定义）；开启 `test-fake-tools` feature 的构建仅在后台启动环境设置了 `LATTICE_TEST_TOOLS` 时启用 `FakeToolExecutor`，未设置时仍使用 `NoTools`。接受事务前调用 `open_turn` 冻结本轮工具目录，协调层用同一份目录驱动模型请求与 `InvalidBatch` 批次校验。
-- 调用分发前先检查取消与本轮 deadline，提交 `start_invocation` 后调用 `TurnTools::execute` 并传入同一取消标志与 deadline：`ToolOutcome::Deadline` 不调用 `finish_invocation`，直接以 `DispatchStop::Deadline` 关闭 Step（槽位保持 `Started`，读出 `Indeterminate(NoResult)`）；其余四种结果映射为 `ToolReply` 写入终态。写事务提交失败时经 `stores.rs` 立即停写全库、排空在途工作后关闭重开，见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)与[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)。
+- 调用分发前先检查取消与本轮 deadline，提交 `start_invocation` 后调用 `TurnTools::execute` 并传入同一取消标志与 deadline：`ToolOutcome::Deadline` 不调用 `finish_invocation`，直接以 `DispatchStop::Deadline` 关闭 Step（槽位保持 `Started`，读出 `Indeterminate(NoResult)`）；其余四种结果映射为 `ToolReply` 写入终态。写事务提交失败时经 `stores.rs` 停写并排空重开，排空超时停机时经 `StoreManager::disable_writes` 停写并保留库句柄至最终释放，见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)、[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
 - 执行者消失后的 Turn 保留原持久状态，`rewind` 只将当前节点指针移到目标 `NodeId` 并保留原分叉、工作区文件与会话设置，见[执行者消失后的 Turn](../../docs/architecture/session/recovery.md#执行者消失后的-turn)与[会话设置](../../docs/architecture/session/settings.md#设置与一轮的配置)。
 - `session.rs` 解析 `SessionId` 时先精确匹配再按已存前缀匹配，歧义时最多列出 5 个候选并拒绝空白输入，内部与持久层始终使用 32 位十六进制规范 `SessionId`。
 - 本 crate 之外：profile 字段与目录权限校验由 `lattice-profile` 负责；会话库表与事务原语由 `lattice-session` 负责；provider wire 协议与认证生命周期由 `lattice-llm` 负责；终端与命令行呈现由 `lattice-tui` 和 `lattice-cli` 负责。
