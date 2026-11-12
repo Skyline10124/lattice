@@ -183,28 +183,19 @@ mod tests {
     use std::path::{Path, PathBuf};
 
     use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
-    use serde::Serialize;
 
     use super::*;
 
-    fn assert_wire_bytes_identical<L: Serialize, I: Serialize>(label: &str, llm: &L, ipc: &I) {
-        let llm_bytes = serde_json::to_vec(llm).expect("llm 类型序列化应成功");
-        let ipc_bytes = serde_json::to_vec(ipc).expect("ipc 展示类型序列化应成功");
-        assert_eq!(
-            ipc_bytes,
-            llm_bytes,
-            "{label} 转换前后的 JSON 字节必须逐字一致:\n  llm: {}\n  ipc: {}",
-            String::from_utf8_lossy(&llm_bytes),
-            String::from_utf8_lossy(&ipc_bytes),
-        );
-    }
-
     #[test]
-    fn enum_conversions_cover_every_branch_with_identical_wire_bytes() {
-        for (label, ipc_q) in [
+    fn enum_conversions_cover_every_branch() {
+        for (label, ipc_q, expected_llm_q) in [
             (
                 "query/list_some",
                 lattice_ipc::ModelCandidateQuery::List {
+                    provider: Some(ProviderId::parse("openai").unwrap()),
+                    ready_only: true,
+                },
+                lattice_llm::ModelCandidateQuery::List {
                     provider: Some(ProviderId::parse("openai").unwrap()),
                     ready_only: true,
                 },
@@ -215,41 +206,66 @@ mod tests {
                     provider: None,
                     ready_only: false,
                 },
+                lattice_llm::ModelCandidateQuery::List {
+                    provider: None,
+                    ready_only: false,
+                },
             ),
             (
                 "query/target",
                 lattice_ipc::ModelCandidateQuery::Target(ModelRef::parse("openai/gpt-5").unwrap()),
+                lattice_llm::ModelCandidateQuery::Target(ModelRef::parse("openai/gpt-5").unwrap()),
             ),
         ] {
-            let llm_q = model_query(&ipc_q);
-            assert_wire_bytes_identical(label, &llm_q, &ipc_q);
+            assert_eq!(
+                model_query(&ipc_q),
+                expected_llm_q,
+                "{label} IPC 到 llm 查询转换结果不符"
+            );
         }
 
-        for (label, llm_req) in [
+        for (label, llm_req, expected_ipc_req) in [
             (
                 "requirement/declaration",
                 lattice_llm::ConfigurationRequirement::Declaration,
+                lattice_ipc::ConfigurationRequirement::Declaration,
             ),
             (
                 "requirement/api_key",
                 lattice_llm::ConfigurationRequirement::ApiKey,
+                lattice_ipc::ConfigurationRequirement::ApiKey,
             ),
             (
                 "requirement/chatgpt_login",
                 lattice_llm::ConfigurationRequirement::ChatgptLogin,
+                lattice_ipc::ConfigurationRequirement::ChatgptLogin,
             ),
         ] {
-            let ipc_req = configuration_requirement(llm_req);
-            assert_wire_bytes_identical(label, &llm_req, &ipc_req);
-            assert_eq!(llm_configuration_requirement(ipc_req), llm_req);
+            assert_eq!(
+                configuration_requirement(llm_req),
+                expected_ipc_req,
+                "{label} llm 到 IPC 配置要求转换结果不符"
+            );
+            assert_eq!(
+                llm_configuration_requirement(expected_ipc_req),
+                llm_req,
+                "{label} IPC 到 llm 配置要求转换结果不符"
+            );
         }
 
-        for (label, llm_avail) in [
-            ("availability/ready", lattice_llm::Availability::Ready),
+        for (label, llm_avail, expected_ipc_avail) in [
+            (
+                "availability/ready",
+                lattice_llm::Availability::Ready,
+                lattice_ipc::Availability::Ready,
+            ),
             (
                 "availability/unconfigured_declaration",
                 lattice_llm::Availability::Unconfigured {
                     requirement: lattice_llm::ConfigurationRequirement::Declaration,
+                },
+                lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::Declaration,
                 },
             ),
             (
@@ -257,11 +273,17 @@ mod tests {
                 lattice_llm::Availability::Unconfigured {
                     requirement: lattice_llm::ConfigurationRequirement::ApiKey,
                 },
+                lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
+                },
             ),
             (
                 "availability/unconfigured_chatgpt_login",
                 lattice_llm::Availability::Unconfigured {
                     requirement: lattice_llm::ConfigurationRequirement::ChatgptLogin,
+                },
+                lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::ChatgptLogin,
                 },
             ),
             (
@@ -269,34 +291,50 @@ mod tests {
                 lattice_llm::Availability::Invalid {
                     reason: "invalid base_url in providers.toml".to_owned(),
                 },
+                lattice_ipc::Availability::Invalid {
+                    reason: "invalid base_url in providers.toml".to_owned(),
+                },
             ),
         ] {
-            let ipc_avail = availability(llm_avail.clone());
-            assert_wire_bytes_identical(label, &llm_avail, &ipc_avail);
-            assert_eq!(llm_availability(&ipc_avail), llm_avail);
+            assert_eq!(
+                availability(llm_avail.clone()),
+                expected_ipc_avail,
+                "{label} llm 到 IPC 可用性转换结果不符"
+            );
+            assert_eq!(
+                llm_availability(&expected_ipc_avail),
+                llm_avail,
+                "{label} IPC 到 llm 可用性转换结果不符"
+            );
         }
 
-        for (label, llm_rev) in [
+        for (label, llm_rev, expected_ipc_rev) in [
             (
                 "revocation/confirmed",
                 lattice_llm::auth::RevocationStatus::Confirmed,
+                lattice_ipc::RevocationStatus::Confirmed,
             ),
             (
                 "revocation/unconfirmed",
                 lattice_llm::auth::RevocationStatus::Unconfirmed,
+                lattice_ipc::RevocationStatus::Unconfirmed,
             ),
             (
                 "revocation/not_needed",
                 lattice_llm::auth::RevocationStatus::NotNeeded,
+                lattice_ipc::RevocationStatus::NotNeeded,
             ),
         ] {
-            let ipc_rev = revocation_status(llm_rev);
-            assert_wire_bytes_identical(label, &llm_rev, &ipc_rev);
+            assert_eq!(
+                revocation_status(llm_rev),
+                expected_ipc_rev,
+                "{label} 吊销状态转换结果不符"
+            );
         }
     }
 
     #[test]
-    fn struct_conversions_cover_full_and_minimal_with_identical_wire_bytes() {
+    fn struct_conversions_cover_full_and_minimal() {
         let price_full = lattice_llm::ModelPrice {
             input: Some(1.25),
             output: Some(10.0),
@@ -309,15 +347,25 @@ mod tests {
             cache_read: None,
             cache_write: None,
         };
-        assert_wire_bytes_identical(
-            "model_price/full",
-            &price_full,
-            &model_price(price_full.clone()),
+        assert_eq!(
+            model_price(price_full.clone()),
+            lattice_ipc::ModelPrice {
+                input: Some(1.25),
+                output: Some(10.0),
+                cache_read: Some(0.125),
+                cache_write: Some(1.5625),
+            },
+            "model_price/full 转换结果不符"
         );
-        assert_wire_bytes_identical(
-            "model_price/minimal",
-            &price_minimal,
-            &model_price(price_minimal.clone()),
+        assert_eq!(
+            model_price(price_minimal),
+            lattice_ipc::ModelPrice {
+                input: None,
+                output: None,
+                cache_read: None,
+                cache_write: None,
+            },
+            "model_price/minimal 转换结果不符"
         );
 
         let candidate_full = lattice_llm::ModelCandidate {
@@ -342,15 +390,40 @@ mod tests {
                 requirement: lattice_llm::ConfigurationRequirement::ApiKey,
             },
         };
-        assert_wire_bytes_identical(
-            "model_candidate/full",
-            &candidate_full,
-            &model_candidate(candidate_full.clone()),
+        assert_eq!(
+            model_candidate(candidate_full.clone()),
+            lattice_ipc::ModelCandidate {
+                provider: ProviderId::parse("openai").unwrap(),
+                model: ModelId::parse("gpt-5").unwrap(),
+                name: Some("GPT-5".to_owned()),
+                context: Some(400_000),
+                output: Some(128_000),
+                supported_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
+                cost: Some(lattice_ipc::ModelPrice {
+                    input: Some(1.25),
+                    output: Some(10.0),
+                    cache_read: Some(0.125),
+                    cache_write: Some(1.5625),
+                }),
+                availability: lattice_ipc::Availability::Ready,
+            },
+            "model_candidate/full 转换结果不符"
         );
-        assert_wire_bytes_identical(
-            "model_candidate/minimal",
-            &candidate_minimal,
-            &model_candidate(candidate_minimal.clone()),
+        assert_eq!(
+            model_candidate(candidate_minimal.clone()),
+            lattice_ipc::ModelCandidate {
+                provider: ProviderId::parse("local").unwrap(),
+                model: ModelId::parse("plain-v1").unwrap(),
+                name: None,
+                context: None,
+                output: None,
+                supported_efforts: Vec::new(),
+                cost: None,
+                availability: lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
+                },
+            },
+            "model_candidate/minimal 转换结果不符"
         );
 
         let warning_full = lattice_llm::ModelWarning {
@@ -361,15 +434,21 @@ mod tests {
             provider: None,
             message: "using built-in model metadata".to_owned(),
         };
-        assert_wire_bytes_identical(
-            "model_warning/full",
-            &warning_full,
-            &model_warning(warning_full.clone()),
+        assert_eq!(
+            model_warning(warning_full.clone()),
+            lattice_ipc::ModelWarning {
+                provider: Some("openai".to_owned()),
+                message: "cached catalog is older than 7 days".to_owned(),
+            },
+            "model_warning/full 转换结果不符"
         );
-        assert_wire_bytes_identical(
-            "model_warning/minimal",
-            &warning_minimal,
-            &model_warning(warning_minimal.clone()),
+        assert_eq!(
+            model_warning(warning_minimal.clone()),
+            lattice_ipc::ModelWarning {
+                provider: None,
+                message: "using built-in model metadata".to_owned(),
+            },
+            "model_warning/minimal 转换结果不符"
         );
 
         let candidates_full = lattice_llm::ModelCandidates {
@@ -380,15 +459,58 @@ mod tests {
             models: Vec::new(),
             warnings: Vec::new(),
         };
-        assert_wire_bytes_identical(
-            "model_candidates/full",
-            &candidates_full,
-            &model_candidates(candidates_full.clone()),
+        assert_eq!(
+            model_candidates(candidates_full),
+            lattice_ipc::ModelCandidates {
+                models: vec![
+                    lattice_ipc::ModelCandidate {
+                        provider: ProviderId::parse("openai").unwrap(),
+                        model: ModelId::parse("gpt-5").unwrap(),
+                        name: Some("GPT-5".to_owned()),
+                        context: Some(400_000),
+                        output: Some(128_000),
+                        supported_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
+                        cost: Some(lattice_ipc::ModelPrice {
+                            input: Some(1.25),
+                            output: Some(10.0),
+                            cache_read: Some(0.125),
+                            cache_write: Some(1.5625),
+                        }),
+                        availability: lattice_ipc::Availability::Ready,
+                    },
+                    lattice_ipc::ModelCandidate {
+                        provider: ProviderId::parse("local").unwrap(),
+                        model: ModelId::parse("plain-v1").unwrap(),
+                        name: None,
+                        context: None,
+                        output: None,
+                        supported_efforts: Vec::new(),
+                        cost: None,
+                        availability: lattice_ipc::Availability::Unconfigured {
+                            requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
+                        },
+                    },
+                ],
+                warnings: vec![
+                    lattice_ipc::ModelWarning {
+                        provider: Some("openai".to_owned()),
+                        message: "cached catalog is older than 7 days".to_owned(),
+                    },
+                    lattice_ipc::ModelWarning {
+                        provider: None,
+                        message: "using built-in model metadata".to_owned(),
+                    },
+                ],
+            },
+            "model_candidates/full 转换结果不符"
         );
-        assert_wire_bytes_identical(
-            "model_candidates/minimal",
-            &candidates_minimal,
-            &model_candidates(candidates_minimal.clone()),
+        assert_eq!(
+            model_candidates(candidates_minimal),
+            lattice_ipc::ModelCandidates {
+                models: Vec::new(),
+                warnings: Vec::new(),
+            },
+            "model_candidates/minimal 转换结果不符"
         );
 
         let provider_status_full = lattice_llm::auth::ProviderAuthStatus {
@@ -405,15 +527,27 @@ mod tests {
             email: None,
             expires_at: None,
         };
-        assert_wire_bytes_identical(
-            "provider_auth_status/full",
-            &provider_status_full,
-            &provider_auth_status(provider_status_full.clone()),
+        assert_eq!(
+            provider_auth_status(provider_status_full.clone()),
+            lattice_ipc::ProviderAuthStatus {
+                provider: "chatgpt".to_owned(),
+                availability: lattice_ipc::Availability::Ready,
+                email: Some("dev@example.com".to_owned()),
+                expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
+            },
+            "provider_auth_status/full 转换结果不符"
         );
-        assert_wire_bytes_identical(
-            "provider_auth_status/minimal",
-            &provider_status_minimal,
-            &provider_auth_status(provider_status_minimal.clone()),
+        assert_eq!(
+            provider_auth_status(provider_status_minimal.clone()),
+            lattice_ipc::ProviderAuthStatus {
+                provider: "openai".to_owned(),
+                availability: lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
+                },
+                email: None,
+                expires_at: None,
+            },
+            "provider_auth_status/minimal 转换结果不符"
         );
 
         let auth_status_full = lattice_llm::auth::AuthStatus {
@@ -426,15 +560,38 @@ mod tests {
             providers: Vec::new(),
             error: None,
         };
-        assert_wire_bytes_identical(
-            "auth_status/full",
-            &auth_status_full,
-            &auth_status(auth_status_full.clone()),
+        assert_eq!(
+            auth_status(auth_status_full),
+            lattice_ipc::AuthStatus {
+                providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
+                providers: vec![
+                    lattice_ipc::ProviderAuthStatus {
+                        provider: "chatgpt".to_owned(),
+                        availability: lattice_ipc::Availability::Ready,
+                        email: Some("dev@example.com".to_owned()),
+                        expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
+                    },
+                    lattice_ipc::ProviderAuthStatus {
+                        provider: "openai".to_owned(),
+                        availability: lattice_ipc::Availability::Unconfigured {
+                            requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
+                        },
+                        email: None,
+                        expires_at: None,
+                    },
+                ],
+                error: Some("auth.json: permissions are too open".to_owned()),
+            },
+            "auth_status/full 转换结果不符"
         );
-        assert_wire_bytes_identical(
-            "auth_status/minimal",
-            &auth_status_minimal,
-            &auth_status(auth_status_minimal.clone()),
+        assert_eq!(
+            auth_status(auth_status_minimal),
+            lattice_ipc::AuthStatus {
+                providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
+                providers: Vec::new(),
+                error: None,
+            },
+            "auth_status/minimal 转换结果不符"
         );
     }
 

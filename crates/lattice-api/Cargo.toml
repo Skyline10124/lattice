@@ -45,7 +45,7 @@ tokio-stream = { workspace = true }
 
 [features]
 default = []
-# 仅供本 crate 与下游测试复用同进程 Turn 执行入口。
-test-utils = []
+# 仅供本 crate 与下游测试复用同进程 Turn 执行入口及 IPC 测试魔数。
+test-utils = ["lattice-ipc/test-utils"]
 test-crash-barriers = ["lattice-session/test-crash-barriers"]
 test-fake-tools = []

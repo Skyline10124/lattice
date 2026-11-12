@@ -6,11 +6,11 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 显式重导出 IPC 协议类型、模型与凭据展示类型，以及线上消息引用的 `lattice-conversation` 与 `lattice-session` 只读领域值类型 |
+| `src/lib.rs` | 仅公开 `ipc` 子模块（`auth`、`models`、`types` 为私有模块），在根模块显式重导出 IPC 协议类型、模型与凭据展示类型，以及线上消息引用的 `lattice-conversation` 与 `lattice-session` 只读领域值类型 |
 | `src/types.rs` | 分页常量（`WATCH_TURNS`、`HISTORY_TURNS`、`MAX_HISTORY_TURNS`）、`Request` / `Response`、会话配置与提交载荷、视图更新、`LocalError` / `RequestConflict`（`ConflictReason`）与恢复/存储诊断、`TurnRef` / `TextSegment` 及 Unix 路径原始字节 serde |
-| `src/models.rs` | `ModelCandidateQuery` 请求类型，以及 `ModelCandidates`、`ModelCandidate`、`ModelPrice`、`ModelWarning`、`Availability`（含 `status_str`）、`ConfigurationRequirement`（含 `as_str` 与 `Display`）展示类型 |
+| `src/models.rs` | `ModelCandidateQuery` 请求类型，以及 `ModelCandidates`、`ModelCandidate`、`ModelPrice`、`ModelWarning`、`Availability`（含 `status_str`）、`ConfigurationRequirement`（含 `Display`）展示类型 |
 | `src/auth.rs` | 透明清零且不实现 `Debug` 的 `AuthKey`、`AuthStatus` / `ProviderAuthStatus` / `RevocationStatus` 展示类型，以及专用登录连接帧 `LoginAction` / `LoginResponse` / `AuthLoginOutcome` / `AuthCatalogOutcome` |
-| `src/ipc.rs` | `PROTOCOL_VERSION`（`63`）与帧魔数、`MAX_FRAME`（16 MiB）单帧读写与响应分片拼回、响应缓冲清零、`rustix` 有效 UID 读取与 `socket_peercred` 对端核验，以及 `test-utils` 下的整帧读取辅助 `read` |
+| `src/ipc.rs` | `PROTOCOL_VERSION`（`63`）与帧魔数、`MAX_FRAME`（16 MiB）单帧读写与响应分片拼回、响应缓冲清零、`rustix` 有效 UID 读取与 `socket_peercred` 对端核验；运行时仅导出帧读写与 UID/对端核验入口，`PROTOCOL_VERSION`、`MAGIC`、`MAX_FRAME`、`magic_for_version` 与 `read` 仅在 `test` 或 `test-utils` 下导出 |
 | `src/wire_shape/`、`src/wire_shape.json` | 本地 IPC 闭包内全部枚举变体、结构体 `full`/`minimal` 形态与场景帧的逐字节 JSON 快照基线及 `PROTOCOL_VERSION` 门禁（`gate.rs` 与 `fixtures/` 分离） |
 
 ## 先读
@@ -25,7 +25,7 @@
 ## 约束
 
 - `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 中，workspace 内部成员仅允许 `lattice-session`、`lattice-conversation`、`lattice-store`（当前仅引入前两者），由 `cargo xtask crate-boundary` 门禁强制检查。
-- `src/lib.rs` 保持显式重导出列表，不使用通配符 `*`，也不重导出 `SessionStore` 或存储写入接口。
+- `src/lib.rs` 仅公开 `ipc` 子模块（`auth`、`models`、`types` 保持私有），根模块保持显式重导出列表，不使用通配符 `*`，也不重导出 `SessionStore` 或存储写入接口；其他 crate 用不到的条目保持私有，仅供测试复用的魔数与分帧辅助收敛在 `test-utils` 下。
 - `AuthKey` 与响应分片缓冲 `ResponseFrame` 保持清零（`Zeroize`）且不实现暴露明文的 `Debug`；线上类型的字段顺序、serde 标签、`null`/省略规则与 `deny_unknown_fields` 严格受 `wire_shape.json` 守卫。
 - 本 crate 之外：实例锁（`owner.lock`）、socket 绑定与清理时序、`ApiError` 映射、`lattice-llm` 到展示类型的逐字段转换及后台执行协调均在 `lattice-api` 中完成。
 

@@ -25,15 +25,15 @@ flowchart LR
 
 | Crate | 持有的状态与类型 | 执行的规则 | 对外接口 |
 | --- | --- | --- | --- |
-| [`lattice-ipc`](../../crates/lattice-ipc/src/lib.rs) | 本地 IPC 请求/响应/登录帧（`Request`、`Response`、`LoginAction`、`LoginResponse`）、`LocalError` 与冲突/恢复诊断、模型查询与模型/凭据展示类型、`AuthKey`、`PROTOCOL_VERSION`（当前为 `63`）及 `wire_shape.json` 基线 | 16 MiB 单帧魔数校验与分片拼回、响应帧敏感缓冲清零、基于 `rustix` 的本进程有效 UID 读取与 Unix socket 对端 UID 核验、线上形状逐字节快照比对 | 协议与展示类型、`ipc` 编解码与核验函数，以及显式选择性重导出的领域只读值类型 |
+| [`lattice-ipc`](../../crates/lattice-ipc/src/lib.rs) | 本地 IPC 请求/响应/登录帧（`Request`、`Response`、`LoginAction`、`LoginResponse`）、`LocalError` 与冲突/恢复诊断、模型查询与模型/凭据展示类型、`AuthKey`、`PROTOCOL_VERSION`（当前为 `63`）及 `wire_shape.json` 基线 | 16 MiB 单帧魔数校验与分片拼回、响应帧敏感缓冲清零、基于 `rustix` 的本进程有效 UID 读取与 Unix socket 对端 UID 核验、线上形状逐字节快照比对 | 根模块显式重导出的协议类型、展示类型与领域只读值类型（`auth`、`models`、`types` 为私有模块），以及 `ipc` 模块的读写与 UID/对端核验入口（`PROTOCOL_VERSION`、`MAGIC`、`MAX_FRAME`、`magic_for_version` 与 `read` 仅在 `test-utils` 下导出） |
 | [`lattice-api`](../../crates/lattice-api/src/lib.rs) | 本地后台实例锁与 socket 端点（`InstanceLock`、`Instance`、`SocketEndpoint`、`Departure`）、`Backend` 与 `Owner` 运行态、`LocalClient` / `LocalTurn` / `LocalAuthLogin` 客户端句柄、不可序列化的客户端结果（`DetachReport`、`ConfigureOutcome`） | 实例锁持有与残留 socket 核验、后台会话与 Turn 协调、`ApiError` 到 `LocalError` 的映射（[`local/error.rs`](../../crates/lattice-api/src/local/error.rs)）、`lattice-llm` 类型与 IPC 展示类型的双向逐字段转换（[`local/presentation.rs`](../../crates/lattice-api/src/local/presentation.rs)） | `SessionApi`、`local::LocalClient`、`local::serve`、`availability_diagnostic`，以及面向前端显式重导出的公开类型 |
 
 ## 类型归属与门面传递
 
 | 类型类别 | 定义与持有者 | 跨边界传递规则 |
 | --- | --- | --- |
-| IPC 请求、响应、登录帧与传输材料 | `lattice-ipc`（[`types.rs`](../../crates/lattice-ipc/src/types.rs)、[`auth.rs`](../../crates/lattice-ipc/src/auth.rs)） | `lattice-api` 在模块内部使用 `Request`、`Response`、`AuthLoggedOut`、`LoginAction`、`LoginResponse` 与 `AuthKey`，不将它们重导出到公开门面 |
-| 模型查询与模型/凭据展示类型 | `lattice-ipc`（[`models.rs`](../../crates/lattice-ipc/src/models.rs)、[`auth.rs`](../../crates/lattice-ipc/src/auth.rs)） | 后台在调用 `lattice-llm` 前将 IPC `ModelCandidateQuery` 转为 `lattice-llm` 查询，在脱敏完成后将 `lattice-llm` 的模型候选与凭据状态逐字段转为 `lattice-ipc` 展示类型；不经 JSON 往返，也不重新计算可用性、价格、档位或告警 |
+| IPC 请求、响应、登录帧与传输材料 | `lattice-ipc`（[`types.rs`](../../crates/lattice-ipc/src/types.rs)、[`auth.rs`](../../crates/lattice-ipc/src/auth.rs)，经根模块导出） | `lattice-api` 在模块内部使用 `Request`、`Response`、`AuthLoggedOut`、`LoginAction`、`LoginResponse` 与 `AuthKey`，不将它们重导出到公开门面 |
+| 模型查询与模型/凭据展示类型 | `lattice-ipc`（[`models.rs`](../../crates/lattice-ipc/src/models.rs)、[`auth.rs`](../../crates/lattice-ipc/src/auth.rs)，经根模块导出） | 后台在调用 `lattice-llm` 前将 IPC `ModelCandidateQuery` 转为 `lattice-llm` 查询，在脱敏完成后将 `lattice-llm` 的模型候选与凭据状态逐字段转为 `lattice-ipc` 展示类型；不经 JSON 往返，也不重新计算可用性、价格、档位或告警，转换测试直接针对手写契约值断言枚举全分支及结构体 `full`/`minimal` 形态 |
 | 供应商可用性诊断文案 | `lattice-llm`（[`availability.rs`](../../crates/lattice-llm/src/availability.rs)） | 文案规则只保留在 `lattice-llm::Availability::diagnostic` 一处；前端通过 `lattice_api::availability_diagnostic` 传入 IPC `Availability`，由 `lattice-api` 穷尽还原后调用 |
 | 会话与对话领域值类型 | `lattice-session`、`lattice-conversation` | 持久格式、校验与存储事务归原 crate 持有；`lattice-ipc` 仅按线上消息所需显式选择性重导出领域值类型，不重导出 `SessionStore` 或写入接口 |
 | 前端消费路径 | `lattice-cli`、`lattice-tui` | 当前经 `lattice-api`（含 `lattice_api::local`）显式重导出路径使用公开协议类型与展示类型 |

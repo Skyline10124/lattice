@@ -13,21 +13,28 @@ use zeroize::{Zeroize, Zeroizing};
 
 use crate::types::{LocalError, LocalErrorKind, Result};
 
-pub const PROTOCOL_VERSION: u8 = 63;
-pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
-/// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
-pub const fn magic_for_version(version: u8) -> [u8; 8] {
-    let mut magic = *b"LTLOCAL\0";
-    magic[7] = version;
-    magic
+mod defs {
+    pub const PROTOCOL_VERSION: u8 = 63;
+    pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
+    /// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
+    pub const fn magic_for_version(version: u8) -> [u8; 8] {
+        let mut magic = *b"LTLOCAL\0";
+        magic[7] = version;
+        magic
+    }
+    pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 }
-pub const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
-pub const MAX_FRAME: usize = 16 * 1024 * 1024;
-pub const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-pub const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
-pub const NEWER_BACKEND: &str =
-    "the running backend is newer than this client; use the newer binary";
-pub const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
+
+#[cfg(not(any(test, feature = "test-utils")))]
+use defs::{MAGIC, MAX_FRAME, PROTOCOL_VERSION, magic_for_version};
+#[cfg(any(test, feature = "test-utils"))]
+pub use defs::{MAGIC, MAX_FRAME, PROTOCOL_VERSION, magic_for_version};
+
+const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
+const NEWER_BACKEND: &str = "the running backend is newer than this client; use the newer binary";
+const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
 
 pub fn permission() -> LocalError {
     LocalError::new(
@@ -36,7 +43,7 @@ pub fn permission() -> LocalError {
     )
 }
 
-pub fn protocol() -> LocalError {
+fn protocol() -> LocalError {
     LocalError::new(
         LocalErrorKind::Protocol,
         "unsupported or malformed local protocol frame",
@@ -44,12 +51,12 @@ pub fn protocol() -> LocalError {
 }
 
 /// 前缀相符时取出版本字节；新旧由 `check_magic` 按版本数值比较。
-pub fn magic_version(magic: &[u8; 8]) -> Option<u8> {
+fn magic_version(magic: &[u8; 8]) -> Option<u8> {
     let version = magic[7];
     (*magic == magic_for_version(version)).then_some(version)
 }
 
-pub fn check_magic(magic: &[u8; 8]) -> Result<()> {
+fn check_magic(magic: &[u8; 8]) -> Result<()> {
     match magic_version(magic) {
         Some(version) if version == PROTOCOL_VERSION => Ok(()),
         Some(version) if version < PROTOCOL_VERSION => Err(LocalError::new(

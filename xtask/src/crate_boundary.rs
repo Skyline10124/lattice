@@ -28,9 +28,9 @@ pub fn run() -> anyhow::Result<()> {
     let root = repo_root::repo_root()?;
     let hits = check_workspace_rules(&root, RULES)?;
     boundary_report::run_groups(
-        "crate dependency boundary check passed",
-        "crate dependency boundary check failed",
-        &[("lattice-ipc direct workspace dependencies", hits)],
+        "crate 依赖边界检查通过",
+        "crate 依赖边界检查失败",
+        &[("lattice-ipc 直接内部依赖", hits)],
     )
 }
 
@@ -55,12 +55,12 @@ pub fn check_metadata_rules(
     for member_id in &metadata.workspace_members {
         let pkg = packages_by_id.get(member_id).copied().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: workspace member id '{member_id}' missing from metadata.packages"
+                "crate 依赖边界：workspace_members 中的成员 '{member_id}' 未出现在 packages 中"
             )
         })?;
         let manifest_dir = pkg.manifest_path.parent().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: manifest path '{}' has no parent directory",
+                "crate 依赖边界：manifest_path '{}' 没有父目录",
                 pkg.manifest_path
             )
         })?;
@@ -73,7 +73,7 @@ pub fn check_metadata_rules(
     for rule in rules {
         let checked_pkg = members_by_name.get(rule.package).copied().ok_or_else(|| {
             anyhow::anyhow!(
-                "crate boundary: checked workspace package '{}' not found in workspace_members",
+                "crate 依赖边界：受检包 '{}' 未出现在 workspace_members 中",
                 rule.package
             )
         })?;
@@ -85,7 +85,7 @@ pub fn check_metadata_rules(
                 DependencyKind::Build => "build-dependencies",
                 DependencyKind::Unknown => {
                     anyhow::bail!(
-                        "crate boundary: {}: unable to identify dependency kind for '{}'",
+                        "crate 依赖边界：{}: 无法识别依赖 '{}' 的 kind",
                         checked_pkg.name,
                         dep.name
                     );
@@ -94,7 +94,7 @@ pub fn check_metadata_rules(
 
             if dep.name.trim().is_empty() {
                 anyhow::bail!(
-                    "crate boundary: {}: dependency entry has empty package name",
+                    "crate 依赖边界：{}: dependencies 条目的包名为空",
                     checked_pkg.name
                 );
             }
@@ -105,7 +105,7 @@ pub fn check_metadata_rules(
                     if let Some(member_pkg) = members_by_dir.get(&norm_dep_dir).copied() {
                         if member_pkg.name.as_str() != dep.name.as_str() {
                             anyhow::bail!(
-                                "crate boundary: {}: dependency path '{}' resolves to workspace member '{}' instead of declared package '{}'",
+                                "crate 依赖边界：{}: 依赖路径 '{}' 解析到内部成员 '{}'，与声明的包名 '{}' 不一致",
                                 checked_pkg.name,
                                 dep_path,
                                 member_pkg.name,
@@ -116,10 +116,10 @@ pub fn check_metadata_rules(
                     } else {
                         if !norm_dep_dir.join("Cargo.toml").is_file() {
                             anyhow::bail!(
-                                "crate boundary: {}: unable to identify path dependency '{}' at '{}'",
+                                "crate 依赖边界：{}: 无法识别位于 '{}' 的路径依赖 '{}'",
                                 checked_pkg.name,
-                                dep.name,
-                                dep_path
+                                dep_path,
+                                dep.name
                             );
                         }
                         None
@@ -128,7 +128,7 @@ pub fn check_metadata_rules(
                 (None, Some(_)) => None,
                 (None, None) => {
                     anyhow::bail!(
-                        "crate boundary: {}: unable to identify dependency '{}' (missing both path and source in metadata)",
+                        "crate 依赖边界：{}: 无法识别依赖 '{}'（metadata 中同时缺少 path 与 source）",
                         checked_pkg.name,
                         dep.name
                     );
@@ -152,12 +152,12 @@ pub fn check_metadata_rules(
                 }
                 let identity = match dep.rename.as_deref() {
                     Some(alias) if alias != workspace_dep_name => {
-                        format!("'{workspace_dep_name}' (renamed as '{alias}')")
+                        format!("'{workspace_dep_name}'（改名为 '{alias}'）")
                     }
                     _ => format!("'{workspace_dep_name}'"),
                 };
                 hits.push(format!(
-                    "{}: {} forbidden workspace dependency {}; allowed workspace dependencies: [{}]",
+                    "{}: {} 出现不允许的内部依赖 {}；允许的内部依赖：[{}]",
                     checked_pkg.name,
                     qualifiers.join(" "),
                     identity,
@@ -233,9 +233,19 @@ mod tests {
         let (_temp, ws_root) =
             setup_workspace("\n[dependencies]\nlattice-llm = { path = \"../lattice-llm\" }\n");
         let hits = check_workspace_rules(&ws_root, RULES).unwrap();
-        assert_eq!(hits.len(), 1, "unexpected hits: {hits:?}");
-        assert!(hits[0].contains("[dependencies]"), "{hits:?}");
-        assert!(hits[0].contains("'lattice-llm'"), "{hits:?}");
+        assert_eq!(hits.len(), 1, "应命中且只命中 1 条违规，实际：{hits:?}");
+        assert!(
+            hits[0].starts_with("lattice-ipc: "),
+            "报错应带受检包名：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("[dependencies]"),
+            "报错应带依赖段：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("出现不允许的内部依赖 'lattice-llm'"),
+            "报错应带违规依赖名：{hits:?}"
+        );
     }
 
     #[test]
@@ -244,9 +254,19 @@ mod tests {
             "\n[build-dependencies]\nlattice-llm = { path = \"../lattice-llm\" }\n",
         );
         let hits = check_workspace_rules(&ws_root, RULES).unwrap();
-        assert_eq!(hits.len(), 1, "unexpected hits: {hits:?}");
-        assert!(hits[0].contains("[build-dependencies]"), "{hits:?}");
-        assert!(hits[0].contains("'lattice-llm'"), "{hits:?}");
+        assert_eq!(hits.len(), 1, "应命中且只命中 1 条违规，实际：{hits:?}");
+        assert!(
+            hits[0].starts_with("lattice-ipc: "),
+            "报错应带受检包名：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("[build-dependencies]"),
+            "报错应带 build 依赖段：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("出现不允许的内部依赖 'lattice-llm'"),
+            "报错应带违规依赖名：{hits:?}"
+        );
     }
 
     #[test]
@@ -255,9 +275,19 @@ mod tests {
             "\n[dependencies]\nllm_alias = { package = \"lattice-llm\", path = \"../lattice-llm\" }\n",
         );
         let hits = check_workspace_rules(&ws_root, RULES).unwrap();
-        assert_eq!(hits.len(), 1, "unexpected hits: {hits:?}");
-        assert!(hits[0].contains("'lattice-llm'"), "{hits:?}");
-        assert!(hits[0].contains("renamed as 'llm_alias'"), "{hits:?}");
+        assert_eq!(hits.len(), 1, "应命中且只命中 1 条违规，实际：{hits:?}");
+        assert!(
+            hits[0].starts_with("lattice-ipc: "),
+            "报错应带受检包名：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("[dependencies]"),
+            "报错应带依赖段：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("'lattice-llm'（改名为 'llm_alias'）"),
+            "报错应同时给出真实包名与改名别名：{hits:?}"
+        );
     }
 
     #[test]
@@ -267,10 +297,27 @@ mod tests {
             "lattice-llm = { path = \"../lattice-llm\", optional = true }\n",
         ));
         let hits = check_workspace_rules(&ws_root, RULES).unwrap();
-        assert_eq!(hits.len(), 1, "unexpected hits: {hits:?}");
-        assert!(hits[0].contains("cfg(windows)"), "{hits:?}");
-        assert!(hits[0].contains("optional"), "{hits:?}");
-        assert!(hits[0].contains("'lattice-llm'"), "{hits:?}");
+        assert_eq!(hits.len(), 1, "应命中且只命中 1 条违规，实际：{hits:?}");
+        assert!(
+            hits[0].starts_with("lattice-ipc: "),
+            "报错应带受检包名：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("[dependencies]"),
+            "报错应带依赖段：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("target 'cfg(windows)'"),
+            "报错应带 target 表达式：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("optional"),
+            "报错应带 optional 标记：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("出现不允许的内部依赖 'lattice-llm'"),
+            "报错应带违规依赖名：{hits:?}"
+        );
     }
 
     #[test]
@@ -278,8 +325,19 @@ mod tests {
         let (_temp, ws_root) =
             setup_workspace("\n[dependencies]\nplain-helper = { path = \"../plain-helper\" }\n");
         let hits = check_workspace_rules(&ws_root, RULES).unwrap();
-        assert_eq!(hits.len(), 1, "unexpected hits: {hits:?}");
-        assert!(hits[0].contains("'plain-helper'"), "{hits:?}");
+        assert_eq!(hits.len(), 1, "应命中且只命中 1 条违规，实际：{hits:?}");
+        assert!(
+            hits[0].starts_with("lattice-ipc: "),
+            "报错应带受检包名：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("[dependencies]"),
+            "报错应带依赖段：{hits:?}"
+        );
+        assert!(
+            hits[0].contains("出现不允许的内部依赖 'plain-helper'"),
+            "报错应带非 lattice 前缀内部成员名：{hits:?}"
+        );
     }
 
     #[test]
@@ -295,7 +353,7 @@ mod tests {
             "plain-helper = { path = \"../plain-helper\" }\n",
         ));
         let hits = check_workspace_rules(&ws_root, RULES).unwrap();
-        assert!(hits.is_empty(), "expected clean pass, got: {hits:?}");
+        assert!(hits.is_empty(), "预期检查通过且无违规，实际：{hits:?}");
     }
 
     #[test]
@@ -308,7 +366,10 @@ mod tests {
             allowed_workspace_dependencies: &[],
         }];
         let err = check_workspace_rules(&ws_root, &missing_rule).unwrap_err();
-        assert!(err.to_string().contains("missing-package"), "{err}");
+        assert!(
+            err.to_string().contains("受检包 'missing-package'"),
+            "报错应指出缺失的受检包：{err}"
+        );
 
         let mut metadata = workspace_metadata::load_no_deps(&ws_root).unwrap();
         let ipc_pkg = metadata
@@ -320,8 +381,8 @@ mod tests {
         ipc_pkg.dependencies[0].source = None;
         let err = check_metadata_rules(&metadata, RULES).unwrap_err();
         assert!(
-            err.to_string().contains("unable to identify dependency"),
-            "{err}"
+            err.to_string().contains("无法识别依赖"),
+            "报错应指出无法识别依赖：{err}"
         );
     }
 }

@@ -17,7 +17,7 @@ pub enum ConfigurationRequirement {
 }
 
 impl ConfigurationRequirement {
-    pub fn as_str(self) -> &'static str {
+    fn as_str(self) -> &'static str {
         match self {
             Self::Declaration => "declaration",
             Self::ApiKey => "api_key",

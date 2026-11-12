@@ -410,7 +410,8 @@ impl ConfigureSession {
         }
     }
 
-    pub fn is_new(self) -> bool {
+    #[cfg(test)]
+    fn is_new(self) -> bool {
         matches!(self, Self::New(_))
     }
 }
