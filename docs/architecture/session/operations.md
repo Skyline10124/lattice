@@ -6,16 +6,16 @@ status: active
 
 > 所属领域：[会话与 Turn](README.md)
 
-以下将前面的角色对应到代码模块，展开调用入口和内部协作。`lattice-api` 负责跨领域协调，把 `ToolExecutor` 工具执行接缝、模型网关和会话库写入接入 Turn；适用边界见[范围与禁止事项](concurrency.md#范围与禁止事项)。
+以下将前面的角色对应到代码模块，展开调用入口和内部协作。`lattice-server` 负责跨领域协调，把 `ToolExecutor` 工具执行接缝、模型网关和会话库写入接入 Turn；适用边界见[范围与禁止事项](concurrency.md#范围与禁止事项)。
 
 | 模块 | 具体职责 |
 | --- | --- |
 | `lattice-local::LocalClient` / `LocalTurn` | `client.rs` 封装连接与分帧，交付 `configure`、视图与只读查询；`operation.rs` 的具体 LocalTurn 管理提交、取消回执与退出交接 |
-| `lattice-api::local::serve` | 持有实例锁和 socket、接收并核验连接、管理连接任务，并在 `configure(New)` 后触发后台草稿清理；实例退出时释放资源 |
+| `lattice-server::local::serve` | 持有实例锁和 socket、接收并核验连接、管理连接任务，并在 `configure(New)` 后触发后台草稿清理；实例退出时释放资源 |
 | `Backend` / `Owner` | Backend 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态；Owner 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接运行，监督者等待操作收尾后才移除 Owner |
-| `lattice-api::configure` | 解析并校验会话设置：加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执 |
-| `lattice-api::SessionApi` | 列表、日志、退回、对话条目与历史查询的领域入口，向后台返回会话事实和对话内容 |
-| `lattice-api::TurnCoordinator`、`ToolExecutor` 及执行核心 | 唯一持久 Turn 协调者，持有全 Turn 执行锁，接受前经注入的 `ToolExecutor::open_turn` 冻结本轮工具目录（生产默认 `NoTools`），从会话设置冻结输入，推进模型循环、调用执行、Step 与 Turn 关闭；会话库写入经 `lattice-session` 的领域接口完成 |
+| `lattice-server::configure` | 解析并校验会话设置：加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执 |
+| `lattice-server::SessionApi` | 列表、日志、退回、对话条目与历史查询的领域入口，向后台返回会话事实和对话内容 |
+| `lattice-server::TurnCoordinator`、`ToolExecutor` 及执行核心 | 唯一持久 Turn 协调者，持有全 Turn 执行锁，接受前经注入的 `ToolExecutor::open_turn` 冻结本轮工具目录（生产默认 `NoTools`），从会话设置冻结输入，推进模型循环、调用执行、Step 与 Turn 关闭；会话库写入经 `lattice-session` 的领域接口完成 |
 | `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
 | `lattice-llm` | 请求网关：提供无凭据的模型档位能力查询（`model_supported_efforts`），统一判定可用性，`GatewayTurn::prepare` 完成提交准入与模型及档位复核，每次请求按 provider `id` 与模型 `id` 解析配置、取得凭据，完成 provider wire 请求、流事件适配和对话投影 |
 | `lattice-conversation` | 维护模型选择值（`ProviderId`、`ModelId`、`ModelRef`）、推理档位 `Effort`、有序消息、ToolCall typestate、调用结果与结构化 `ToolError`、内容摘要、尝试诊断和 usage 等纯数据 |

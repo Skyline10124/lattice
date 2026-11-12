@@ -6,7 +6,7 @@ members = [
     "crates/lattice-ipc",
     "crates/lattice-local",
     "crates/lattice-llm",
-    "crates/lattice-api",
+    "crates/lattice-server",
     "crates/lattice-session",
     "crates/lattice-conversation",
     "crates/lattice-agent",
@@ -31,7 +31,7 @@ lattice-store    = { path = "crates/lattice-store" }
 lattice-ipc      = { path = "crates/lattice-ipc" }
 lattice-local    = { path = "crates/lattice-local" }
 lattice-llm      = { path = "crates/lattice-llm" }
-lattice-api      = { path = "crates/lattice-api" }
+lattice-server   = { path = "crates/lattice-server" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-conversation = { path = "crates/lattice-conversation" }
 lattice-agent    = { path = "crates/lattice-agent" }

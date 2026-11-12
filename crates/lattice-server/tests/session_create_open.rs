@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Session 由 create_session 显式创建；首轮接受、重开及同身份冲突保持冻结配置和原始输入。
-use lattice_api::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
 use lattice_llm::testing::ScriptEvent;
 use lattice_local::{AgentName, ConflictReason, new_session_id, new_turn_id};
+use lattice_server::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
 use lattice_session::store::{EffectiveProfile, PublicTurnOutcome, SessionSettings, SessionStore};
 use std::sync::Arc;
 
@@ -43,7 +43,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         std::os::unix::fs::MetadataExt::uid(&std::fs::symlink_metadata(project.path()).unwrap());
     let alpha = AgentName::parse("alpha").unwrap();
     let loaded_profile = lattice_profile::load_agent_profile(&alpha, &paths, uid).unwrap();
-    let root = lattice_api::LocalWorkspaceRoot::from_path(project.path()).unwrap();
+    let root = lattice_server::LocalWorkspaceRoot::from_path(project.path()).unwrap();
     let session_id = new_session_id();
     let settings = SessionSettings {
         profile: EffectiveProfile {
@@ -79,7 +79,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         )),
     };
     let id = new_turn_id();
-    let execution = lattice_api::start_turn(api.clone(), id, root.clone(), request.clone());
+    let execution = lattice_server::start_turn(api.clone(), id, root.clone(), request.clone());
     let TurnAcceptance::Accepted { turn } = execution.acceptance.await.unwrap().unwrap() else {
         panic!("not accepted")
     };
@@ -98,10 +98,12 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let api = SessionApi::from_store(store.clone());
     let mut retry = request;
     retry.test_llm = None;
-    let execution = lattice_api::start_turn(api, id, root, retry);
+    let execution = lattice_server::start_turn(api, id, root, retry);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
-        Err(lattice_api::ApiError::Conflict(ConflictReason::TurnIdUsed))
+        Err(lattice_server::ApiError::Conflict(
+            ConflictReason::TurnIdUsed
+        ))
     ));
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(

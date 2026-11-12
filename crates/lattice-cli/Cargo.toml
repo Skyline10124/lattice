@@ -11,7 +11,7 @@ name = "lattice"
 path = "src/main.rs"
 
 [dependencies]
-lattice-api = { workspace = true }
+lattice-server = { workspace = true }
 lattice-local = { workspace = true }
 lattice-tui = { workspace = true }
 tokio = { workspace = true }
@@ -32,5 +32,5 @@ tempfile = { workspace = true }
 
 [features]
 default = []
-test-crash-barriers = ["lattice-api/test-crash-barriers"]
-test-fake-tools = ["lattice-api/test-fake-tools"]
+test-crash-barriers = ["lattice-server/test-crash-barriers"]
+test-fake-tools = ["lattice-server/test-fake-tools"]

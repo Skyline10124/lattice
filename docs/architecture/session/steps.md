@@ -66,7 +66,7 @@ stateDiagram-v2
 同一回复的调用按片段顺序逐个执行，每次只处理最低序号的未返回槽位：
 
 1. 把该槽位推进到 `Started` 并提交。从这时起，它停下时的结论是 `Indeterminate(NoResult)`。这是“可能已执行”的保守边界：它不证明执行器已开始或外部效果已发生，但越过它之后不能仅凭没有结果推定未执行。
-2. 把已提交的 `StartedInvocation`、工具名、参数、取消标志与本轮 deadline 交给 `TurnTools::execute` 执行，取得 [`ToolOutcome`](../../../crates/lattice-api/src/lib.rs)。
+2. 把已提交的 `StartedInvocation`、工具名、参数、取消标志与本轮 deadline 交给 `TurnTools::execute` 执行，取得 [`ToolOutcome`](../../../crates/lattice-server/src/lib.rs)。
 3. 执行器因调用期到达本轮 deadline 返回 `ToolOutcome::Deadline` 时，协调层不调用 `finish_invocation` 补写槽位终态，直接以 `Stop { Deadline }` 关闭 Step（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）；其余四种返回由协调层映射为 [`ToolReply`](../../../crates/lattice-session/src/store/types.rs)，推进该槽位到 `Terminal` 并提交，写入结局与载荷。
 
 每个槽位任何时刻都有 `ToolResultOutcome` 的一种结局，以及按结局确定形状的载荷：`Terminal` 的槽位保存它们，其他阶段由阶段确定。结局与[模型尝试](acceptance.md#模型请求与执行预算)一样分两维：结局是结束形状，说明执行器给出了什么；原因放在载荷的 `ToolError` 或 `IndeterminateCause` 里。判定只看两件事：槽位到达了哪个阶段，以及执行器返回了什么。

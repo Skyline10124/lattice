@@ -1,6 +1,6 @@
 # lattice-store 工作指引
 
-提供 Linux 私有存储布局、文件锁、`fsync` 与位置能力探测，被 `lattice-session` 使用（`lattice-api` 仅在测试中使用）。
+提供 Linux 私有存储布局、文件锁、`fsync` 与位置能力探测，被 `lattice-session` 使用（`lattice-server` 仅在测试中使用）。
 
 ## 模块
 
@@ -38,4 +38,4 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-store` 与 `cargo clippy -p lattice-store --all-targets -- -D warnings` |
 | 修改 `Cargo.toml` 依赖 | `cargo tree -p lattice-store --edges normal`（确认无工作区内部 crate 依赖） |
-| 修改布局、锁、屏障或探测 | `cargo test -p lattice-session`、`cargo test -p lattice-api` |
+| 修改布局、锁、屏障或探测 | `cargo test -p lattice-session`、`cargo test -p lattice-server` |

@@ -31,14 +31,14 @@
 
 ## 约束
 
-- `Cargo.toml` 的内部直接依赖只允许 `lattice-local`，普通依赖闭包中禁止出现 `lattice-api`、`lattice-llm`、`lattice-profile`、`lattice-agent`，由 `cargo xtask crate-boundary` 强制检查。
+- `Cargo.toml` 的内部直接依赖只允许 `lattice-local`，普通依赖闭包中禁止出现 `lattice-server`、`lattice-llm`、`lattice-profile`、`lattice-agent`，由 `cargo xtask crate-boundary` 强制检查。
 - 启动时新会话经 `configure(New)` 创建草稿会话，既有会话带 `--agent` 时经 `configure(Existing)` 更新设置，只读打开既有会话时按 `current_dir()` 的 Unix 原始字节与 `session.project_path` 比较（不在前端做 `canonicalize`），进入事件循环即开始 `watch`；提交携带当前或入队时的 `expected_settings`（排队绑定规则见[排队](../../docs/architecture/tui/interaction.md#排队)），被配置拒绝或 `SettingsChanged` 冲突拒绝时展示说明并保留输入，见[启动、提交与运行](../../docs/architecture/tui/README.md#启动提交与运行)。
 - `/model` 与 `/effort` 候选项取自后台模型候选查询，选定后异步发出 `configure(Existing)`，statusline 与 `/effort` 面板直接读取会话头，见[选择面板](../../docs/architecture/tui/dock.md#选择面板)。
 - `connection.rs` 集中生成状态消息文案并决定等级，Dock 只按等级决定暂驻或常驻，组件间状态与句柄交接见[状态消息与等级](../../docs/architecture/tui/README.md#状态消息与等级)与[组件接线](../../docs/architecture/tui/README.md#组件接线)。
 - raw 模式下直接从终端输入事件捕获 `Ctrl+C`，经当前 `LocalTurn` 按 `TurnId` 发出取消意图，退出交接、视图推送替换、向上翻页与断连恢复显示按[连接、结局与重载](../../docs/architecture/tui/README.md#连接结局与重载)与[取消、退出与恢复提示](../../docs/architecture/tui/README.md#取消退出与恢复提示)执行。
 - `input.rs` 将已提交输入按纯文本行尽力写入 `<session_dir>/repl_history.txt`；所有布局统一以 `content_w` 和饱和整数运算计算几何尺寸，见[水平与垂直分配](../../docs/architecture/tui/layout.md#水平与垂直分配)。
 - 界面运行态仅反映实时观察进度，调用终态以会话库节点持久记录为准（失败工具显示 `ToolError.message`）；新增工具卡片或交互元素以明确的数据契约与[功能边界](../../docs/architecture/tui/README.md#功能边界)为依据。
-- 本 crate 之外：命令行参数解析与子命令分派由 `lattice-cli` 负责；客户端句柄与观察状态机由 `lattice-local` 负责；IPC 分帧由 `lattice-ipc` 负责；profile/provider/凭据读取与持久 Turn 执行由 `lattice-api` 和 `lattice-llm` 负责。
+- 本 crate 之外：命令行参数解析与子命令分派由 `lattice-cli` 负责；客户端句柄与观察状态机由 `lattice-local` 负责；IPC 分帧由 `lattice-ipc` 负责；profile/provider/凭据读取与持久 Turn 执行由 `lattice-server` 和 `lattice-llm` 负责。
 
 ## 验证
 

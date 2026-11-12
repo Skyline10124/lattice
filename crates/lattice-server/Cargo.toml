@@ -1,5 +1,5 @@
 [package]
-name = "lattice-api"
+name = "lattice-server"
 version.workspace = true
 license.workspace = true
 edition.workspace = true
@@ -32,7 +32,7 @@ zeroize = { workspace = true }
 
 [dev-dependencies]
 rustix = { workspace = true }
-lattice-api = { workspace = true, features = ["test-utils"] }
+lattice-server = { workspace = true, features = ["test-utils"] }
 lattice-ipc = { workspace = true, features = ["test-utils"] }
 lattice-local = { workspace = true, features = ["test-utils"] }
 lattice-session = { workspace = true, features = ["test-utils"] }

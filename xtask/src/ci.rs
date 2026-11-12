@@ -96,7 +96,7 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
             &[
                 "clippy",
                 "-p",
-                "lattice-api",
+                "lattice-server",
                 "-p",
                 "lattice-cli",
                 "--all-targets",
@@ -255,7 +255,7 @@ fn run_feature_tests(
     build_jobs: &str,
 ) -> anyhow::Result<()> {
     let targets = [
-        ("lattice-api", "test-fake-tools,test-crash-barriers"),
+        ("lattice-server", "test-fake-tools,test-crash-barriers"),
         ("lattice-system-harness", "fake-tools,crash-barriers"),
     ];
     let timeout_secs = test_timeout_secs();

@@ -339,7 +339,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "-p",
         "lattice-conversation",
         "-p",
-        "lattice-api",
+        "lattice-server",
         "-p",
         "lattice-session",
     ]);

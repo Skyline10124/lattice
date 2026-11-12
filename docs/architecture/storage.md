@@ -56,13 +56,13 @@ status: active
 
 - 本地目录及 socket 核验类型、所有者和私有权限，通信双方均核对 Linux peer UID。IPC 限于本机 Unix socket；身份检查或版本不兼容时拒绝连接，不开放远程入口。
 - 只有实例锁持有者可绑定、替换或清理 socket，也只有它打开会话库。不按 PID、mtime、连接数或超时抢占所有权，也不终止身份或协议不兼容的已有后台；客户端报告错误，交由用户处理。
-- 版本化帧、长度检查和有界队列限制请求与观察资源。分帧、目录权限检查与协议版本实现入口为 [`lattice-ipc`](../../crates/lattice-ipc/src/ipc.rs)，客户端端点寻址见 [`lattice-local/src/endpoint.rs`](../../crates/lattice-local/src/endpoint.rs)，后台实例锁与 socket 绑定见 [`lattice-api/src/local/ipc.rs`](../../crates/lattice-api/src/local/ipc.rs)，具体计量及超限行为见[输入与传输限制](session/concurrency.md#输入与传输限制)。
+- 版本化帧、长度检查和有界队列限制请求与观察资源。分帧、目录权限检查与协议版本实现入口为 [`lattice-ipc`](../../crates/lattice-ipc/src/ipc.rs)，客户端端点寻址见 [`lattice-local/src/endpoint.rs`](../../crates/lattice-local/src/endpoint.rs)，后台实例锁与 socket 绑定见 [`lattice-server/src/local/ipc.rs`](../../crates/lattice-server/src/local/ipc.rs)，具体计量及超限行为见[输入与传输限制](session/concurrency.md#输入与传输限制)。
 - 后台启动不创建或修复缺失领域库，也不写入未关闭的 Turn。常驻句柄继续遵守各领域的身份、严格打开和发布规则，不增加第二份请求状态库。
 - 单例锁只排除第二个后台，不串行化各 Session 的 Turn。短准入管理与领域锁分开，常驻持库不改变[锁序与持有期限](#锁与并发语义)。
 
 ### 项目绑定
 
-Session 记录保存完整 Local Workspace 根的规范项目路径原始字节（[`ProjectPath`](../../crates/lattice-session/src/model/project_path.rs)）。路径由 [`root.rs`](../../crates/lattice-api/src/root.rs) 经 `canonicalize` 解析符号链接得到，按 Linux `OsStrExt` 字节保存，校验以 `/` 开头且不含 NUL 字节，不要求路径为 UTF-8。
+Session 记录保存完整 Local Workspace 根的规范项目路径原始字节（[`ProjectPath`](../../crates/lattice-session/src/model/project_path.rs)）。路径由 [`root.rs`](../../crates/lattice-server/src/root.rs) 经 `canonicalize` 解析符号链接得到，按 Linux `OsStrExt` 字节保存，校验以 `/` 开头且不含 NUL 字节，不要求路径为 UTF-8。
 
 在会话库、本地 IPC（含 `configure`、`submit`、`rewind` 请求中的 `workspace`）与 `--json` 结构化输出中，路径表示为每项 `0..=255` 的 JSON 整数数组；面向人阅读的输出与诊断信息中的路径使用有损 UTF-8 文本，非 UTF-8 字节显示为替换字符。
 
@@ -171,7 +171,7 @@ SIGKILL 后重开证明相应进程崩溃场景。文件系统探测、进程崩
 | 寻址、状态布局、锁、`fsync` 与能力探测 | `cargo test -p lattice-store` |
 | 内核静态检查 | `cargo clippy -p lattice-store --all-targets -- -D warnings` |
 | 依赖边界 | `cargo tree -p lattice-store --edges normal`、`cargo xtask harness-boundary` |
-| 会话的新建与续写不在 `projects/` 下创建或改动内容 | `cargo test -p lattice-api --test session_without_workspace_history` |
+| 会话的新建与续写不在 `projects/` 下创建或改动内容 | `cargo test -p lattice-server --test session_without_workspace_history` |
 | 实际存储位置能力 | 在获准目录运行预构建的 `lattice-store-probe` |
 
 纯文档修订核对接口责任、锁范围、来源、状态及图示。修改内核或会话库接线时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。

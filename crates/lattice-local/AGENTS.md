@@ -24,10 +24,10 @@
 
 ## 约束
 
-- `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 中，workspace 内部成员仅允许 `lattice-ipc`、`lattice-conversation`、`lattice-store`；普通依赖闭包中禁止出现 `lattice-api`、`lattice-llm`、`lattice-profile`、`lattice-agent`，由 `cargo xtask crate-boundary` 门禁强制检查。
+- `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 中，workspace 内部成员仅允许 `lattice-ipc`、`lattice-conversation`、`lattice-store`；普通依赖闭包中禁止出现 `lattice-server`、`lattice-llm`、`lattice-profile`、`lattice-agent`，由 `cargo xtask crate-boundary` 门禁强制检查。
 - `src/lib.rs` 保持全部内部子模块私有与扁平显式重导出列表，不使用通配符 `*`，也不向门面重导出 `Request`、`Response`、`AuthLoggedOut`、`LoginAction`、`LoginResponse` 或 `AuthKey`；其他 crate 用不到的自有函数、方法与常量不公开，仅供测试复用的 `LocalWatch`、`Departure`、`test_support` 与底层客户端/重连方法收窄在 `test` 或 `test-utils` 下；前端经 `LocalTurn` 观察会话。
 - `SensitiveLoginUrl` 内部持有 `Zeroizing<String>`，只提供 `new(String)` 与 `expose(&self) -> &str`，不实现 `Debug`、`Display`、`Serialize`、`Deref` 或隐式转换；`LocalWatch` 与 `LocalAuthLogin` 的持续读取任务保留同一连接的半帧进度，避免界面单次轮询取消丢失数据，并在 Drop 时中止读任务。
-- 本 crate 不做工作区路径 `canonicalize`，工作区规范化与项目绑定校验统一由后台执行；实例锁（`owner.lock`）持有、socket 绑定与清理时序、`ApiError` 映射、模型/凭据展示转换与持久 Turn 协调由 `lattice-api` 负责。
+- 本 crate 不做工作区路径 `canonicalize`，工作区规范化与项目绑定校验统一由后台执行；实例锁（`owner.lock`）持有、socket 绑定与清理时序、`ApiError` 映射、模型/凭据展示转换与持久 Turn 协调由 `lattice-server` 负责。
 
 ## 验证
 
@@ -35,4 +35,4 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-local` 与 `cargo clippy -p lattice-local --all-targets -- -D warnings` |
 | 修改 `Cargo.toml` 依赖或 `test-utils` feature | `cargo xtask crate-boundary` 与 `cargo xtask harness-boundary` |
-| 修改客户端句柄、观察流、登录流或门面导出 | `cargo test -p lattice-cli -p lattice-tui`、`cargo test -p lattice-api` |
+| 修改客户端句柄、观察流、登录流或门面导出 | `cargo test -p lattice-cli -p lattice-tui`、`cargo test -p lattice-server` |

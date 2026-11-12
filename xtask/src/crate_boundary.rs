@@ -53,7 +53,7 @@ pub const RULES: &[DirectDependencyRule] = &[
         ]),
     },
     DirectDependencyRule {
-        package: "lattice-api",
+        package: "lattice-server",
         policy: WorkspaceDependencyPolicy::Forbid(&["lattice-local"]),
     },
 ];
@@ -62,7 +62,7 @@ pub const CLOSURE_RULES: &[NormalClosureRule] = &[
     NormalClosureRule {
         package: "lattice-tui",
         forbidden_packages: &[
-            "lattice-api",
+            "lattice-server",
             "lattice-llm",
             "lattice-profile",
             "lattice-agent",
@@ -71,7 +71,7 @@ pub const CLOSURE_RULES: &[NormalClosureRule] = &[
     NormalClosureRule {
         package: "lattice-local",
         forbidden_packages: &[
-            "lattice-api",
+            "lattice-server",
             "lattice-llm",
             "lattice-profile",
             "lattice-agent",
@@ -386,7 +386,7 @@ mod tests {
         "lattice-ipc",
         "lattice-tui",
         "lattice-local",
-        "lattice-api",
+        "lattice-server",
         "lattice-session",
         "lattice-conversation",
         "lattice-store",
@@ -432,7 +432,7 @@ mod tests {
                 "lattice-store = { path = \"../lattice-store\" }\n",
                 "outside-util = { path = \"../../../outside-util\" }\n",
             )),
-            "lattice-api" => CrateSpec::with_deps(concat!(
+            "lattice-server" => CrateSpec::with_deps(concat!(
                 "lattice-ipc = { path = \"../lattice-ipc\" }\n",
                 "lattice-session = { path = \"../lattice-session\" }\n",
                 "lattice-conversation = { path = \"../lattice-conversation\" }\n",
@@ -800,7 +800,7 @@ mod tests {
 
         let mut tui_spec = baseline_spec("lattice-tui");
         tui_spec.dev_deps = concat!(
-            "lattice-api = { path = \"../lattice-api\" }\n",
+            "lattice-server = { path = \"../lattice-server\" }\n",
             "plain-helper = { path = \"../plain-helper\" }\n",
         )
         .to_owned();
@@ -809,15 +809,15 @@ mod tests {
         let mut local_spec = baseline_spec("lattice-local");
         local_spec.dev_deps = concat!(
             "lattice-session = { path = \"../lattice-session\" }\n",
-            "lattice-api = { path = \"../lattice-api\" }\n",
+            "lattice-server = { path = \"../lattice-server\" }\n",
             "plain-helper = { path = \"../plain-helper\" }\n",
         )
         .to_owned();
         ws.write_member("lattice-local", &local_spec);
 
-        let mut api_spec = baseline_spec("lattice-api");
-        api_spec.dev_deps = "lattice-local = { path = \"../lattice-local\" }\n".to_owned();
-        ws.write_member("lattice-api", &api_spec);
+        let mut server_spec = baseline_spec("lattice-server");
+        server_spec.dev_deps = "lattice-local = { path = \"../lattice-local\" }\n".to_owned();
+        ws.write_member("lattice-server", &server_spec);
 
         let dev_hits = check_workspace_rules(&ws.ws_root, RULES).unwrap();
         assert!(
@@ -844,7 +844,7 @@ mod tests {
         assert_direct_rule_rejects_all_forms(
             &ws,
             "lattice-tui",
-            "lattice-api",
+            "lattice-server",
             "允许的内部依赖：[lattice-local]",
         );
         assert_direct_normal_violation(&ws, "lattice-tui", "plain-helper");
@@ -863,11 +863,11 @@ mod tests {
     }
 
     #[test]
-    fn direct_rule_lattice_api_rejects_lattice_local_dependency() {
+    fn direct_rule_lattice_server_rejects_lattice_local_dependency() {
         let ws = TestWorkspace::new();
         assert_direct_rule_rejects_all_forms(
             &ws,
-            "lattice-api",
+            "lattice-server",
             "lattice-local",
             "禁止的内部依赖：[lattice-local]",
         );
@@ -891,15 +891,15 @@ mod tests {
             "报错应指出无法识别依赖：{err}"
         );
 
-        let members_without_api: Vec<&str> = WORKSPACE_MEMBERS
+        let members_without_server: Vec<&str> = WORKSPACE_MEMBERS
             .iter()
             .copied()
-            .filter(|&m| m != "lattice-api")
+            .filter(|&m| m != "lattice-server")
             .collect();
-        TestWorkspace::write_workspace_toml(&ws.ws_root, &members_without_api);
+        TestWorkspace::write_workspace_toml(&ws.ws_root, &members_without_server);
         let err = check_workspace_rules(&ws.ws_root, RULES).unwrap_err();
         assert!(
-            err.to_string().contains("受检包 'lattice-api'"),
+            err.to_string().contains("受检包 'lattice-server'"),
             "报错应指出缺失的受检包：{err}"
         );
     }
@@ -910,7 +910,7 @@ mod tests {
 
         let mut tui_spec = baseline_spec("lattice-tui");
         tui_spec.dev_deps = concat!(
-            "lattice-api = { path = \"../lattice-api\" }\n",
+            "lattice-server = { path = \"../lattice-server\" }\n",
             "lattice-agent = { path = \"../lattice-agent\" }\n",
         )
         .to_owned();
@@ -918,7 +918,7 @@ mod tests {
 
         let mut local_spec = baseline_spec("lattice-local");
         local_spec.dev_deps = concat!(
-            "lattice-api = { path = \"../lattice-api\" }\n",
+            "lattice-server = { path = \"../lattice-server\" }\n",
             "lattice-llm = { path = \"../lattice-llm\" }\n",
             "lattice-profile = { path = \"../lattice-profile\" }\n",
         )
@@ -1013,8 +1013,8 @@ mod tests {
     #[test]
     fn closure_workspace_reports_full_path_through_intermediate_workspace_members() {
         let ws = TestWorkspace::new();
-        // 清空 `lattice-api` 自己的禁用依赖，只核对经中间成员传递到 `lattice-api` 的完整路径。
-        ws.write_member("lattice-api", &CrateSpec::default());
+        // 清空 `lattice-server` 自己的禁用依赖，只核对经中间成员传递到 `lattice-server` 的完整路径。
+        ws.write_member("lattice-server", &CrateSpec::default());
 
         let mut ipc_spec = baseline_spec("lattice-ipc");
         ipc_spec
@@ -1024,7 +1024,7 @@ mod tests {
 
         ws.write_member(
             "plain-helper",
-            &CrateSpec::with_deps("lattice-api = { path = \"../lattice-api\" }\n"),
+            &CrateSpec::with_deps("lattice-server = { path = \"../lattice-server\" }\n"),
         );
 
         let hits = check_workspace_normal_closure(&ws.ws_root, CLOSURE_RULES).unwrap();
@@ -1035,15 +1035,15 @@ mod tests {
         );
         assert!(
             hits.iter().any(|h| {
-                h == "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-api'，路径：lattice-local -> lattice-ipc -> plain-helper -> lattice-api"
+                h == "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-server'，路径：lattice-local -> lattice-ipc -> plain-helper -> lattice-server"
             }),
-            "应写出从 lattice-local 经中间 workspace 成员到达 lattice-api 的完整路径，实际：{hits:?}"
+            "应写出从 lattice-local 经中间 workspace 成员到达 lattice-server 的完整路径，实际：{hits:?}"
         );
         assert!(
             hits.iter().any(|h| {
-                h == "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-api'，路径：lattice-tui -> lattice-local -> lattice-ipc -> plain-helper -> lattice-api"
+                h == "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-server'，路径：lattice-tui -> lattice-local -> lattice-ipc -> plain-helper -> lattice-server"
             }),
-            "应写出从 lattice-tui 经中间 workspace 成员到达 lattice-api 的完整路径，实际：{hits:?}"
+            "应写出从 lattice-tui 经中间 workspace 成员到达 lattice-server 的完整路径，实际：{hits:?}"
         );
     }
 
@@ -1146,7 +1146,7 @@ mod tests {
                 "lattice-local",
                 "lattice-ipc",
                 "lattice-session",
-                "lattice-api",
+                "lattice-server",
                 "lattice-llm",
             ],
             &["redb"],
@@ -1155,7 +1155,7 @@ mod tests {
                 ("lattice-local", "lattice-ipc", &[None]),
                 ("lattice-ipc", "lattice-session", &[None]),
                 ("lattice-session", "redb", &[None]),
-                ("lattice-local", "lattice-api", &[Some("dev")]),
+                ("lattice-local", "lattice-server", &[Some("dev")]),
                 ("lattice-ipc", "lattice-llm", &[Some("build")]),
             ],
             true,
@@ -1168,11 +1168,11 @@ mod tests {
 
         // 同时含 normal 与 dev 的边进入普通依赖闭包。
         let mixed = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-api"],
+            &["lattice-tui", "lattice-local", "lattice-server"],
             &[],
             &[
                 ("lattice-tui", "lattice-local", &[None]),
-                ("lattice-local", "lattice-api", &[Some("dev"), None]),
+                ("lattice-local", "lattice-server", &[Some("dev"), None]),
             ],
             true,
         );
@@ -1184,8 +1184,8 @@ mod tests {
         );
         assert!(
             hits.iter()
-                .any(|h| h.contains("lattice-tui -> lattice-local -> lattice-api")),
-            "混合边闭包应报告从 lattice-tui 到 lattice-api 的完整路径，实际：{hits:?}"
+                .any(|h| h.contains("lattice-tui -> lattice-local -> lattice-server")),
+            "混合边闭包应报告从 lattice-tui 到 lattice-server 的完整路径，实际：{hits:?}"
         );
     }
 

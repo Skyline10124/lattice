@@ -1,4 +1,4 @@
-# lattice-api 工作指引
+# lattice-server 工作指引
 
 提供 `SessionApi`、本地后台服务入口 `local::serve`、`TurnCoordinator` 与 `ToolExecutor` 接缝，跨领域协调会话库、请求网关、profile 与工具执行器，被 `lattice-cli` 的 `daemon serve` 调用。
 
@@ -49,7 +49,7 @@
 
 | 改动 | 运行 |
 | --- | --- |
-| 任何改动 | `cargo test -p lattice-api` 与 `cargo test -p lattice-api --features test-fake-tools,test-crash-barriers`（含提交、取消交接、视图切点、库级故障、执行者消失、假工具执行及 `tests/session_without_workspace_history.rs`） |
+| 任何改动 | `cargo test -p lattice-server` 与 `cargo test -p lattice-server --features test-fake-tools,test-crash-barriers`（含提交、取消交接、视图切点、库级故障、执行者消失、假工具执行及 `tests/session_without_workspace_history.rs`） |
 | 修改 `Cargo.toml` 依赖 | `cargo xtask crate-boundary` |
 | 修改 Turn 协调、流消费或工具接线 | `cargo test -p lattice-agent`、`cargo test -p lattice-session` |
 | 联动修改 `lattice-ipc` 请求、响应、登录帧或展示类型 | `env -u LATTICE_UPDATE_WIRE_SHAPE cargo test -p lattice-ipc wire_shape`（见 [`crates/lattice-ipc/AGENTS.md`](../lattice-ipc/AGENTS.md)） |

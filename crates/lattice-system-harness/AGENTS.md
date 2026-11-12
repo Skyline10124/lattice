@@ -32,7 +32,7 @@
 - 目标平台固定为 Linux，环境隔离、环境变量白名单、`ScenarioWorld` 后台提前登记与前后台进程组清理、`ResponseGate`、预算、失败产物占用与脱敏均按[测试工程](../../docs/development/testing.md)执行；运行环境异常（含 PTY 环境错误）直接计为测试失败。
 - `FakeLlmServer` 经场景私有 `HOME` 下的 `providers.toml` 与 `lattice auth set` 接入正式配置入口；验证变量未设置（如 `fast_env_boundary`）时调用 `unset_env` 移除变量，确保真正测试缺失态而非空字符串。
 - `src/` 只承载跨场景通用驱动，Direct 共用辅助放在 `tests/support/mod.rs`，场景专用 fixture 与语义断言保留在各自 `tests/*.rs` 中。需要工具循环的场景以 `#[cfg(feature = "fake-tools")]` 标记，配合 `--features test-fake-tools` 构建的 `lattice` 二进制，并在后台首次启动前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 设置逗号分隔的工具名单。
-- 本 crate 之外：未公开的 redb 表编码、值版本、纯关闭规划与内部状态机分支由 `lattice-session`、`lattice-llm`、`lattice-api` 等对应产品 crate 的单元或集成测试负责。
+- 本 crate 之外：未公开的 redb 表编码、值版本、纯关闭规划与内部状态机分支由 `lattice-session`、`lattice-llm`、`lattice-server` 等对应产品 crate 的单元或集成测试负责。
 
 ## 验证
 

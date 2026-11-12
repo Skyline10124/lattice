@@ -1,6 +1,6 @@
 # lattice-session 工作指引
 
-维护全局会话库 `lattice.redb`、会话树同步领域事务、由持久进度推导的结论、历史与轮次详情只读查询及共享领域字段类型，被 `lattice-profile`、`lattice-api` 与 `lattice-cli` 使用。
+维护全局会话库 `lattice.redb`、会话树同步领域事务、由持久进度推导的结论、历史与轮次详情只读查询及共享领域字段类型，被 `lattice-profile`、`lattice-server` 与 `lattice-cli` 使用。
 
 ## 模块
 
@@ -35,7 +35,7 @@
 - 写事务内只做内存编码与提交，同步接口由异步调用方放入 blocking 线程执行；锁范围与提交失败后的停写重开见[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)与[锁与并发语义](../../docs/architecture/storage.md#锁与并发语义)。
 - 调用槽位绑定（`InvocationBinding`、`BindingIdentity`）由本 crate 的 `store` 模块定义并维护，`tool_identity` 为不透明字符串；持久身份、规范 JSON 与参数摘要经 `lattice-conversation` 取得（[ADR 0009](../../docs/adr/0009-remove-legacy-lancet-tool-executor.md#5-身份与规范-json-归-lattice-conversation)）。
 - 轮次与槽位详情查询只依赖存储记录，`SlotDetail` 仅投影调用身份、槽位状态、结局、机器错误码与内容摘要元数据（排除参数、结果正文、错误消息原文、schema 与冻结秘密），见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)。
-- 本 crate 之外：对话消息、身份、规范 JSON、模型选择值与用量数据结构由 `lattice-conversation` 负责；profile 发现与解析由 `lattice-profile` 负责；provider 请求、Turn 协调、工具执行接口与 CLI 分别由 `lattice-llm`、`lattice-api` 和 `lattice-cli` 负责。
+- 本 crate 之外：对话消息、身份、规范 JSON、模型选择值与用量数据结构由 `lattice-conversation` 负责；profile 发现与解析由 `lattice-profile` 负责；provider 请求、Turn 协调、工具执行接口与 CLI 分别由 `lattice-llm`、`lattice-server` 和 `lattice-cli` 负责。
 
 ## 验证
 
@@ -43,5 +43,5 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-session` |
 | 修改依赖或 `test-utils` 特性边界 | `cargo xtask harness-boundary` |
-| 修改记录编码、会话树、事务或读取投影 | `cargo test -p lattice-api`、`cargo test -p lattice-cli`，并用当前构建的 `lattice` 二进制运行 `cargo test -p lattice-system-harness --test direct_tree_session` |
+| 修改记录编码、会话树、事务或读取投影 | `cargo test -p lattice-server`、`cargo test -p lattice-cli`，并用当前构建的 `lattice` 二进制运行 `cargo test -p lattice-system-harness --test direct_tree_session` |
 | 修改提交阶段或崩溃后结论推导 | 构建带 `--features test-fake-tools,test-crash-barriers` 的 `lattice` 二进制并运行 `cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers` 验证真实提交窗口 |

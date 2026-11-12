@@ -273,12 +273,12 @@ name = "harness"
 version = "0.0.0"
 
 [dependencies]
-lattice-api = "0.1"
+lattice-server = "0.1"
 "#,
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(joined(&out).contains("forbidden product crate name 'lattice-api'"));
+        assert!(joined(&out).contains("forbidden product crate name 'lattice-server'"));
     }
 
     #[test]

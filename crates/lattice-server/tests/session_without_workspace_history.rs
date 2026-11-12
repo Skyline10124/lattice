@@ -7,8 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use lattice_api::{LocalWorkspaceRoot, StateLayout, local::serve_for_test};
 use lattice_local::*;
+use lattice_server::{LocalWorkspaceRoot, StateLayout, local::serve_for_test};
 use lattice_session::store::PublicTurnOutcome;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;

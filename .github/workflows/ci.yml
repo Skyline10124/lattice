@@ -65,13 +65,13 @@ jobs:
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       # 第二轮：先检查测试专用 feature 的编译与 clippy，再用带测试 feature 的产物覆盖
       # target/debug/lattice（LATTICE_BIN 路径不变），运行假执行器单元测试、假工具场景与崩溃屏障。
-      - run: cargo clippy -p lattice-api -p lattice-cli --all-targets --features test-fake-tools,test-crash-barriers -- -D warnings
+      - run: cargo clippy -p lattice-server -p lattice-cli --all-targets --features test-fake-tools,test-crash-barriers -- -D warnings
         if: steps.changes.outputs.code != 'false'
       - run: cargo clippy -p lattice-system-harness --all-targets --features fake-tools,crash-barriers -- -D warnings
         if: steps.changes.outputs.code != 'false'
       - run: cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers
         if: steps.changes.outputs.code != 'false'
-      - run: cargo test -p lattice-api --features test-fake-tools,test-crash-barriers
+      - run: cargo test -p lattice-server --features test-fake-tools,test-crash-barriers
         if: steps.changes.outputs.code != 'false'
       - run: cargo test -p lattice-system-harness --features fake-tools,crash-barriers
         if: steps.changes.outputs.code != 'false'

@@ -8,7 +8,7 @@
 //! characters, as produced by `Uuid::new_v4().simple()` at session creation).
 //!
 //! 本模块仅校验解析、显示与 serde 表示，不生成身份值：`InvocationId` 由
-//! `lattice-api::TurnCoordinator` 经可注入的 UUID v4 源生成，`SessionId` 与
+//! `lattice_server::TurnCoordinator` 经可注入的 UUID v4 源生成，`SessionId` 与
 //! `TurnId` 由客户端经 `lattice_local` 生成（ADR 0009 决策 5）。同一身份不设
 //! `String` 别名或第二个 newtype。
 

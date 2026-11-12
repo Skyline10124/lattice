@@ -16,7 +16,7 @@ status: active
 
 ```sh
 cargo test -p lattice-session
-cargo test -p lattice-api
+cargo test -p lattice-server
 cargo test -p lattice-agent --features test-utils
 
 cargo test -p lattice-system-harness --test direct_tree_session

@@ -1,8 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_api::{StateLayout, local::serve_for_test};
 use lattice_local::*;
+use lattice_server::{StateLayout, local::serve_for_test};
 use lattice_session::store::*;
 use std::time::Duration;
 
@@ -18,7 +18,7 @@ fn seed(layout: &StateLayout, root: &std::path::Path) {
 }
 fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, tid: TurnId) {
     let guard = store.try_lock_session(sid).unwrap();
-    let project_path = lattice_api::LocalWorkspaceRoot::from_path(root)
+    let project_path = lattice_server::LocalWorkspaceRoot::from_path(root)
         .unwrap()
         .project_path();
     let config = FrozenTurnConfig {
@@ -29,7 +29,7 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: lattice_api::TurnTimeout::default(),
+            timeout_secs: lattice_server::TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 2,
         },
@@ -75,7 +75,7 @@ async fn usage_identity_resolution_skips_conversation_and_configuration() {
                 other,
                 TurnId::parse("00000000-0000-4000-8000-000000000002").unwrap(),
             );
-            let api = lattice_api::SessionApi::from_store(store.clone());
+            let api = lattice_server::SessionApi::from_store(store.clone());
             let id = session_id().to_string();
             let expected = api.usage(id.clone()).await.unwrap();
             store
@@ -109,7 +109,7 @@ async fn usage_identity_resolution_skips_conversation_and_configuration() {
 }
 #[tokio::test]
 async fn session_prefix_resolution_reads_only_matching_identities() {
-    use lattice_api::ApiError;
+    use lattice_server::ApiError;
     let state = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
@@ -120,7 +120,7 @@ async fn session_prefix_resolution_reads_only_matching_identities() {
         let tid = TurnId::parse(&format!("00000000-0000-4000-8000-00000000000{}", n + 1)).unwrap();
         seed_session(&store, project.path(), sid, tid);
     }
-    let api = lattice_api::SessionApi::from_store(store);
+    let api = lattice_server::SessionApi::from_store(store);
     let resolve = |input: &str| {
         let api = api.clone();
         let input = input.to_owned();
