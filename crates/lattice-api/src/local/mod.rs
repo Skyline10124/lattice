@@ -45,4 +45,4 @@ mod tests;
 mod client_tests;
 
 #[cfg(test)]
-mod wire_shape_tests;
+mod wire_shape;
