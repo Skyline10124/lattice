@@ -14,6 +14,7 @@
 | `src/local/client.rs`、`src/local/operation.rs` | `LocalClient` 连接、自动启动后台、`configure` 与视图/查询转发、`stop` 收到回执后等待 socket 撤下与 `owner.lock` 释放；`LocalTurn` 提交、取消回执与 `detach` 退出交接 |
 | `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与草稿清理（`cleanup_drafts`）、提交准入、视图推送、`Owner` 独立监督，以及信号与 IPC `stop` 共用的有界停机顺序（返回 `ServeExit`） |
 | `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令转发、敏感材料传输、错误映射与同连接 SIWC 登录句柄 |
+| `src/local/wire_shape/`、`src/local/wire_shape.json` | 本地 IPC 闭包内全部枚举穷尽片段、结构体 `full`/`minimal` 片段与一致性场景帧的原始 JSON 快照基线、逐字节比对及 `PROTOCOL_VERSION` 门禁（`gate.rs` 与 `fixtures/` 分离） |
 | `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
 | `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、生产后台接线 `start_turn` 及 `test-utils` 复用的 `run_turn` |
 | `src/turn/coordinator.rs`、`src/turn/saga.rs` | 全 Turn `SessionExecutionLock` 持有、`spawn_blocking` 存储适配、模型重试、顺序调用分发及 Step/Turn 关闭 |
@@ -49,4 +50,5 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-api` 与 `cargo test -p lattice-api --features test-fake-tools,test-crash-barriers`（含提交、取消交接、视图切点、库级故障、执行者消失、假工具执行及 `tests/session_without_workspace_history.rs`） |
 | 修改 Turn 协调、流消费或工具接线 | `cargo test -p lattice-agent`、`cargo test -p lattice-session` |
+| 修改 IPC 请求、响应、登录帧或其闭包引用的会话/对话/模型类型 | `cargo test -p lattice-api wire_shape`（补齐 `src/local/wire_shape/fixtures/` 对应片段）；线上形状变化时先升 `PROTOCOL_VERSION`，再以 `LATTICE_UPDATE_WIRE_SHAPE=1` 重新生成 |
 | 修改 `LocalClient`、IPC 或公开 DTO | `cargo test -p lattice-cli`、`cargo test -p lattice-tui`，并按[测试工程](../../docs/development/testing.md)运行受影响的 `lattice-system-harness` 场景 |

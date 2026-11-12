@@ -45,7 +45,7 @@ pub enum AuthLoginEvent {
     rename_all = "snake_case",
     deny_unknown_fields
 )]
-enum LoginResponse {
+pub(in crate::local) enum LoginResponse {
     AuthLoginAuthorization { authorization_url: AuthKey },
     AuthLoginResult(AuthLoginOutcome),
     Error(LocalError),
@@ -53,7 +53,7 @@ enum LoginResponse {
 
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-enum LoginAction {
+pub(in crate::local) enum LoginAction {
     Callback { url: AuthKey },
     Cancel {},
 }
