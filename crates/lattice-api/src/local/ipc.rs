@@ -100,10 +100,35 @@ pub(super) fn endpoint(layout: &crate::StateLayout) -> Result<PathBuf> {
     Ok(directory.join("api.sock"))
 }
 
-pub(super) struct Instance {
+/// 实例锁的持有对象；不暴露底层文件描述符，供后台宿主保持锁直至进程退出。
+#[derive(Debug)]
+pub struct InstanceLock {
     _lock: File,
+}
+
+pub(super) struct SocketEndpoint {
     socket: PathBuf,
     identity: (u64, u64),
+}
+
+impl SocketEndpoint {
+    /// 只删除本实例发布的 socket；实例锁由 `InstanceLock` 独立持有。
+    pub(super) fn cleanup(&self) -> Result<()> {
+        let meta = fs::symlink_metadata(&self.socket)?;
+        if meta.uid() != uid() {
+            return Err(permission());
+        }
+        if (meta.dev(), meta.ino()) != self.identity {
+            return Err(permission());
+        }
+        fs::remove_file(&self.socket)?;
+        Ok(())
+    }
+}
+
+pub(super) struct Instance {
+    lock: InstanceLock,
+    endpoint: SocketEndpoint,
 }
 
 impl Instance {
@@ -136,7 +161,7 @@ impl Instance {
         if meta.uid() != uid() {
             return Err(permission());
         }
-        // 持有文件描述符直至 serve 排空结束；不按 PID、mtime 或客户端连接数释放或抢占。
+        // 持有文件描述符直至后台宿主退出；不按 PID、mtime 或客户端连接数释放或抢占。
         if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
             let error = std::io::Error::last_os_error();
             return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -160,25 +185,24 @@ impl Instance {
         let meta = fs::symlink_metadata(&socket)?;
         Ok((
             Self {
-                _lock: lock,
-                socket,
-                identity: (meta.dev(), meta.ino()),
+                lock: InstanceLock { _lock: lock },
+                endpoint: SocketEndpoint {
+                    socket,
+                    identity: (meta.dev(), meta.ino()),
+                },
             },
             listener,
         ))
     }
 
+    pub(super) fn into_parts(self) -> (InstanceLock, SocketEndpoint) {
+        (self.lock, self.endpoint)
+    }
+
     /// 只删除本实例发布的 socket；实例锁随 Instance 释放，调用方决定释放的时机。
+    #[cfg(test)]
     pub(super) fn cleanup(&self) -> Result<()> {
-        let meta = fs::symlink_metadata(&self.socket)?;
-        if meta.uid() != uid() {
-            return Err(permission());
-        }
-        if (meta.dev(), meta.ino()) != self.identity {
-            return Err(permission());
-        }
-        fs::remove_file(&self.socket)?;
-        Ok(())
+        self.endpoint.cleanup()
     }
 }
 

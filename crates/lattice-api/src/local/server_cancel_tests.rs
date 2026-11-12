@@ -17,10 +17,10 @@ pub(super) struct Gates {
     pub watch_waiting_owner: Mutex<Option<Gate>>,
     pub cleanup_scanned: Mutex<Option<Gate>>,
     pub cleanup_claimed: Mutex<Option<Gate>>,
+    /// 元数据收尾尾段（Tail 1）内。
+    pub metadata_drain: Mutex<Option<Gate>>,
     /// 回执与排空之后、关闭 listener 之前。
     pub listener_close: Mutex<Option<Gate>>,
-    /// socket 已撤下、实例锁尚未释放。
-    pub lock_release: Mutex<Option<Gate>>,
 }
 pub(super) fn arm(slot: &Mutex<Option<Gate>>) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entry) = oneshot::channel();
@@ -101,11 +101,16 @@ impl Provider {
     }
 }
 
+struct TestServerTask {
+    stop: tokio::sync::mpsc::Sender<()>,
+    handle: tokio::task::JoinHandle<Result<ServeExit>>,
+}
+
 async fn backend() -> (
     tempfile::TempDir,
     Arc<Backend>,
     super::super::LocalClient,
-    tokio::task::JoinHandle<()>,
+    TestServerTask,
 ) {
     backend_with_roots(vec![include_bytes!("test_root.der").to_vec()]).await
 }
@@ -115,34 +120,42 @@ async fn backend_with_roots(
     tempfile::TempDir,
     Arc<Backend>,
     super::super::LocalClient,
-    tokio::task::JoinHandle<()>,
+    TestServerTask,
 ) {
     let dir = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(dir.path());
-    let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
-    let listener = UnixListener::from_std(listener).unwrap();
-    let backend = Backend::with_tls_roots(
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let backend_layout = layout.clone();
+    let home = dir.path().to_path_buf();
+    let handle = tokio::spawn(serve_with_backend(
         layout.clone(),
-        Some(dir.path().into()),
-        roots,
-        Arc::new(crate::NoTools),
-    );
-    let server = backend.clone();
-    let task = tokio::spawn(async move {
-        let mut connections = JoinSet::new();
-        let mut closed = server.closed.subscribe();
-        loop {
-            tokio::select! {
-                accepted = listener.accept() => { let (socket, _) = accepted.unwrap(); connections.spawn(connection(server.clone(), socket)); }
-                _ = connections.join_next(), if !connections.is_empty() => {},
-                _ = closed.changed() => break,
-            }
-        }
-        connections.abort_all();
-        while connections.join_next().await.is_some() {}
-        instance.cleanup().unwrap();
-    });
-    (dir, backend, super::super::LocalClient::new(layout), task)
+        Duration::from_secs(60),
+        stop_rx,
+        move || {
+            let mut backend = Backend::with_tls_roots(
+                backend_layout,
+                Some(home),
+                roots,
+                Arc::new(crate::NoTools),
+            );
+            Arc::get_mut(&mut backend)
+                .expect("unshared test backend")
+                .metadata = super::super::metadata::MetadataRefresh::without_network();
+            let _ = ready_tx.send(backend.clone());
+            backend
+        },
+    ));
+    let backend = bounded(ready_rx).await.unwrap();
+    (
+        dir,
+        backend,
+        super::super::LocalClient::new(layout),
+        TestServerTask {
+            stop: stop_tx,
+            handle,
+        },
+    )
 }
 fn configure_new(dir: &std::path::Path, sid: SessionId) -> ConfigureRequest {
     ConfigureRequest {
@@ -183,10 +196,16 @@ async fn idle(backend: &Backend) {
     })
     .await;
 }
-async fn finish(backend: &Backend, task: tokio::task::JoinHandle<()>) {
+async fn finish(backend: &Backend, task: TestServerTask) {
     idle(backend).await;
-    backend.closed.send_replace(true);
-    bounded(task).await.unwrap();
+    let _ = task.stop.send(()).await;
+    let exit = bounded(task.handle).await.unwrap().unwrap();
+    assert!(
+        exit.failure.is_none(),
+        "后台收尾不应报错: {:?}",
+        exit.failure
+    );
+    drop(exit.instance);
 }
 
 #[tokio::test]
@@ -596,6 +615,7 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
         view.next().await.unwrap().unwrap(),
         ViewUpdate::Head(SessionHead { owner: true, .. })
     ));
+    let (at_close, release_close) = arm(&backend.gates.listener_close);
     let stop = {
         let client = client.clone();
         tokio::spawn(async move { client.request_stop().await.map(|(status, _)| status) })
@@ -633,6 +653,7 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     })
     .await;
     assert_eq!(bounded(stop).await.unwrap().unwrap().owners, 0);
+    bounded(at_close).await.unwrap();
     assert!(backend.chatgpt_auth().unwrap().logout().await.is_err());
     bounded(async {
         loop {
@@ -646,6 +667,7 @@ async fn owner_retirement_updates_watch_and_stop_drains_the_same_cancellation_ca
     })
     .await;
     drop(view);
+    release_close.send(()).unwrap();
     assert_eq!(provider.finish().await.len(), 1);
     finish(&backend, task).await;
 }
@@ -1807,14 +1829,14 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         assert_eq!(status.owners, 0);
         assert_eq!(status.unconfirmed_operations, usize::from(forwarding_panic));
         if forwarding_panic {
-            let TurnLookup::Accepted { turn } = client.turn(input.turn_id).await.unwrap() else {
+            let TurnLookup::Accepted { turn } = backend.lookup(input.turn_id).await.unwrap() else {
                 panic!("accepted")
             };
             assert_eq!(turn.summary.outcome, PublicTurnOutcome::Cancelled);
             assert!(turn.summary.progress.is_closed());
         } else {
             assert_eq!(
-                client.turn(input.turn_id).await.unwrap_err().kind,
+                backend.lookup(input.turn_id).await.unwrap_err().kind,
                 LocalErrorKind::NotFound
             );
         }
@@ -1913,30 +1935,135 @@ type GatedServe = (
     super::super::LocalClient,
     oneshot::Receiver<()>,
     oneshot::Sender<()>,
-    tokio::task::JoinHandle<Result<()>>,
+    tokio::task::JoinHandle<Result<DrainOutcome>>,
 );
-/// 以正式 serve 收尾路径起后台，构造 Backend 时在指定退场窗口装 gate。
-async fn serve_gated(slot: GateSlot) -> GatedServe {
+struct ConfiguredServe {
+    dir: tempfile::TempDir,
+    layout: crate::StateLayout,
+    backend: Arc<Backend>,
+    client: super::super::LocalClient,
+    stop: tokio::sync::mpsc::Sender<()>,
+    serving: tokio::task::JoinHandle<Result<DrainOutcome>>,
+}
+
+async fn serve_configured(
+    drain_timeout: Duration,
+    metadata: Option<Arc<super::super::metadata::MetadataRefresh>>,
+    slot: Option<GateSlot>,
+) -> (
+    ConfiguredServe,
+    Option<(oneshot::Receiver<()>, oneshot::Sender<()>)>,
+) {
     let dir = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(dir.path());
-    let (armed, gate) = oneshot::channel();
-    let (backend_layout, home) = (layout.clone(), dir.path().to_path_buf());
-    let serving = tokio::spawn(serve_with_backend(layout.clone(), move || {
-        let mut backend = Backend::with_tools(
-            backend_layout,
-            Some(home),
-            crate::turn::tools::default_tool_executor(),
-        );
-        Arc::get_mut(&mut backend)
-            .expect("unshared test backend")
-            .metadata = super::super::metadata::MetadataRefresh::without_network();
-        let _ = armed.send(arm(slot(&backend.gates)));
-        backend
-    }));
-    let (entry, release) = bounded(gate).await.unwrap();
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (serving_layout, backend_layout, home) =
+        (layout.clone(), layout.clone(), dir.path().to_path_buf());
+    let serving = tokio::spawn(async move {
+        let exit = serve_with_backend(serving_layout, drain_timeout, stop_rx, move || {
+            let mut backend = Backend::with_tools(
+                backend_layout,
+                Some(home),
+                crate::turn::default_tool_executor(),
+            );
+            Arc::get_mut(&mut backend)
+                .expect("unshared test backend")
+                .metadata =
+                metadata.unwrap_or_else(super::super::metadata::MetadataRefresh::without_network);
+            lock(&backend.admission).drain_timeout = drain_timeout;
+            let armed = slot.map(|slot| arm(slot(&backend.gates)));
+            let _ = ready_tx.send((backend.clone(), armed));
+            backend
+        })
+        .await?;
+        let ServeExit {
+            drain,
+            failure,
+            instance,
+        } = exit;
+        drop(instance);
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(drain),
+        }
+    });
+    let (backend, armed) = bounded(ready_rx).await.unwrap();
+    let client = super::super::LocalClient::new(layout.clone());
+    (
+        ConfiguredServe {
+            dir,
+            layout,
+            backend,
+            client,
+            stop: stop_tx,
+            serving,
+        },
+        armed,
+    )
+}
+
+/// 以正式 serve 收尾路径起后台，构造 Backend 时在指定退场窗口装 gate。
+async fn serve_gated(slot: GateSlot) -> GatedServe {
+    let (configured, armed) = serve_configured(Duration::from_secs(60), None, Some(slot)).await;
+    let (entry, release) = armed.expect("armed gate");
+    (
+        configured.dir,
+        configured.layout,
+        configured.client,
+        entry,
+        release,
+        configured.serving,
+    )
+}
+
+/// 测试宿主在 `serve` 返回后继续持有 `InstanceLock`，直至收到放行信号再释放。
+async fn serve_holding_lock() -> GatedServe {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(dir.path());
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    let (entered_tx, entry) = oneshot::channel();
+    let (release, resume) = oneshot::channel();
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (serving_layout, backend_layout, home) =
+        (layout.clone(), layout.clone(), dir.path().to_path_buf());
+    let serving = tokio::spawn(async move {
+        let exit = serve_with_backend(
+            serving_layout,
+            Duration::from_secs(60),
+            stop_rx,
+            move || {
+                let mut backend = Backend::with_tools(
+                    backend_layout,
+                    Some(home),
+                    crate::turn::default_tool_executor(),
+                );
+                Arc::get_mut(&mut backend)
+                    .expect("unshared test backend")
+                    .metadata = super::super::metadata::MetadataRefresh::without_network();
+                let _ = ready_tx.send(());
+                backend
+            },
+        )
+        .await?;
+        let ServeExit {
+            drain,
+            failure,
+            instance,
+        } = exit;
+        let _ = entered_tx.send(());
+        bounded(resume).await.unwrap();
+        drop(instance);
+        match failure {
+            Some(error) => Err(error),
+            None => Ok(drain),
+        }
+    });
+    bounded(ready_rx).await.unwrap();
     let client = super::super::LocalClient::new(layout.clone());
     (dir, layout, client, entry, release, serving)
 }
+
 /// 另开文件描述做非阻塞 flock；同进程内的后台锁同样会冲突。
 fn owner_lock_free(layout: &crate::StateLayout) -> bool {
     use std::os::fd::AsRawFd;
@@ -1944,8 +2071,8 @@ fn owner_lock_free(layout: &crate::StateLayout) -> bool {
     unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
 }
 /// stop 回执之后后台停在退场窗口：stop 不能先返回，放行后返回时实例锁已释放、socket 已撤下。
-async fn stop_waits_for_departure(slot: GateSlot) {
-    let (_dir, layout, client, entry, release, serving) = serve_gated(slot).await;
+async fn stop_waits_for_departure(gated: GatedServe) {
+    let (_dir, layout, client, entry, release, serving) = gated;
     let stop = {
         let client = client.clone();
         tokio::spawn(async move { client.stop().await })
@@ -1959,20 +2086,22 @@ async fn stop_waits_for_departure(slot: GateSlot) {
     assert_eq!(status.owners, 0);
     assert!(owner_lock_free(&layout), "stop 返回时实例锁尚未释放");
     assert!(!layout.lattice_root().join("local/api.sock").exists());
-    bounded(serving).await.unwrap().unwrap();
+    assert_eq!(
+        bounded(serving).await.unwrap().unwrap(),
+        DrainOutcome::Completed
+    );
 }
 #[tokio::test]
 async fn stop_waits_while_listener_close_is_delayed() {
-    stop_waits_for_departure(|gates| &gates.listener_close).await;
+    stop_waits_for_departure(serve_gated(|gates| &gates.listener_close).await).await;
 }
 #[tokio::test]
 async fn stop_waits_while_lock_release_is_delayed() {
-    stop_waits_for_departure(|gates| &gates.lock_release).await;
+    stop_waits_for_departure(serve_holding_lock().await).await;
 }
 #[tokio::test]
 async fn stop_reports_timeout_when_lock_is_never_released() {
-    let (_dir, layout, client, entry, release, serving) =
-        serve_gated(|gates| &gates.lock_release).await;
+    let (_dir, layout, client, entry, release, serving) = serve_holding_lock().await;
     let started = std::time::Instant::now();
     let error = bounded(client.stop_within(Duration::from_millis(200)))
         .await
@@ -1980,11 +2109,15 @@ async fn stop_reports_timeout_when_lock_is_never_released() {
     assert_eq!(error.kind, LocalErrorKind::Stopping);
     assert!(error.message.contains("lattice daemon status"));
     assert!(started.elapsed() < Duration::from_secs(5));
-    // 超时报错时后台仍停在锁释放之前，说明报错不是因为锁恰好放开。
+    // 超时报错时测试宿主仍持有 ServeExit.instance，说明报错不是因为锁恰好放开。
     bounded(entry).await.unwrap();
+    assert!(!layout.lattice_root().join("local/api.sock").exists());
     assert!(!owner_lock_free(&layout));
     release.send(()).unwrap();
-    bounded(serving).await.unwrap().unwrap();
+    assert_eq!(
+        bounded(serving).await.unwrap().unwrap(),
+        DrainOutcome::Completed
+    );
     assert!(owner_lock_free(&layout));
 }
 #[tokio::test]
@@ -2028,4 +2161,435 @@ async fn symlinked_workspace_shares_canonical_project_binding() {
     );
     assert_eq!(provider.finish().await.len(), 2);
     finish(&backend, task).await;
+}
+
+#[tokio::test]
+async fn stop_request_queued_before_serve_drains_immediately_and_removes_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(dir.path());
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    stop_tx.send(()).await.expect("预先向停机通道写入请求");
+
+    let exit = bounded(super::serve_for_test(
+        layout.clone(),
+        Some(dir.path().into()),
+        Duration::from_secs(60),
+        stop_rx,
+    ))
+    .await
+    .expect("就绪前收到停机请求的 serve 应正常返回");
+
+    assert_eq!(
+        exit.drain,
+        DrainOutcome::Completed,
+        "无在途工作时应排空完成"
+    );
+    assert!(
+        exit.failure.is_none(),
+        "不应产生运行期失败: {:?}",
+        exit.failure
+    );
+    assert!(
+        !layout.lattice_root().join("local/api.sock").exists(),
+        "serve 返回前 socket 应已撤下"
+    );
+    assert!(
+        !owner_lock_free(&layout),
+        "宿主释放 ServeExit.instance 前实例锁仍应持有"
+    );
+    drop(exit.instance);
+    assert!(owner_lock_free(&layout), "释放实例持有对象后锁应可取得");
+}
+
+#[tokio::test]
+async fn drain_timeout_disables_writes_before_inflight_turn_can_record_terminal_outcome() {
+    let (configured, _) = serve_configured(Duration::from_millis(300), None, None).await;
+    let ConfiguredServe {
+        dir,
+        layout,
+        backend,
+        client,
+        stop,
+        serving,
+    } = configured;
+    let mut provider = Provider::start().await;
+    provider.release.send_replace(false);
+    config(dir.path(), &provider.endpoint);
+
+    let input = create_request(&client, dir.path()).await;
+    client.submit(input.clone()).await.expect("提交在途轮次");
+    bounded(&mut provider.arrived).await.unwrap();
+
+    stop.send(()).await.expect("发送停机请求触发排空超时");
+    let outcome = bounded(serving).await.unwrap().expect("serve 收尾完成");
+    assert_eq!(outcome, DrainOutcome::TimedOut, "超过 300ms 应返回排空超时");
+    assert_eq!(
+        backend.status().owners,
+        1,
+        "放行模型前在途轮次的 Owner 仍应存活"
+    );
+
+    provider.release.send_replace(true);
+    assert_eq!(provider.finish().await.len(), 1);
+    idle(&backend).await;
+    assert_eq!(backend.status().owners, 0, "在途轮次的 Owner 应实际退休");
+
+    drop(backend);
+    let reopened =
+        lattice_session::store::SessionStore::open(&layout).expect("释放全部库句柄后重开会话库");
+    let read = reopened.begin_read().expect("开启只读事务");
+    let log = read.log(input.session).expect("读取会话日志");
+    assert_eq!(
+        log.unclosed_turn,
+        Some(input.turn_id),
+        "停写后实际退休的轮次在库中仍应保持未关闭"
+    );
+    let detail = read
+        .turn_detail(input.session, input.turn_id)
+        .expect("读取轮次详情");
+    assert!(
+        !detail.summary.progress.is_closed(),
+        "停写后模型完成的轮次不应写入持久结局"
+    );
+}
+
+#[tokio::test]
+async fn ipc_stop_replies_after_drain_timeout_and_before_metadata_tail() {
+    let (configured, armed) = serve_configured(
+        Duration::from_millis(300),
+        None,
+        Some(|gates| &gates.metadata_drain),
+    )
+    .await;
+    let (meta_entered, meta_release) = armed.expect("armed metadata_drain gate");
+    let ConfiguredServe {
+        dir,
+        layout,
+        backend,
+        client,
+        serving,
+        ..
+    } = configured;
+
+    let mut provider = Provider::start().await;
+    provider.release.send_replace(false);
+    config(dir.path(), &provider.endpoint);
+    let input = create_request(&client, dir.path()).await;
+    client.submit(input).await.expect("提交阻塞轮次");
+    bounded(&mut provider.arrived).await.unwrap();
+
+    let (status, departure) = bounded(client.request_stop())
+        .await
+        .expect("排空超时后、元数据收尾完成前 IPC stop 回执应到达");
+    bounded(meta_entered)
+        .await
+        .expect("后台应进入元数据收尾尾段并停在门控处");
+    assert!(status.stopping, "stop 回执应带 stopping=true");
+    assert!(
+        status.unconfirmed_operations >= 1,
+        "排空超时后 stop 回执的 unconfirmed_operations 应不小于 1"
+    );
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert!(
+        !serving.is_finished() && !owner_lock_free(&layout),
+        "元数据收尾门控未放行时 serve 不应已退出，证明回执先于元数据收尾到达"
+    );
+
+    let second_status = backend
+        .dispatch(Request::Stop)
+        .await
+        .expect("重复 stop 请求");
+    assert!(
+        matches!(second_status, Response::Status(ref s) if s == &status),
+        "第 2 步结束后重复的 stop 应共用同一份 DaemonStatus"
+    );
+
+    meta_release.send(()).unwrap();
+    bounded(departure.wait(Duration::from_secs(5)))
+        .await
+        .expect("放行元数据门控后实例锁应释放");
+    assert_eq!(
+        bounded(serving).await.unwrap().unwrap(),
+        DrainOutcome::TimedOut
+    );
+
+    provider.release.send_replace(true);
+    let _ = provider.finish().await;
+    idle(&backend).await;
+}
+
+#[tokio::test(start_paused = true)]
+async fn tail_deadlines_bound_idle_connection_and_hung_metadata_at_five_seconds() {
+    // 1. 不发请求的空闲连接占着 socket：同步到连接收尾尾段起点后，虚拟时间 5 秒起、10 秒读帧超时前返回。
+    {
+        let (configured, armed) = serve_configured(
+            Duration::from_secs(60),
+            None,
+            Some(|gates| &gates.listener_close),
+        )
+        .await;
+        let (close_entered, close_release) = armed.expect("armed listener_close gate");
+        while configured.client.status().await.is_err() {
+            tokio::task::yield_now().await;
+        }
+        let _idle_stream = ipc::connect(configured.layout.clone())
+            .await
+            .expect("建立不发请求的连接");
+        configured
+            .client
+            .status()
+            .await
+            .expect("确认空闲连接已被 accept 循环接纳");
+
+        configured.stop.send(()).await.unwrap();
+        close_entered.await.expect("同步到连接收尾尾段起点");
+        let started = tokio::time::Instant::now();
+        close_release.send(()).unwrap();
+
+        tokio::time::advance(Duration::from_millis(4_900)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !configured.serving.is_finished(),
+            "连接尾段 5 秒期限未到前 serve 不应提前中止空闲连接"
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), configured.serving)
+            .await
+            .expect("连接收尾应在 5 秒期限到达后立即返回，不等待 10 秒读帧超时")
+            .unwrap()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
+            "连接尾段耗时应在 [5s, 10s) 区间内，实际为 {elapsed:?}"
+        );
+        assert_eq!(outcome, DrainOutcome::Completed);
+        assert!(
+            !configured
+                .layout
+                .lattice_root()
+                .join("local/api.sock")
+                .exists()
+        );
+    }
+
+    // 2. 元数据收尾 gate 永不放行：同步到元数据尾段起点后，虚拟时间 5 秒起继续收尾并返回。
+    {
+        let (configured, armed) = serve_configured(
+            Duration::from_secs(60),
+            None,
+            Some(|gates| &gates.metadata_drain),
+        )
+        .await;
+        let (meta_entered, _never_release) = armed.expect("armed metadata_drain gate");
+
+        configured.stop.send(()).await.unwrap();
+        meta_entered.await.expect("同步到元数据收尾尾段起点");
+        let started = tokio::time::Instant::now();
+
+        tokio::time::advance(Duration::from_millis(4_900)).await;
+        tokio::task::yield_now().await;
+        assert!(
+            !configured.serving.is_finished(),
+            "元数据尾段 5 秒期限未到前 serve 应继续等待"
+        );
+
+        let outcome = tokio::time::timeout(Duration::from_secs(2), configured.serving)
+            .await
+            .expect("元数据收尾应在虚拟时间 5 秒起不再等待")
+            .unwrap()
+            .unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
+            "元数据尾段耗时应在 [5s, 10s) 区间内，实际为 {elapsed:?}"
+        );
+        assert_eq!(outcome, DrainOutcome::Completed, "尾段到期本身不算排空超时");
+        assert!(
+            !configured
+                .layout
+                .lattice_root()
+                .join("local/api.sock")
+                .exists()
+        );
+    }
+}
+
+#[tokio::test]
+async fn drain_timeout_counts_each_active_operation_once_across_error_retirement() {
+    // 1. 普通 Owner：排空超时计入 1 次，之后以 WriteDisabled 退休不再重复计数。
+    {
+        let (configured, _) = serve_configured(Duration::from_millis(100), None, None).await;
+        let mut provider = Provider::start().await;
+        provider.release.send_replace(false);
+        config(configured.dir.path(), &provider.endpoint);
+        let input = create_request(&configured.client, configured.dir.path()).await;
+        configured.client.submit(input).await.unwrap();
+        bounded(&mut provider.arrived).await.unwrap();
+
+        configured.stop.send(()).await.unwrap();
+        assert_eq!(
+            bounded(configured.serving).await.unwrap().unwrap(),
+            DrainOutcome::TimedOut
+        );
+        assert_eq!(configured.backend.status().unconfirmed_operations, 1);
+
+        provider.release.send_replace(true);
+        let _ = provider.finish().await;
+        idle(&configured.backend).await;
+        assert_eq!(
+            configured.backend.status().unconfirmed_operations,
+            1,
+            "普通 Owner 在排空超时后以错误退休时不能重复计数"
+        );
+    }
+
+    // 2. 草稿清理扫描阶段（cleanup_scanned gate）：计入 1 次，放行退出后仍为 1。
+    {
+        let (configured, _) = serve_configured(Duration::from_millis(100), None, None).await;
+        let provider = Provider::start().await;
+        config(configured.dir.path(), &provider.endpoint);
+        let workspace = crate::LocalWorkspaceRoot::from_path(configured.dir.path())
+            .unwrap()
+            .canonical_path()
+            .to_path_buf();
+        let expired = super::super::new_session_id();
+        super::configure_tests::seed_draft(
+            &configured.backend,
+            &workspace,
+            expired,
+            chrono::Utc::now() - chrono::Duration::hours(25),
+        )
+        .await;
+        let (scanned_in, scanned_out) = arm(&configured.backend.gates.cleanup_scanned);
+        configured
+            .client
+            .configure(configure_new(&workspace, super::super::new_session_id()))
+            .await
+            .unwrap();
+        bounded(scanned_in).await.unwrap();
+
+        configured.stop.send(()).await.unwrap();
+        assert_eq!(
+            bounded(configured.serving).await.unwrap().unwrap(),
+            DrainOutcome::TimedOut
+        );
+        assert_eq!(configured.backend.status().unconfirmed_operations, 1);
+
+        scanned_out.send(()).unwrap();
+        idle(&configured.backend).await;
+        assert_eq!(
+            configured.backend.status().unconfirmed_operations,
+            1,
+            "扫描阶段的草稿清理在超时后结束不能改变计数"
+        );
+        let _ = provider.finish().await;
+    }
+
+    // 3. 草稿清理候选 Owner 阶段（cleanup_claimed gate）：清理与候选 Owner 共计 1 次，WriteDisabled 退休后仍为 1。
+    {
+        let (configured, _) = serve_configured(Duration::from_millis(100), None, None).await;
+        let provider = Provider::start().await;
+        config(configured.dir.path(), &provider.endpoint);
+        let workspace = crate::LocalWorkspaceRoot::from_path(configured.dir.path())
+            .unwrap()
+            .canonical_path()
+            .to_path_buf();
+        let expired = super::super::new_session_id();
+        super::configure_tests::seed_draft(
+            &configured.backend,
+            &workspace,
+            expired,
+            chrono::Utc::now() - chrono::Duration::hours(25),
+        )
+        .await;
+        let (claimed_in, claimed_out) = arm(&configured.backend.gates.cleanup_claimed);
+        configured
+            .client
+            .configure(configure_new(&workspace, super::super::new_session_id()))
+            .await
+            .unwrap();
+        bounded(claimed_in).await.unwrap();
+        assert_eq!(configured.backend.status().owners, 1);
+        assert!(configured.backend.has_cleanups());
+
+        configured.stop.send(()).await.unwrap();
+        assert_eq!(
+            bounded(configured.serving).await.unwrap().unwrap(),
+            DrainOutcome::TimedOut
+        );
+        assert_eq!(
+            configured.backend.status().unconfirmed_operations,
+            1,
+            "草稿清理与它的候选 Owner 只能按一次操作计入"
+        );
+
+        claimed_out.send(()).unwrap();
+        idle(&configured.backend).await;
+        assert_eq!(
+            configured.backend.status().unconfirmed_operations,
+            1,
+            "候选 Owner 因停写报错退休后不能重复计数"
+        );
+        let _ = provider.finish().await;
+    }
+}
+
+#[tokio::test]
+async fn second_stop_signal_during_drain_triggers_immediate_drain_timeout() {
+    for start_via_ipc in [false, true] {
+        let (configured, _) = serve_configured(Duration::from_secs(60), None, None).await;
+        let mut provider = Provider::start().await;
+        provider.release.send_replace(false);
+        config(configured.dir.path(), &provider.endpoint);
+        let input = create_request(&configured.client, configured.dir.path()).await;
+        configured.client.submit(input).await.unwrap();
+        bounded(&mut provider.arrived).await.unwrap();
+
+        let ipc_stop = if start_via_ipc {
+            let client = configured.client.clone();
+            Some(tokio::spawn(async move { client.request_stop().await }))
+        } else {
+            configured.stop.send(()).await.unwrap();
+            None
+        };
+        bounded(async {
+            while !configured.backend.status().stopping {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+
+        // 排空期间重复的 IPC stop 不算信号，不能提前判为超时。
+        let dup_client = configured.client.clone();
+        let dup_ipc = tokio::spawn(async move { dup_client.request_stop().await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            !configured.serving.is_finished(),
+            "60 秒排空期内且未收到信号时后台不应提前超时"
+        );
+
+        let signal_sent = std::time::Instant::now();
+        configured.stop.send(()).await.unwrap();
+        let outcome = bounded(configured.serving).await.unwrap().unwrap();
+        assert_eq!(
+            outcome,
+            DrainOutcome::TimedOut,
+            "排空期间收到信号应立即按排空超时处理"
+        );
+        assert!(
+            signal_sent.elapsed() < Duration::from_secs(5),
+            "收到信号后不应继续等待 60 秒排空期限"
+        );
+        let (dup_status, _) = bounded(dup_ipc).await.unwrap().unwrap();
+        assert_eq!(dup_status.unconfirmed_operations, 1);
+        if let Some(ipc_stop) = ipc_stop {
+            let (first_status, _) = bounded(ipc_stop).await.unwrap().unwrap();
+            assert_eq!(first_status, dup_status);
+        }
+
+        provider.release.send_replace(true);
+        let _ = provider.finish().await;
+        idle(&configured.backend).await;
+    }
 }

@@ -26,7 +26,7 @@ status: active
 | --- | --- |
 | `run`、`session`、`tui`、`auth`、`models` | 连接当前状态根的后台；后台未运行时自动启动 |
 | `daemon status`、`daemon stop` | 只连接已有后台；后台未运行时报 `not_running` |
-| `daemon serve` | 在前台运行一个后台实例 |
+| `daemon serve` | 在前台运行一个后台实例；支持 `--drain-timeout <时长>`，可由 `SIGTERM`、`SIGINT` 或 IPC `stop` 停机 |
 
 ## 判读结果
 
@@ -34,9 +34,10 @@ status: active
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 命令成功。`run`、`session send` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；纯查询只表示读取成功，业务结局看 `TurnSummary` |
-| `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，以及下一行之外的后台错误（如 `Busy`、`Stopping`、`Transport`） |
-| `2` | 使用错误或取消：参数错误，后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
+| `0` | 命令成功。`run`、`session send` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；纯查询只表示读取成功，业务结局看 `TurnSummary`；`daemon serve` 表示在途工作排空完成且无运行错误 |
+| `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，`daemon status`、`daemon stop` 读到非零 `unconfirmed_operations`（`daemon stop` 另在标准错误提示有未确认收尾的操作），以及其余两行之外的后台与运行错误（如 `Busy`、`Stopping`、`Transport`） |
+| `2` | 使用错误或取消：参数错误（含无效的 `--drain-timeout`），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
+| `4` | `daemon serve` 排空超时，或排空期间收到 `SIGTERM`、`SIGINT`；在途操作停止写入，见[停止后台](../architecture/session/recovery.md#停止后台) |
 
 - `configure` 只发一次：结果不明时，CLI 输出 `configure` 的 `unknown` 记录与 `submit` 的 `not_accepted` 回执并退出 `1`（提交尚未发出），由用户重跑命令；TUI 显示警告，实际生效的设置以 `watch` 推送的会话头为准。规则见 [configure 的找回](../architecture/session/recovery.md#configure-的找回)。
 - `submit` 的接受结果不明时，按第一条 `submit` 记录中的 TurnId 查询（`session turn`）。查到即已接受；在途就稍后再查；NotFound 才重新发送，重新发送会生成新的 TurnId。规则见[请求身份与找回](../architecture/session/recovery.md#请求身份与找回)。

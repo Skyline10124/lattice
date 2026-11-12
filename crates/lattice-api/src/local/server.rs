@@ -28,6 +28,48 @@ mod configure_tests;
 #[path = "server_models_tests.rs"]
 mod models_tests;
 
+/// 后台第 2 步排空的结束方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// 全部活动操作在期限内自然退休。
+    Completed,
+    /// 到达排空期限，或排空期间再次收到停机信号。
+    TimedOut,
+}
+
+/// `serve` 收尾后的返回结果；实例锁由 `instance` 继续持有，不因运行期错误提前释放。
+#[derive(Debug)]
+pub struct ServeExit {
+    pub drain: DrainOutcome,
+    pub failure: Option<LocalError>,
+    pub instance: ipc::InstanceLock,
+}
+
+/// 单次操作的未确认收尾计数标记；仅在持有 `admission` 锁时经 `Admission::count_unconfirmed` 读写。
+#[derive(Default)]
+struct OperationRecord {
+    counted: AtomicBool,
+}
+
+#[derive(Default)]
+enum StopPhase {
+    #[default]
+    Running,
+    Draining {
+        deadline: tokio::time::Instant,
+    },
+    TimedOutDisablingWrites,
+    Finished {
+        status: DaemonStatus,
+    },
+}
+
+impl StopPhase {
+    fn is_stopping(&self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
 struct Owner {
     identity: Option<TurnRequest>,
     session: Option<SessionId>,
@@ -38,21 +80,43 @@ struct Owner {
     started: AtomicBool,
     core: Mutex<Option<oneshot::Receiver<crate::session::Result<crate::TurnCompletion>>>>,
     store: Mutex<Option<crate::SessionApi>>,
+    operation: Arc<OperationRecord>,
 }
 impl Owner {
     fn reply(&self, response: Response) {
         self.reply.send_replace(Some(response));
     }
 }
-#[derive(Default)]
 struct Admission {
-    stopping: bool,
+    drain_timeout: Duration,
+    stop: StopPhase,
     turns: HashMap<TurnId, Arc<Owner>>,
     sessions: HashMap<SessionId, Arc<Owner>>,
     owners: Vec<Arc<Owner>>,
-    cleanups: usize,
+    cleanups: Vec<Arc<OperationRecord>>,
     diagnostics: HashMap<TurnId, LocalError>,
     unconfirmed_operations: usize,
+}
+impl Default for Admission {
+    fn default() -> Self {
+        Self {
+            drain_timeout: Duration::from_secs(60),
+            stop: StopPhase::Running,
+            turns: HashMap::new(),
+            sessions: HashMap::new(),
+            owners: Vec::new(),
+            cleanups: Vec::new(),
+            diagnostics: HashMap::new(),
+            unconfirmed_operations: 0,
+        }
+    }
+}
+impl Admission {
+    fn count_unconfirmed(&mut self, operation: &OperationRecord) {
+        if !operation.counted.swap(true, Ordering::Relaxed) {
+            self.unconfirmed_operations += 1;
+        }
+    }
 }
 struct Backend {
     #[cfg(test)]
@@ -101,11 +165,14 @@ const DRAFT_TTL_HOURS: i64 = 24;
 const MAX_OWNERS: usize = 32;
 struct CleanupGuard {
     backend: Arc<Backend>,
+    operation: Arc<OperationRecord>,
 }
 impl Drop for CleanupGuard {
     fn drop(&mut self) {
         let mut state = lock(&self.backend.admission);
-        state.cleanups -= 1;
+        state
+            .cleanups
+            .retain(|record| !Arc::ptr_eq(record, &self.operation));
         self.backend.changed.send_modify(|v| *v += 1);
     }
 }
@@ -158,10 +225,41 @@ impl Backend {
     }
 
     fn begin_stop(&self) {
-        lock(&self.admission).stopping = true;
+        let mut state = lock(&self.admission);
+        if !matches!(state.stop, StopPhase::Running) {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let deadline = now
+            .checked_add(state.drain_timeout)
+            .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
+        state.stop = StopPhase::Draining { deadline };
         self.metadata.stop();
-        if let Ok(auth) = self.chatgpt_auth() {
-            auth.stop_logins();
+        if let Ok(gateway) = &self.gateway {
+            gateway.chatgpt_auth().stop_logins();
+        }
+        self.changed.send_modify(|v| *v += 1);
+    }
+
+    fn is_stopping(&self) -> bool {
+        lock(&self.admission).stop.is_stopping()
+    }
+
+    fn draining_deadline(&self) -> Option<tokio::time::Instant> {
+        match lock(&self.admission).stop {
+            StopPhase::Draining { deadline } => Some(deadline),
+            StopPhase::Running
+            | StopPhase::TimedOutDisablingWrites
+            | StopPhase::Finished { .. } => None,
+        }
+    }
+
+    fn stopped_status(&self) -> Option<DaemonStatus> {
+        match &lock(&self.admission).stop {
+            StopPhase::Finished { status } => Some(status.clone()),
+            StopPhase::Running
+            | StopPhase::Draining { .. }
+            | StopPhase::TimedOutDisablingWrites => None,
         }
     }
 
@@ -220,22 +318,25 @@ impl Backend {
             cache: self.observers.clone(),
         }
     }
-    fn status(&self) -> DaemonStatus {
-        let state = lock(&self.admission);
+    fn status_locked(&self, state: &Admission) -> DaemonStatus {
         DaemonStatus {
             epoch: self.epoch.clone(),
-            stopping: state.stopping,
+            stopping: state.stop.is_stopping(),
             owners: state.owners.len(),
             unconfirmed_operations: state.unconfirmed_operations,
         }
     }
+    fn status(&self) -> DaemonStatus {
+        let state = lock(&self.admission);
+        self.status_locked(&state)
+    }
     fn has_active_work(&self) -> bool {
         let state = lock(&self.admission);
-        !state.owners.is_empty() || state.cleanups != 0
+        !state.owners.is_empty() || !state.cleanups.is_empty()
     }
     #[cfg(test)]
     fn has_cleanups(&self) -> bool {
-        lock(&self.admission).cleanups != 0
+        !lock(&self.admission).cleanups.is_empty()
     }
     fn has_watchers(&self, session_id: SessionId) -> bool {
         let sink = lock(&self.observers)
@@ -245,23 +346,26 @@ impl Backend {
     }
     fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
         let mut state = lock(&self.admission);
-        if state.stopping {
+        if state.stop.is_stopping() {
             return None;
         }
-        state.cleanups += 1;
+        let operation = Arc::new(OperationRecord::default());
+        state.cleanups.push(operation.clone());
         Some(CleanupGuard {
             backend: self.clone(),
+            operation,
         })
     }
     fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
         let backend = self.clone();
         tokio::spawn(async move {
+            let operation = guard.operation.clone();
             let _guard = guard;
-            backend.cleanup_drafts().await;
+            backend.cleanup_drafts(operation).await;
         });
     }
-    async fn cleanup_drafts(self: &Arc<Self>) {
-        if lock(&self.admission).stopping {
+    async fn cleanup_drafts(self: &Arc<Self>, operation: Arc<OperationRecord>) {
+        if self.is_stopping() {
             return;
         }
         let api = match self.open().await {
@@ -295,7 +399,7 @@ impl Backend {
         for sid in candidates {
             let owner = {
                 let mut state = lock(&self.admission);
-                if state.stopping {
+                if state.stop.is_stopping() {
                     return;
                 }
                 if state.owners.len() >= MAX_OWNERS
@@ -314,6 +418,7 @@ impl Backend {
                     started: AtomicBool::new(false),
                     core: Mutex::new(None),
                     store: Mutex::new(Some(api.clone())),
+                    operation: operation.clone(),
                 });
                 state.sessions.insert(sid, owner.clone());
                 owner.observer.owner_changed();
@@ -362,7 +467,7 @@ impl Backend {
                     )
                     && (owner.started.load(Ordering::Acquire) || error.recovery.is_some())
                 {
-                    state.unconfirmed_operations += 1;
+                    state.count_unconfirmed(&owner.operation);
                 }
                 if state
                     .sessions
@@ -388,14 +493,16 @@ impl Backend {
     async fn optional_store(&self) -> Result<Option<crate::SessionApi>> {
         let mut changed = self.stores.subscribe();
         loop {
+            changed.borrow_and_update();
             match self.open().await {
                 Ok(api) => return Ok(Some(api)),
                 Err(error) if uninitialized(&error) => return Ok(None),
                 Err(error)
-                    if error
-                        .recovery
-                        .as_ref()
-                        .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled) =>
+                    if !self.stores.is_stopped()
+                        && error
+                            .recovery
+                            .as_ref()
+                            .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled) =>
                 {
                     changed.changed().await.map_err(|_| internal())?;
                 }
@@ -425,7 +532,7 @@ impl Backend {
             if identity.is_none() && session.is_some_and(|sid| state.sessions.contains_key(&sid)) {
                 return Err(busy());
             }
-            if state.stopping {
+            if state.stop.is_stopping() {
                 return Err(LocalError::new(
                     LocalErrorKind::Stopping,
                     "backend is draining",
@@ -444,6 +551,7 @@ impl Backend {
                 started: AtomicBool::new(false),
                 core: Mutex::new(None),
                 store: Mutex::new(None),
+                operation: Arc::default(),
             });
             if let Some(request) = &owner.identity {
                 state.turns.insert(request.turn_id, owner.clone());
@@ -499,7 +607,7 @@ impl Backend {
                     // 只读准入检查失败时尚未写入会话库；已进入写入或带恢复需求的操作仍计入。
                     && (task_owner.started.load(Ordering::Acquire) || error.recovery.is_some())
                 {
-                    state.unconfirmed_operations += 1;
+                    state.count_unconfirmed(&task_owner.operation);
                     if let Some(request) = &task_owner.identity {
                         state.diagnostics.insert(request.turn_id, error.clone());
                     }
@@ -1045,14 +1153,13 @@ impl Backend {
             Request::Stop => {
                 let mut changed = self.changed.subscribe();
                 self.begin_stop();
-                self.metadata.drain().await;
-                while self.has_active_work() {
+                loop {
+                    changed.borrow_and_update();
+                    if let Some(status) = self.stopped_status() {
+                        return Ok(Response::Status(status));
+                    }
                     changed.changed().await.map_err(|_| internal())?;
                 }
-                if let Ok(auth) = self.chatgpt_auth() {
-                    auth.shutdown().await.map_err(super::auth::error)?;
-                }
-                Ok(Response::Status(self.status()))
             }
             Request::ResolveSession { prefix } => Ok(Response::Session(
                 self.open().await?.resolve_session(prefix).await?,
@@ -1430,12 +1537,17 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     }
     write_result
 }
-/// 实例锁唯一持有者；正常停止排空后台执行与读取，不创建领域库。
+/// 实例锁唯一持有者；按统一停机顺序执行有界排空、收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
-pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>) -> Result<()> {
+pub async fn serve(
+    layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
-    serve_with_backend(layout, move || {
+    serve_with_backend(layout, drain_timeout, stop_requests, move || {
         Backend::with_tools(backend_layout, home, tools)
     })
     .await
@@ -1446,10 +1558,12 @@ pub async fn serve(layout: crate::StateLayout, home: Option<std::path::PathBuf>)
 pub async fn serve_for_test(
     layout: crate::StateLayout,
     home: Option<std::path::PathBuf>,
-) -> Result<()> {
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
-    serve_with_backend(layout, move || {
+    serve_with_backend(layout, drain_timeout, stop_requests, move || {
         let mut backend = Backend::with_tools(backend_layout, home, tools);
         Arc::get_mut(&mut backend)
             .expect("unshared test backend")
@@ -1459,59 +1573,208 @@ pub async fn serve_for_test(
     .await
 }
 
+async fn cleanup_socket_into_exit(
+    endpoint: ipc::SocketEndpoint,
+    drain: DrainOutcome,
+    mut failure: Option<LocalError>,
+    instance: ipc::InstanceLock,
+) -> ServeExit {
+    if let Err(error) = blocking(move || endpoint.cleanup()).await {
+        failure.get_or_insert(error);
+    }
+    ServeExit {
+        drain,
+        failure,
+        instance,
+    }
+}
+
 async fn serve_with_backend(
     layout: crate::StateLayout,
+    drain_timeout: Duration,
+    mut stop_requests: tokio::sync::mpsc::Receiver<()>,
     build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
-) -> Result<()> {
+) -> Result<ServeExit> {
     let binding_layout = layout.clone();
     let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
-    let listener = UnixListener::from_std(listener)?;
-    let backend = blocking(move || Ok(build_backend())).await?;
+    // 取得实例锁之后不再用 `?` 提前退出，确保任何后续错误仍由 ServeExit 携带锁返回调用方。
+    let (instance, endpoint) = instance.into_parts();
+    let listener = match UnixListener::from_std(listener) {
+        Ok(listener) => listener,
+        Err(error) => {
+            return Ok(cleanup_socket_into_exit(
+                endpoint,
+                DrainOutcome::Completed,
+                Some(error.into()),
+                instance,
+            )
+            .await);
+        }
+    };
+    let backend = match blocking(move || Ok(build_backend())).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            drop(listener);
+            return Ok(cleanup_socket_into_exit(
+                endpoint,
+                DrainOutcome::Completed,
+                Some(error),
+                instance,
+            )
+            .await);
+        }
+    };
+    {
+        let mut state = lock(&backend.admission);
+        if matches!(state.stop, StopPhase::Running) {
+            state.drain_timeout = drain_timeout;
+        }
+    }
+
     let metadata_task = backend.metadata.start();
     let mut connections = JoinSet::new();
     let mut failure = None;
-    loop {
-        if backend.status().stopping && !backend.has_active_work() {
-            break;
+    let mut accept_failed = false;
+    let mut force_timeout = false;
+    let mut stop_closed = false;
+    let mut changed = backend.changed.subscribe();
+
+    let drain = loop {
+        while !stop_closed {
+            match stop_requests.try_recv() {
+                Ok(()) => {
+                    if backend.is_stopping() {
+                        force_timeout = true;
+                    } else {
+                        backend.begin_stop();
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    stop_closed = true;
+                }
+            }
         }
+
+        changed.borrow_and_update();
+        if let Some(deadline) = backend.draining_deadline() {
+            if !backend.has_active_work() {
+                break DrainOutcome::Completed;
+            }
+            if force_timeout || tokio::time::Instant::now() >= deadline {
+                break DrainOutcome::TimedOut;
+            }
+        }
+
+        let drain_sleep = backend.draining_deadline().map(tokio::time::sleep_until);
+        tokio::pin!(drain_sleep);
+
         tokio::select! {
-            accepted = listener.accept() => match accepted {
-                Ok((stream, _)) if connections.len() < 64 => { connections.spawn(connection(backend.clone(), stream)); }
-                Ok(_) => {},
-                Err(error) => { failure = Some(error.into()); lock(&backend.admission).stopping = true; break; }
+            accepted = listener.accept(), if !accept_failed => match accepted {
+                Ok((stream, _)) if connections.len() < 64 => {
+                    connections.spawn(connection(backend.clone(), stream));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    failure.get_or_insert_with(|| error.into());
+                    accept_failed = true;
+                    backend.begin_stop();
+                }
             },
-            _ = connections.join_next(), if !connections.is_empty() => {},
-            _ = tokio::time::sleep(Duration::from_millis(25)) => {},
+            signal = stop_requests.recv(), if !stop_closed => match signal {
+                Some(()) => {
+                    if backend.is_stopping() {
+                        force_timeout = true;
+                    } else {
+                        backend.begin_stop();
+                    }
+                }
+                None => {
+                    stop_closed = true;
+                }
+            },
+            _ = async { drain_sleep.as_mut().as_pin_mut().expect("armed drain sleep").await }, if drain_sleep.is_some() => {}
+            _ = connections.join_next(), if !connections.is_empty() => {}
+            _ = changed.changed() => {}
+        }
+    };
+
+    match drain {
+        DrainOutcome::Completed => {
+            let mut state = lock(&backend.admission);
+            let status = backend.status_locked(&state);
+            state.stop = StopPhase::Finished { status };
+            backend.changed.send_modify(|v| *v += 1);
+        }
+        DrainOutcome::TimedOut => {
+            {
+                let mut state = lock(&backend.admission);
+                state.stop = StopPhase::TimedOutDisablingWrites;
+                let active_ops: Vec<Arc<OperationRecord>> = state
+                    .owners
+                    .iter()
+                    .map(|owner| owner.operation.clone())
+                    .chain(state.cleanups.iter().cloned())
+                    .collect();
+                for op in &active_ops {
+                    state.count_unconfirmed(op);
+                }
+            }
+            backend.stores.disable_writes().await;
+            {
+                let mut state = lock(&backend.admission);
+                let status = backend.status_locked(&state);
+                state.stop = StopPhase::Finished { status };
+                backend.changed.send_modify(|v| *v += 1);
+            }
         }
     }
-    let mut changed = backend.changed.subscribe();
-    backend.begin_stop();
-    if metadata_task.await.is_err() {
+
+    // 尾段 1：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
+    // 三项各自以同一期限包裹：到期只停止等待尚未结束的一项，已经返回的错误照常记录。
+    let tail_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let auth = backend.chatgpt_auth().ok();
+    let metadata = backend.metadata.clone();
+    #[cfg(test)]
+    let metadata_drain_backend = backend.clone();
+    let (meta_join, _, auth_res) = tokio::join!(
+        tokio::time::timeout_at(tail_deadline, metadata_task),
+        tokio::time::timeout_at(tail_deadline, async move {
+            metadata.drain().await;
+            #[cfg(test)]
+            tests::pause(&metadata_drain_backend.gates.metadata_drain).await;
+        }),
+        tokio::time::timeout_at(tail_deadline, async move {
+            match auth {
+                Some(auth) => auth.shutdown().await,
+                None => Ok(()),
+            }
+        }),
+    );
+    if let Ok(Err(_)) = meta_join {
         failure.get_or_insert_with(internal);
     }
-    backend.metadata.drain().await;
-    while backend.has_active_work() {
-        changed.changed().await.map_err(|_| internal())?;
-    }
-    if let Ok(auth) = backend.chatgpt_auth()
-        && let Err(error) = auth.shutdown().await
-    {
+    if let Ok(Err(error)) = auth_res {
         failure.get_or_insert_with(|| super::auth::error(error));
     }
-    backend.closed.send_replace(true);
+
+    // 尾段 2：关闭推送与监听套接字，等待连接任务至多 5 秒；到期 abort 后不再等待。
     #[cfg(test)]
     tests::pause(&backend.gates.listener_close).await;
+    backend.closed.send_replace(true);
     drop(listener);
-    while connections.join_next().await.is_some() {}
-    #[cfg(test)]
-    let lock_release = Mutex::new(lock(&backend.gates.lock_release).take());
+    if tokio::time::timeout(Duration::from_secs(5), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        connections.abort_all();
+    }
+    drop(connections);
     drop(backend);
-    // socket 先撤下，实例锁随 instance 最后释放；stop 方以实例锁可取得判定退场。
-    let instance = blocking(move || instance.cleanup().map(|()| instance)).await?;
-    #[cfg(test)]
-    tests::pause(&lock_release).await;
-    drop(instance);
-    failure.map_or(Ok(()), Err)
+
+    Ok(cleanup_socket_into_exit(endpoint, drain, failure, instance).await)
 }
 
 /// 告警和单模型配置诊断跨过后台边界前都要遮掉已知凭据。

@@ -164,7 +164,20 @@ async fn lookup_and_watch_an_orphan_without_changing_its_facts() {
     let project = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(state.path());
     seed(&layout, project.path());
-    let serving = tokio::spawn(serve_for_test(layout.clone(), Some(state.path().into())));
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    let serving_layout = layout.clone();
+    let serving_home = Some(state.path().into());
+    let serving = tokio::spawn(async move {
+        let exit = serve_for_test(
+            serving_layout,
+            serving_home,
+            Duration::from_secs(60),
+            stop_rx,
+        )
+        .await?;
+        drop(exit.instance);
+        exit.failure.map_or(Ok(()), Err)
+    });
     let client = LocalClient::new(layout);
     ready(&client).await;
     let lookup = client.turn(turn_id()).await;

@@ -679,6 +679,10 @@ pub fn report_error(error: &anyhow::Error, json: bool) -> std::process::ExitCode
     }
     std::process::ExitCode::from(code)
 }
+pub fn report_daemon_failure(error: &LocalError) {
+    let (_, value) = error_record(&anyhow::Error::new(error.clone()));
+    let _ = render_human_error(&value, &mut std::io::stderr());
+}
 #[cfg(test)]
 fn submission_error(error: LocalError) -> anyhow::Error {
     anyhow::Error::new(error).context("Turn submission")

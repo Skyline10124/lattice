@@ -168,14 +168,7 @@ impl ScenarioDaemon {
                 Err(error) if crate::driver::process_exited(&error) => continue,
                 Err(error) => return Err(error),
             };
-            let fields: Vec<_> = args
-                .split(|byte| *byte == 0)
-                .filter(|part| !part.is_empty())
-                .collect();
-            if fields.len() == 5
-                && fields[1..4] == [b"daemon".as_slice(), b"serve", b"--state-root"]
-                && fields[4] == self.state_root.as_os_str().as_bytes()
-            {
+            if matches_daemon_cmdline(&args, self.state_root.as_os_str().as_bytes()) {
                 let members =
                     inspect(pid).map_err(|error| std::io::Error::new(error.kind, error.message))?;
                 let mut captured = capture_members(pid, &members)?;
@@ -460,6 +453,46 @@ impl ScenarioDaemon {
         }
         Ok(None)
     }
+}
+
+/// 识别 `/proc/<pid>/cmdline` 是否为归属当前场景状态根的 `daemon serve` 进程。
+/// 只去掉末尾的空段，不过滤中间的空参数。
+fn matches_daemon_cmdline(cmdline: &[u8], expected_state_root: &[u8]) -> bool {
+    if cmdline.is_empty() {
+        return false;
+    }
+    let mut fields: Vec<&[u8]> = cmdline.split(|byte| *byte == 0).collect();
+    if fields.last().is_some_and(|part| part.is_empty()) {
+        fields.pop();
+    }
+    if fields.len() < 3 || fields[0].is_empty() || fields[1] != b"daemon" || fields[2] != b"serve" {
+        return false;
+    }
+    let mut rest = &fields[3..];
+    let mut saw_state_root = false;
+    let mut saw_drain_timeout = false;
+    while !rest.is_empty() {
+        let [flag, value, tail @ ..] = rest else {
+            return false;
+        };
+        match *flag {
+            b"--state-root" => {
+                if saw_state_root || *value != expected_state_root {
+                    return false;
+                }
+                saw_state_root = true;
+            }
+            b"--drain-timeout" => {
+                if saw_drain_timeout {
+                    return false;
+                }
+                saw_drain_timeout = true;
+            }
+            _ => return false,
+        }
+        rest = tail;
+    }
+    saw_state_root
 }
 
 /// 以非阻塞 flock 试探存储布局公开的实例锁并立即放开；锁文件不存在视为已释放。
@@ -900,5 +933,163 @@ mod tests {
             started.elapsed()
         );
         assert!(wait_group_empty(pgid).is_empty());
+    }
+
+    #[test]
+    fn daemon_cmdline_matches_drain_timeout_in_either_order_and_rejects_malformed_argv() {
+        fn nul_cmdline(parts: &[&[u8]]) -> Vec<u8> {
+            let mut out = Vec::new();
+            for part in parts {
+                out.extend_from_slice(part);
+                out.push(0);
+            }
+            out
+        }
+
+        let root = b"/tmp/scenario-state-root";
+        for accepted in [
+            nul_cmdline(&[b"/bin/lattice", b"daemon", b"serve", b"--state-root", root]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"--drain-timeout",
+                b"300ms",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--drain-timeout",
+                b"not-validated-here",
+                b"--state-root",
+                root,
+            ]),
+        ] {
+            assert!(
+                super::matches_daemon_cmdline(&accepted, root),
+                "应识别合法后台 cmdline: {accepted:?}"
+            );
+        }
+
+        for rejected in [
+            Vec::new(),
+            nul_cmdline(&[b"/bin/lattice", b"daemon", b"serve"]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--drain-timeout",
+                b"60s",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                b"/tmp/other-root",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"--verbose",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"--unknown",
+                b"1",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"--state-root",
+                root,
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"--drain-timeout",
+                b"1s",
+                b"--drain-timeout",
+                b"2s",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"--drain-timeout",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--drain-timeout",
+                b"1s",
+                b"--state-root",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"extra-positional",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"extra-a",
+                b"extra-b",
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"",
+                b"--state-root",
+                root,
+            ]),
+            nul_cmdline(&[
+                b"/bin/lattice",
+                b"daemon",
+                b"serve",
+                b"--state-root",
+                root,
+                b"",
+            ]),
+        ] {
+            assert!(
+                !super::matches_daemon_cmdline(&rejected, root),
+                "不应识别异常 cmdline: {rejected:?}"
+            );
+        }
     }
 }

@@ -258,3 +258,37 @@ fn fast_unknown_command_rejected() {
         panic!("unknown command exits 2 with 'unrecognized subcommand'\n{report}")
     });
 }
+
+#[test]
+fn fast_daemon_serve_invalid_drain_timeout_exits_two() {
+    let spec = ScenarioSpec::fast("lattice-harness-invalid-drain-timeout");
+    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let output = driver()
+        .run(
+            &world,
+            &LatticeCommand {
+                args: vec![
+                    "daemon".into(),
+                    "serve".into(),
+                    "--drain-timeout".into(),
+                    "1h".into(),
+                ],
+                timeout: Some(spec.step_timeout()),
+            },
+        )
+        .expect("run invalid drain-timeout");
+
+    let result = assert_exit_code(&output, 2)
+        .and_then(|_| assert_stderr_contains(&output, "invalid value '1h'"));
+    finalize_with_failure_artifacts(
+        &world,
+        &spec.name,
+        "lattice daemon serve --drain-timeout 1h",
+        &output,
+        &[],
+        result,
+    )
+    .unwrap_or_else(|report| {
+        panic!("invalid --drain-timeout 应以退出码 2 报告参数值校验错误\n{report}")
+    });
+}

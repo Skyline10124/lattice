@@ -9,14 +9,23 @@ use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
 const KEY: &str = "auth-ipc-test-secret-9E82";
 
+fn spawn_test_server(
+    layout: crate::StateLayout,
+    home: Option<std::path::PathBuf>,
+) -> tokio::task::JoinHandle<local::Result<()>> {
+    let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
+    tokio::spawn(async move {
+        let exit = local::serve_for_test(layout, home, Duration::from_secs(60), stop_rx).await?;
+        drop(exit.instance);
+        exit.failure.map_or(Ok(()), Err)
+    })
+}
+
 #[tokio::test]
 async fn stop_cancels_browser_login_and_releases_the_backend_instance() {
     let directory = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(directory.path());
-    let server = tokio::spawn(local::serve_for_test(
-        layout.clone(),
-        Some(directory.path().into()),
-    ));
+    let server = spawn_test_server(layout.clone(), Some(directory.path().into()));
     let client = LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.status().await.is_err() {
@@ -51,10 +60,7 @@ async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     let directory = tempfile::tempdir().unwrap();
     let layout = crate::StateLayout::in_state_root(directory.path());
     let config = directory.path().join(".lattice");
-    let server = tokio::spawn(local::serve_for_test(
-        layout.clone(),
-        Some(directory.path().into()),
-    ));
+    let server = spawn_test_server(layout.clone(), Some(directory.path().into()));
     let client = LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(5), async {
         while client.status().await.is_err() {
@@ -229,7 +235,7 @@ async fn invalid_home_only_rejects_operations_that_need_configuration() {
     ] {
         let directory = tempfile::tempdir().unwrap();
         let layout = crate::StateLayout::in_state_root(directory.path());
-        let server = tokio::spawn(local::serve_for_test(layout.clone(), home));
+        let server = spawn_test_server(layout.clone(), home);
         let client = LocalClient::new(layout);
         tokio::time::timeout(Duration::from_secs(5), async {
             while client.status().await.is_err() {

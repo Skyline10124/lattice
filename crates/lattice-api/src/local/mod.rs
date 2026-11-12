@@ -21,9 +21,10 @@ pub use operation::LocalTurn;
 pub fn new_session_id() -> SessionId {
     SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).expect("generated SessionId")
 }
-pub use server::serve;
+pub use ipc::InstanceLock;
 #[cfg(any(test, feature = "test-utils"))]
 pub use server::serve_for_test;
+pub use server::{DrainOutcome, ServeExit, serve};
 /// 身份在发送之前分配，与输入文本无关；调用者负责保存并显示它。
 pub fn new_turn_id() -> TurnId {
     TurnId::parse(&uuid::Uuid::new_v4().to_string()).expect("generated canonical UUID")

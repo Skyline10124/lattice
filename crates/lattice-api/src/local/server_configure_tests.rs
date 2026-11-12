@@ -478,7 +478,7 @@ async fn submit_with_empty_settings_model_returns_configuration_rejection() {
     finish(&backend, task).await;
 }
 
-async fn seed_draft(
+pub(super) async fn seed_draft(
     backend: &Backend,
     workspace: &std::path::Path,
     sid: SessionId,

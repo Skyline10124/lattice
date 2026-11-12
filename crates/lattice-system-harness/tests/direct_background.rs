@@ -3049,3 +3049,389 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
     }));
     support::finish_recorded(evidence, result);
 }
+
+fn spawn_explicit_daemon(
+    world: &ScenarioWorld,
+    budget: &ScenarioBudget,
+    evidence: &mut ScenarioEvidence,
+    drain_timeout: Option<&str>,
+) -> RunningCommand {
+    let root = world
+        .session_store_dir()
+        .parent()
+        .unwrap()
+        .display()
+        .to_string();
+    let mut args = vec!["daemon", "serve", "--state-root", &root];
+    if let Some(limit) = drain_timeout {
+        args.extend(["--drain-timeout", limit]);
+    }
+    let daemon = command(world, budget, &args);
+    let deadline = Instant::now() + wait(budget);
+    while !run(world, budget, evidence, &["--json", "daemon", "status"]).is_clean_exit(0) {
+        assert!(Instant::now() < deadline, "显式启动的后台未在预算内就绪");
+        std::thread::yield_now();
+    }
+    assert_eq!(
+        world.daemon_pids().unwrap(),
+        vec![daemon.pgid()],
+        "后台归属识别应命中显式启动的进程组"
+    );
+    daemon
+}
+
+fn poll_daemon_status(
+    world: &ScenarioWorld,
+    budget: &ScenarioBudget,
+    evidence: &mut ScenarioEvidence,
+    predicate: impl Fn(&Value) -> bool,
+    message: &str,
+) -> Value {
+    let deadline = Instant::now() + wait(budget);
+    loop {
+        let out = run(world, budget, evidence, &["--json", "daemon", "status"]);
+        if out.is_clean_exit(0) {
+            let status: Value = serde_json::from_slice(&out.stdout).unwrap();
+            if predicate(&status) {
+                return status;
+            }
+        }
+        assert!(Instant::now() < deadline, "{message}");
+        std::thread::yield_now();
+    }
+}
+
+#[test]
+fn sigterm_drains_inflight_turn_and_exits_zero() {
+    let (world, spec) = direct_world("background-sigterm-drain", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (server, gate) =
+            wire_gated_fake_llm(&world, "background", SseScript::plain("drained reply"));
+        world.stop_daemon().unwrap();
+        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, None);
+        let front = command(
+            &world,
+            &budget,
+            &["--json", "run", "drain me", "--agent", "background"],
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        poll_daemon_status(
+            &world,
+            &budget,
+            &mut evidence,
+            |status| status["owners"] == 1,
+            "后台 owners 未变为 1",
+        );
+        let (sid, tid) = running_turns(&world, &budget, &mut evidence)[0].clone();
+
+        daemon.terminate().unwrap();
+        poll_daemon_status(
+            &world,
+            &budget,
+            &mut evidence,
+            |status| status["stopping"] == true,
+            "收到 SIGTERM 后后台未进入 stopping",
+        );
+        assert!(
+            !daemon.has_exited().unwrap(),
+            "排空期间在途轮次尚未收尾，后台不应提前退出"
+        );
+
+        gate.release(wait(&budget)).unwrap();
+        let front_done = front.wait(None).unwrap();
+        evidence.record_command("frontend during sigterm drain", &front_done);
+        let exited = daemon.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("daemon serve sigterm drain exit", &exited);
+        assert_eq!(
+            exited.exit_code(),
+            Some(0),
+            "正常排空完成后台应以 0 退出：{}",
+            exited.summary()
+        );
+        assert_eq!(
+            exited.interventions,
+            vec![lattice_system_harness::HarnessIntervention::TerminateRequested]
+        );
+        assert!(
+            !exited.cleanup.forced && exited.cleanup.succeeded(),
+            "{:?}",
+            exited.cleanup
+        );
+        world.daemon_departed().unwrap();
+
+        let completed = detail(&world, &budget, &mut evidence, &tid);
+        assert_eq!(
+            completed["summary"]["outcome"], "completed",
+            "排空完成后该轮持久结局应为 completed：{completed}"
+        );
+        archive_state(&world, &budget, &mut evidence, &[&tid]);
+        evidence
+            .record_json("parameters", &json!({"session": sid, "turn": tid}))
+            .unwrap();
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn sigint_right_after_ready_exits_zero_and_releases_resources() {
+    let (world, spec) = direct_world("background-sigint-ready", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (_server, _gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("idle"));
+        world.stop_daemon().unwrap();
+        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, None);
+        daemon.interrupt().unwrap();
+        let exited = daemon.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("daemon serve sigint exit", &exited);
+        assert_eq!(
+            exited.exit_code(),
+            Some(0),
+            "无在途工作时 SIGINT 停机应以 0 退出：{}",
+            exited.summary()
+        );
+        assert_eq!(
+            exited.interventions,
+            vec![lattice_system_harness::HarnessIntervention::InterruptRequested]
+        );
+        assert!(
+            !exited.cleanup.forced && exited.cleanup.succeeded(),
+            "{:?}",
+            exited.cleanup
+        );
+        world.daemon_departed().unwrap();
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn() {
+    let (world, spec) = direct_world("background-sigterm-drain-timeout", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("next"));
+        world.stop_daemon().unwrap();
+        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, Some("300ms"));
+        let front = command(
+            &world,
+            &budget,
+            &[
+                "--json",
+                "run",
+                "vanish on drain timeout",
+                "--agent",
+                "background",
+            ],
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+        let (sid, tid) = running_turns(&world, &budget, &mut evidence)[0].clone();
+
+        let stop_started = Instant::now();
+        daemon.terminate().unwrap();
+        let exited = daemon.wait(Some(Duration::from_millis(20_300))).unwrap();
+        let stop_elapsed = stop_started.elapsed();
+        evidence.record_command("daemon serve drain timeout exit", &exited);
+        assert!(
+            stop_elapsed <= Duration::from_millis(20_300),
+            "排空超时停机应在 20.3s 内退出，实际耗时 {:?}",
+            stop_elapsed
+        );
+        assert_eq!(
+            exited.exit_code(),
+            Some(4),
+            "排空超时后台应以 4 退出：{}",
+            exited.summary()
+        );
+        assert_eq!(
+            exited.interventions,
+            vec![lattice_system_harness::HarnessIntervention::TerminateRequested]
+        );
+        assert!(
+            !exited.cleanup.forced && exited.cleanup.succeeded(),
+            "{:?}",
+            exited.cleanup
+        );
+        world.daemon_departed().unwrap();
+
+        let lost = front.wait(None).unwrap();
+        evidence.record_command("frontend loses backend after drain timeout", &lost);
+        assert!(lost.is_clean_exit(1), "{}", lost.summary());
+
+        let stopped = detail(&world, &budget, &mut evidence, &tid);
+        assert_ne!(stopped["summary"]["progress"]["progress"], "closed");
+        let mut watcher = Watcher::open(&world, wait(&budget), &sid);
+        let head = watcher.initial().head.clone().unwrap();
+        assert_eq!(head.turn_id.as_deref(), Some(tid.as_str()));
+        assert!(!head.owner, "重启后台后会话头 owner 应为 false：{head:?}");
+        let followed = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "session", "turn", &tid, "--follow"],
+        );
+        assert!(followed.is_clean_exit(1), "{}", followed.summary());
+        let followed = records(&followed);
+        assert_eq!(
+            followed.closed_result(),
+            Some((sid.as_str(), tid.as_str(), "failed"))
+        );
+        let last = followed.entries().into_iter().last().unwrap();
+        assert_eq!(last.step().unwrap().progress, StepProgress::Requesting);
+
+        gate.release(wait(&budget)).unwrap();
+        let next = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "run", "after drain timeout", "--session", &sid],
+        );
+        assert!(next.is_clean_exit(0), "{}", next.summary());
+        assert_eq!(detail(&world, &budget, &mut evidence, &tid), stopped);
+        assert_eq!(server.captured_requests().len(), 2);
+        archive_state(&world, &budget, &mut evidence, &[&tid]);
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn ipc_daemon_stop_drain_timeout_reports_unconfirmed_and_daemon_exits_four() {
+    let (world, spec) = direct_world("background-ipc-stop-timeout", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("stalled"));
+        world.stop_daemon().unwrap();
+        let daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, Some("300ms"));
+        let front = command(
+            &world,
+            &budget,
+            &["--json", "run", "ipc stop stall", "--agent", "background"],
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+
+        let stop_started = Instant::now();
+        let stopped = driver()
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: vec!["--json".into(), "daemon".into(), "stop".into()],
+                    timeout: Some(Duration::from_millis(20_300)),
+                },
+            )
+            .unwrap();
+        let stop_elapsed = stop_started.elapsed();
+        evidence.record_command("--json daemon stop timeout", &stopped);
+        assert!(
+            stop_elapsed <= Duration::from_millis(20_300),
+            "daemon stop 应在 20.3s 内返回，实际耗时 {:?}",
+            stop_elapsed
+        );
+        world.daemon_departed().unwrap();
+        assert!(
+            stopped.is_clean_exit(1),
+            "排空超时时 daemon stop 应以 1 退出：{}",
+            stopped.summary()
+        );
+        let status: Value = serde_json::from_slice(&stopped.stdout).unwrap();
+        assert!(
+            status["unconfirmed_operations"].as_u64().unwrap_or(0) >= 1,
+            "unconfirmed_operations 应不小于 1：{status}"
+        );
+        let stderr = String::from_utf8_lossy(&stopped.stderr);
+        assert!(
+            stderr.contains("没有确认收尾") && stderr.contains("执行者消失"),
+            "daemon stop 标准错误应含提示，实际：{stderr:?}"
+        );
+
+        let daemon_out = daemon.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("daemon serve exit after ipc stop timeout", &daemon_out);
+        assert!(
+            daemon_out.is_clean_exit(4),
+            "后台应以 4 退出：{}",
+            daemon_out.summary()
+        );
+        let lost = front.wait(None).unwrap();
+        evidence.record_command("frontend after ipc stop timeout", &lost);
+        assert!(lost.is_clean_exit(1), "{}", lost.summary());
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn second_sigterm_during_drain_triggers_immediate_timeout_exit_four() {
+    let (world, spec) = direct_world("background-second-sigterm", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("stalled"));
+        world.stop_daemon().unwrap();
+        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, Some("60s"));
+        let front = command(
+            &world,
+            &budget,
+            &[
+                "--json",
+                "run",
+                "second signal stall",
+                "--agent",
+                "background",
+            ],
+        );
+        gate.wait_until_stalled(1, wait(&budget)).unwrap();
+
+        daemon.terminate().unwrap();
+        poll_daemon_status(
+            &world,
+            &budget,
+            &mut evidence,
+            |status| status["stopping"] == true,
+            "第一次 SIGTERM 后后台未进入 stopping",
+        );
+        assert!(
+            !daemon.has_exited().unwrap(),
+            "60s 排空期内后台在第二次信号前不应退出"
+        );
+
+        let second_started = Instant::now();
+        daemon.terminate().unwrap();
+        let daemon_out = daemon.wait(Some(Duration::from_secs(20))).unwrap();
+        let elapsed = second_started.elapsed();
+        evidence.record_command("daemon serve after second sigterm", &daemon_out);
+        assert!(
+            elapsed <= Duration::from_secs(20),
+            "第二次 SIGTERM 起应在 20s 内退出，实际耗时 {:?}",
+            elapsed
+        );
+        assert_eq!(
+            daemon_out.exit_code(),
+            Some(4),
+            "第二次信号触发排空超时应以 4 退出：{}",
+            daemon_out.summary()
+        );
+        assert_eq!(
+            daemon_out.interventions,
+            vec![
+                lattice_system_harness::HarnessIntervention::TerminateRequested,
+                lattice_system_harness::HarnessIntervention::TerminateRequested,
+            ]
+        );
+        assert!(
+            !daemon_out.cleanup.forced && daemon_out.cleanup.succeeded(),
+            "{:?}",
+            daemon_out.cleanup
+        );
+        world.daemon_departed().unwrap();
+
+        let lost = front.wait(None).unwrap();
+        evidence.record_command("frontend after second sigterm", &lost);
+        assert!(lost.is_clean_exit(1), "{}", lost.summary());
+        evidence.record_captures(server.captured_requests());
+    }));
+    support::finish_recorded(evidence, result);
+}

@@ -49,6 +49,7 @@ pub enum ProcessTermination {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessIntervention {
     InterruptRequested,
+    TerminateRequested,
     TimedOut(Duration),
     ForcedKill,
 }
@@ -310,6 +311,14 @@ impl RunningCommand {
         interrupt_process_group(self.pgid)?;
         self.interventions
             .push(HarnessIntervention::InterruptRequested);
+        Ok(())
+    }
+
+    /// Deliver a controlled SIGTERM to the whole process group.
+    pub fn terminate(&mut self) -> std::io::Result<()> {
+        terminate_process_group(self.pgid)?;
+        self.interventions
+            .push(HarnessIntervention::TerminateRequested);
         Ok(())
     }
 
@@ -691,6 +700,10 @@ fn interrupt_process_group(pgid: u32) -> std::io::Result<()> {
     signal_process_group(pgid, libc::SIGINT)
 }
 
+fn terminate_process_group(pgid: u32) -> std::io::Result<()> {
+    signal_process_group(pgid, libc::SIGTERM)
+}
+
 pub(crate) fn kill_process_group(pgid: u32) {
     let _ = signal_process_group(pgid, libc::SIGKILL);
 }
@@ -1018,6 +1031,41 @@ mod tests {
             ]
         );
         assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+    }
+
+    #[test]
+    fn terminate_delivers_sigterm_to_process_group_and_records_intervention() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let ready = dir.path().join("ready");
+        let mut cmd = Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "trap 'exit 42' TERM; touch '{}'; while :; do sleep 1; done",
+            ready.display()
+        ));
+        let mut running = RunningCommand::spawn(cmd).expect("spawn");
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !ready.exists() && Instant::now() < deadline {
+            std::thread::yield_now();
+        }
+        assert!(ready.exists(), "子进程未进入 SIGTERM 等待点");
+
+        running.terminate().expect("terminate group");
+        let outcome = running
+            .wait(Some(Duration::from_secs(2)))
+            .expect("wait after terminate");
+
+        assert_eq!(
+            outcome.exit_code(),
+            Some(42),
+            "子进程应收到 SIGTERM 并以 42 退出"
+        );
+        assert_eq!(
+            outcome.interventions,
+            vec![HarnessIntervention::TerminateRequested],
+            "干预记录应包含 TerminateRequested"
+        );
+        assert!(!outcome.cleanup.forced);
         assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
     }
 

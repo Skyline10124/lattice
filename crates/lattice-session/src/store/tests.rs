@@ -5597,3 +5597,138 @@ fn delete_draft_keeps_sessions_with_turns_even_after_rewind_to_root() {
         "回退到根节点的会话整棵树节点应完整保留"
     );
 }
+
+#[test]
+fn disable_writes_waits_for_inflight_commit_and_blocks_later_writes() {
+    let (_dir, _layout, db) = store();
+    let db = Arc::new(db);
+    let lock1 = db.try_lock_session(sid(1)).expect("锁定会话 1");
+    let lock2 = db.try_lock_session(sid(2)).expect("锁定会话 2");
+    let timeout = std::time::Duration::from_secs(5);
+
+    std::thread::scope(|scope| {
+        let (at_commit, commit_reached) = std::sync::mpsc::channel();
+        let (release_commit, commit_gate) = std::sync::mpsc::channel();
+        let (at_return, returned) = std::sync::mpsc::channel();
+        let (release_health, health_gate) = std::sync::mpsc::channel();
+        let writer = {
+            let db = &db;
+            let lock1 = &lock1;
+            scope.spawn(move || {
+                with_write_probe(
+                    move |stage| match stage {
+                        WriteStage::BeforeCommit => {
+                            at_commit.send(()).unwrap();
+                            commit_gate.recv_timeout(timeout).unwrap();
+                        }
+                        WriteStage::CommitReturned => {
+                            at_return.send(()).unwrap();
+                            health_gate.recv_timeout(timeout).unwrap();
+                        }
+                        _ => {}
+                    },
+                    || {
+                        db.create_session(
+                            lock1,
+                            project(1),
+                            SessionSettings::for_test(&config()),
+                            now(),
+                        )
+                    },
+                )
+            })
+        };
+
+        commit_reached
+            .recv_timeout(timeout)
+            .expect("在途写入应到达提交前探针");
+
+        let (contended_tx, contended_rx) = std::sync::mpsc::channel();
+        let (disabled_tx, disabled_rx) = std::sync::mpsc::channel();
+        let disabler = {
+            let db = &db;
+            scope.spawn(move || {
+                with_write_probe(
+                    move |stage| {
+                        if stage == WriteStage::HealthLockContended {
+                            contended_tx.send(()).unwrap();
+                        }
+                    },
+                    || db.disable_writes(),
+                );
+                disabled_tx.send(()).unwrap();
+            })
+        };
+
+        contended_rx
+            .recv_timeout(timeout)
+            .expect("disable_writes 应在健康锁上等待正在进行的写入");
+        assert!(
+            matches!(
+                disabled_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "在途写入提交前 disable_writes 不应提前返回"
+        );
+
+        release_commit.send(()).unwrap();
+        returned
+            .recv_timeout(timeout)
+            .expect("redb 提交返回后仍持有健康锁");
+        assert!(
+            matches!(
+                disabled_rx.recv_timeout(std::time::Duration::from_millis(50)),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+            ),
+            "健康锁释放前 disable_writes 不应提前返回"
+        );
+
+        release_health.send(()).unwrap();
+        writer.join().unwrap().expect("已进入提交的写入应正常完成");
+        disabled_rx
+            .recv_timeout(timeout)
+            .expect("在途提交结束后 disable_writes 应完成");
+        disabler.join().unwrap();
+    });
+
+    assert!(
+        matches!(
+            db.create_session(
+                &lock2,
+                project(1),
+                SessionSettings::for_test(&config()),
+                now(),
+            ),
+            Err(StoreError::WriteDisabled)
+        ),
+        "停写后新写入应返回 WriteDisabled"
+    );
+    assert!(
+        matches!(
+            db.with_execution_start(|| ()),
+            Err(StoreError::WriteDisabled)
+        ),
+        "停写后执行起点交接应返回 WriteDisabled"
+    );
+
+    let head = db
+        .begin_read()
+        .expect("停写后只读事务应照常开启")
+        .session(sid(1))
+        .expect("停写后应能读取已提交的会话");
+    assert_eq!(head.session_id, sid(1), "读取到的会话标识应一致");
+
+    db.disable_writes();
+    assert!(
+        matches!(
+            db.create_session(
+                &lock2,
+                project(1),
+                SessionSettings::for_test(&config()),
+                now(),
+            ),
+            Err(StoreError::WriteDisabled)
+        ),
+        "重复调用 disable_writes 应保持幂等并继续拒绝写入"
+    );
+}
