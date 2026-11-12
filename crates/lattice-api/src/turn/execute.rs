@@ -20,8 +20,6 @@ use std::sync::{
 };
 use tokio::sync::oneshot;
 
-pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
-
 pub(crate) struct ExecutionInput {
     pub session: SessionApi,
     pub turn_id: TurnId,

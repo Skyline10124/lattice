@@ -4,7 +4,7 @@
 //! 视图推送、历史查询与回执的消费：条目按 NodeId 维护，状态消息按是否新到进入 Dock 或对话记录。
 use super::fixtures::*;
 use super::*;
-use lattice_api::local::{CostEstimate, LocalErrorKind, UsageCompleteness::*};
+use lattice_local::{CostEstimate, LocalErrorKind, UsageCompleteness::*};
 
 fn turn(n: u64) -> TurnId {
     numbered_turn(n)
@@ -1130,17 +1130,16 @@ fn own_messages_carry_their_level() {
 #[test]
 fn detach_lines_describe_receipts_cancel_and_outcome_in_words() {
     let id = turn(9);
-    let report =
-        |submission, summary: Option<lattice_api::local::TurnSummary>, owner| DetachReport {
-            session_id: sid(),
-            turn_id: Some(id),
-            submission,
-            submission_diagnostic: Some(local_error(LocalErrorKind::Transport, "late failure")),
-            cancel: Some(CancelStatus::Unknown),
-            cancel_error: Some(local_error(LocalErrorKind::Internal, "cancel denied")),
-            head: Some(head(2, Some(id), owner)),
-            summary,
-        };
+    let report = |submission, summary: Option<lattice_local::TurnSummary>, owner| DetachReport {
+        session_id: sid(),
+        turn_id: Some(id),
+        submission,
+        submission_diagnostic: Some(local_error(LocalErrorKind::Transport, "late failure")),
+        cancel: Some(CancelStatus::Unknown),
+        cancel_error: Some(local_error(LocalErrorKind::Internal, "cancel denied")),
+        head: Some(head(2, Some(id), owner)),
+        summary,
+    };
     let failed = match step(2, id, 0).stopped("failed").entry() {
         ConversationEntry::Step { summary, .. } => summary,
         ConversationEntry::UserMessage { .. } => unreachable!(),
@@ -1248,7 +1247,7 @@ fn current_model_comes_from_head_after_rewind_and_root() {
     current.agent = "latest-copy-agent".into();
     current.model = Some(ModelId::parse("latest-copy-model").unwrap());
     current.provider = Some(ProviderId::parse("latest-provider").unwrap());
-    current.effort = Some(lattice_api::Effort::Low);
+    current.effort = Some(lattice_local::Effort::Low);
     open_view(&mut app, current.clone(), turns(1..=1));
     assert_eq!(
         app.current_target()
@@ -1257,7 +1256,7 @@ fn current_model_comes_from_head_after_rewind_and_root() {
             .as_deref(),
         Some("latest-provider/latest-copy-model")
     );
-    assert_eq!(app.current_effort(), Some(lattice_api::Effort::Low));
+    assert_eq!(app.current_effort(), Some(lattice_local::Effort::Low));
     assert_eq!(app.current_agent(), "latest-copy-agent");
     current.position = NodeId(0);
     current.turn_id = None;
@@ -1270,7 +1269,7 @@ fn current_model_comes_from_head_after_rewind_and_root() {
             .as_deref(),
         Some("latest-provider/latest-copy-model")
     );
-    assert_eq!(app.current_effort(), Some(lattice_api::Effort::Low));
+    assert_eq!(app.current_effort(), Some(lattice_local::Effort::Low));
     app.apply_submission(receipt(turn(1), accepted(turn(1))));
     assert_eq!(
         app.current_agent(),
@@ -1281,7 +1280,7 @@ fn current_model_comes_from_head_after_rewind_and_root() {
 
 #[test]
 fn closed_reopened_and_retargeted_panels_ignore_late_success_and_failure() {
-    use lattice_api::{Effort::Low, ModelCandidateQuery, ModelCandidates, ModelRef};
+    use lattice_local::{Effort::Low, ModelCandidateQuery, ModelCandidates, ModelRef};
     let mut app = test_app(false);
     app.apply_builtin("/model");
     let closed = app.model_query.take().unwrap();
@@ -1443,7 +1442,7 @@ fn failed_tool_renders_tool_error_message() {
 
 #[test]
 fn configure_adjustment_shows_info_and_busy_shows_warn() {
-    use lattice_api::{
+    use lattice_local::{
         Effort::{High, Low, Medium},
         ModelCandidates,
     };
@@ -1451,7 +1450,7 @@ fn configure_adjustment_shows_info_and_busy_shows_warn() {
         SessionContext {
             session_id: sid(),
             initial_head: head(0, None, false),
-            initial_adjustment: Some(lattice_api::local::EffortAdjustment {
+            initial_adjustment: Some(lattice_local::EffortAdjustment {
                 from: Some(High),
                 to: Some(Medium),
             }),
@@ -1495,7 +1494,7 @@ fn configure_adjustment_shows_info_and_busy_shows_warn() {
         g1,
         Ok(ConfigureReply {
             head: updated,
-            adjustment: Some(lattice_api::local::EffortAdjustment {
+            adjustment: Some(lattice_local::EffortAdjustment {
                 from: Some(Medium),
                 to: Some(Low),
             }),
@@ -1544,7 +1543,7 @@ fn configure_adjustment_shows_info_and_busy_shows_warn() {
 #[test]
 fn settings_changed_rejection_restores_input_and_pauses_queue() {
     let settings_changed = || LocalError {
-        conflict: Some(lattice_api::local::ConflictReason::SettingsChanged),
+        conflict: Some(lattice_local::ConflictReason::SettingsChanged),
         ..local_error(
             LocalErrorKind::Conflict,
             "session settings changed before turn acceptance",

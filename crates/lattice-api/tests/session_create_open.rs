@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! Session 由 create_session 显式创建；首轮接受、重开及同身份冲突保持冻结配置和原始输入。
-use lattice_api::local::*;
 use lattice_api::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
 use lattice_llm::testing::ScriptEvent;
+use lattice_local::{AgentName, ConflictReason, new_session_id, new_turn_id};
 use lattice_session::store::{EffectiveProfile, PublicTurnOutcome, SessionSettings, SessionStore};
 use std::sync::Arc;
 
@@ -101,9 +101,7 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let execution = lattice_api::start_turn(api, id, root, retry);
     assert!(matches!(
         execution.acceptance.await.unwrap(),
-        Err(lattice_api::ApiError::Conflict(
-            lattice_api::local::ConflictReason::TurnIdUsed
-        ))
+        Err(lattice_api::ApiError::Conflict(ConflictReason::TurnIdUsed))
     ));
     assert!(execution.completion.await.unwrap().is_err());
     assert_eq!(

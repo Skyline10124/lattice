@@ -5,13 +5,12 @@ use super::*;
 
 #[test]
 fn configuration_errors_keep_reason_and_exit_two_through_anyhow() {
-    let error = lattice_api::ApiError::Configuration(lattice_api::ConfigRejection::new(
+    let local = LocalError::new(
+        LocalErrorKind::BadRequest,
         "agent profile 'reader' not found at project path /project/.lattice/agents/reader/agent.toml or global path /home/user/.lattice/agents/reader/agent.toml",
-        None,
-    ));
-    let local = lattice_api::local::LocalError::from(error.clone());
+    );
     for error in [
-        anyhow::Error::new(error).context("configuration rejection"),
+        anyhow::Error::new(local.clone()).context("configuration rejection"),
         anyhow::Error::new(local.clone()).context("TUI configuration"),
         submission_error(local.clone()),
     ] {
@@ -27,8 +26,9 @@ fn configuration_errors_keep_reason_and_exit_two_through_anyhow() {
                 .contains("agent profile")
         );
     }
-    let error = anyhow::Error::new(lattice_api::ApiError::Configuration(
-        lattice_api::ConfigRejection::new("model reference must be <provider>/<model>", None),
+    let error = anyhow::Error::new(LocalError::new(
+        LocalErrorKind::BadRequest,
+        "model reference must be <provider>/<model>",
     ));
     let (code, record) = error_record(&error);
     assert_eq!(code, 2);
@@ -37,11 +37,72 @@ fn configuration_errors_keep_reason_and_exit_two_through_anyhow() {
         record["message"],
         "model reference must be <provider>/<model>"
     );
-    let error = anyhow::Error::new(lattice_api::ApiError::BadRequest("sk-private-input".into()));
+    let error = anyhow::Error::new(LocalError::new(
+        LocalErrorKind::BadRequest,
+        "request or frozen configuration is invalid",
+    ));
     let (code, record) = error_record(&error);
     assert_eq!(code, 2);
     assert_eq!(
         record["message"],
         "request or frozen configuration is invalid"
+    );
+}
+
+#[test]
+fn frontend_local_errors_keep_json_human_output_and_exit_codes() {
+    let invalid_key = super::super::auth::finish_key(zeroize::Zeroizing::new(vec![0xff, b'\n']))
+        .expect_err("非法 UTF-8 key 应失败");
+    let invalid_callback = super::super::auth::login::input_failure(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        "callback URL must be UTF-8 and at most 16384 bytes",
+    ));
+    let relative_state_root = super::super::daemon::state_root(Some(std::path::Path::new("rel")))
+        .expect_err("相对 state_root 应失败");
+
+    for (error, expected_message) in [
+        (invalid_key, "API key input must be valid UTF-8"),
+        (
+            invalid_callback,
+            "callback URL must be UTF-8 and at most 16384 bytes",
+        ),
+        (
+            relative_state_root,
+            "request or frozen configuration is invalid",
+        ),
+    ] {
+        let (code, record) = error_record(&error);
+        assert_eq!(code, 2, "前端输入错误应退出 2");
+        assert_eq!(
+            record,
+            serde_json::json!({
+                "type": "error",
+                "kind": "bad_request",
+                "message": expected_message,
+                "recovery": null,
+                "store": null,
+            })
+        );
+        let mut human = Vec::new();
+        render_human_error(&record, &mut human).unwrap();
+        assert_eq!(
+            String::from_utf8(human).unwrap(),
+            format!("error: {expected_message}\n")
+        );
+    }
+
+    let other_io = super::super::auth::login::input_failure(std::io::Error::new(
+        std::io::ErrorKind::BrokenPipe,
+        "pipe closed",
+    ));
+    let (code, record) = error_record(&other_io);
+    assert_eq!(code, 1, "其他 I/O 错误应保持退出 1");
+    assert_eq!(
+        record,
+        serde_json::json!({
+            "type": "error",
+            "kind": "internal",
+            "message": "command failed; inspect configuration and durable state",
+        })
     );
 }

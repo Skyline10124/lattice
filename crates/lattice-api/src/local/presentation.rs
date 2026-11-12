@@ -148,7 +148,8 @@ pub(super) fn revocation_status(
     }
 }
 
-pub(crate) fn llm_availability(value: &lattice_ipc::Availability) -> lattice_llm::Availability {
+#[cfg(test)]
+fn llm_availability(value: &lattice_ipc::Availability) -> lattice_llm::Availability {
     match value {
         lattice_ipc::Availability::Ready => lattice_llm::Availability::Ready,
         lattice_ipc::Availability::Unconfigured { requirement } => {
@@ -162,6 +163,7 @@ pub(crate) fn llm_availability(value: &lattice_ipc::Availability) -> lattice_llm
     }
 }
 
+#[cfg(test)]
 fn llm_configuration_requirement(
     value: lattice_ipc::ConfigurationRequirement,
 ) -> lattice_llm::ConfigurationRequirement {
@@ -598,12 +600,19 @@ mod tests {
     #[test]
     fn availability_diagnostic_matches_llm_diagnostic_for_every_variant() {
         let providers_path = Path::new("/tmp/custom-home/.lattice/providers.toml");
-        for (provider, llm_avail) in [
-            ("openai", lattice_llm::Availability::Ready),
+        for (provider, llm_avail, ipc_avail) in [
+            (
+                "openai",
+                lattice_llm::Availability::Ready,
+                lattice_ipc::Availability::Ready,
+            ),
             (
                 "lmstudio",
                 lattice_llm::Availability::Unconfigured {
                     requirement: lattice_llm::ConfigurationRequirement::Declaration,
+                },
+                lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::Declaration,
                 },
             ),
             (
@@ -611,11 +620,17 @@ mod tests {
                 lattice_llm::Availability::Unconfigured {
                     requirement: lattice_llm::ConfigurationRequirement::ApiKey,
                 },
+                lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
+                },
             ),
             (
                 "chatgpt",
                 lattice_llm::Availability::Unconfigured {
                     requirement: lattice_llm::ConfigurationRequirement::ChatgptLogin,
+                },
+                lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::ChatgptLogin,
                 },
             ),
             (
@@ -623,11 +638,32 @@ mod tests {
                 lattice_llm::Availability::Invalid {
                     reason: "auth.json: invalid credential structure".to_owned(),
                 },
+                lattice_ipc::Availability::Invalid {
+                    reason: "auth.json: invalid credential structure".to_owned(),
+                },
             ),
         ] {
-            let ipc_avail = availability(llm_avail.clone());
+            match &llm_avail {
+                lattice_llm::Availability::Ready => {}
+                lattice_llm::Availability::Unconfigured { requirement } => match requirement {
+                    lattice_llm::ConfigurationRequirement::Declaration
+                    | lattice_llm::ConfigurationRequirement::ApiKey
+                    | lattice_llm::ConfigurationRequirement::ChatgptLogin => {}
+                },
+                lattice_llm::Availability::Invalid { reason: _ } => {}
+            }
+            match &ipc_avail {
+                lattice_ipc::Availability::Ready => {}
+                lattice_ipc::Availability::Unconfigured { requirement } => match requirement {
+                    lattice_ipc::ConfigurationRequirement::Declaration
+                    | lattice_ipc::ConfigurationRequirement::ApiKey
+                    | lattice_ipc::ConfigurationRequirement::ChatgptLogin => {}
+                },
+                lattice_ipc::Availability::Invalid { reason: _ } => {}
+            }
+            assert_eq!(availability(llm_avail.clone()), ipc_avail);
             assert_eq!(
-                crate::availability_diagnostic(&ipc_avail, provider, providers_path),
+                ipc_avail.diagnostic(provider, providers_path),
                 llm_avail.diagnostic(provider, providers_path),
                 "provider={provider} avail={llm_avail:?}"
             );

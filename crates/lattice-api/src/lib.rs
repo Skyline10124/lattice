@@ -3,7 +3,7 @@
 
 //! LATTICE 公开应用接口。
 //!
-//! [`SessionApi`] 提供会话操作，[`local::LocalClient`] 提供本地提交与观察，
+//! [`SessionApi`] 提供会话操作，[`local::serve`] 提供本地控制面后台服务入口，
 //! [`start_turn`] 提供后台执行接线；`run_turn` 只在测试或 `test-utils` 下复用执行核心。
 //!
 //! # Boundary
@@ -33,7 +33,7 @@ pub use lattice_session::{
 pub use models::{
     Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery, ModelCandidates,
     ModelId, ModelIdError, ModelPrice, ModelRef, ModelRefError, ModelWarning, ProviderId,
-    ProviderIdError, init_logging,
+    ProviderIdError,
 };
 pub use profile::LoadedAgentProfile;
 pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
@@ -41,16 +41,6 @@ pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]
 pub use turn::run_turn;
 pub use turn::{
-    NoTools, RunTurnRequest, RunTurnResult, STREAM_IDLE_TIMEOUT_SECS, ToolExecutor, ToolOutcome,
-    ToolSpec, TurnAcceptance, TurnCompletion, TurnEvent, TurnExecution, TurnRef, TurnTools,
-    start_turn,
+    NoTools, RunTurnRequest, RunTurnResult, ToolExecutor, ToolOutcome, ToolSpec, TurnAcceptance,
+    TurnCompletion, TurnEvent, TurnExecution, TurnRef, TurnTools, start_turn,
 };
-
-/// 将 IPC 展示层的 [`Availability`] 转回 `lattice_llm::Availability` 并生成诊断文案。
-pub fn availability_diagnostic(
-    availability: &lattice_ipc::Availability,
-    provider: &str,
-    providers_path: &std::path::Path,
-) -> Option<String> {
-    local::presentation::llm_availability(availability).diagnostic(provider, providers_path)
-}

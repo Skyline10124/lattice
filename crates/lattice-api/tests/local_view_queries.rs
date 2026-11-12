@@ -1,7 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_api::{StateLayout, local::*};
+use lattice_api::{StateLayout, local::serve_for_test};
+use lattice_local::*;
 use lattice_session::store::*;
 use std::time::Duration;
 

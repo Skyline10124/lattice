@@ -13,10 +13,10 @@ const LIMIT: usize = 5;
 /// 排队消息对应的预期设置版本：入队时固定的快照，或绑定入队时在途 configure 的代次。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum QueuedSettings {
-    Snapshot(lattice_api::local::SettingsVersion),
+    Snapshot(lattice_local::SettingsVersion),
     PendingConfigure {
         generation: u64,
-        fallback: lattice_api::local::SettingsVersion,
+        fallback: lattice_local::SettingsVersion,
     },
 }
 
@@ -24,7 +24,7 @@ pub(crate) enum QueuedSettings {
 #[derive(Clone)]
 pub(crate) struct Outgoing {
     pub(crate) message: Message,
-    pub(crate) expected_settings: lattice_api::local::SettingsVersion,
+    pub(crate) expected_settings: lattice_local::SettingsVersion,
 }
 impl std::ops::Deref for Outgoing {
     type Target = Message;
@@ -72,7 +72,7 @@ struct Editor {
 pub(crate) struct Queue {
     messages: VecDeque<QueuedMessage>,
     // 已离开可编辑列表，收到接受或未知回执前仍占名额。
-    awaiting: Option<(lattice_api::local::TurnId, QueuedMessage)>,
+    awaiting: Option<(lattice_local::TurnId, QueuedMessage)>,
     paused: bool,
     drafts: Vec<Draft>,
     editor: Option<Editor>,
@@ -92,7 +92,7 @@ impl Queue {
         self.editor.is_some()
     }
 
-    pub(crate) fn start_send(&mut self, turn: lattice_api::local::TurnId) -> Option<Outgoing> {
+    pub(crate) fn start_send(&mut self, turn: lattice_local::TurnId) -> Option<Outgoing> {
         if self.paused || self.is_editing() || self.awaiting.is_some() {
             return None;
         }
@@ -107,7 +107,7 @@ impl Queue {
         self.awaiting = Some((turn, message));
         Some(payload)
     }
-    pub(crate) fn release(&mut self, turn: lattice_api::local::TurnId) -> bool {
+    pub(crate) fn release(&mut self, turn: lattice_local::TurnId) -> bool {
         if self.awaiting.as_ref().is_some_and(|(id, _)| *id == turn) {
             self.awaiting = None;
             true
@@ -115,7 +115,7 @@ impl Queue {
             false
         }
     }
-    pub(crate) fn reject(&mut self, turn: lattice_api::local::TurnId) -> bool {
+    pub(crate) fn reject(&mut self, turn: lattice_local::TurnId) -> bool {
         if self.awaiting.as_ref().is_none_or(|(id, _)| *id != turn) {
             return false;
         }
@@ -308,7 +308,7 @@ impl Queue {
     pub(crate) fn take_message(
         &mut self,
         text: String,
-        expected_settings: lattice_api::local::SettingsVersion,
+        expected_settings: lattice_local::SettingsVersion,
     ) -> Outgoing {
         Outgoing {
             message: self.drain_message(text),
@@ -330,7 +330,7 @@ impl Queue {
     pub(crate) fn resolve_configure(
         &mut self,
         target: u64,
-        version: lattice_api::local::SettingsVersion,
+        version: lattice_local::SettingsVersion,
     ) -> bool {
         self.resolve_configure_with(target, |_| version)
     }
@@ -340,7 +340,7 @@ impl Queue {
     fn resolve_configure_with(
         &mut self,
         target: u64,
-        pick: impl Fn(lattice_api::local::SettingsVersion) -> lattice_api::local::SettingsVersion,
+        pick: impl Fn(lattice_local::SettingsVersion) -> lattice_local::SettingsVersion,
     ) -> bool {
         let mut resolved = false;
         for message in &mut self.messages {
@@ -379,12 +379,12 @@ impl Queue {
     }
     pub(crate) fn retain_steps(
         &mut self,
-        steps: &std::collections::BTreeSet<lattice_api::local::StepKey>,
+        steps: &std::collections::BTreeSet<lattice_local::StepKey>,
     ) -> Vec<usize> {
         let mut dropped = Vec::new();
         let mut keep = |comment: &Comment| {
             let fragment = &comment.location.fragment;
-            let present = steps.contains(&lattice_api::local::StepKey {
+            let present = steps.contains(&lattice_local::StepKey {
                 turn_id: fragment.turn,
                 ordinal: fragment.step,
             });

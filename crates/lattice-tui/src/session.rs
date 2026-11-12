@@ -5,28 +5,32 @@ use crate::TuiOptions;
 use crate::app::{Block, ToolState};
 use crate::blocks::BlockList;
 use crate::connection::{closing_status, retry_status};
-use lattice_api::local::{
+use std::os::unix::ffi::OsStrExt;
+use std::path::Path;
+
+use lattice_local::{
     AttemptProgress, ConfigureRequest, ConfigureSession, ConflictReason, ConversationEntry,
-    LocalClient, LocalError, LocalErrorKind, MessageRole, MessageSemantic, ModelAttemptKey, Node,
-    ResultPayload, SessionId, SlotProgress, StepContent, SuccessContent,
+    EffortAdjustment, LocalClient, LocalError, LocalErrorKind, MessageRole, MessageSemantic,
+    ModelAttemptKey, Node, ResultPayload, SessionHead, SessionId, SlotProgress, StepContent,
+    SuccessContent,
 };
 
 pub(crate) struct SessionContext {
     pub session_id: SessionId,
-    pub initial_head: lattice_api::local::SessionHead,
-    pub initial_adjustment: Option<lattice_api::local::EffortAdjustment>,
+    pub initial_head: SessionHead,
+    pub initial_adjustment: Option<EffortAdjustment>,
 }
 
 /// 启动会话上下文：不带会话时 `configure(New)` 创建草稿；带会话与 `--agent` 时 `configure(Existing)`；
 /// 只读打开已有会话时先校验项目路径，再读取一次会话头，不读取 log。
 pub(crate) async fn open_or_create(
     options: &TuiOptions,
-    workspace: &lattice_api::LocalWorkspaceRoot,
+    workspace: &Path,
     client: &LocalClient,
 ) -> anyhow::Result<SessionContext> {
     if let Some(id) = &options.session_id {
         let session = client.resolve_session(id).await?;
-        if session.project_path != workspace.project_path() {
+        if session.project_path.as_bytes() != workspace.as_os_str().as_bytes() {
             return Err(LocalError {
                 kind: LocalErrorKind::Conflict,
                 message: format!(
@@ -44,7 +48,7 @@ pub(crate) async fn open_or_create(
             let reply = client
                 .configure(ConfigureRequest {
                     session: ConfigureSession::Existing(session.session_id),
-                    workspace: workspace.canonical_path().to_path_buf(),
+                    workspace: workspace.to_path_buf(),
                     agent: Some(agent),
                     model: None,
                     effort: None,
@@ -83,11 +87,11 @@ pub(crate) async fn open_or_create(
         recovery: None,
         store: None,
     })?;
-    let session_id = lattice_api::local::new_session_id();
+    let session_id = lattice_local::new_session_id();
     let reply = client
         .configure(ConfigureRequest {
             session: ConfigureSession::New(session_id),
-            workspace: workspace.canonical_path().to_path_buf(),
+            workspace: workspace.to_path_buf(),
             agent: Some(agent),
             model: None,
             effort: None,
@@ -172,7 +176,7 @@ pub(crate) fn entry_blocks(
             };
             blocks.push(Block::Step {
                 node: *node,
-                key: lattice_api::local::StepKey {
+                key: lattice_local::StepKey {
                     turn_id: *turn_id,
                     ordinal: *step_ordinal,
                 },
@@ -220,7 +224,7 @@ pub(crate) fn entry_blocks(
 fn append_history_step(
     blocks: &mut BlockList,
     content: StepContent,
-    turn: lattice_api::local::TurnId,
+    turn: lattice_local::TurnId,
     step: u32,
     running: &std::collections::HashSet<String>,
 ) {
@@ -316,7 +320,7 @@ fn append_step(
 
 fn append_messages(
     blocks: &mut BlockList,
-    messages: Vec<lattice_api::local::NativeMessage<lattice_api::local::BoundToolCall>>,
+    messages: Vec<lattice_local::NativeMessage<lattice_local::BoundToolCall>>,
 ) {
     for message in messages {
         for part in message.parts {

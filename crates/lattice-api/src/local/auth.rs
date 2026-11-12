@@ -3,17 +3,7 @@
 
 pub(super) mod login;
 
-pub(super) use lattice_ipc::AuthKey;
-
-pub(super) fn require_chatgpt(provider: &str) -> super::Result<()> {
-    if provider == "chatgpt" {
-        return Ok(());
-    }
-    Err(super::LocalError::new(
-        super::LocalErrorKind::BadRequest,
-        "login and logout require the built-in chatgpt provider",
-    ))
-}
+pub(super) use lattice_ipc::{AuthKey, require_chatgpt};
 
 pub(super) fn store(home: Option<&std::path::Path>) -> super::Result<lattice_llm::auth::AuthStore> {
     Ok(lattice_llm::auth::AuthStore::new(directory(home)?))

@@ -7,10 +7,12 @@ use std::{
 };
 
 use clap::Subcommand;
-use lattice_api::{StateLayout, local::LocalClient};
+use lattice_local::{
+    Availability, LocalClient, LocalError, LocalErrorKind, RevocationStatus, StateLayout,
+};
 use zeroize::Zeroizing;
 
-mod login;
+pub(super) mod login;
 mod terminal;
 use terminal::TerminalInput;
 
@@ -99,9 +101,7 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
             } else {
                 for row in status.providers {
                     print!("{} {}", row.provider, row.availability.status_str());
-                    if let lattice_api::local::Availability::Unconfigured { requirement } =
-                        row.availability
-                    {
+                    if let Availability::Unconfigured { requirement } = row.availability {
                         print!(" requirement={requirement}");
                     }
                     if let Some(email) = row.email {
@@ -110,11 +110,10 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
                     if let Some(expiry) = row.expires_at {
                         print!(" expires_at={expiry}");
                     }
-                    if let Some(diagnostic) = lattice_api::availability_diagnostic(
-                        &row.availability,
-                        &row.provider,
-                        &status.providers_path,
-                    ) {
+                    if let Some(diagnostic) = row
+                        .availability
+                        .diagnostic(&row.provider, &status.providers_path)
+                    {
                         print!(": {diagnostic}");
                     }
                     println!();
@@ -128,8 +127,8 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
     Ok(std::process::ExitCode::SUCCESS)
 }
 
-fn show_revocation(status: lattice_api::local::RevocationStatus) {
-    use lattice_api::local::RevocationStatus::*;
+fn show_revocation(status: RevocationStatus) {
+    use RevocationStatus::*;
     match status {
         Confirmed => println!("Remote revocation confirmed"),
         Unconfirmed => println!(
@@ -139,7 +138,7 @@ fn show_revocation(status: lattice_api::local::RevocationStatus) {
     }
 }
 
-fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
+pub(super) fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
     // 管道常用一行传入 key；只移除一个行结束符，不裁剪 key 两侧的空格。
     if bytes.last() == Some(&b'\n') {
         bytes.pop();
@@ -148,10 +147,10 @@ fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
         }
     }
     let key = std::str::from_utf8(&bytes).map_err(|_| {
-        lattice_api::ApiError::Configuration(lattice_api::ConfigRejection::new(
+        LocalError::new(
+            LocalErrorKind::BadRequest,
             "API key input must be valid UTF-8",
-            None,
-        ))
+        )
     })?;
     Ok(key.to_owned())
 }

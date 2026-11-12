@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_api::local::{
+use lattice_local::{
     AuthCatalogOutcome, AuthLoginEvent, AuthLoginOutcome, LocalAuthLogin, LocalError,
     LocalErrorKind, SensitiveLoginUrl,
 };
@@ -92,7 +92,7 @@ async fn send_action(
     login: &mut LocalAuthLogin,
     callback: Option<SensitiveLoginUrl>,
     hooks: &Hooks,
-) -> lattice_api::local::Result<()> {
+) -> lattice_local::Result<()> {
     hooks.before_write().await;
     let result = match callback {
         Some(url) => login.submit_callback(url).await,
@@ -220,12 +220,12 @@ async fn interact_with_hooks(
     })
 }
 
-fn input_failure(error: io::Error) -> anyhow::Error {
+pub(crate) fn input_failure(error: io::Error) -> anyhow::Error {
     if error.kind() == io::ErrorKind::InvalidInput {
-        lattice_api::ApiError::Configuration(lattice_api::ConfigRejection::new(
-            &error.to_string(),
-            None,
-        ))
+        LocalError::new(
+            LocalErrorKind::BadRequest,
+            "callback URL must be UTF-8 and at most 16384 bytes",
+        )
         .into()
     } else {
         error.into()
@@ -280,9 +280,9 @@ mod output_tests {
     #[test]
     fn directory_failure_is_a_successful_login_with_a_structured_warning() {
         let outcome = AuthLoginOutcome::SignedIn {
-            status: lattice_api::local::ProviderAuthStatus {
+            status: lattice_local::ProviderAuthStatus {
                 provider: "chatgpt".into(),
-                availability: lattice_api::local::Availability::Ready,
+                availability: lattice_local::Availability::Ready,
                 email: None,
                 expires_at: None,
             },
@@ -336,9 +336,9 @@ mod output_tests {
         out.clear();
         render(
             &AuthLoginOutcome::SignedIn {
-                status: lattice_api::local::ProviderAuthStatus {
+                status: lattice_local::ProviderAuthStatus {
                     provider: "chatgpt".into(),
-                    availability: lattice_api::local::Availability::Ready,
+                    availability: lattice_local::Availability::Ready,
                     email: Some("user@example.com".into()),
                     expires_at: None,
                 },

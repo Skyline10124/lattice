@@ -2,103 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use futures::future::BoxFuture;
-use lattice_llm::auth::{ChatgptLogin, LoginError};
-use tokio::{
-    net::{UnixStream, unix::OwnedWriteHalf},
-    sync::mpsc,
-    task::JoinHandle,
-};
+use lattice_llm::auth::{ChatgptLogin, LoginError, SensitiveLoginUrl};
+use tokio::{net::UnixStream, sync::mpsc, task::JoinHandle};
 
 use super::AuthKey;
-use crate::local::{LocalError, LocalErrorKind, Result, SensitiveLoginUrl, ipc};
+use crate::local::{
+    ipc,
+    types::{LocalError, LocalErrorKind, Result},
+};
 
-pub use lattice_ipc::{AuthCatalogOutcome, AuthLoginOutcome};
-pub(in crate::local) use lattice_ipc::{LoginAction, LoginResponse};
-
-/// 授权 URL 只在登录界面借用，事件本身不提供 Debug 或序列化。
-pub enum AuthLoginEvent {
-    Authorization(SensitiveLoginUrl),
-    Finished(AuthLoginOutcome),
-}
-
-/// 单次登录独占一个连接；持续读任务保存分片进度，Drop 关闭前端连接。
-pub struct LocalAuthLogin {
-    write: OwnedWriteHalf,
-    events: mpsc::Receiver<Result<AuthLoginEvent>>,
-    reader: JoinHandle<()>,
-}
-
-impl LocalAuthLogin {
-    pub(crate) fn from_stream(stream: UnixStream) -> Self {
-        let (read, write) = stream.into_split();
-        Self::from_reader(read, write)
-    }
-
-    fn from_reader(
-        mut read: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-        write: OwnedWriteHalf,
-    ) -> Self {
-        let (sender, events) = mpsc::channel(2);
-        let reader = tokio::spawn(async move {
-            let mut frames = ipc::ResponseReader::for_login();
-            let mut authorized = false;
-            loop {
-                let (event, done) = match frames.read::<LoginResponse>(&mut read).await {
-                    Ok(LoginResponse::AuthLoginAuthorization {
-                        mut authorization_url,
-                    }) if !authorized => {
-                        authorized = true;
-                        (
-                            Ok(AuthLoginEvent::Authorization(SensitiveLoginUrl::new(
-                                authorization_url.take(),
-                            ))),
-                            false,
-                        )
-                    }
-                    Ok(LoginResponse::AuthLoginResult(result))
-                        if authorized || matches!(result, AuthLoginOutcome::Cancelled {}) =>
-                    {
-                        (Ok(AuthLoginEvent::Finished(result)), true)
-                    }
-                    Ok(LoginResponse::Error(error)) | Err(error) => (Err(error), true),
-                    _ => (Err(protocol()), true),
-                };
-                if sender.send(event).await.is_err() || done {
-                    break;
-                }
-            }
-        });
-        Self {
-            write,
-            events,
-            reader,
-        }
-    }
-
-    pub async fn next(&mut self) -> Result<Option<AuthLoginEvent>> {
-        self.events.recv().await.transpose()
-    }
-
-    pub async fn submit_callback(&mut self, url: SensitiveLoginUrl) -> Result<()> {
-        ipc::write(
-            &mut self.write,
-            &LoginAction::Callback {
-                url: AuthKey::new(url.expose().into()),
-            },
-        )
-        .await
-    }
-
-    pub async fn cancel(&mut self) -> Result<()> {
-        ipc::write(&mut self.write, &LoginAction::Cancel {}).await
-    }
-}
-
-impl Drop for LocalAuthLogin {
-    fn drop(&mut self) {
-        self.reader.abort();
-    }
-}
+pub(in crate::local) use lattice_ipc::{
+    AuthCatalogOutcome, AuthLoginOutcome, LoginAction, LoginResponse,
+};
 
 fn protocol() -> LocalError {
     LocalError::new(LocalErrorKind::Protocol, "unexpected login message")

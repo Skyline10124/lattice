@@ -1,9 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{ipc, types::*};
+//! 本地 IPC 客户端句柄、后台自动启动与观察流帧读取。
+
 use std::time::Duration;
+
+use lattice_ipc::{
+    Acceptance, AuthKey, AuthRemoval, AuthStatus, ConfigureReply, ConfigureRequest, DaemonStatus,
+    HISTORY_TURNS, LocalError, LocalErrorKind, LocalHistory, ModelCandidateQuery, ModelCandidates,
+    NodeId, RecoveryCause, Request, Response, Result, RevocationStatus, SessionHead, SessionId,
+    SessionListRow, SessionLog, SessionRecord, SessionUsage, TurnDetail, TurnId, TurnLookup,
+    TurnRequest, ViewUpdate, ipc, require_chatgpt,
+};
+use lattice_store::StateLayout;
 use tokio::net::UnixStream;
+
+use crate::{endpoint, login::LocalAuthLogin, operation::ConfigureOutcome};
 
 /// stop 回执后等待旧后台释放实例锁的上限；覆盖回执后收尾连接时的请求读取与写出超时。
 const STOP_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
@@ -11,32 +23,37 @@ const STOP_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
 /// 每个操作一个连接；持续读取任务拥有分帧进度，UI 的 next 可取消。
 #[derive(Clone)]
 pub struct LocalClient {
-    layout: crate::StateLayout,
+    layout: StateLayout,
 }
+
 impl LocalClient {
-    pub fn new(layout: crate::StateLayout) -> Self {
+    pub fn new(layout: StateLayout) -> Self {
         Self { layout }
     }
+
     async fn response(&self, request: Request) -> Result<Response> {
         self.response_with_progress(request, || {}).await
     }
+
     async fn response_with_progress(
         &self,
         request: Request,
         progress: impl FnMut(),
     ) -> Result<Response> {
-        let mut stream = ipc::connect(self.layout.clone()).await?;
+        let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(&mut stream, &request).await?;
         ipc::ResponseReader::default()
             .read_with_progress(&mut stream, progress)
             .await
     }
+
     async fn call(&self, request: Request) -> Result<Response> {
         match self.response(request).await? {
             Response::Error(error) => Err(error),
             response => Ok(response),
         }
     }
+
     pub async fn status(&self) -> Result<DaemonStatus> {
         match tokio::time::timeout(Duration::from_secs(5), self.call(Request::Status))
             .await
@@ -46,35 +63,59 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
     /// 回执之后再等 socket 撤下、`owner.lock` 可取得才返回，调用方随即可在同一 STATE_ROOT 启动新后台。
     /// 不等待后台进程退出。超过 `STOP_RELEASE_TIMEOUT` 仍未放开时报 Stopping，需用 status 复核。
     pub async fn stop(&self) -> Result<DaemonStatus> {
         self.stop_within(STOP_RELEASE_TIMEOUT).await
     }
+
     /// 等待上限由调用方给出；正式入口固定用 `STOP_RELEASE_TIMEOUT`，测试以短上限核验超时报错。
-    pub(super) async fn stop_within(&self, timeout: Duration) -> Result<DaemonStatus> {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn stop_within(&self, timeout: Duration) -> Result<DaemonStatus> {
+        self.stop_within_inner(timeout).await
+    }
+
+    #[cfg(not(any(test, feature = "test-utils")))]
+    async fn stop_within(&self, timeout: Duration) -> Result<DaemonStatus> {
+        self.stop_within_inner(timeout).await
+    }
+
+    async fn stop_within_inner(&self, timeout: Duration) -> Result<DaemonStatus> {
         let (status, departure) = self.request_stop().await?;
         departure.wait(timeout).await?;
         Ok(status)
     }
+
     /// 只取得 stop 回执：后台已排空，但 listener、socket 与实例锁可能尚未放开。
-    pub(super) async fn request_stop(&self) -> Result<(DaemonStatus, ipc::Departure)> {
-        let mut stream = ipc::connect(self.layout.clone()).await?;
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn request_stop(&self) -> Result<(DaemonStatus, endpoint::Departure)> {
+        self.request_stop_inner().await
+    }
+
+    #[cfg(not(any(test, feature = "test-utils")))]
+    async fn request_stop(&self) -> Result<(DaemonStatus, endpoint::Departure)> {
+        self.request_stop_inner().await
+    }
+
+    async fn request_stop_inner(&self) -> Result<(DaemonStatus, endpoint::Departure)> {
+        let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(&mut stream, &Request::Stop).await?;
         let response = ipc::ResponseReader::default().read(&mut stream).await?;
         // 先放开连接，后台排空连接时不必等本端。
         drop(stream);
         match response {
-            Response::Status(status) => Ok((status, ipc::Departure::new(self.layout.clone()))),
+            Response::Status(status) => Ok((status, endpoint::Departure::new(self.layout.clone()))),
             Response::Error(error) => Err(error),
             _ => Err(protocol()),
         }
     }
+
     pub async fn auth_set(&self, provider: &str, key: String) -> Result<()> {
         match self
             .call(Request::AuthSet {
                 provider: provider.into(),
-                key: super::auth::AuthKey::new(key),
+                key: AuthKey::new(key),
             })
             .await?
         {
@@ -82,9 +123,10 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    pub async fn auth_login(&self, provider: &str) -> Result<super::LocalAuthLogin> {
-        super::auth::require_chatgpt(provider)?;
-        let mut stream = ipc::connect(self.layout.clone()).await?;
+
+    pub async fn auth_login(&self, provider: &str) -> Result<LocalAuthLogin> {
+        require_chatgpt(provider)?;
+        let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(
             &mut stream,
             &Request::AuthLogin {
@@ -92,7 +134,7 @@ impl LocalClient {
             },
         )
         .await?;
-        Ok(super::LocalAuthLogin::from_stream(stream))
+        Ok(LocalAuthLogin::from_stream(stream))
     }
 
     pub async fn auth_logout(&self, provider: &str) -> Result<RevocationStatus> {
@@ -118,12 +160,14 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
     pub async fn auth_status(&self) -> Result<AuthStatus> {
         match self.call(Request::AuthStatus {}).await? {
             Response::AuthStatus(status) => Ok(status),
             _ => Err(protocol()),
         }
     }
+
     pub async fn models(&self, query: ModelCandidateQuery) -> Result<ModelCandidates> {
         match self.call(Request::Models { query }).await? {
             Response::Models(models) => Ok(models),
@@ -138,6 +182,7 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
     pub async fn resolve_session(&self, prefix: &str) -> Result<SessionRecord> {
         match self
             .call(Request::ResolveSession {
@@ -149,6 +194,7 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
     pub async fn list_sessions(&self) -> Result<Vec<SessionListRow>> {
         let mut result = Vec::new();
         let mut after = None;
@@ -167,12 +213,14 @@ impl LocalClient {
             }
         }
     }
+
     pub async fn log(&self, session_id: SessionId) -> Result<SessionLog> {
         match self.call(Request::Log { session_id }).await? {
             Response::Log(log) => Ok(log),
             _ => Err(protocol()),
         }
     }
+
     pub async fn usage(&self, session_id: &str) -> Result<SessionUsage> {
         match self
             .call(Request::Usage {
@@ -184,12 +232,14 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
     pub async fn turn(&self, turn_id: TurnId) -> Result<TurnLookup> {
         match self.call(Request::Turn { turn_id }).await? {
             Response::Turn(turn) => Ok(turn),
             _ => Err(protocol()),
         }
     }
+
     /// 按 TurnId 找回接受结果；在途时每 25ms 再查，NotFound 与其他错误原样返回。
     pub async fn wait_for_turn(&self, turn_id: TurnId) -> Result<TurnDetail> {
         loop {
@@ -199,15 +249,17 @@ impl LocalClient {
             }
         }
     }
+
     pub async fn configure(&self, request: ConfigureRequest) -> Result<ConfigureReply> {
         match self.call(Request::Configure { request }).await? {
             Response::Configure(reply) => Ok(reply),
             _ => Err(protocol()),
         }
     }
+
     /// 单次发送 configure，区分连接前或确定未提交的拒绝与连接建立后的结果不明。
     pub async fn configure_once(&self, request: ConfigureRequest) -> ConfigureOutcome {
-        let mut stream = match ipc::connect(self.layout.clone()).await {
+        let mut stream = match endpoint::connect(self.layout.clone()).await {
             Ok(stream) => stream,
             Err(error) => return ConfigureOutcome::Rejected(error),
         };
@@ -232,6 +284,7 @@ impl LocalClient {
             Err(error) => ConfigureOutcome::Unknown(error),
         }
     }
+
     pub async fn rewind(
         &self,
         session_id: SessionId,
@@ -250,15 +303,28 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
-    /// 对话向前翻页时默认取得十轮，显式轮数使用 history。
+
+    /// 对话向前翻页，一次取得 `HISTORY_TURNS` 轮。
     pub async fn history_before(
         &self,
         session_id: SessionId,
         before: NodeId,
     ) -> Result<LocalHistory> {
-        self.history(session_id, before, HISTORY_TURNS).await
+        self.fetch_history(session_id, before, HISTORY_TURNS).await
     }
+
+    /// 指定轮数的翻页，只供测试使用。
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn history(
+        &self,
+        session_id: SessionId,
+        before: NodeId,
+        turns: u32,
+    ) -> Result<LocalHistory> {
+        self.fetch_history(session_id, before, turns).await
+    }
+
+    async fn fetch_history(
         &self,
         session_id: SessionId,
         before: NodeId,
@@ -276,14 +342,17 @@ impl LocalClient {
             _ => Err(protocol()),
         }
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn submit(&self, request: TurnRequest) -> Result<Acceptance> {
         match self.call(Request::Submit { request }).await? {
             Response::Acceptance(value) => Ok(value),
             _ => Err(protocol()),
         }
     }
-    pub(super) async fn submit_once(&self, request: TurnRequest) -> SubmissionReply {
-        let mut stream = match ipc::connect(self.layout.clone()).await {
+
+    pub(crate) async fn submit_once(&self, request: TurnRequest) -> SubmissionReply {
+        let mut stream = match endpoint::connect(self.layout.clone()).await {
             Ok(stream) => stream,
             Err(error) => return SubmissionReply::Rejected(error),
         };
@@ -297,18 +366,22 @@ impl LocalClient {
             Err(error) => SubmissionReply::Disconnected(error),
         }
     }
+
     pub async fn cancel(&self, turn_id: TurnId) -> Result<bool> {
         match self.call(Request::Cancel { turn_id }).await? {
             Response::Cancelled { owned } => Ok(owned),
             _ => Err(protocol()),
         }
     }
+
     pub async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
         match self.call(Request::Head { session_id }).await? {
             Response::Head(head) => Ok(head),
             _ => Err(protocol()),
         }
     }
+
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn cancel_session(&self, session_id: SessionId) -> Result<(Option<TurnId>, bool)> {
         let head = self.session_head(session_id).await?;
         match head.turn_id.filter(|_| head.owner) {
@@ -316,11 +389,19 @@ impl LocalClient {
             None => Ok((None, false)),
         }
     }
+
+    /// 直接观察会话视图，只供测试使用；前端经 `LocalTurn` 观察。
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn watch(&self, session_id: SessionId) -> Result<LocalWatch> {
-        let mut stream = ipc::connect(self.layout.clone()).await?;
+        self.open_watch(session_id).await
+    }
+
+    pub(crate) async fn open_watch(&self, session_id: SessionId) -> Result<LocalWatch> {
+        let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(&mut stream, &Request::Watch { session_id }).await?;
         Ok(LocalWatch::from_stream(stream))
     }
+
     /// 自启当前 CLI，只有端点缺失才启动；不替换不兼容后台。
     pub async fn ensure_running(&self) -> Result<DaemonStatus> {
         match self.status().await {
@@ -383,8 +464,9 @@ impl LocalClient {
 pub struct LocalWatch {
     receiver: tokio::sync::mpsc::Receiver<Result<ViewUpdate>>,
     reader: tokio::task::JoinHandle<()>,
-    pub(super) progress: tokio::sync::watch::Receiver<tokio::time::Instant>,
+    pub(crate) progress: tokio::sync::watch::Receiver<tokio::time::Instant>,
 }
+
 impl LocalWatch {
     fn from_stream(mut stream: UnixStream) -> Self {
         let (sender, receiver) = tokio::sync::mpsc::channel(8);
@@ -416,20 +498,23 @@ impl LocalWatch {
             progress: progress_rx,
         }
     }
+
     pub async fn next(&mut self) -> Result<Option<ViewUpdate>> {
         self.receiver.recv().await.transpose()
     }
 }
+
 impl Drop for LocalWatch {
     fn drop(&mut self) {
         self.reader.abort();
     }
 }
-pub(super) fn protocol() -> LocalError {
+
+pub(crate) fn protocol() -> LocalError {
     LocalError::new(LocalErrorKind::Protocol, "unexpected local response")
 }
 
-pub(super) enum SubmissionReply {
+pub(crate) enum SubmissionReply {
     Accepted(Acceptance),
     Rejected(LocalError),
     Disconnected(LocalError),
@@ -438,7 +523,9 @@ pub(super) enum SubmissionReply {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lattice_conversation::{ModelId, ProviderId};
     use tokio::io::AsyncWriteExt;
+
     #[tokio::test]
     async fn interrupted_view_poll_preserves_a_partial_frame() {
         tokio::time::timeout(Duration::from_secs(1), async {
@@ -456,7 +543,7 @@ mod tests {
                 effort: None,
                 settings_version: serde_json::from_value(serde_json::json!("11".repeat(32)))
                     .unwrap(),
-                session_id: super::super::new_session_id(),
+                session_id: crate::new_session_id(),
                 position: NodeId(0),
                 agent: "test".into(),
                 turn_id: None,
@@ -465,10 +552,13 @@ mod tests {
                 path_replaced: false,
             }));
             let json = serde_json::to_string(&response).unwrap();
-            let payload = serde_json::to_vec(
-            &serde_json::json!({"message_id":0,"offset":0,"json_fragment":json,"complete":true}),
-        )
-        .unwrap();
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "message_id": 0,
+                "offset": 0,
+                "json_fragment": json,
+                "complete": true,
+            }))
+            .unwrap();
             writer.write_all(&ipc::MAGIC[4..]).await.unwrap();
             writer.write_u32(payload.len() as u32).await.unwrap();
             writer.write_all(&payload).await.unwrap();
@@ -481,6 +571,6 @@ mod tests {
             ));
         })
         .await
-        .expect("partial IPC frame timed out");
+        .expect("观察流半帧读取超时");
     }
 }

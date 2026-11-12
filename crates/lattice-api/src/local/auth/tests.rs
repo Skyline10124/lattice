@@ -2,9 +2,9 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::local::{
-    self, Availability, ConfigurationRequirement, LocalClient, LocalErrorKind, Request, Response,
-    ipc,
+    self, Availability, ConfigurationRequirement, LocalErrorKind, Request, Response, ipc,
 };
+use lattice_local::{AuthLoginEvent, LocalClient};
 use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
 const KEY: &str = "auth-ipc-test-secret-9E82";
@@ -34,13 +34,13 @@ async fn stop_cancels_browser_login_and_releases_the_backend_instance() {
         let mut login = client.auth_login("chatgpt").await.unwrap();
         assert!(matches!(
             login.next().await.unwrap(),
-            Some(local::AuthLoginEvent::Authorization(_))
+            Some(AuthLoginEvent::Authorization(_))
         ));
         let (stopped, outcome) = tokio::join!(client.stop(), login.next());
         assert!(stopped.unwrap().stopping);
         assert!(matches!(
             outcome.unwrap(),
-            Some(local::AuthLoginEvent::Finished(
+            Some(AuthLoginEvent::Finished(
                 local::AuthLoginOutcome::Cancelled {}
             ))
         ));

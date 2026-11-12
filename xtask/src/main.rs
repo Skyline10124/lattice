@@ -25,7 +25,7 @@ struct Cli {
 enum Commands {
     /// 在本地复现 CI：fmt、clippy、构建、harness 与 crate 两条边界检查、测试。
     Ci(ci::CiArgs),
-    /// 检查受控 crate 的内部直接依赖白名单。
+    /// 检查受控 crate 的内部直接依赖与普通依赖闭包。
     CrateBoundary,
     /// 检查 Markdown 相对链接的目标文件与锚点。
     DocsCheck,

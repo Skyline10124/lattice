@@ -33,7 +33,7 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 async fn frame(stream: &mut UnixStream) -> Value {
     let mut magic = [0; 8];
     stream.read_exact(&mut magic).await.unwrap();
-    assert_eq!(&magic, lattice_api::local::test_support::FRAME_MAGIC);
+    assert_eq!(&magic, lattice_local::test_support::FRAME_MAGIC);
     let length = stream.read_u32().await.unwrap();
     let mut bytes = vec![0; length as usize];
     stream.read_exact(&mut bytes).await.unwrap();
@@ -45,7 +45,7 @@ async fn reply(stream: &mut UnixStream, sequence: u64, response: &str, value: Va
         "json_fragment":json!({"response":response,"value":value}).to_string()}))
     .unwrap();
     stream
-        .write_all(lattice_api::local::test_support::FRAME_MAGIC)
+        .write_all(lattice_local::test_support::FRAME_MAGIC)
         .await
         .unwrap();
     stream.write_u32(bytes.len() as u32).await.unwrap();
@@ -54,14 +54,14 @@ async fn reply(stream: &mut UnixStream, sequence: u64, response: &str, value: Va
 
 async fn peer() -> (tempfile::TempDir, LocalAuthLogin, UnixStream) {
     let directory = tempfile::tempdir().unwrap();
-    let layout = lattice_api::StateLayout::in_state_root(directory.path());
+    let layout = lattice_local::StateLayout::in_state_root(directory.path());
     let local = layout.lattice_root().join("local");
     std::fs::create_dir_all(&local).unwrap();
     std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).unwrap();
     let path = local.join("api.sock");
     let listener = UnixListener::bind(&path).unwrap();
     std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let client = lattice_api::local::LocalClient::new(layout);
+    let client = lattice_local::LocalClient::new(layout);
     let (login, wire) = tokio::join!(client.auth_login("chatgpt"), listener.accept());
     let mut wire = wire.unwrap().0;
     assert_eq!(

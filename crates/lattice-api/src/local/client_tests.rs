@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{ipc, types::*, *};
+use lattice_local::{LocalClient, LocalTurn, new_turn_id};
 use std::time::Duration;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -224,8 +225,8 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
     assert!(openai_models.models.iter().all(|candidate| {
         candidate.provider == "openai"
             && candidate.availability
-                == crate::Availability::Unconfigured {
-                    requirement: crate::ConfigurationRequirement::ApiKey,
+                == Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::ApiKey,
                 }
     }));
     let target_model =

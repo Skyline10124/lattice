@@ -128,7 +128,7 @@ const TIE_ORDER: [Slot; 9] = [
 ];
 
 /// SessionId 只显示前 8 个字符，从启动起就显示。
-fn session_field(id: lattice_api::local::SessionId) -> String {
+fn session_field(id: lattice_local::SessionId) -> String {
     id.to_string().chars().take(8).collect()
 }
 
@@ -150,7 +150,7 @@ fn format_tokens(tokens: u64) -> String {
     }
 }
 
-fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
+fn format_turn(usage: &lattice_local::UsageSummary) -> Option<String> {
     let mut parts = Vec::new();
     if usage.attempts > 0 {
         for (prefix, metric) in [("↑", &usage.input), ("↓", &usage.output)] {
@@ -191,19 +191,21 @@ fn format_turn(usage: &lattice_api::UsageSummary) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_api::local::{CostEstimate, UsageCompleteness, UsageCompleteness::*};
+    use lattice_local::{CostEstimate, UsageCompleteness, UsageCompleteness::*};
     use serde_json::{Value, json};
 
     fn summary(
         attempts: impl IntoIterator<Item = (Value, UsageCompleteness, Option<(f64, bool)>)>,
-    ) -> lattice_api::UsageSummary {
-        lattice_api::UsageSummary::from_attempts(attempts.into_iter().map(|(usage, kind, cost)| {
-            (
-                serde_json::from_value(usage).unwrap(),
-                kind,
-                cost.map(|(usd, exact)| CostEstimate { usd, exact }),
-            )
-        }))
+    ) -> lattice_local::UsageSummary {
+        lattice_local::UsageSummary::from_attempts(attempts.into_iter().map(
+            |(usage, kind, cost)| {
+                (
+                    serde_json::from_value(usage).unwrap(),
+                    kind,
+                    cost.map(|(usd, exact)| CostEstimate { usd, exact }),
+                )
+            },
+        ))
     }
 
     #[test]
@@ -232,15 +234,15 @@ mod tests {
         agent: &str,
         model: Option<&str>,
         provider: Option<&str>,
-        effort: Option<lattice_api::Effort>,
-    ) -> lattice_api::local::SessionHead {
-        lattice_api::local::SessionHead {
-            session_id: lattice_api::local::SessionId::parse("11111111111141118111111111111111")
+        effort: Option<lattice_local::Effort>,
+    ) -> lattice_local::SessionHead {
+        lattice_local::SessionHead {
+            session_id: lattice_local::SessionId::parse("11111111111141118111111111111111")
                 .unwrap(),
-            position: lattice_api::local::NodeId(0),
+            position: lattice_local::NodeId(0),
             agent: agent.into(),
-            model: model.map(|m| lattice_api::ModelId::parse(m).unwrap()),
-            provider: provider.map(|p| lattice_api::ProviderId::parse(p).unwrap()),
+            model: model.map(|m| lattice_local::ModelId::parse(m).unwrap()),
+            provider: provider.map(|p| lattice_local::ProviderId::parse(p).unwrap()),
             effort,
             settings_version: serde_json::from_value(json!("11".repeat(32))).unwrap(),
             turn_id: None,
@@ -253,11 +255,11 @@ mod tests {
     #[test]
     fn effort_is_hidden_when_absent_and_omitted_before_equal_width_provider() {
         let mut app = super::super::tests::test_app();
-        app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+        app.apply_view(lattice_local::LocalUpdate::Head(test_head(
             "a",
             Some("mmm"),
             Some("ppp"),
-            Some(lattice_api::Effort::Low),
+            Some(lattice_local::Effort::Low),
         )));
         assert!(line(&app, 200).to_string().contains("low"));
         let narrow = line(&app, 20).to_string();
@@ -265,7 +267,7 @@ mod tests {
             narrow.contains("ppp") && narrow.contains("mmm") && !narrow.contains("low"),
             "{narrow}"
         );
-        app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+        app.apply_view(lattice_local::LocalUpdate::Head(test_head(
             "a",
             Some("mmm"),
             Some("ppp"),
@@ -452,7 +454,7 @@ mod tests {
     async fn narrow_statusline_omits_whole_usage_and_uses_display_width() {
         tokio::time::timeout(std::time::Duration::from_secs(10), async {
             let mut app = super::super::tests::test_app();
-            app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+            app.apply_view(lattice_local::LocalUpdate::Head(test_head(
                 "agent",
                 Some("m"),
                 Some("p"),
@@ -468,7 +470,7 @@ mod tests {
             assert!(equal_width.contains("≈$123.45"), "{equal_width}");
             assert!(!equal_width.contains("上下文"), "{equal_width}");
 
-            app.apply_view(lattice_api::local::LocalUpdate::Head(test_head(
+            app.apply_view(lattice_local::LocalUpdate::Head(test_head(
                 "中文 agent",
                 Some("模型很长很长很长 e\u{301}"),
                 Some("provider"),

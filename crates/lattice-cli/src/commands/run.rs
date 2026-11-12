@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 //! CLI 消费提交回执与会话视图，执行与取消交接由 LocalTurn 管理。
 use anyhow::Result;
-use lattice_api::local::*;
+use lattice_local::*;
 use std::io::Write;
 
 #[derive(Default)]
@@ -256,8 +256,8 @@ fn render_update(
     err.flush()?;
     Ok(())
 }
-fn effort_label(effort: Option<lattice_api::Effort>) -> &'static str {
-    effort.map_or("none", lattice_api::Effort::as_str)
+fn effort_label(effort: Option<lattice_local::Effort>) -> &'static str {
+    effort.map_or("none", lattice_local::Effort::as_str)
 }
 pub async fn run_session_prompt(
     api: &LocalClient,
@@ -287,9 +287,9 @@ pub(super) async fn run_session_prompt_with_io(
 ) -> Result<std::process::ExitCode> {
     let session_id = match &args.session_id {
         Some(prefix) => api.resolve_session(prefix).await?.session_id,
-        None => lattice_api::local::new_session_id(),
+        None => lattice_local::new_session_id(),
     };
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut state = RunRenderState::default();
     render_update(
         &LocalUpdate::Submit {
@@ -309,11 +309,12 @@ pub(super) async fn run_session_prompt_with_io(
         if let Some(path) = workspace_override {
             return Ok::<_, LocalError>(path);
         }
-        let root = tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root)
-            .await
-            .map_err(|_| local_error("workspace worker failed"))?
-            .map_err(LocalError::from)?;
-        Ok::<_, LocalError>(root.canonical_path().to_path_buf())
+        std::env::current_dir().map_err(|_| {
+            LocalError::new(
+                LocalErrorKind::Internal,
+                "operation failed; inspect durable state",
+            )
+        })
     };
     let prepared = tokio::select! {biased;_=signal.recv()=>None,result=prepare=>Some(result)};
     let workspace = match prepared {
@@ -560,15 +561,6 @@ async fn consume(
     }
     Ok(summary_exit(state.summary.as_ref()))
 }
-fn local_error(message: &str) -> LocalError {
-    LocalError {
-        kind: LocalErrorKind::Internal,
-        message: message.into(),
-        conflict: None,
-        recovery: None,
-        store: None,
-    }
-}
 fn summary_exit(summary: Option<&TurnSummary>) -> std::process::ExitCode {
     std::process::ExitCode::from(match summary.map(|s| &s.outcome) {
         Some(PublicTurnOutcome::Completed) => 0,
@@ -620,7 +612,7 @@ fn finish_human(
         if let Some(head) = &state.head {
             writeln!(err, "session: {}", head.session_id)?;
         }
-        let usage = lattice_api::UsageSummary::from_attempts(
+        let usage = lattice_local::UsageSummary::from_attempts(
             state
                 .steps
                 .values()
@@ -637,12 +629,7 @@ fn finish_human(
     Ok(())
 }
 fn error_record(error: &anyhow::Error) -> (u8, serde_json::Value) {
-    let local = error.downcast_ref::<LocalError>().cloned().or_else(|| {
-        error
-            .downcast_ref::<lattice_api::ApiError>()
-            .cloned()
-            .map(Into::into)
-    });
+    let local = error.downcast_ref::<LocalError>().cloned();
     let code = match local.as_ref().map(|e| e.kind) {
         Some(LocalErrorKind::BadRequest | LocalErrorKind::NotFound | LocalErrorKind::Conflict) => 2,
         _ => 1,

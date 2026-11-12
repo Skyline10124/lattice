@@ -7,8 +7,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::time::Duration;
 
-use lattice_api::local::*;
-use lattice_api::{LocalWorkspaceRoot, StateLayout};
+use lattice_api::{LocalWorkspaceRoot, StateLayout, local::serve_for_test};
+use lattice_local::*;
 use lattice_session::store::PublicTurnOutcome;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
@@ -196,7 +196,7 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
 fn spawn_test_server(
     layout: StateLayout,
     home: Option<std::path::PathBuf>,
-) -> tokio::task::JoinHandle<lattice_api::local::Result<()>> {
+) -> tokio::task::JoinHandle<lattice_local::Result<()>> {
     let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
     tokio::spawn(async move {
         let exit =

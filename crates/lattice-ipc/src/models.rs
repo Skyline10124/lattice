@@ -3,7 +3,7 @@
 
 //! 本地 IPC 的模型查询请求与模型候选展示类型。
 
-use std::fmt;
+use std::{fmt, path::Path};
 
 use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
 use serde::{Deserialize, Serialize};
@@ -50,6 +50,28 @@ impl Availability {
             Self::Ready => "ready",
             Self::Unconfigured { .. } => "unconfigured",
             Self::Invalid { .. } => "invalid",
+        }
+    }
+
+    /// 由 provider id、可用性结果与实际的 `providers.toml` 路径生成面向用户的说明。
+    pub fn diagnostic(&self, provider_id: &str, providers_path: &Path) -> Option<String> {
+        match self {
+            Self::Ready => None,
+            Self::Unconfigured {
+                requirement: ConfigurationRequirement::ApiKey,
+            } => Some(format!(
+                "provider {provider_id:?} has no API key configured; run lattice auth set {provider_id}"
+            )),
+            Self::Unconfigured {
+                requirement: ConfigurationRequirement::ChatgptLogin,
+            } => Some("ChatGPT is not signed in; run lattice auth login chatgpt".to_owned()),
+            Self::Unconfigured {
+                requirement: ConfigurationRequirement::Declaration,
+            } => Some(format!(
+                "provider {provider_id:?} is not declared; add [providers.{provider_id}] in {}",
+                providers_path.display()
+            )),
+            Self::Invalid { reason } => Some(reason.clone()),
         }
     }
 }

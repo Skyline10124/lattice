@@ -34,6 +34,7 @@ zeroize = { workspace = true }
 rustix = { workspace = true }
 lattice-api = { workspace = true, features = ["test-utils"] }
 lattice-ipc = { workspace = true, features = ["test-utils"] }
+lattice-local = { workspace = true, features = ["test-utils"] }
 lattice-session = { workspace = true, features = ["test-utils"] }
 lattice-store = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
@@ -45,7 +46,7 @@ tokio-stream = { workspace = true }
 
 [features]
 default = []
-# 仅供本 crate 与下游测试复用同进程 Turn 执行入口及 IPC 测试魔数。
-test-utils = ["lattice-ipc/test-utils"]
+# 仅供本 crate 与下游测试复用同进程 Turn 执行入口。
+test-utils = []
 test-crash-barriers = ["lattice-session/test-crash-barriers"]
 test-fake-tools = []

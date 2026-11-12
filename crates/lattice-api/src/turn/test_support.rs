@@ -111,7 +111,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
     let agent = crate::AgentName::parse("test").unwrap();
     let loaded_profile =
         lattice_profile::load_agent_profile(&agent, &paths, crate::local::ipc::uid()).unwrap();
-    let session_id = crate::local::new_session_id();
+    let session_id = lattice_local::new_session_id();
     let turn_profile = crate::profile::TurnProfile::from_loaded(&loaded_profile);
     let settings = lattice_session::store::SessionSettings {
         profile: turn_profile.effective,
@@ -183,7 +183,7 @@ impl TestFixture {
             .unwrap();
     }
     pub fn create_session(&self) -> lattice_conversation::SessionId {
-        let sid = crate::local::new_session_id();
+        let sid = lattice_local::new_session_id();
         let settings = self
             .store
             .begin_read()

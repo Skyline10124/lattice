@@ -4,8 +4,8 @@ use super::*;
 use serde_json::json;
 #[test]
 fn json_updates_keep_submission_receipt_and_error_shapes() {
-    let id = lattice_api::local::new_turn_id();
-    let sid = lattice_api::local::new_session_id();
+    let id = lattice_local::new_turn_id();
+    let sid = lattice_local::new_session_id();
     let error: LocalError = serde_json::from_value(
         json!({"kind":"bad_request","message":"exact rejection","recovery":null,"store":null}),
     )
@@ -97,8 +97,8 @@ fn json_updates_keep_submission_receipt_and_error_shapes() {
 
 #[test]
 fn json_and_human_configure_updates_render_expected_shapes_and_adjustment_line() {
-    let id = lattice_api::local::new_turn_id();
-    let sid = lattice_api::local::new_session_id();
+    let id = lattice_local::new_turn_id();
+    let sid = lattice_local::new_session_id();
     let head = ipc_tests::head(id, false);
     let error: LocalError = serde_json::from_value(
         json!({"kind":"bad_request","message":"unsupported effort","recovery":null,"store":null}),
@@ -110,8 +110,8 @@ fn json_and_human_configure_updates_render_expected_shapes_and_adjustment_line()
             result: ConfigureResult::Configured {
                 head: head.clone(),
                 adjustment: Some(EffortAdjustment {
-                    from: Some(lattice_api::Effort::High),
-                    to: Some(lattice_api::Effort::Medium),
+                    from: Some(lattice_local::Effort::High),
+                    to: Some(lattice_local::Effort::Medium),
                 }),
             },
         },
@@ -198,7 +198,7 @@ fn json_and_human_configure_updates_render_expected_shapes_and_adjustment_line()
 
 #[test]
 fn human_rejected_receipt_keeps_legacy_store_paths() {
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let paths = [
         "/home/test/state/lattice/sessions.git",
         "/home/test/state/lattice/projects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/invocations.git",
@@ -240,7 +240,7 @@ fn human_rejected_receipt_keeps_legacy_store_paths() {
 }
 #[test]
 fn human_entries_replace_streamed_text_and_print_one_final_summary() {
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let mut state = RunRenderState::default();
@@ -283,7 +283,7 @@ fn human_entries_replace_streamed_text_and_print_one_final_summary() {
 }
 #[test]
 fn durable_attempt_usage_is_reported_once_with_partial_totals() {
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut node = ipc_tests::entry(id, "completed");
     if let ConversationEntry::Step { step, .. } = node.as_mut() {
         let attempt = |n, usage| {
@@ -336,7 +336,7 @@ fn durable_attempt_usage_is_reported_once_with_partial_totals() {
 
 #[test]
 fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut node = ipc_tests::entry(id, "completed");
     if let ConversationEntry::Step {
         content: Node::Step {
@@ -426,7 +426,7 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
         let mut state = RunRenderState::default();
         let mut out = Vec::new();
         let mut err = Vec::new();
-        let mut new_head = ipc_tests::head(lattice_api::local::new_turn_id(), true);
+        let mut new_head = ipc_tests::head(lattice_local::new_turn_id(), true);
         new_head.position = NodeId(4);
         render_update(
             &LocalUpdate::Head(new_head),
@@ -459,7 +459,7 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
 
 #[test]
 fn human_and_json_tool_failure_renders_tool_error_without_legacy_evidence() {
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let inv_id = "10000000-0000-4000-8000-000000000001";
     let mut node = ipc_tests::entry(id, "completed");
     if let ConversationEntry::Step {

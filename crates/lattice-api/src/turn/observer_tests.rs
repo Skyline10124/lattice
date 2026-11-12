@@ -4,7 +4,7 @@ use super::*;
 use lattice_session::store::{AttemptOrigin, AttemptProtocol};
 fn key(attempt_ordinal: u32) -> lattice_conversation::ModelAttemptKey {
     lattice_conversation::ModelAttemptKey {
-        turn_id: crate::local::new_turn_id(),
+        turn_id: lattice_local::new_turn_id(),
         model_step_ordinal: 0,
         attempt_ordinal,
     }

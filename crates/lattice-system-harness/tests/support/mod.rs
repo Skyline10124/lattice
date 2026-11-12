@@ -311,7 +311,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
         .expect("drive lattice")
 }
 
-/// 与 `lattice_api::local::test_support::FRAME_MAGIC` 相同；harness 不能依赖产品 crate，用同一版本号拼出帧魔数。
+/// 与 `lattice_local::test_support::FRAME_MAGIC` 相同；harness 不能依赖产品 crate，用同一版本号拼出帧魔数。
 const PROTOCOL_VERSION: u8 = 63;
 const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
 

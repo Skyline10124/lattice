@@ -19,15 +19,20 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct TuiOptions {
     pub session_id: Option<String>,
-    pub agent: Option<lattice_api::AgentName>,
+    pub agent: Option<lattice_local::AgentName>,
     pub session_dir: PathBuf,
     pub project_root: PathBuf,
 }
 
 pub async fn run(mut options: TuiOptions) -> anyhow::Result<std::process::ExitCode> {
-    let workspace = tokio::task::spawn_blocking(lattice_api::LocalWorkspaceRoot::resolve).await??;
-    options.project_root = workspace.canonical_path().to_path_buf();
-    let client = lattice_api::local::LocalClient::new(lattice_api::StateLayout::resolve()?);
+    let workspace = std::env::current_dir().map_err(|_| {
+        lattice_local::LocalError::new(
+            lattice_local::LocalErrorKind::Internal,
+            "operation failed; inspect durable state",
+        )
+    })?;
+    options.project_root = workspace.clone();
+    let client = lattice_local::LocalClient::new(lattice_local::StateLayout::resolve()?);
     client.ensure_running().await?;
     let ctx = session::open_or_create(&options, &workspace, &client).await?;
     app::run_app(options, ctx, client).await?;

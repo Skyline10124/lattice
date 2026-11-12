@@ -2269,6 +2269,7 @@ dependencies = [
  "lattice-conversation",
  "lattice-ipc",
  "lattice-llm",
+ "lattice-local",
  "lattice-profile",
  "lattice-session",
  "lattice-store",
@@ -2294,15 +2295,12 @@ name = "lattice-cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "clap",
  "colored",
  "dirs",
  "futures",
- "lattice-agent",
  "lattice-api",
- "lattice-llm",
- "lattice-profile",
+ "lattice-local",
  "lattice-session",
  "lattice-tui",
  "libc",
@@ -2378,6 +2376,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-local"
+version = "0.1.0"
+dependencies = [
+ "lattice-conversation",
+ "lattice-ipc",
+ "lattice-store",
+ "libc",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing-subscriber",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "lattice-profile"
 version = "0.1.0"
 dependencies = [
@@ -2444,7 +2458,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "futures",
- "lattice-api",
+ "lattice-local",
  "pulldown-cmark",
  "ratatui",
  "serde_json",

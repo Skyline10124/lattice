@@ -1100,7 +1100,10 @@ impl Backend {
                     revocation: super::presentation::revocation_status(revocation),
                 }))
             }
-            Request::AuthLogin { .. } => Err(super::client::protocol()),
+            Request::AuthLogin { .. } => Err(LocalError::new(
+                LocalErrorKind::Protocol,
+                "unexpected local response",
+            )),
             Request::AuthStatus {} => {
                 let auth = super::auth::store(self.home.as_deref())?;
                 blocking(move || {

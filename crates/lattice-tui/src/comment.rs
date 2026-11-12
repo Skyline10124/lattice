@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_api::local::TurnId;
+use lattice_local::TurnId;
 use std::ops::Range;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -214,7 +214,7 @@ mod tests {
 
     #[test]
     fn structured_comments_round_trip_preserves_paragraphs_quotes_and_escapes() {
-        let turn = lattice_api::local::new_turn_id();
+        let turn = lattice_local::new_turn_id();
         for quote in ["原文", "原文\n\n末段\n", "</quote>\n\\</lattice-comment>\n"] {
             for (comment, body) in [
                 ("第一段\n\n第二段", ""),

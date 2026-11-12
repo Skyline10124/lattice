@@ -2,10 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Subcommand;
-use lattice_api::{
-    StateLayout,
-    local::{self, LocalClient},
-};
+use lattice_local::{DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -67,12 +64,14 @@ fn parse_drain_timeout(raw: &str) -> Result<Duration, String> {
     }
 }
 
-fn state_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
+pub(super) fn state_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
     if let Some(root) = explicit {
         if !root.is_absolute() {
-            return Err(
-                lattice_api::ApiError::BadRequest("state root must be absolute".into()).into(),
-            );
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "request or frozen configuration is invalid",
+            )
+            .into());
         }
         return Ok(root.to_owned());
     }
@@ -87,9 +86,9 @@ pub async fn serve(
     explicit_state_root: Option<&Path>,
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
-) -> anyhow::Result<local::ServeExit> {
+) -> anyhow::Result<lattice_api::local::ServeExit> {
     let root = state_root(explicit_state_root)?;
-    local::serve(
+    lattice_api::local::serve(
         StateLayout::in_state_root(&root),
         std::env::var_os("HOME").map(PathBuf::from),
         drain_timeout,
@@ -116,7 +115,7 @@ pub async fn run_client(is_stop: bool, json: bool) -> anyhow::Result<std::proces
 }
 
 fn render_daemon_status(
-    status: &local::DaemonStatus,
+    status: &DaemonStatus,
     is_stop: bool,
     json: bool,
     out: &mut impl Write,
@@ -146,7 +145,7 @@ fn render_daemon_status(
 #[cfg(test)]
 mod tests {
     use super::render_daemon_status;
-    use lattice_api::local::DaemonStatus;
+    use lattice_local::DaemonStatus;
 
     #[test]
     fn daemon_stop_warns_on_stderr_when_operations_are_unconfirmed_while_status_stays_silent() {

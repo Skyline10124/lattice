@@ -50,7 +50,7 @@ enum Commands {
         auth: bool,
         /// Only list models from this configured provider.
         #[arg(long)]
-        provider: Option<lattice_api::ProviderId>,
+        provider: Option<lattice_local::ProviderId>,
         #[command(subcommand)]
         action: Option<models::ModelsAction>,
     },
@@ -65,7 +65,7 @@ enum Commands {
         /// Existing session; when omitted, a new session is created via configure.
         session_id: Option<String>,
         #[arg(long, required_unless_present = "session_id")]
-        agent: Option<lattice_api::AgentName>,
+        agent: Option<lattice_local::AgentName>,
     },
 }
 
@@ -120,7 +120,7 @@ fn main() -> std::process::ExitCode {
 
 fn run_with_runtime(cli: Cli) -> std::process::ExitCode {
     let json = cli.json;
-    let _ = lattice_api::init_logging(cli.verbose);
+    let _ = lattice_local::init_logging(cli.verbose);
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()

@@ -1,50 +1,30 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-pub use crate::models::{ModelCandidateQuery, ModelCandidates};
-pub use crate::turn::{TextSegment, TurnRef};
-pub use crate::{
-    AgentName, AgentNameError, ModelId, ModelIdError, ModelRef, ModelRefError, ProviderId,
-    ProviderIdError,
+pub(crate) use crate::models::ModelCandidateQuery;
+pub(crate) use lattice_conversation::{SessionId, TurnId};
+pub(crate) use lattice_ipc::{
+    Acceptance, AuthLoggedOut, AuthRemoval, ConfigureReply, ConfigureRequest, ConfigureSession,
+    ConflictReason, DaemonStatus, EffortAdjustment, LocalError, LocalErrorKind, LocalHistory,
+    MAX_HISTORY_TURNS, RecoveryCause, Request, Response, Result, SessionHead, SessionListRow,
+    StoreDiagnostic, TextUpdate, TurnLookup, TurnRequest, TurnView, ViewUpdate, WATCH_TURNS,
 };
-pub use lattice_conversation::{
-    CostEstimate, CostSummary, Effort, InvocationId, ModelAttemptKey, ResultPayload, SessionId,
-    StepContent, StoredToolResult, SuccessContent, TokenSummary, ToolError, TurnId,
-    UsageCompleteness,
-};
-pub use lattice_ipc::{
-    Acceptance, AuthRemoval, AuthStatus, Availability, CancelStatus, ConfigurationRequirement,
-    ConfigureReply, ConfigureRequest, ConfigureResult, ConfigureSession, ConflictReason,
-    ConnectionStatus, DaemonStatus, EffortAdjustment, HISTORY_TURNS, LocalError, LocalErrorKind,
-    LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, ProviderAuthStatus, RecoveryCause, RecoveryNeed,
-    Result, RevocationStatus, SessionHead, SessionListRow, StoreDiagnostic, SubmissionReceipt,
-    SubmissionResult, SubmissionUpdate, TextUpdate, TurnLookup, TurnRequest, TurnView, ViewUpdate,
-    WATCH_TURNS,
-};
-pub(super) use lattice_ipc::{AuthLoggedOut, Request, Response};
-pub use lattice_llm::auth::SensitiveLoginUrl;
-pub use lattice_session::store::{
-    AttemptProgress, ConversationEntry, MaterialSummary, Node, NodeId, NodeKind, NodeRef, Notice,
-    NoticeLevel, Page, PublicTurnOutcome, RetryNotice, SessionLog, SessionRecord, SessionUsage,
-    SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail, StepEnd, StepKey,
-    StepProgress, TurnDetail, TurnSummary, TurnUsageRow, UsageSummary,
-};
+pub(crate) use lattice_session::store::Page;
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct DetachReport {
-    pub session_id: SessionId,
-    pub turn_id: Option<TurnId>,
-    pub submission: Option<SubmissionReceipt>,
-    pub submission_diagnostic: Option<LocalError>,
-    pub cancel: Option<CancelStatus>,
-    pub cancel_error: Option<LocalError>,
-    pub head: Option<SessionHead>,
-    pub summary: Option<TurnSummary>,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub enum ConfigureOutcome {
-    Configured(ConfigureReply),
-    Rejected(LocalError),
-    Unknown(LocalError),
-}
+#[cfg(test)]
+pub(crate) use crate::turn::{TextSegment, TurnRef};
+#[cfg(test)]
+pub(crate) use crate::{AgentName, ModelId, ModelRef, ProviderId};
+#[cfg(test)]
+pub(crate) use lattice_conversation::{Effort, MessageRole, ModelAttemptKey, NativeMessage};
+#[cfg(test)]
+pub(crate) use lattice_ipc::{
+    AuthLoginOutcome, AuthStatus, Availability, CancelStatus, ConfigurationRequirement,
+    ConfigureResult, ConnectionStatus, LocalUpdate, ProviderAuthStatus, RevocationStatus,
+    SubmissionReceipt, SubmissionResult, SubmissionUpdate,
+};
+#[cfg(test)]
+pub(crate) use lattice_session::store::{
+    ConversationEntry, Node, NodeId, NodeRef, PublicTurnOutcome, StepDetail, StepEnd, StepKey,
+    StepProgress, TurnDetail, TurnSummary, UsageSummary,
+};

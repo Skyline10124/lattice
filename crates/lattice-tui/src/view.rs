@@ -11,7 +11,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::app::{App, Block, Status, ToolState, TurnPhase};
 use crate::input::{CTRL_C_WINDOW, InputBuffer};
 use crate::wrapping;
-use lattice_api::local::{NoticeLevel, PublicTurnOutcome};
+use lattice_local::{NoticeLevel, PublicTurnOutcome};
 
 pub(crate) mod browse;
 pub(crate) use browse::Focus;
@@ -909,13 +909,13 @@ mod tests {
 
     pub(super) fn test_app() -> App {
         let session_id =
-            lattice_api::local::SessionId::parse("11111111111141118111111111111111").unwrap();
+            lattice_local::SessionId::parse("11111111111141118111111111111111").unwrap();
         App::new(
             SessionContext {
                 session_id,
-                initial_head: lattice_api::local::SessionHead {
+                initial_head: lattice_local::SessionHead {
                     session_id,
-                    position: lattice_api::local::NodeId(0),
+                    position: lattice_local::NodeId(0),
                     agent: "unused".into(),
                     model: None,
                     provider: None,
