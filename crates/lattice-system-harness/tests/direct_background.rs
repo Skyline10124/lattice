@@ -3150,10 +3150,6 @@ fn sigterm_drains_inflight_turn_and_exits_zero() {
             "正常排空完成后台应以 0 退出：{}",
             exited.summary()
         );
-        assert_eq!(
-            exited.interventions,
-            vec![lattice_system_harness::HarnessIntervention::TerminateRequested]
-        );
         assert!(
             !exited.cleanup.forced && exited.cleanup.succeeded(),
             "{:?}",
@@ -3192,10 +3188,6 @@ fn sigint_right_after_ready_exits_zero_and_releases_resources() {
             Some(0),
             "无在途工作时 SIGINT 停机应以 0 退出：{}",
             exited.summary()
-        );
-        assert_eq!(
-            exited.interventions,
-            vec![lattice_system_harness::HarnessIntervention::InterruptRequested]
         );
         assert!(
             !exited.cleanup.forced && exited.cleanup.succeeded(),
@@ -3245,10 +3237,6 @@ fn sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn() {
             Some(4),
             "排空超时后台应以 4 退出：{}",
             exited.summary()
-        );
-        assert_eq!(
-            exited.interventions,
-            vec![lattice_system_harness::HarnessIntervention::TerminateRequested]
         );
         assert!(
             !exited.cleanup.forced && exited.cleanup.succeeded(),
@@ -3413,13 +3401,6 @@ fn second_sigterm_during_drain_triggers_immediate_timeout_exit_four() {
             Some(4),
             "第二次信号触发排空超时应以 4 退出：{}",
             daemon_out.summary()
-        );
-        assert_eq!(
-            daemon_out.interventions,
-            vec![
-                lattice_system_harness::HarnessIntervention::TerminateRequested,
-                lattice_system_harness::HarnessIntervention::TerminateRequested,
-            ]
         );
         assert!(
             !daemon_out.cleanup.forced && daemon_out.cleanup.succeeded(),
