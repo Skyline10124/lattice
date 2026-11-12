@@ -75,7 +75,7 @@ LocalTurn 是本客户端一次提交的具体句柄，处理接受回执、取�
 | TUI `input` | 管理多行缓冲、光标、粘贴、键位和输入历史 |
 | TUI `app` 应用事件循环 | 持有 LocalTurn、当前会话视图、最新会话头，以及 `configure` 的请求、回复与在途代次；发起 `configure`、提交、`watch`、历史查询、模型候选查询、按 TurnId 的查询或取消意图，消费视图推送；按 NodeId 维护对话条目的显示，维护焦点、排队与评论草稿，处理键盘、退出及重绘 |
 | TUI `view` | 从 Block、输入和状态统一计算布局、折行、viewport、Dock 与 statusline，绘制终端字符单元 |
-| `lattice-api::local::LocalClient` / `LocalTurn` | LocalClient 连接后台，转交 `configure`、视图与查询，超过单帧的消息由连接层分帧与拼回；LocalTurn 交付提交，管理取消回执与退出交接 |
+| `lattice-local::LocalClient` / `LocalTurn` | LocalClient 连接后台，转交 `configure`、视图与查询，超过单帧的消息由连接层分帧与拼回；LocalTurn 交付提交，管理取消回执与退出交接 |
 | 后台 `serve` / Backend / Owner | serve 持本地实例与连接，Backend 管 `configure`、准入、存储与各观察者的视图推送；Owner 监督独立操作，实际带配置的操作从准备起持同一取消载体直至独立收尾 |
 | 后台 TurnCoordinator | 唯一持久 Turn 协调者，推进模型、工具、结果保存和最终关闭，向 Backend 返回完成结果 |
 
@@ -135,7 +135,7 @@ flowchart LR
 
 模型尝试重试时，新尝试的文字从头开始。失败的尝试在 Step 条目中显示为 `Ended`，它的生成中文字随之移除；条目中的这次尝试带有重试提示，等级取自条目。不再重试的失败没有重试提示，只由 Turn 结局显示一次。尝试规则见[模型请求与执行预算](../session/acceptance.md#模型请求与执行预算)。
 
-观察 idle 由客户端判定，唯一常量为 `lattice_api::STREAM_IDLE_TIMEOUT_SECS`，只在会话头说明当前位置那一轮有 Owner 执行时计时，触发条件和范围见[输入与传输限制](../session/concurrency.md#输入与传输限制)。超时、断连或 EOF 按连接诊断呈现，仍在运行的工具按观察未知显示；用户可用 `/reconnect` 重新观察。
+观察 idle 由客户端判定，唯一常量为 `lattice_local::STREAM_IDLE_TIMEOUT_SECS`，只在会话头说明当前位置那一轮有 Owner 执行时计时，触发条件和范围见[输入与传输限制](../session/concurrency.md#输入与传输限制)。超时、断连或 EOF 按连接诊断呈现，仍在运行的工具按观察未知显示；用户可用 `/reconnect` 重新观察。
 
 #### configure 结果不明与设置同步
 
@@ -181,7 +181,7 @@ TUI 只操作当前会话，不提供会话选择器、会话树视图或退回�
 | 检查对象 | 入口与关注点 |
 | --- | --- |
 | 键位、折行、Dock 模块栈与高度、状态释放、选择面板的过滤、移动、选定与取消及换模型时的档位调整提示、在途 `configure` 代次与排队设置版本绑定、布局、statusline 字段与省略、标题线与轮次序号、浏览光标移动与翻页夹紧、评论格式解析与降级、排队上限与暂停、Markdown 元素、代码块边框与续行、表格列宽与代码高亮分类 | `cargo test -p lattice-tui` |
-| 视图推送的消费：会话头同步设置与面板、条目按 NodeId 原位替换与接在末尾、新视图开始与路径替换时丢弃旧条目、往上翻时插入更早的轮、生成中的文字由条目接替、重试提示与结局按是否新到进入 Dock 或对话记录；接受未知时的查询找回与取消交接 | TUI 的 `app_loop_tests` / `connection_tests`；共同控制、视图与查询协议由 API 局部测试保护 |
+| 视图推送的消费：会话头同步设置与面板、条目按 NodeId 原位替换与接在末尾、新视图开始与路径替换时丢弃旧条目、往上翻时插入更早的轮、生成中的文字由条目接替、重试提示与结局按是否新到进入 Dock 或对话记录；接受未知时的查询找回与取消交接 | TUI 的 `app_loop_tests` / `connection_tests`；共同控制、视图与查询协议由 `lattice-local` 与 `lattice-api` 局部测试保护 |
 | CLI 接线 | CLI 表面变化时检查 `cargo test -p lattice-cli` |
 | 实际终端入口 | 按测试工程的[被测二进制要求](../../development/testing.md#被测二进制)准备 lattice-cli，运行 harness 的 `pty_tui_smoke`；其中用 `/model`、`/effort` 选择经 `configure` 保存后提交、核对执行中禁改设置、换模型后的档位调整提示、fake provider 收到的请求带所选模型与档位，以及选择面板的过滤与取消 |
 | 交互与配色 | 真彩色终端下的界面与代码高亮配色、超宽及极小终端、错误确认、翻页、浏览光标、评论与排队编辑、块状光标形状与恢复的人工检查 |

@@ -8,7 +8,10 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
-use crate::{models::Availability, types::LocalError};
+use crate::{
+    models::Availability,
+    types::{LocalError, LocalErrorKind, Result},
+};
 
 /// 私有 IPC 录入材料，不提供 Debug，也不进入公开响应。
 #[derive(Serialize, Deserialize, Zeroize, ZeroizeOnDrop)]
@@ -91,4 +94,15 @@ pub enum LoginResponse {
 pub enum LoginAction {
     Callback { url: AuthKey },
     Cancel {},
+}
+
+/// 登录与登出协议只支持内置 `chatgpt` provider。
+pub fn require_chatgpt(provider: &str) -> Result<()> {
+    if provider == "chatgpt" {
+        return Ok(());
+    }
+    Err(LocalError::new(
+        LocalErrorKind::BadRequest,
+        "login and logout require the built-in chatgpt provider",
+    ))
 }

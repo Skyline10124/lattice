@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_api::local::SensitiveLoginUrl;
+use lattice_local::SensitiveLoginUrl;
 use std::{
     fs::File,
     io::{self, IsTerminal, Read},

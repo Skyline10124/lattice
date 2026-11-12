@@ -3,10 +3,7 @@
 
 use anyhow::Result;
 use clap::Subcommand;
-use lattice_api::{
-    ModelCandidateQuery, ProviderId, StateLayout,
-    local::{Availability, LocalClient},
-};
+use lattice_local::{Availability, LocalClient, ModelCandidateQuery, ProviderId, StateLayout};
 use std::io::Write;
 
 #[derive(Subcommand)]

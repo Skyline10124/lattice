@@ -35,7 +35,7 @@ mod live_tests;
 #[cfg(any(test, feature = "test-utils"))]
 pub use execute::run_turn;
 pub(crate) use execute::start_execution;
-pub use execute::{STREAM_IDLE_TIMEOUT_SECS, start_turn};
+pub use execute::start_turn;
 pub(crate) use tools::default_tool_executor;
 pub use tools::{NoTools, ToolExecutor, ToolOutcome, ToolSpec, TurnTools};
 pub use types::{

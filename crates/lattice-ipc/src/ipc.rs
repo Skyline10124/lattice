@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 本地 IPC 协议版本、16 MiB 单帧编解码、响应分片与对端 UID 核验。
+//! 本地 IPC 协议版本、16 MiB 单帧编解码、响应分片与本地访问边界核验。
 
-use std::time::Duration;
+use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
@@ -72,6 +72,18 @@ pub fn uid() -> u32 {
 pub fn check_peer(stream: &UnixStream) -> Result<()> {
     let cred = rustix::net::sockopt::socket_peercred(stream).map_err(std::io::Error::from)?;
     if cred.uid.as_raw() != uid() {
+        return Err(permission());
+    }
+    Ok(())
+}
+
+/// 核验状态根或 `local/` 目录类型、有效 UID 属主与权限位。
+pub fn check_dir(path: &Path, private: bool) -> Result<()> {
+    let meta = std::fs::symlink_metadata(path)?;
+    if !meta.is_dir()
+        || meta.uid() != uid()
+        || meta.mode() & if private { 0o077 } else { 0o022 } != 0
+    {
         return Err(permission());
     }
     Ok(())

@@ -7,7 +7,7 @@ authors.workspace = true
 description = "LATTICE full-screen chat TUI"
 
 [dependencies]
-lattice-api    = { workspace = true }
+lattice-local  = { workspace = true }
 anyhow         = { workspace = true }
 futures        = { workspace = true }
 tokio          = { workspace = true }
@@ -22,7 +22,7 @@ syntect       = { workspace = true }
 two-face      = { workspace = true }
 
 [dev-dependencies]
-lattice-api = { workspace = true, features = ["test-utils"] }
+lattice-local = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
 serde_json = { workspace = true }
 # `test-util` (paused clock) is not part of tokio's `full`; it is what lets the

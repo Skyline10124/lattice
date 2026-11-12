@@ -25,7 +25,8 @@ async fn exchange<A: LoginAttempt>(
     .await
 }
 
-use crate::local::{Availability, ConfigurationRequirement, ProviderAuthStatus};
+use crate::local::{Availability, ConfigurationRequirement, ProviderAuthStatus, Request};
+use lattice_local::{AuthLoginEvent, LocalAuthLogin, LocalClient};
 
 struct Attempt {
     url: SensitiveLoginUrl,
@@ -112,6 +113,32 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("登录交换没有收尾")
 }
 
+/// 经真实本地 socket 与 `LocalClient::auth_login` 建立登录连接，并在接管后立即释放监听与锁。
+async fn open_login() -> (LocalAuthLogin, UnixStream) {
+    let directory = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(directory.path());
+    let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
+    let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+    let client = LocalClient::new(layout);
+    let (login, server) = bounded(async {
+        tokio::join!(client.auth_login("chatgpt"), async {
+            let (mut server, _) = listener.accept().await.unwrap();
+            ipc::check_peer(&server).unwrap();
+            let request: Request = ipc::read_request(&mut server).await.unwrap();
+            assert!(matches!(
+                request,
+                Request::AuthLogin { ref provider } if provider == "chatgpt"
+            ));
+            server
+        })
+    })
+    .await;
+    drop(listener);
+    instance.cleanup().unwrap();
+    drop(instance);
+    (login.unwrap(), server)
+}
+
 async fn authorization(login: &mut LocalAuthLogin) {
     let Some(AuthLoginEvent::Authorization(url)) = bounded(login.next()).await.unwrap() else {
         panic!("授权事件缺失")
@@ -127,7 +154,7 @@ async fn cancel_during_startup_drops_the_start_future_before_replying() {
             self.0.store(true, Ordering::SeqCst);
         }
     }
-    let (client, server) = UnixStream::pair().unwrap();
+    let (mut login, server) = open_login().await;
     let cancelled = Arc::new(AtomicBool::new(false));
     let control = cancelled.clone();
     let entered = Arc::new(tokio::sync::Notify::new());
@@ -137,7 +164,6 @@ async fn cancel_during_startup_drops_the_start_future_before_replying() {
         ready.notify_one();
         std::future::pending::<std::result::Result<Attempt, LoginError>>().await
     }));
-    let mut login = LocalAuthLogin::from_stream(client);
     bounded(entered.notified()).await;
     login.cancel().await.unwrap();
     assert!(matches!(
@@ -200,14 +226,13 @@ fn login_envelopes_payloads_and_outcomes_reject_unknown_fields() {
 
 #[tokio::test]
 async fn one_socket_delivers_authorization_callback_and_final_result() {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (mut login, server) = open_login().await;
     let (attempt, mut callbacks) = attempt();
     let finished = attempt.finished.clone();
     let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
-    let mut login = LocalAuthLogin::from_stream(client);
     authorization(&mut login).await;
     login
-        .submit_callback(SensitiveLoginUrl::new(
+        .submit_callback(lattice_local::SensitiveLoginUrl::new(
             "http://127.0.0.1:1455/auth/callback?code=private-code".into(),
         ))
         .await
@@ -229,11 +254,10 @@ async fn one_socket_delivers_authorization_callback_and_final_result() {
 
 #[tokio::test]
 async fn browser_completion_needs_no_frontend_message_and_wins_late_cancel() {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (mut login, server) = open_login().await;
     let (attempt, _callbacks) = attempt();
     let finished = attempt.finished.clone();
     let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
-    let mut login = LocalAuthLogin::from_stream(client);
     authorization(&mut login).await;
     finished.send_replace(Some(Ok(llm_signed_in())));
     let _ = login.cancel().await;
@@ -253,7 +277,7 @@ async fn saved_login_waits_for_the_directory_result_and_directory_failure_keeps_
             warning: "directory unavailable".into(),
         },
     ] {
-        let (client, server) = UnixStream::pair().unwrap();
+        let (mut login, server) = open_login().await;
         let (attempt, _callbacks) = attempt();
         let saved = attempt.finished.clone();
         let cancelled = attempt.cancelled.clone();
@@ -272,7 +296,6 @@ async fn saved_login_waits_for_the_directory_result_and_directory_failure_keeps_
                 })
             }
         }));
-        let mut login = LocalAuthLogin::from_stream(client);
         authorization(&mut login).await;
         assert!(calls.try_recv().is_err(), "保存成功之前不刷新目录");
         saved.send_replace(Some(Ok(llm_signed_in())));
@@ -298,25 +321,36 @@ async fn saved_login_waits_for_the_directory_result_and_directory_failure_keeps_
 #[tokio::test]
 async fn cancel_eof_and_partial_frame_eof_cancel_the_attempt() {
     for mode in ["cancel", "eof", "partial"] {
-        let (client, server) = UnixStream::pair().unwrap();
         let (attempt, _callbacks) = attempt();
         let cancelled = attempt.cancelled.clone();
-        let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
-        let mut login = LocalAuthLogin::from_stream(client);
-        authorization(&mut login).await;
-        if mode == "cancel" {
-            login.cancel().await.unwrap();
+        if mode == "partial" {
+            let (mut client, server) = UnixStream::pair().unwrap();
+            let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
+            let mut reader = ipc::ResponseReader::for_login();
             assert!(matches!(
-                bounded(login.next()).await.unwrap(),
-                Some(AuthLoginEvent::Finished(AuthLoginOutcome::Cancelled {}))
+                bounded(reader.read::<LoginResponse>(&mut client))
+                    .await
+                    .unwrap(),
+                LoginResponse::AuthLoginAuthorization { .. }
             ));
+            client.write_all(b"LTL").await.unwrap();
+            drop(client);
+            let _ = bounded(task).await.unwrap();
         } else {
-            if mode == "partial" {
-                login.write.write_all(b"LTL").await.unwrap();
+            let (mut login, server) = open_login().await;
+            let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
+            authorization(&mut login).await;
+            if mode == "cancel" {
+                login.cancel().await.unwrap();
+                assert!(matches!(
+                    bounded(login.next()).await.unwrap(),
+                    Some(AuthLoginEvent::Finished(AuthLoginOutcome::Cancelled {}))
+                ));
+            } else {
+                drop(login);
             }
-            drop(login);
+            let _ = bounded(task).await.unwrap();
         }
-        let _ = bounded(task).await.unwrap();
         assert!(cancelled.load(Ordering::SeqCst));
     }
 }
@@ -352,167 +386,16 @@ async fn unknown_fields_and_wrong_actions_fail_without_echoing_material() {
 }
 
 #[tokio::test]
-async fn interrupted_ui_poll_keeps_partial_authorization_frame() {
-    let (client, mut server) = UnixStream::pair().unwrap();
-    let mut login = LocalAuthLogin::from_stream(client);
-    let payload = serde_json::to_vec(&serde_json::json!({"message_id":0,"offset":0,"complete":true,
-        "json_fragment":serde_json::to_string(&LoginResponse::AuthLoginAuthorization { authorization_url: AuthKey::new(URL.into()) }).unwrap()})).unwrap();
-    server.write_all(ipc::MAGIC).await.unwrap();
-    server.write_u32(payload.len() as u32).await.unwrap();
-    server.write_all(&payload[..7]).await.unwrap();
-    for _ in 0..3 {
-        assert!(
-            timeout(Duration::from_millis(1), login.next())
-                .await
-                .is_err()
-        );
-    }
-    server.write_all(&payload[7..]).await.unwrap();
-    authorization(&mut login).await;
-}
-
-struct ObservedRead {
-    read: tokio::net::unix::OwnedReadHalf,
-    bytes: usize,
-    waiting: Option<tokio::sync::oneshot::Sender<()>>,
-    partial: Option<tokio::sync::oneshot::Sender<()>>,
-}
-
-impl tokio::io::AsyncRead for ObservedRead {
-    fn poll_read(
-        mut self: std::pin::Pin<&mut Self>,
-        context: &mut std::task::Context<'_>,
-        buffer: &mut tokio::io::ReadBuf<'_>,
-    ) -> std::task::Poll<std::io::Result<()>> {
-        let before = buffer.filled().len();
-        let result = std::pin::Pin::new(&mut self.read).poll_read(context, buffer);
-        self.bytes += buffer.filled().len() - before;
-        if result.is_pending() {
-            let signal = if self.bytes == 0 {
-                self.waiting.take()
-            } else {
-                self.partial.take()
-            };
-            if let Some(signal) = signal {
-                let _ = signal.send(());
-            }
-        }
-        result
-    }
-}
-
-fn observed_login(
-    stream: UnixStream,
-) -> (
-    LocalAuthLogin,
-    tokio::sync::oneshot::Receiver<()>,
-    tokio::sync::oneshot::Receiver<()>,
-) {
-    let (read, write) = stream.into_split();
-    let (waiting, entered) = tokio::sync::oneshot::channel();
-    let (partial, started) = tokio::sync::oneshot::channel();
-    (
-        LocalAuthLogin::from_reader(
-            ObservedRead {
-                read,
-                bytes: 0,
-                waiting: Some(waiting),
-                partial: Some(partial),
-            },
-            write,
-        ),
-        entered,
-        started,
-    )
-}
-
-#[tokio::test(start_paused = true)]
-async fn human_wait_remains_usable_after_the_reader_waits_over_300_seconds() {
-    let (client, mut server) = UnixStream::pair().unwrap();
-    let (mut login, waiting, _partial) = observed_login(client);
-    waiting.await.unwrap();
-    tokio::time::advance(Duration::from_secs(301)).await;
-    let mut writer = ipc::ResponseWriter::default();
-    writer
-        .write(
-            &mut server,
-            &LoginResponse::AuthLoginAuthorization {
-                authorization_url: AuthKey::new(URL.into()),
-            },
-        )
-        .await
-        .unwrap();
-    authorization(&mut login).await;
-}
-
-#[tokio::test(start_paused = true)]
-async fn partial_frame_times_out_ten_seconds_after_its_first_byte() {
-    let (client, mut server) = UnixStream::pair().unwrap();
-    let (mut login, waiting, partial) = observed_login(client);
-    waiting.await.unwrap();
-    server.write_all(b"L").await.unwrap();
-    partial.await.unwrap();
-    tokio::time::advance(Duration::from_secs(9)).await;
-    assert!(login.events.try_recv().is_err());
-    tokio::time::advance(Duration::from_secs(2)).await;
-    let error = login.next().await.err().unwrap();
-    assert_eq!(error.kind, LocalErrorKind::Transport);
-    assert!(error.message.contains("timed out"));
-}
-
-#[tokio::test]
-async fn client_rejects_duplicate_authorization_and_signed_in_before_authorization() {
-    for duplicate in [true, false] {
-        let (client, mut server) = UnixStream::pair().unwrap();
-        let mut login = LocalAuthLogin::from_stream(client);
-        let mut writer = ipc::ResponseWriter::default();
-        if duplicate {
-            writer
-                .write(
-                    &mut server,
-                    &LoginResponse::AuthLoginAuthorization {
-                        authorization_url: AuthKey::new(URL.into()),
-                    },
-                )
-                .await
-                .unwrap();
-            authorization(&mut login).await;
-            writer
-                .write(
-                    &mut server,
-                    &LoginResponse::AuthLoginAuthorization {
-                        authorization_url: AuthKey::new(URL.into()),
-                    },
-                )
-                .await
-                .unwrap();
-        } else {
-            writer
-                .write(
-                    &mut server,
-                    &LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn {
-                        status: signed_in(),
-                        catalog: AuthCatalogOutcome::Refreshed { model_count: 0 },
-                    }),
-                )
-                .await
-                .unwrap();
-        }
-        let error = bounded(login.next()).await.err().unwrap();
-        assert_eq!(error.kind, LocalErrorKind::Protocol);
-    }
-}
-
-#[tokio::test]
 async fn second_legal_callback_cancels_attempt_and_is_not_delivered() {
-    let (client, server) = UnixStream::pair().unwrap();
+    let (mut login, server) = open_login().await;
     let (attempt, mut callbacks) = attempt();
     let cancelled = attempt.cancelled.clone();
     let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
-    let mut login = LocalAuthLogin::from_stream(client);
     authorization(&mut login).await;
     login
-        .submit_callback(SensitiveLoginUrl::new("http://callback?code=first".into()))
+        .submit_callback(lattice_local::SensitiveLoginUrl::new(
+            "http://callback?code=first".into(),
+        ))
         .await
         .unwrap();
     assert_eq!(
@@ -520,7 +403,9 @@ async fn second_legal_callback_cancels_attempt_and_is_not_delivered() {
         "http://callback?code=first"
     );
     login
-        .submit_callback(SensitiveLoginUrl::new("http://callback?code=second".into()))
+        .submit_callback(lattice_local::SensitiveLoginUrl::new(
+            "http://callback?code=second".into(),
+        ))
         .await
         .unwrap();
     let error = bounded(login.next()).await.err().unwrap();
@@ -584,11 +469,10 @@ async fn login_success_frame_converts_provider_auth_status_variants_and_fields()
             },
         ),
     ] {
-        let (client, server) = UnixStream::pair().unwrap();
+        let (mut login, server) = open_login().await;
         let (attempt, _callbacks) = attempt();
         let finished = attempt.finished.clone();
         let task = tokio::spawn(exchange(server, async { Ok(attempt) }));
-        let mut login = LocalAuthLogin::from_stream(client);
         authorization(&mut login).await;
         finished.send_replace(Some(Ok(llm_status)));
         let Some(AuthLoginEvent::Finished(AuthLoginOutcome::SignedIn { status, catalog })) =

@@ -26,16 +26,16 @@ use crossterm::event::{
     PushKeyboardEnhancementFlags,
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
-use lattice_api::local::{
+use lattice_local::{
     CancelStatus, ConfigureReply, ConfigureRequest, ConfigureSession, ConnectionStatus,
     ConversationEntry, DetachReport, LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate,
     Node, NodeId, NoticeLevel, PublicTurnOutcome, SessionHead, SessionId, StepKey,
     SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment, TextUpdate, TurnId,
     TurnRequest, ViewUpdate,
 };
-use lattice_api::{Effort, ModelCandidateQuery, ModelRef, UsageSummary};
+use lattice_local::{Effort, ModelCandidateQuery, ModelRef, UsageSummary};
 #[cfg(test)]
-use lattice_api::{ModelId, ProviderId};
+use lattice_local::{ModelId, ProviderId};
 use tokio::time::Instant;
 
 const FRAME: Duration = Duration::from_millis(33);
@@ -81,7 +81,7 @@ pub(crate) struct Status {
     /// 仅 Turn 结局携带所属 Turn 与结局：它属于这一轮最后一个 Step 条目，并决定符号与配色。
     pub(crate) closing: Option<(TurnId, PublicTurnOutcome)>,
     /// 仅重试提示携带它所属的尝试：它属于这个 Step 条目。
-    pub(crate) retry: Option<lattice_api::local::ModelAttemptKey>,
+    pub(crate) retry: Option<lattice_local::ModelAttemptKey>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -506,7 +506,7 @@ impl App {
         self.current_head().agent.clone()
     }
 
-    fn current_settings_version(&self) -> lattice_api::local::SettingsVersion {
+    fn current_settings_version(&self) -> lattice_local::SettingsVersion {
         self.current_head().settings_version
     }
 
@@ -530,7 +530,7 @@ impl App {
     pub(crate) fn apply_configure(
         &mut self,
         generation: u64,
-        result: lattice_api::local::Result<ConfigureReply>,
+        result: lattice_local::Result<ConfigureReply>,
     ) {
         self.configure_in_flight.remove(&generation);
         let is_latest = generation == self.configure_generation;
@@ -564,7 +564,7 @@ impl App {
     fn apply_models(
         &mut self,
         request: ModelQuery,
-        result: lattice_api::local::Result<lattice_api::ModelCandidates>,
+        result: lattice_local::Result<lattice_local::ModelCandidates>,
     ) {
         // 关闭、重开或目标改变后，成功和失败都只属于旧面板。
         if self.dock.query().as_ref() != Some(&request) {
@@ -787,7 +787,7 @@ impl App {
             SubmissionResult::Rejected { error } => {
                 let kept = self.reject_submission(turn_id);
                 if kept != KeptInput::Nothing
-                    && error.conflict == Some(lattice_api::local::ConflictReason::SettingsChanged)
+                    && error.conflict == Some(lattice_local::ConflictReason::SettingsChanged)
                 {
                     self.queue.pause();
                 }
@@ -850,7 +850,7 @@ impl App {
     pub(crate) fn apply_cancel_result(
         &mut self,
         turn_id: TurnId,
-        result: lattice_api::local::Result<bool>,
+        result: lattice_local::Result<bool>,
     ) {
         let (status, error) = match result {
             Ok(true) => (CancelStatus::Taken, None),
@@ -868,7 +868,7 @@ impl App {
         self.awaiting_before_view = self.awaiting_head;
     }
 
-    fn last_summary(&self, turn: TurnId) -> Option<&lattice_api::local::TurnSummary> {
+    fn last_summary(&self, turn: TurnId) -> Option<&lattice_local::TurnSummary> {
         self.entries.values().rev().find_map(|entry| match entry {
             ConversationEntry::Step {
                 content,
@@ -1092,7 +1092,7 @@ impl App {
         let message = self
             .queue
             .take_message(raw, self.current_settings_version());
-        Some(self.start_submission(message, lattice_api::local::new_turn_id()))
+        Some(self.start_submission(message, lattice_local::new_turn_id()))
     }
 
     fn auto_submit(&mut self) -> Option<String> {
@@ -1129,7 +1129,7 @@ impl App {
             return None;
         }
         self.check_comments_before_send();
-        let id = lattice_api::local::new_turn_id();
+        let id = lattice_local::new_turn_id();
         let raw = self.queue.start_send(id)?;
         Some(self.start_submission(raw, id))
     }
@@ -1531,7 +1531,7 @@ impl App {
     pub(crate) fn apply_older(
         &mut self,
         request: OlderRequest,
-        result: lattice_api::local::Result<LocalHistory>,
+        result: lattice_local::Result<LocalHistory>,
     ) {
         if request.epoch != self.epoch {
             return;
@@ -1670,13 +1670,10 @@ fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
 
 /// 进入 raw 模式后并行接收视图推送与按键；启动不等待条目读取。
 pub(crate) async fn run_app(
-    mut options: TuiOptions,
+    options: TuiOptions,
     ctx: SessionContext,
     client: LocalClient,
 ) -> anyhow::Result<()> {
-    let root = options.project_root.clone();
-    options.project_root =
-        tokio::task::spawn_blocking(move || std::fs::canonicalize(root)).await??;
     // try_init 可能在 raw/备用屏幕已改变后失败，恢复 guard 必须先于初始化。
     let mut cleanup = TerminalCleanup { kitty: false };
     let mut terminal = ratatui::try_init()?;
@@ -2081,7 +2078,7 @@ mod tests {
 
     #[test]
     fn selection_panel_filters_scrolls_and_preserves_hidden_input_under_messages() {
-        use lattice_api::{Effort::Low, ModelCandidates};
+        use lattice_local::{Effort::Low, ModelCandidates};
         let mut app = test_app(true);
         let mut current = head(0, None, false);
         current.provider = Some(ProviderId::parse("p").unwrap());
@@ -2244,10 +2241,10 @@ mod tests {
 
     #[test]
     fn config_error_model_is_marked_and_offers_no_effort() {
-        use lattice_api::ModelCandidates;
+        use lattice_local::ModelCandidates;
         let mut app = test_app(true);
-        let broken = lattice_api::ModelCandidate {
-            availability: lattice_api::Availability::Invalid {
+        let broken = lattice_local::ModelCandidate {
+            availability: lattice_local::Availability::Invalid {
                 reason: "effort low".into(),
             },
             ..model_candidate("p", "broken", &[])
@@ -2310,7 +2307,7 @@ mod tests {
     #[test]
     fn ctrl_c_targets_running_turn_but_esc_only_clears_input() {
         let mut app = test_app(true);
-        let id = lattice_api::local::new_turn_id();
+        let id = lattice_local::new_turn_id();
         open_view(
             &mut app,
             head(2, Some(id), true),
@@ -2639,7 +2636,7 @@ mod tests {
             assert!(app.should_quit);
             app.should_quit = false;
             app.last_ctrl_c = None;
-            let id = lattice_api::local::new_turn_id();
+            let id = lattice_local::new_turn_id();
             app.apply_view(LocalUpdate::Head(head(2, Some(id), true)));
             app.apply_view(entry_update(user(1, id, 1, "prompt")));
             app.apply_view(entry_update(step(2, id, 0).entry()));

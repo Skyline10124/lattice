@@ -25,7 +25,7 @@ struct Wire {
 impl Peer {
     fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
-        let layout = lattice_api::StateLayout::in_state_root(root.path());
+        let layout = lattice_local::StateLayout::in_state_root(root.path());
         let local = layout.lattice_root().join("local");
         std::fs::create_dir_all(&local).unwrap();
         std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -42,7 +42,7 @@ impl Peer {
         let (mut stream, _) = self.listener.accept().await.unwrap();
         let mut magic = [0; 8];
         stream.read_exact(&mut magic).await.unwrap();
-        assert_eq!(&magic, lattice_api::local::test_support::FRAME_MAGIC);
+        assert_eq!(&magic, lattice_local::test_support::FRAME_MAGIC);
         let length = stream.read_u32().await.unwrap();
         let mut bytes = vec![0; length as usize];
         stream.read_exact(&mut bytes).await.unwrap();
@@ -87,7 +87,7 @@ impl Wire {
         let bytes=serde_json::to_vec(&json!({"message_id":self.sequence,"offset":0,"json_fragment":fragment,"complete":true})).unwrap();
         self.sequence += 1;
         self.stream
-            .write_all(lattice_api::local::test_support::FRAME_MAGIC)
+            .write_all(lattice_local::test_support::FRAME_MAGIC)
             .await
             .unwrap();
         self.stream.write_u32(bytes.len() as u32).await.unwrap();
@@ -172,7 +172,7 @@ async fn session_cancel_preserves_identity_and_exit_codes_across_reply_loss() {
     for json_mode in [true, false] {
         for case in ["unknown", "taken", "not_taken", "none", "missing"] {
             let peer = Peer::new();
-            let id = lattice_api::local::new_turn_id();
+            let id = lattice_local::new_turn_id();
             let mut out = Vec::new();
             let mut err = Vec::new();
             let command = super::super::session::cancel_current_turn(
@@ -253,7 +253,7 @@ async fn session_cancel_preserves_identity_and_exit_codes_across_reply_loss() {
 async fn in_flight_turn_query_uses_human_or_json_output_and_exits_zero() {
     for json_mode in [true, false] {
         let peer = Peer::new();
-        let id = lattice_api::local::new_turn_id();
+        let id = lattice_local::new_turn_id();
         let mut out = Vec::new();
         let mut err = Vec::new();
         let command = super::super::session::show_turn(
@@ -300,7 +300,7 @@ async fn in_flight_follow_waits_for_acceptance_or_not_found() {
     for json_mode in [true, false] {
         for accepted in [true, false] {
             let peer = Peer::new();
-            let id = lattice_api::local::new_turn_id();
+            let id = lattice_local::new_turn_id();
             let mut out = Vec::new();
             let mut err = Vec::new();
             let command = super::super::session::show_turn(
@@ -391,12 +391,12 @@ pub(super) fn detail(id: TurnId, outcome: &str) -> TurnDetail {
     } else {
         json!({"progress":"closed","end":end})
     };
-    serde_json::from_value(json!({"session_id":sid(),"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-10-17T00:00:00Z","ended_at":"2026-10-17T00:00:01Z","summary":{"outcome":if outcome=="reserved"{"failed"}else{outcome},"progress":progress,"notice":if outcome=="completed"{Value::Null}else{json!({"level":"error","text":"exact notice"})}},"usage":lattice_api::UsageSummary::from_attempts([]),"steps":[{"node":2,"key":{"turn_id":id,"ordinal":0},"progress":progress,"end":end,"attempts":[],"slots":[],"updated_at":"2026-10-17T00:00:01Z"}]})).unwrap()
+    serde_json::from_value(json!({"session_id":sid(),"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-10-17T00:00:00Z","ended_at":"2026-10-17T00:00:01Z","summary":{"outcome":if outcome=="reserved"{"failed"}else{outcome},"progress":progress,"notice":if outcome=="completed"{Value::Null}else{json!({"level":"error","text":"exact notice"})}},"usage":lattice_local::UsageSummary::from_attempts([]),"steps":[{"node":2,"key":{"turn_id":id,"ordinal":0},"progress":progress,"end":end,"attempts":[],"slots":[],"updated_at":"2026-10-17T00:00:01Z"}]})).unwrap()
 }
 pub(super) fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
-        model: Some(lattice_api::ModelId::parse("test").unwrap()),
-        provider: Some(lattice_api::ProviderId::parse("openai-compatible").unwrap()),
+        model: Some(lattice_local::ModelId::parse("test").unwrap()),
+        provider: Some(lattice_local::ProviderId::parse("openai-compatible").unwrap()),
         effort: None,
         settings_version: serde_json::from_value(json!("11".repeat(32))).unwrap(),
         session_id: sid(),
@@ -433,7 +433,7 @@ pub(super) fn entry(id: TurnId, outcome: &str) -> Box<ConversationEntry> {
 async fn follow_uses_watch_entries_or_one_detail_when_outside_the_initial_path() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let following = follow_with_output(
@@ -478,7 +478,7 @@ async fn ended_turn_outside_window_or_rewound_to_root_is_one_detail() {
     for root in [false, true] {
         for outcome in ["completed", "failed", "cancelled"] {
             let peer = Peer::new();
-            let id = lattice_api::local::new_turn_id();
+            let id = lattice_local::new_turn_id();
             let target = detail(id, outcome);
             let mut out = Vec::new();
             let mut err = Vec::new();
@@ -491,7 +491,7 @@ async fn ended_turn_outside_window_or_rewound_to_root_is_one_detail() {
                 &mut err,
             );
             let driver = async {
-                let other = lattice_api::local::new_turn_id();
+                let other = lattice_local::new_turn_id();
                 let mut wire = peer.request("watch").await;
                 let mut h = head(other, true);
                 if root {
@@ -530,7 +530,7 @@ async fn ended_turn_outside_window_or_rewound_to_root_is_one_detail() {
 async fn known_completed_turn_with_incomplete_view_exits_one_with_connection_record() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let following = follow_with_output(
@@ -569,7 +569,7 @@ async fn known_completed_turn_with_incomplete_view_exits_one_with_connection_rec
 async fn follow_outside_window_refreshes_a_turn_that_completed_after_the_first_lookup() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let following = follow_with_output(
@@ -582,7 +582,7 @@ async fn follow_outside_window_refreshes_a_turn_that_completed_after_the_first_l
     );
     let driver = async {
         let mut view = peer.request("watch").await;
-        let other = lattice_api::local::new_turn_id();
+        let other = lattice_local::new_turn_id();
         view.view(ViewUpdate::Head(head(other, false))).await;
         view.view(ViewUpdate::Entry {
             entry: entry(other, "completed"),
@@ -619,7 +619,7 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
     for user_position in [true, false] {
         for json_mode in [true, false] {
             let peer = Peer::new();
-            let id = lattice_api::local::new_turn_id();
+            let id = lattice_local::new_turn_id();
             let mut out = Vec::new();
             let mut err = Vec::new();
             let mut latest = detail(id, "completed");
@@ -650,11 +650,11 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
                         parent: NodeId(0),
                         turn_id: id,
                         accepted_at: latest.accepted_at,
-                        agent_name: lattice_api::AgentName::parse("test").unwrap(),
-                        model: lattice_api::ModelId::parse("test").unwrap(),
-                        provider: lattice_api::ProviderId::parse("test").unwrap(),
+                        agent_name: lattice_local::AgentName::parse("test").unwrap(),
+                        model: lattice_local::ModelId::parse("test").unwrap(),
+                        provider: lattice_local::ProviderId::parse("test").unwrap(),
                         limits: lattice_session::store::TurnExecutionLimits {
-                            timeout_secs: lattice_api::TurnTimeout::default(),
+                            timeout_secs: lattice_session::store::TurnTimeout::default(),
                             max_model_steps: 32,
                             max_model_attempts: 1,
                         },
@@ -718,7 +718,7 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
 async fn sigint_uses_the_original_turn_and_second_interrupt_detaches() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let mut out = Vec::new();
     let mut err = Vec::new();
     let following = follow_with_output(
@@ -782,7 +782,7 @@ async fn sigint_uses_the_original_turn_and_second_interrupt_detaches() {
 async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let turn = peer.client.start_turn(TurnRequest {
         turn_id: id,
         session: sid(),
@@ -869,7 +869,7 @@ async fn send_configure_outcomes_and_exit_codes() {
                 super::super::session::SendArgs {
                     prompt: "hello".into(),
                     session_id: None,
-                    agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+                    agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                     model: None,
                     effort: None,
                 },
@@ -960,9 +960,9 @@ async fn send_configure_outcomes_and_exit_codes() {
                 super::super::session::SendArgs {
                     prompt: "reply lost".into(),
                     session_id: existing.then(|| "1111".into()),
-                    agent: (!existing).then(|| lattice_api::AgentName::parse("test").unwrap()),
+                    agent: (!existing).then(|| lattice_local::AgentName::parse("test").unwrap()),
                     model: existing
-                        .then(|| lattice_api::ModelRef::parse("local/org/model").unwrap()),
+                        .then(|| lattice_local::ModelRef::parse("local/org/model").unwrap()),
                     effort: None,
                 },
                 false,
@@ -1056,7 +1056,7 @@ async fn send_configure_outcomes_and_exit_codes() {
                 super::super::session::SendArgs {
                     prompt: "interrupted configure".into(),
                     session_id: None,
-                    agent: Some(lattice_api::AgentName::parse("test").unwrap()),
+                    agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                     model: None,
                     effort: None,
                 },
@@ -1135,9 +1135,9 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
             super::super::session::SendArgs {
                 prompt: "original input".into(),
                 session_id: existing.then(|| "1111".into()),
-                agent: (!existing).then(|| lattice_api::AgentName::parse("test").unwrap()),
-                model: explicit.then(|| lattice_api::ModelRef::parse("local/org/model").unwrap()),
-                effort: explicit.then_some(lattice_api::Effort::Off),
+                agent: (!existing).then(|| lattice_local::AgentName::parse("test").unwrap()),
+                model: explicit.then(|| lattice_local::ModelRef::parse("local/org/model").unwrap()),
+                effort: explicit.then_some(lattice_local::Effort::Off),
             },
             false,
             true,
@@ -1164,7 +1164,7 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
                     assert_eq!(creq["effort"], "off");
                     sid()
                 };
-                let mut configured_head = head(lattice_api::local::new_turn_id(), false);
+                let mut configured_head = head(lattice_local::new_turn_id(), false);
                 configured_head.session_id = target_sid;
                 cfg.reply(
                     "configure",

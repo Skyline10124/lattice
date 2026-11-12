@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use crate::app::{Block, Status};
-use lattice_api::local::{ModelAttemptKey, NodeId, TurnId};
+use lattice_local::{ModelAttemptKey, NodeId, TurnId};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BlockId {

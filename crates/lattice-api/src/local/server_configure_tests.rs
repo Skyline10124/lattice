@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use lattice_local::{LocalClient, new_session_id, new_turn_id};
 
 async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(10), future)
@@ -12,7 +13,7 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 async fn backend() -> (
     tempfile::TempDir,
     Arc<Backend>,
-    super::super::LocalClient,
+    LocalClient,
     tokio::task::JoinHandle<()>,
 ) {
     let dir = tempfile::tempdir().unwrap();
@@ -43,7 +44,7 @@ async fn backend() -> (
         while connections.join_next().await.is_some() {}
         instance.cleanup().unwrap();
     });
-    (dir, backend, super::super::LocalClient::new(layout), task)
+    (dir, backend, LocalClient::new(layout), task)
 }
 
 async fn idle(backend: &Backend) {
@@ -94,7 +95,7 @@ async fn configure_new_existing_session_returns_session_exists() {
     let provider = tests::Provider::start().await;
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
 
     let created = client
         .configure(ConfigureRequest {
@@ -138,7 +139,7 @@ async fn configure_existing_rejects_binding_mismatch() {
     let workspace = canonical_dir(dir.path());
     let other_dir = tempfile::tempdir().unwrap();
     let other_workspace = canonical_dir(other_dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
 
     client
         .configure(ConfigureRequest {
@@ -179,7 +180,7 @@ async fn configure_during_running_turn_returns_busy() {
     provider.release.send_replace(false);
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
 
     client
         .configure(ConfigureRequest {
@@ -194,7 +195,7 @@ async fn configure_during_running_turn_returns_busy() {
 
     client
         .submit(TurnRequest {
-            turn_id: super::super::new_turn_id(),
+            turn_id: new_turn_id(),
             session: sid,
             workspace: workspace.clone(),
             input: "执行中".into(),
@@ -232,7 +233,7 @@ async fn configure_pushes_updated_head_to_multiple_watchers() {
     let provider = tests::Provider::start().await;
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
 
     let initial = client
         .configure(ConfigureRequest {
@@ -302,7 +303,7 @@ async fn configure_succeeds_without_credentials_while_submit_rejects_missing_cre
     assert!(removed.removed);
 
     let workspace = canonical_dir(dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
     let reply = client
         .configure(ConfigureRequest {
             session: ConfigureSession::New(sid),
@@ -324,7 +325,7 @@ async fn configure_succeeds_without_credentials_while_submit_rejects_missing_cre
 
     let rejection = client
         .submit(TurnRequest {
-            turn_id: super::super::new_turn_id(),
+            turn_id: new_turn_id(),
             session: sid,
             workspace,
             input: "需要凭据".into(),
@@ -354,7 +355,7 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
     let provider = tests::Provider::start().await;
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
 
     let initial = client
         .configure(ConfigureRequest {
@@ -381,7 +382,7 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
 
     let stale_err = client
         .submit(TurnRequest {
-            turn_id: super::super::new_turn_id(),
+            turn_id: new_turn_id(),
             session: sid,
             workspace: workspace.clone(),
             input: "旧设置提交".into(),
@@ -396,7 +397,7 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
         "expected_settings 不符必须返回 SettingsChanged"
     );
 
-    let accepted_tid = super::super::new_turn_id();
+    let accepted_tid = new_turn_id();
     let accepted = client
         .submit(TurnRequest {
             turn_id: accepted_tid,
@@ -442,7 +443,7 @@ async fn submit_with_empty_settings_model_returns_configuration_rejection() {
         "schema_version = 1\n[agent]\nname = 'modeless'\n[prompt]\nsystem = 'no default model'\n",
     );
     let workspace = canonical_dir(dir.path());
-    let sid = super::super::new_session_id();
+    let sid = new_session_id();
 
     let created = client
         .configure(ConfigureRequest {
@@ -459,7 +460,7 @@ async fn submit_with_empty_settings_model_returns_configuration_rejection() {
 
     let err = client
         .submit(TurnRequest {
-            turn_id: super::super::new_turn_id(),
+            turn_id: new_turn_id(),
             session: sid,
             workspace,
             input: "尝试发送".into(),
@@ -520,7 +521,7 @@ async fn cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome()
     // 会话库未初始化时，被拒绝的 configure(New) 应跳过清理且不创建会话库。
     let pre_init_rejected = client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace: workspace.clone(),
             agent: None,
             model: None,
@@ -536,9 +537,9 @@ async fn cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome()
     );
 
     let base_now = chrono::Utc::now();
-    let expired_a = super::super::new_session_id();
-    let fresh = super::super::new_session_id();
-    let postponed = super::super::new_session_id();
+    let expired_a = new_session_id();
+    let fresh = new_session_id();
+    let postponed = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -579,7 +580,7 @@ async fn cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome()
     );
 
     // 成功的 configure(New) 结束后应删除过期无观察者草稿，保留未过期与修改过设置的草稿。
-    let trigger_new = super::super::new_session_id();
+    let trigger_new = new_session_id();
     client
         .configure(ConfigureRequest {
             session: ConfigureSession::New(trigger_new),
@@ -611,7 +612,7 @@ async fn cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome()
     );
 
     // configure(New) 返回 SessionExists 后也应触发清理。
-    let expired_b = super::super::new_session_id();
+    let expired_b = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -642,7 +643,7 @@ async fn cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome()
     );
 
     // configure(New) 被拒绝后也应触发清理。
-    let expired_c = super::super::new_session_id();
+    let expired_c = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -652,7 +653,7 @@ async fn cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome()
     .await;
     let rejected_err = client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace,
             agent: None,
             model: None,
@@ -683,7 +684,7 @@ async fn cleanup_drafts_skips_watched_draft_until_watch_disconnects() {
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
 
-    let expired = super::super::new_session_id();
+    let expired = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -700,7 +701,7 @@ async fn cleanup_drafts_skips_watched_draft_until_watch_disconnects() {
 
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace: workspace.clone(),
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -721,7 +722,7 @@ async fn cleanup_drafts_skips_watched_draft_until_watch_disconnects() {
 
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace,
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -751,8 +752,8 @@ async fn cleanup_drafts_skips_when_session_slot_or_execution_lock_is_busy() {
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
 
-    let slot_busy = super::super::new_session_id();
-    let lock_busy = super::super::new_session_id();
+    let slot_busy = new_session_id();
+    let lock_busy = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -775,7 +776,7 @@ async fn cleanup_drafts_skips_when_session_slot_or_execution_lock_is_busy() {
     let submitting = tokio::spawn(async move {
         submit_client
             .submit(TurnRequest {
-                turn_id: super::super::new_turn_id(),
+                turn_id: new_turn_id(),
                 session: slot_busy,
                 workspace: submit_workspace,
                 input: "占住会话槽".into(),
@@ -795,7 +796,7 @@ async fn cleanup_drafts_skips_when_session_slot_or_execution_lock_is_busy() {
 
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace: workspace.clone(),
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -829,7 +830,7 @@ async fn cleanup_drafts_skips_when_session_slot_or_execution_lock_is_busy() {
 
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace,
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -865,7 +866,7 @@ async fn cleanup_drafts_and_watch_registration_serialize_in_both_orders() {
     let workspace = canonical_dir(dir.path());
 
     // 顺序一：扫描后 watch 先完成登记，随后清理在准入锁内看到活跃观察者并跳过。
-    let watch_first = super::super::new_session_id();
+    let watch_first = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -876,7 +877,7 @@ async fn cleanup_drafts_and_watch_registration_serialize_in_both_orders() {
     let (scanned_in, scanned_out) = tests::arm(&backend.gates.cleanup_scanned);
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace: workspace.clone(),
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -914,7 +915,7 @@ async fn cleanup_drafts_and_watch_registration_serialize_in_both_orders() {
     // 顺序二：清理先占位，watch 在准入锁边界看到无身份 Owner 后等待其结束并得到 NotFound。
     // watch_first 的观察者保持到测试结束：它仍是过期草稿，若失去观察者就会成为候选，
     // 而候选按随机的 SessionId 排序，一次性门控可能停在它上面；保持观察使唯一可占位的候选是 cleanup_first。
-    let cleanup_first = super::super::new_session_id();
+    let cleanup_first = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -926,7 +927,7 @@ async fn cleanup_drafts_and_watch_registration_serialize_in_both_orders() {
     let (waiting_in, waiting_out) = tests::arm(&backend.gates.watch_waiting_owner);
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace,
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -973,7 +974,7 @@ async fn cleanup_drafts_keeps_session_accepted_between_scan_and_delete() {
     super::super::tests::configure(dir.path(), &provider.endpoint);
     let workspace = canonical_dir(dir.path());
 
-    let candidate = super::super::new_session_id();
+    let candidate = new_session_id();
     seed_draft(
         &backend,
         &workspace,
@@ -985,7 +986,7 @@ async fn cleanup_drafts_keeps_session_accepted_between_scan_and_delete() {
     let (scanned_in, scanned_out) = tests::arm(&backend.gates.cleanup_scanned);
     client
         .configure(ConfigureRequest {
-            session: ConfigureSession::New(super::super::new_session_id()),
+            session: ConfigureSession::New(new_session_id()),
             workspace: workspace.clone(),
             agent: Some(AgentName::parse("local-test").unwrap()),
             model: None,
@@ -998,7 +999,7 @@ async fn cleanup_drafts_keeps_session_accepted_between_scan_and_delete() {
     // 扫描已把 candidate 列为候选，但在清理占位删除前先让它接受并完成一轮。
     let accepted = client
         .submit(TurnRequest {
-            turn_id: super::super::new_turn_id(),
+            turn_id: new_turn_id(),
             session: candidate,
             workspace,
             input: "扫描后接受首轮".into(),

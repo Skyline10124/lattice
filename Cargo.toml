@@ -4,6 +4,7 @@ members = [
     "crates/net-guard",
     "crates/lattice-store",
     "crates/lattice-ipc",
+    "crates/lattice-local",
     "crates/lattice-llm",
     "crates/lattice-api",
     "crates/lattice-session",
@@ -28,6 +29,7 @@ authors = ["Ast Rin"]
 net-guard       = { path = "crates/net-guard" }
 lattice-store    = { path = "crates/lattice-store" }
 lattice-ipc      = { path = "crates/lattice-ipc" }
+lattice-local    = { path = "crates/lattice-local" }
 lattice-llm      = { path = "crates/lattice-llm" }
 lattice-api      = { path = "crates/lattice-api" }
 lattice-session  = { path = "crates/lattice-session" }

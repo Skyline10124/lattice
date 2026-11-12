@@ -156,4 +156,37 @@ mod tests {
                 .contains("secret-body")
         );
     }
+
+    #[test]
+    fn configuration_errors_preserve_reason_while_bad_request_redacts_input() {
+        let profile_missing = LocalError::from(ApiError::Configuration(
+            crate::ConfigRejection::new(
+                "agent profile 'reader' not found at project path /project/.lattice/agents/reader/agent.toml or global path /home/user/.lattice/agents/reader/agent.toml",
+                None,
+            ),
+        ));
+        assert_eq!(profile_missing.kind, LocalErrorKind::BadRequest);
+        assert_eq!(
+            profile_missing.message,
+            "agent profile 'reader' not found at project path /project/.lattice/agents/reader/agent.toml or global path /home/user/.lattice/agents/reader/agent.toml"
+        );
+
+        let model_invalid = LocalError::from(ApiError::Configuration(crate::ConfigRejection::new(
+            "model reference must be <provider>/<model>",
+            None,
+        )));
+        assert_eq!(model_invalid.kind, LocalErrorKind::BadRequest);
+        assert_eq!(
+            model_invalid.message,
+            "model reference must be <provider>/<model>"
+        );
+
+        let bad_request = LocalError::from(ApiError::BadRequest("sk-private-input".into()));
+        assert_eq!(bad_request.kind, LocalErrorKind::BadRequest);
+        assert_eq!(
+            bad_request.message,
+            "request or frozen configuration is invalid"
+        );
+        assert!(!bad_request.message.contains("sk-private-input"));
+    }
 }

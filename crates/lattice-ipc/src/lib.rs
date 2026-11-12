@@ -13,7 +13,7 @@ mod wire_shape;
 
 pub use auth::{
     AuthCatalogOutcome, AuthKey, AuthLoginOutcome, AuthStatus, LoginAction, LoginResponse,
-    ProviderAuthStatus, RevocationStatus,
+    ProviderAuthStatus, RevocationStatus, require_chatgpt,
 };
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, InvocationId, MessageRole, MessageSemantic,

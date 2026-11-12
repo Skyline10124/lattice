@@ -207,7 +207,7 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
         drop(exit.instance);
         exit.failure.map_or(Ok(()), Err)
     });
-    let client = crate::local::LocalClient::new(layout);
+    let client = lattice_local::LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(10), async {
         while client.status().await.is_err() {
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -216,12 +216,12 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
     .await
     .unwrap();
     let mut view = client.watch(detail.session_id).await.unwrap();
-    let Some(crate::local::ViewUpdate::Head(head)) = view.next().await.unwrap() else {
+    let Some(lattice_local::ViewUpdate::Head(head)) = view.next().await.unwrap() else {
         panic!("reopened head")
     };
     assert!(!head.owner);
     view.next().await.unwrap().unwrap();
-    let Some(crate::local::ViewUpdate::Entry { entry }) = view.next().await.unwrap() else {
+    let Some(lattice_local::ViewUpdate::Entry { entry }) = view.next().await.unwrap() else {
         panic!("reopened entry")
     };
     let lattice_session::store::ConversationEntry::Step {

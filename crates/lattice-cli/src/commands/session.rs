@@ -29,16 +29,16 @@ pub(crate) fn default_session_dir() -> PathBuf {
 
 /// The private-state layout every durable store is addressed through
 /// (ADR 0005 §3).
-pub(crate) fn state_layout() -> Result<lattice_session::StateLayout> {
-    Ok(lattice_session::StateLayout::resolve()?)
+pub(crate) fn state_layout() -> Result<lattice_local::StateLayout> {
+    Ok(lattice_local::StateLayout::resolve()?)
 }
 
-pub(crate) fn parse_turn_id(value: &str) -> Result<lattice_api::local::TurnId, String> {
-    lattice_api::local::TurnId::parse(value).map_err(|_| "expected canonical TurnId UUID".into())
+pub(crate) fn parse_turn_id(value: &str) -> Result<lattice_local::TurnId, String> {
+    lattice_local::TurnId::parse(value).map_err(|_| "expected canonical TurnId UUID".into())
 }
 
-pub(crate) async fn local_client() -> Result<lattice_api::local::LocalClient> {
-    let client = lattice_api::local::LocalClient::new(state_layout()?);
+pub(crate) async fn local_client() -> Result<lattice_local::LocalClient> {
+    let client = lattice_local::LocalClient::new(state_layout()?);
     client.ensure_running().await?;
     Ok(client)
 }
@@ -51,35 +51,35 @@ pub struct SendArgs {
     pub session_id: Option<String>,
     /// Agent to use. Required for a new session; selecting it updates session settings.
     #[arg(long, required_unless_present = "session_id")]
-    pub agent: Option<lattice_api::AgentName>,
+    pub agent: Option<lattice_local::AgentName>,
     #[arg(
         long,
         help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend."
     )]
-    pub model: Option<lattice_api::ModelRef>,
+    pub model: Option<lattice_local::ModelRef>,
     #[arg(
         long,
         help = effort_help()
     )]
-    pub effort: Option<lattice_api::Effort>,
+    pub effort: Option<lattice_local::Effort>,
 }
 
 fn effort_help() -> String {
-    let efforts = lattice_api::Effort::ALL
+    let efforts = lattice_local::Effort::ALL
         .into_iter()
-        .map(lattice_api::Effort::as_str)
+        .map(lattice_local::Effort::as_str)
         .collect::<Vec<_>>()
         .join(", ");
     format!("Reasoning effort: {efforts}. Omit to inherit; off explicitly disables reasoning.")
 }
 
-pub(crate) fn parse_node_id(value: &str) -> Result<lattice_api::local::NodeId, String> {
+pub(crate) fn parse_node_id(value: &str) -> Result<lattice_local::NodeId, String> {
     if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
         return Err("expected decimal NodeId".into());
     }
     value
         .parse::<u64>()
-        .map(lattice_api::local::NodeId)
+        .map(lattice_local::NodeId)
         .map_err(|_| "NodeId exceeds u64".into())
 }
 
@@ -91,7 +91,7 @@ pub enum SessionAction {
     Rewind {
         session_id: String,
         #[arg(value_parser = parse_node_id)]
-        target: lattice_api::local::NodeId,
+        target: lattice_local::NodeId,
     },
     /// List all sessions.
     List,
@@ -104,7 +104,7 @@ pub enum SessionAction {
     /// Show every Step of a Turn by TurnId; --follow keeps observing.
     Turn {
         #[arg(value_parser = parse_turn_id)]
-        turn_id: lattice_api::local::TurnId,
+        turn_id: lattice_local::TurnId,
         #[arg(long)]
         follow: bool,
     },
@@ -184,9 +184,13 @@ pub async fn run(
         }
         SessionAction::Rewind { session_id, target } => {
             let id = api.resolve_session(&session_id).await?.session_id;
-            let root =
-                tokio::task::spawn_blocking(lattice_api::resolve_local_workspace_root).await??;
-            let session = api.rewind(id, target, root.canonical_path().into()).await?;
+            let workspace = std::env::current_dir().map_err(|_| {
+                lattice_local::LocalError::new(
+                    lattice_local::LocalErrorKind::Internal,
+                    "operation failed; inspect durable state",
+                )
+            })?;
+            let session = api.rewind(id, target, workspace).await?;
             if json {
                 println!("{}", serde_json::to_string(&session)?);
             } else {
@@ -201,8 +205,8 @@ pub async fn run(
 }
 
 pub(super) async fn show_turn(
-    api: &lattice_api::local::LocalClient,
-    turn_id: lattice_api::local::TurnId,
+    api: &lattice_local::LocalClient,
+    turn_id: lattice_local::TurnId,
     follow: bool,
     json: bool,
     verbose: bool,
@@ -213,8 +217,8 @@ pub(super) async fn show_turn(
         api.wait_for_turn(turn_id).await?
     } else {
         match api.turn(turn_id).await? {
-            lattice_api::local::TurnLookup::Accepted { turn } => turn,
-            lattice_api::local::TurnLookup::InFlight => {
+            lattice_local::TurnLookup::Accepted { turn } => turn,
+            lattice_local::TurnLookup::InFlight => {
                 if json {
                     writeln!(
                         out,
@@ -239,13 +243,13 @@ pub(super) async fn show_turn(
     Ok(std::process::ExitCode::SUCCESS)
 }
 pub(super) async fn cancel_current_turn(
-    api: &lattice_api::local::LocalClient,
+    api: &lattice_local::LocalClient,
     prefix: &str,
     json: bool,
     out: &mut impl std::io::Write,
     err: &mut impl std::io::Write,
 ) -> Result<std::process::ExitCode> {
-    use lattice_api::local::{CancelStatus, LocalUpdate};
+    use lattice_local::{CancelStatus, LocalUpdate};
     let session_id = api.resolve_session(prefix).await?.session_id;
     let head = api.session_head(session_id).await?;
     // 查头后就固定目标；回执丢失不能丢掉本次取消的身份，也不能追取消新一轮。
@@ -289,7 +293,7 @@ pub(super) async fn cancel_current_turn(
     Ok(std::process::ExitCode::from(u8::from(error.is_some())))
 }
 
-fn render_log(log: &lattice_api::local::SessionLog) -> String {
+fn render_log(log: &lattice_local::SessionLog) -> String {
     use std::fmt::Write;
     let mut text = format!(
         "session {} current={} agent={} unclosed_turn={}\n",
@@ -315,9 +319,9 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
         .collect();
     while let Some((row, depth)) = stack.pop() {
         let kind = match row.node.kind {
-            lattice_api::local::NodeKind::Root => "root".into(),
-            lattice_api::local::NodeKind::UserMessage => "user".into(),
-            lattice_api::local::NodeKind::Step { ordinal } => format!("step {ordinal}"),
+            lattice_local::NodeKind::Root => "root".into(),
+            lattice_local::NodeKind::UserMessage => "user".into(),
+            lattice_local::NodeKind::Step { ordinal } => format!("step {ordinal}"),
         };
         let _ = writeln!(
             text,
@@ -343,7 +347,7 @@ fn render_log(log: &lattice_api::local::SessionLog) -> String {
     text
 }
 
-fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
+fn render_usage(usage: &lattice_local::SessionUsage) -> String {
     use std::fmt::Write;
     let mut text = format!(
         "session {} position={}\n",
@@ -370,7 +374,7 @@ fn render_usage(usage: &lattice_api::local::SessionUsage) -> String {
     text
 }
 
-fn render_usage_values(usage: &lattice_api::local::UsageSummary) -> String {
+fn render_usage_values(usage: &lattice_local::UsageSummary) -> String {
     let tokens = [
         &usage.input,
         &usage.cache_read,
@@ -405,7 +409,7 @@ fn render_metric<T: Copy>(
     value
 }
 
-pub(super) fn render_turn(turn: &lattice_api::local::TurnDetail) -> String {
+pub(super) fn render_turn(turn: &lattice_local::TurnDetail) -> String {
     use std::fmt::Write;
     let mut text = format!(
         "turn {} session={} agent={}\nsummary={}\nusage={}\n",
@@ -485,7 +489,7 @@ fn summarize(text: &str, max: usize) -> String {
 mod session_cli {
     use super::*;
     use clap::{CommandFactory, Parser};
-    use lattice_api::local::{CostEstimate, UsageCompleteness};
+    use lattice_local::{CostEstimate, UsageCompleteness};
     #[derive(Parser)]
     struct TestCli {
         #[command(subcommand)]
@@ -493,8 +497,8 @@ mod session_cli {
     }
     #[test]
     fn saturated_usage_is_not_presented_as_an_exact_total() {
-        let mut usage = lattice_api::UsageSummary::from_attempts([]);
-        usage.input = lattice_api::local::TokenSummary {
+        let mut usage = lattice_local::UsageSummary::from_attempts([]);
+        usage.input = lattice_local::TokenSummary {
             known: Some(u64::MAX),
             complete: false,
             overflowed: true,
@@ -520,8 +524,8 @@ mod session_cli {
             (Some((0.016, true)), "$0.02"),
             (None, "-"),
         ] {
-            let usage = lattice_api::UsageSummary::from_attempts([(
-                Some(lattice_llm::TokenUsage {
+            let usage = lattice_local::UsageSummary::from_attempts([(
+                Some(lattice_local::TokenUsage {
                     input: Some(1),
                     ..Default::default()
                 }),
@@ -539,7 +543,7 @@ mod session_cli {
     #[test]
     fn partial_usage_keeps_unknown_cost_cell_unadorned() {
         let usage =
-            lattice_api::UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
+            lattice_local::UsageSummary::from_attempts([(None, UsageCompleteness::Partial, None)]);
         let text = render_usage_values(&usage);
         assert_eq!(text.split('\t').next_back(), Some("-"));
     }
@@ -592,7 +596,7 @@ mod session_cli {
     }
     #[test]
     fn tree_output_keeps_root_branches_current_and_notice() {
-        let log: lattice_api::local::SessionLog = serde_json::from_value(serde_json::json!({
+        let log: lattice_local::SessionLog = serde_json::from_value(serde_json::json!({
             "session": {"session_id":"11111111111111111111111111111111", "project_path": b"/test-project".as_slice(), "current":4, "created_at":"2026-09-27T00:00:00Z", "updated_at":"2026-09-27T00:00:00Z"},
             "current_agent":"beta", "unclosed_turn":"20000000-0000-4000-8000-000000000002",
             "nodes":[
@@ -615,13 +619,13 @@ mod session_cli {
     }
     #[test]
     fn turn_output_keeps_reserved_node_and_process_exit_conclusion() {
-        let turn: lattice_api::local::TurnDetail = serde_json::from_value(serde_json::json!({
+        let turn: lattice_local::TurnDetail = serde_json::from_value(serde_json::json!({
             "session_id":"11111111111141118111111111111111",
             "turn_id":"10000000-0000-4000-8000-000000000001",
             "user_node":1,"agent_name":"alpha",
             "accepted_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:00:01Z",
             "summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}},
-            "usage":lattice_api::UsageSummary::from_attempts([]),
+            "usage":lattice_local::UsageSummary::from_attempts([]),
             "steps":[{"node":2,"key":{"turn_id":"10000000-0000-4000-8000-000000000001","ordinal":0},"progress":{"progress":"reserved"},"end":{"end":"stop","cause":{"cause":"process_exit"}},"attempts":[],"slots":[],"updated_at":"2026-09-27T00:00:01Z"}]
         })).unwrap();
         let text = render_turn(&turn);
@@ -662,7 +666,7 @@ mod session_cli {
             "SlotDetail 必须拒绝旧 evidence 字段"
         );
 
-        let turn: lattice_api::local::TurnDetail = serde_json::from_value(serde_json::json!({
+        let turn: lattice_local::TurnDetail = serde_json::from_value(serde_json::json!({
             "session_id": "11111111111141118111111111111111",
             "turn_id": "10000000-0000-4000-8000-000000000001",
             "user_node": 1,
@@ -674,7 +678,7 @@ mod session_cli {
                 "progress": {"progress": "closed", "end": {"end": "finish"}},
                 "notice": null
             },
-            "usage": lattice_api::UsageSummary::from_attempts([]),
+            "usage": lattice_local::UsageSummary::from_attempts([]),
             "steps": [{
                 "node": 2,
                 "key": {"turn_id": "10000000-0000-4000-8000-000000000001", "ordinal": 0},

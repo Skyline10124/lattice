@@ -27,17 +27,17 @@ pub(super) fn buffer_text(buffer: &ratatui::buffer::Buffer) -> String {
 pub(super) fn model_candidate(
     provider: &str,
     model: &str,
-    efforts: &[lattice_api::Effort],
-) -> lattice_api::ModelCandidate {
-    lattice_api::ModelCandidate {
-        provider: lattice_api::ProviderId::parse(provider).unwrap(),
-        model: lattice_api::ModelId::parse(model).unwrap(),
+    efforts: &[lattice_local::Effort],
+) -> lattice_local::ModelCandidate {
+    lattice_local::ModelCandidate {
+        provider: lattice_local::ProviderId::parse(provider).unwrap(),
+        model: lattice_local::ModelId::parse(model).unwrap(),
         name: None,
         context: None,
         output: None,
         supported_efforts: efforts.to_vec(),
         cost: None,
-        availability: lattice_api::Availability::Ready,
+        availability: lattice_local::Availability::Ready,
     }
 }
 
@@ -45,7 +45,7 @@ pub(super) fn sid() -> SessionId {
     SessionId::parse(SESSION).unwrap()
 }
 
-pub(super) fn settings_version(byte: u8) -> lattice_api::local::SettingsVersion {
+pub(super) fn settings_version(byte: u8) -> lattice_local::SettingsVersion {
     serde_json::from_value(json!(format!("{byte:02x}").repeat(32))).unwrap()
 }
 
@@ -264,14 +264,14 @@ impl StepEntry {
     pub(super) fn metering(
         mut self,
         usage: Value,
-        usage_kind: lattice_api::local::UsageCompleteness,
+        usage_kind: lattice_local::UsageCompleteness,
         cost: Option<(f64, bool)>,
     ) -> Self {
         let attempt = self.attempts.last_mut().expect("已有尝试");
         attempt["usage"] = usage;
         attempt["usage_kind"] = json!(usage_kind);
         attempt["cost"] =
-            json!(cost.map(|(usd, exact)| lattice_api::local::CostEstimate { usd, exact }));
+            json!(cost.map(|(usd, exact)| lattice_local::CostEstimate { usd, exact }));
         self
     }
     /// 回复末尾加一个工具调用；`terminal` 时槽位已有成功结果，否则停在 Started。
@@ -391,22 +391,22 @@ pub(super) fn accepted(turn_id: TurnId) -> SubmissionResult {
     }
 }
 
-pub(super) fn turn_view(turn_id: TurnId) -> lattice_api::local::TurnView {
+pub(super) fn turn_view(turn_id: TurnId) -> lattice_local::TurnView {
     serde_json::from_value(json!({
         "session_id":SESSION,"turn_id":turn_id,"user_node":1,"agent_name":"unused",
         "accepted_at":AT,"ended_at":AT,"summary":summary("failed", json!({"progress":"reserved"})),
-        "usage":lattice_api::UsageSummary::from_attempts([])
+        "usage":lattice_local::UsageSummary::from_attempts([])
     }))
     .unwrap()
 }
 
-pub(super) fn turn_detail(turn_id: TurnId) -> lattice_api::local::TurnDetail {
+pub(super) fn turn_detail(turn_id: TurnId) -> lattice_local::TurnDetail {
     let mut value = serde_json::to_value(turn_view(turn_id)).unwrap();
     value["steps"] = json!([]);
     serde_json::from_value(value).unwrap()
 }
 
-pub(super) fn local_error(kind: lattice_api::local::LocalErrorKind, message: &str) -> LocalError {
+pub(super) fn local_error(kind: lattice_local::LocalErrorKind, message: &str) -> LocalError {
     serde_json::from_value(json!({"kind":kind,"message":message,"recovery":null,"store":null}))
         .unwrap()
 }

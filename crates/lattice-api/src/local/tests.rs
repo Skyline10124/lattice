@@ -16,7 +16,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
             ..
         })
     ));
-    let path = ipc::endpoint(&layout).unwrap();
+    let path = lattice_local::test_support::endpoint(&layout).unwrap();
     use std::os::unix::fs::PermissionsExt;
     assert_eq!(
         std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
@@ -25,7 +25,7 @@ async fn private_socket_rejects_second_owner_and_oversized_frame() {
     let (mut writer, mut reader) = tokio::net::UnixStream::pair().unwrap();
     ipc::check_peer(&writer).unwrap();
     writer
-        .write_all(super::test_support::FRAME_MAGIC)
+        .write_all(lattice_local::test_support::FRAME_MAGIC)
         .await
         .unwrap();
     writer.write_u32((ipc::MAX_FRAME + 1) as u32).await.unwrap();

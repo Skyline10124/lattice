@@ -6,7 +6,7 @@
 //! 不调度请求、订阅或退出交接。
 
 use crate::app::Status;
-use lattice_api::local::{
+use lattice_local::{
     CancelStatus, ConnectionStatus, DetachReport, LocalError, ModelAttemptKey, Notice, NoticeLevel,
     PublicTurnOutcome, SubmissionResult, TurnId, TurnSummary,
 };
@@ -29,8 +29,8 @@ pub(crate) fn model_query_notice(message: &str) -> Status {
 }
 
 pub(crate) fn effort_changed_status(
-    before: Option<lattice_api::Effort>,
-    after: Option<lattice_api::Effort>,
+    before: Option<lattice_local::Effort>,
+    after: Option<lattice_local::Effort>,
 ) -> Status {
     let before = before.map_or_else(|| "未设置".into(), |effort| effort.to_string());
     let after = after.map_or_else(|| "不发送推理参数".into(), |effort| effort.to_string());
@@ -42,11 +42,11 @@ pub(crate) fn effort_changed_status(
 
 pub(crate) fn configure_failed_status(error: &LocalError) -> Status {
     match error.kind {
-        lattice_api::local::LocalErrorKind::Busy => status(
+        lattice_local::LocalErrorKind::Busy => status(
             NoticeLevel::Warn,
             "当前有一轮正在执行，这一轮执行中不能修改设置".into(),
         ),
-        lattice_api::local::LocalErrorKind::Transport => status(
+        lattice_local::LocalErrorKind::Transport => status(
             NoticeLevel::Warn,
             format!("修改会话设置结果未知：{}", error.message),
         ),
@@ -122,7 +122,7 @@ pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
 }
 
 pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError, kept: KeptInput) -> Status {
-    let text = if error.conflict == Some(lattice_api::local::ConflictReason::SettingsChanged) {
+    let text = if error.conflict == Some(lattice_local::ConflictReason::SettingsChanged) {
         format!(
             "请求 {} 被拒绝：会话设置已变更，请确认当前设置后重试{}",
             turn_id,
@@ -189,7 +189,7 @@ pub(crate) fn observation_lost_status(cause: &ConnectionStatus) -> Status {
         ConnectionStatus::Eof => "观察连接结束；不代表 Turn 已关闭，/reconnect 重连".into(),
         ConnectionStatus::Idle => format!(
             "观察 {} s 无增量；执行状态未知，/reconnect 重连",
-            lattice_api::STREAM_IDLE_TIMEOUT_SECS
+            lattice_local::STREAM_IDLE_TIMEOUT_SECS
         ),
         ConnectionStatus::Error(error) => format!(
             "观察连接出错；执行状态未知，/reconnect 重连：{}",

@@ -12,7 +12,6 @@ pub use tls::{load_tls_roots_der, usable_tls_roots_der};
 mod gateway;
 pub use gateway::{GatewayTurn, PrepareError, RequestGateway, ResolvedRequest};
 pub use protocol::Protocol;
-mod logging;
 mod models;
 pub use models::{
     ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning,
@@ -43,7 +42,6 @@ mod transport;
 mod types;
 
 pub use lattice_conversation::TokenUsage;
-pub use logging::init_logging;
 pub use reply::{
     AccumulatedReply, LiveDelta, ReplyOutcome, ReplyProtocolError, ReplyStop, StreamStop,
 };

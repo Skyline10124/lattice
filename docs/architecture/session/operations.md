@@ -10,7 +10,7 @@ status: active
 
 | 模块 | 具体职责 |
 | --- | --- |
-| `lattice-api::local::LocalClient` / `LocalTurn` | `client.rs` 封装连接与分帧，交付 `configure`、视图与只读查询；`operation.rs` 的具体 LocalTurn 管理提交、取消回执与退出交接 |
+| `lattice-local::LocalClient` / `LocalTurn` | `client.rs` 封装连接与分帧，交付 `configure`、视图与只读查询；`operation.rs` 的具体 LocalTurn 管理提交、取消回执与退出交接 |
 | `lattice-api::local::serve` | 持有实例锁和 socket、接收并核验连接、管理连接任务，并在 `configure(New)` 后触发后台草稿清理；实例退出时释放资源 |
 | `Backend` / `Owner` | Backend 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态；Owner 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接运行，监督者等待操作收尾后才移除 Owner |
 | `lattice-api::configure` | 解析并校验会话设置：加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执 |
@@ -43,7 +43,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 `session send`（`--model <provider>/<model>` 与 `--effort <档位>` 选择模型与推理档位；新建会话时 `--agent` 必填，已有会话可选）按以下顺序执行：
 
-1. 带 `--session` 时先解析会话前缀，不带时生成新的 SessionId；随后生成 TurnId，输出 `submit` 的 `sending` 记录，再从当前目录解析规范工作区（工作区解析前收到 SIGINT 则输出 `submit` 的 `not_accepted` 回执并退出 1；工作区无效则输出 `submit` 的 `rejected` 回执）。因此进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在提交发出之前时，查询返回 NotFound。
+1. 带 `--session` 时先解析会话前缀，不带时生成新的 SessionId；随后生成 TurnId，输出 `submit` 的 `sending` 记录，再读取当前目录 `current_dir()`（读取前收到 SIGINT 则输出 `submit` 的 `not_accepted` 回执并退出 1；`current_dir()` 失败则输出 `submit` 的 `rejected` 回执并退出 1；路径规范化与校验由后台在 `configure` 或 `submit` 时执行）。因此进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在提交发出之前时，查询返回 NotFound。
 2. 决定是否先执行 `configure`：
    - 不带 `--session`：执行 `configure(New)`；
    - 带 `--session`，且给出了 `--agent`、`--model` 或 `--effort` 中的任何一个：执行 `configure(Existing)`；
@@ -58,7 +58,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 4. `configure` 只发一次，结果不明时按上表的 `unknown` 处理；重跑命令是安全的，见[configure 的找回](recovery.md#configure-的找回)。
 
-`session send` 与 `session turn --follow` 的 `--json` 输出 JSONL，只含所提交或所跟的那一轮，共有八种记录：`submit`（发出请求前一条写明 TurnId 与 SessionId，结束时一条写明回执结果）、`configure`（会话配置结果：`configured`、`rejected` 或 `unknown`）、`cancel`（取消回执）、`head`（会话头）、`entry`（对话条目，读者按 `node` 覆盖）、`text`（生成中的文字）、`connection` 与 `error`。向已有会话发送且未给出 `--agent`、`--model`、`--effort` 时，或工作区在 `configure` 之前失败与中断时，没有 `configure` 记录；`session turn --follow` 不会配置会话，也不输出 `configure` 记录。结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另设结束记录。
+`session send` 与 `session turn --follow` 的 `--json` 输出 JSONL，只含所提交或所跟的那一轮，共有八种记录：`submit`（发出请求前一条写明 TurnId 与 SessionId，结束时一条写明回执结果）、`configure`（会话配置结果：`configured`、`rejected` 或 `unknown`）、`cancel`（取消回执）、`head`（会话头）、`entry`（对话条目，读者按 `node` 覆盖）、`text`（生成中的文字）、`connection` 与 `error`。向已有会话发送且未给出 `--agent`、`--model`、`--effort` 时，或在 `configure` 之前读取当前目录失败与中断时，没有 `configure` 记录；`session turn --follow` 不会配置会话，也不输出 `configure` 记录。结局在本轮最后一个 Step 条目的 `TurnSummary` 中，不另设结束记录。
 
 输出写明身份的 `submit` 之后，这次提交以一条回执结束（进程被杀除外）。回执的 `result` 为 `accepted`（带接受的这一轮）、`rejected`（带拒绝的错误）、`not_accepted` 或 `unknown`（结果不明，可带错误）；`recovered` 表示结果来自按 TurnId 查询。后台的拒绝（包括 `configure` 与提交的配置错误）是 `rejected`。`rejected` 的错误为 BadRequest（含配置拒绝）、NotFound 或 Conflict 时退出 2，为其他种类（如 Busy、Stopping）时退出 1；`configure` 被拒与提交被拒按同一规则。`not_accepted` 表示确定未被接受，有三种来源：按 TurnId 查询为 NotFound，取消发生在请求写出之前、请求没有发出，或前置 `configure` 结果为 `unknown`、提交未发出。`error` 记录只用于不属于这次提交的错误，例如生成身份之前的使用错误、观察时后台回复的错误；`sending` 要写完整的 SessionId，`--session` 的前缀在生成身份之前解析，解析失败也是 `error` 记录。回执为 `not_accepted` 或 `unknown` 时退出 1。
 
@@ -68,7 +68,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最后已知的提交、取消与诊断，或由 Drop 停止本地后续工作；两者都不新增取消。`LocalTurn::turn_id` 给出提交与取消共用的身份。
 
-公开类型与方法见[本地连接与读取](../../../crates/lattice-api/src/local/client.rs)、[LocalTurn](../../../crates/lattice-api/src/local/operation.rs)、[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)及[客户端结果类型](../../../crates/lattice-api/src/local/types.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
+公开类型与方法见[本地连接与读取](../../../crates/lattice-local/src/client.rs)、[LocalTurn 与客户端结果类型](../../../crates/lattice-local/src/operation.rs)及[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
 
 ## 凭据命令与私有交换
 

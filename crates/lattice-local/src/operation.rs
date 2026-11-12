@@ -1,16 +1,48 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use super::{LocalClient, LocalWatch, client::SubmissionReply, types::*};
+//! 本地会话提交、观察、重连、取消与空闲超时的前端状态机。
+
 use std::{
     collections::{BTreeSet, VecDeque},
     time::Duration,
+};
+
+use lattice_ipc::{
+    Acceptance, CancelStatus, ConfigureReply, ConnectionStatus, ConversationEntry, LocalError,
+    LocalErrorKind, LocalUpdate, NodeId, Result, SessionHead, SessionId, StoreDiagnostic,
+    SubmissionReceipt, SubmissionResult, SubmissionUpdate, TurnDetail, TurnId, TurnRequest,
+    TurnSummary, TurnView, ViewUpdate,
 };
 use tokio::{
     sync::{mpsc, oneshot, watch},
     task::JoinHandle,
     time::Instant,
 };
+
+use crate::client::{LocalClient, LocalWatch, SubmissionReply};
+
+/// 活跃会话观察流无新帧与新消息的空闲超时上限（秒）。
+pub const STREAM_IDLE_TIMEOUT_SECS: u64 = 300;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DetachReport {
+    pub session_id: SessionId,
+    pub turn_id: Option<TurnId>,
+    pub submission: Option<SubmissionReceipt>,
+    pub submission_diagnostic: Option<LocalError>,
+    pub cancel: Option<CancelStatus>,
+    pub cancel_error: Option<LocalError>,
+    pub head: Option<SessionHead>,
+    pub summary: Option<TurnSummary>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConfigureOutcome {
+    Configured(ConfigureReply),
+    Rejected(LocalError),
+    Unknown(LocalError),
+}
 
 #[derive(Clone, Copy, Default)]
 struct Commands {
@@ -19,6 +51,7 @@ struct Commands {
     detach: bool,
     stop: bool,
 }
+
 /// 提交与取消独立于观察队列推进，退出只交接已经登记的意图。
 pub struct LocalTurn {
     commands: watch::Sender<Commands>,
@@ -28,15 +61,18 @@ pub struct LocalTurn {
     turn_id: Option<TurnId>,
     task: Option<JoinHandle<DetachReport>>,
 }
+
 impl LocalClient {
     /// 只处理提交与控制回执；前端用 apply_view 交付已有 watch 的消息。
     /// Unknown 之后的确定结果会再次交付回执，供前端开始观察或显示拒绝。
     pub fn start_submission(&self, request: TurnRequest) -> LocalTurn {
         self.submission(request, false)
     }
+
     pub fn start_turn(&self, request: TurnRequest) -> LocalTurn {
         self.submission(request, true)
     }
+
     fn submission(&self, request: TurnRequest, own_view: bool) -> LocalTurn {
         let (mut handle, mut worker) =
             LocalTurn::prepare(self.clone(), request.session, Some(request.turn_id), true);
@@ -57,11 +93,13 @@ impl LocalClient {
         handle.task = Some(tokio::spawn(worker.run()));
         handle
     }
+
     pub fn observe(&self, session_id: SessionId) -> LocalTurn {
         let (mut handle, worker) = LocalTurn::prepare(self.clone(), session_id, None, false);
         handle.task = Some(tokio::spawn(worker.run()));
         handle
     }
+
     pub fn follow_turn(&self, turn: TurnDetail) -> LocalTurn {
         let (mut handle, mut worker) =
             LocalTurn::prepare(self.clone(), turn.session_id, Some(turn.turn_id), true);
@@ -70,6 +108,7 @@ impl LocalClient {
         handle
     }
 }
+
 impl LocalTurn {
     /// 按原顺序交付本会话的 head、entry、text，供取消与结束判定；不再转发。
     /// 自带 watch 的句柄忽略此输入；句柄结束后调用无效果。
@@ -81,6 +120,7 @@ impl LocalTurn {
             }
         }
     }
+
     fn prepare(
         client: LocalClient,
         session_id: SessionId,
@@ -102,21 +142,27 @@ impl LocalTurn {
             worker,
         )
     }
+
     pub fn session_id(&self) -> SessionId {
         self.session_id
     }
+
     pub fn turn_id(&self) -> Option<TurnId> {
         self.turn_id
     }
+
     pub fn cancel(&self) {
         self.commands.send_modify(|c| c.cancel += 1);
     }
+
     pub fn reconnect(&self) {
         self.commands.send_modify(|c| c.reconnect += 1);
     }
+
     pub async fn next(&mut self) -> Option<LocalUpdate> {
         self.updates.recv().await
     }
+
     pub async fn detach(mut self) -> DetachReport {
         self.commands.send_modify(|c| c.detach = true);
         self.task
@@ -126,6 +172,7 @@ impl LocalTurn {
             .expect("local worker panicked")
     }
 }
+
 impl Drop for LocalTurn {
     fn drop(&mut self) {
         self.commands.send_modify(|c| c.stop = true);
@@ -163,6 +210,7 @@ struct Worker {
     detach_deadline: Option<Instant>,
     idle_deadline: Instant,
 }
+
 impl Worker {
     fn new(
         client: LocalClient,
@@ -210,9 +258,10 @@ impl Worker {
             submission_deadline: None,
             handoff: None,
             detach_deadline: None,
-            idle_deadline: Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS),
+            idle_deadline: Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS),
         }
     }
+
     fn receipt(&mut self, result: SubmissionResult, recovered: bool) {
         let first_receipt = self.report.submission.is_none();
         let late_resolution =
@@ -234,6 +283,7 @@ impl Worker {
             });
         }
     }
+
     fn connect(&mut self) {
         self.finished = false;
         if !self.own_view {
@@ -248,8 +298,9 @@ impl Worker {
         let client = self.client.clone();
         let sid = self.report.session_id;
         self.connection = Some(tokio::spawn(async move { client.watch(sid).await }));
-        self.idle_deadline = Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS);
+        self.idle_deadline = Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS);
     }
+
     fn recover(&mut self) {
         let client = self.client.clone();
         let turn_id = self.report.turn_id.expect("submission identity");
@@ -257,6 +308,7 @@ impl Worker {
             async move { client.wait_for_turn(turn_id).await },
         ));
     }
+
     fn submitted(&mut self, reply: SubmissionReply) {
         match reply {
             SubmissionReply::Accepted(Acceptance::Accepted { turn }) => {
@@ -273,6 +325,7 @@ impl Worker {
             }
         }
     }
+
     fn accepted(&mut self, turn: TurnView, recovered: bool) {
         // 外部视图可能先于接受回执确认结局，不能用接受时的旧投影覆盖它。
         if self.own_view || !self.observed_end {
@@ -281,6 +334,7 @@ impl Worker {
         self.receipt(SubmissionResult::Accepted { turn }, recovered);
         self.connect();
     }
+
     fn cancellation(&mut self, status: CancelStatus, error: Option<LocalError>) {
         self.report.cancel = Some(status);
         if error.is_some() || matches!(status, CancelStatus::Taken | CancelStatus::NotTaken) {
@@ -303,6 +357,7 @@ impl Worker {
             });
         }
     }
+
     fn drive_cancel(&mut self) {
         if self.cancel_generation == 0 || self.cancel_task.is_some() {
             return;
@@ -342,8 +397,9 @@ impl Worker {
             }),
         ));
     }
+
     fn observed(&mut self, update: ViewUpdate, forward: bool) {
-        self.idle_deadline = Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS);
+        self.idle_deadline = Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS);
         let mut ended = false;
         let include = match &update {
             ViewUpdate::Head(head) => {
@@ -417,6 +473,7 @@ impl Worker {
             self.view = None;
         }
     }
+
     async fn run(mut self) -> DetachReport {
         if let Some(request) = self.input.take() {
             if self.commands.borrow().cancel > 0 || self.commands.borrow().stop {
@@ -534,7 +591,7 @@ impl Worker {
                 }
                 progress = async { self.progress.as_mut().expect("watching progress").changed().await }, if self.progress.is_some() && self.view.is_some() => {
                     if progress.is_err() { self.progress = None; }
-                    if progress.is_ok() { self.idle_deadline = Instant::now() + Duration::from_secs(crate::STREAM_IDLE_TIMEOUT_SECS); }
+                    if progress.is_ok() { self.idle_deadline = Instant::now() + Duration::from_secs(STREAM_IDLE_TIMEOUT_SECS); }
                 }
                 _ = tokio::time::sleep_until(self.idle_deadline), if self.view.is_some() && self.report.head.as_ref().is_none_or(|h| h.owner) => {
                     self.view = None; self.pending.push_back(LocalUpdate::Connection { status: ConnectionStatus::Idle }); self.finished = true;
@@ -563,6 +620,7 @@ impl Worker {
         self.report
     }
 }
+
 fn worker_error() -> LocalError {
     LocalError::new(LocalErrorKind::Internal, "local worker failed")
 }

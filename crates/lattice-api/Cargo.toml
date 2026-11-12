@@ -34,6 +34,7 @@ zeroize = { workspace = true }
 rustix = { workspace = true }
 lattice-api = { workspace = true, features = ["test-utils"] }
 lattice-ipc = { workspace = true, features = ["test-utils"] }
+lattice-local = { workspace = true, features = ["test-utils"] }
 lattice-session = { workspace = true, features = ["test-utils"] }
 lattice-store = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }

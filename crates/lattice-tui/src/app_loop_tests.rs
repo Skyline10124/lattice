@@ -5,7 +5,7 @@
 use super::fixtures::*;
 use super::*;
 use futures::channel::mpsc::{UnboundedReceiver, UnboundedSender, unbounded};
-use lattice_api::local::{LocalErrorKind, UsageCompleteness::*, ViewUpdate};
+use lattice_local::{LocalErrorKind, UsageCompleteness::*, ViewUpdate};
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -55,14 +55,14 @@ fn comment_history(app: &mut App, id: TurnId, parts: Value, closed: bool) {
 #[test]
 fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
     let mut h = Harness::new(false);
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     let parts = json!([{"semantic":{"reasoning":{"text":"hidden"}}},{"semantic":{"text":{"text":"comment target"}}}]);
     comment_history(&mut h.app, id, parts.clone(), false);
     comment_browse(&mut h.app, "comment target");
     h.app.apply_action(KeyAction::Submit);
     assert!(!h.app.queue.is_editing());
     let mut h = Harness::new(false);
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     comment_history(&mut h.app, id, parts, true);
     comment_browse(&mut h.app, "comment target");
     h.app.apply_action(KeyAction::Submit);
@@ -84,7 +84,7 @@ fn comment_app() -> Harness {
     let mut h = Harness::new(false);
     h.app.term_width = 100;
     h.app.term_height = 40;
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     comment_history(
         &mut h.app,
         id,
@@ -261,7 +261,7 @@ fn comment_queue_only_edit_rejection_and_delete() {
 
 /// 重新打开会话：`on_path` 时被评论的那一轮仍在路径上。
 fn reload_comment(app: &mut App, target: TurnId, wire: &str, on_path: bool) {
-    let new_turn = lattice_api::local::new_turn_id();
+    let new_turn = lattice_local::new_turn_id();
     let mut entries = Vec::new();
     if on_path {
         entries.push(user(1, target, 1, "original prompt"));
@@ -321,7 +321,7 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
     let app = &mut h.app;
     app.term_width = 80;
     app.term_height = 12;
-    let last = lattice_api::local::new_turn_id();
+    let last = lattice_local::new_turn_id();
     open_view(
         app,
         head(8, Some(last), false),
@@ -477,7 +477,7 @@ fn comment_warn_error_keeps_space_paste_and_hidden_input_untouched() {
 #[test]
 fn comment_adjacent_text_fragments_and_generating_text_are_not_commentable() {
     let mut h = Harness::new(false);
-    let id = lattice_api::local::new_turn_id();
+    let id = lattice_local::new_turn_id();
     comment_history(
         &mut h.app,
         id,
@@ -1065,7 +1065,7 @@ impl Drop for Peer {
 impl Peer {
     fn start(mut handler: impl FnMut(&Value) -> Reply + Send + 'static) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let layout = lattice_api::StateLayout::in_state_root(root.path());
+        let layout = lattice_local::StateLayout::in_state_root(root.path());
         let local = layout.lattice_root().join("local");
         std::fs::create_dir_all(&local).unwrap();
         std::fs::set_permissions(&local, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -1079,7 +1079,7 @@ impl Peer {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut magic = [0; 8];
                 stream.read_exact(&mut magic).await.unwrap();
-                assert_eq!(&magic, lattice_api::local::test_support::FRAME_MAGIC);
+                assert_eq!(&magic, lattice_local::test_support::FRAME_MAGIC);
                 let len = stream.read_u32().await.unwrap();
                 assert!(len <= 16 * 1024 * 1024);
                 let mut bytes = vec![0; len as usize];
@@ -1158,7 +1158,7 @@ async fn send(stream: &mut UnixStream, value: &Value, seq: &mut u64) {
     let bytes = serde_json::to_vec(&json!({"message_id":*seq,"offset":0,"json_fragment":serde_json::to_string(value).unwrap(),"complete":true})).unwrap();
     *seq += 1;
     if stream
-        .write_all(lattice_api::local::test_support::FRAME_MAGIC)
+        .write_all(lattice_local::test_support::FRAME_MAGIC)
         .await
         .is_err()
     {
@@ -1192,7 +1192,7 @@ fn accepted_reply(request: &Value) -> Value {
 }
 fn configure_reply(
     head: SessionHead,
-    adjustment: Option<lattice_api::local::EffortAdjustment>,
+    adjustment: Option<lattice_local::EffortAdjustment>,
 ) -> Value {
     response(
         "configure",
@@ -1275,7 +1275,7 @@ struct Remote {
 impl Harness {
     fn new(_new_session: bool) -> Self {
         let root = tempfile::tempdir().unwrap();
-        let unused = lattice_api::AgentName::parse("unused").unwrap();
+        let unused = lattice_local::AgentName::parse("unused").unwrap();
         let options = TuiOptions {
             session_id: Some(SESSION.into()),
             agent: Some(unused),
@@ -1859,7 +1859,7 @@ async fn paging_up_queries_turns_before_the_earliest_user_message() {
         let seen = peer.wait(|s| count(s, "history") == 1).await;
         let request = requests(&seen, "history").next().unwrap();
         assert_eq!(request["before"], json!(5));
-        assert_eq!(request["turns"], json!(lattice_api::local::HISTORY_TURNS));
+        assert_eq!(request["turns"], json!(lattice_local::HISTORY_TURNS));
         assert_eq!(request["session_id"], json!(SESSION));
         remote.wait(|f| f.text.contains("prompt-1")).await;
         remote.press(KeyCode::Char('d'), KeyModifiers::CONTROL);
@@ -1891,7 +1891,7 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
     let driver = async {
         view_tx.push([
             head_reply(SessionHead {
-                effort: Some(lattice_api::Effort::High),
+                effort: Some(lattice_local::Effort::High),
                 settings_version: settings_version(0x11),
                 ..head(2, Some(running), true)
             }),
@@ -1907,7 +1907,7 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
         remote.wait(|f| f.input == "untouched draft").await;
         view_tx.push([
             head_reply(SessionHead {
-                effort: Some(lattice_api::Effort::High),
+                effort: Some(lattice_local::Effort::High),
                 settings_version: settings_version(0x11),
                 ..head(2, Some(running), false)
             }),
@@ -1962,7 +1962,7 @@ async fn idle_timer_runs_only_while_the_head_shows_an_owner() {
             remote.wait(|f| f.text.contains("prompt")).await;
             tokio::time::pause();
             // 处理屏障等帧时暂停的时钟会前进几帧，判定点离空闲超时留出余量。
-            let idle = Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS);
+            let idle = Duration::from_secs(lattice_local::STREAM_IDLE_TIMEOUT_SECS);
             tokio::time::advance(idle - Duration::from_secs(2)).await;
             assert!(remote.processed().await.connected);
             tokio::time::advance(Duration::from_secs(3)).await;
@@ -1978,7 +1978,7 @@ async fn idle_timer_runs_only_while_the_head_shows_an_owner() {
             remote.ctrl('d');
         };
         // 暂停的时钟会推进过空闲超时，上限要越过它。
-        let limit = LOOP_LIMIT + Duration::from_secs(lattice_api::STREAM_IDLE_TIMEOUT_SECS);
+        let limit = LOOP_LIMIT + Duration::from_secs(lattice_local::STREAM_IDLE_TIMEOUT_SECS);
         let ((), exit) = bounded(limit, async { tokio::join!(driver, h.run(&peer.client)) }).await;
         assert!(exit.result.is_ok());
     }
@@ -2068,14 +2068,14 @@ async fn model_and_effort_panels_configure_session_and_submit_uses_configured_he
                 1 => SessionHead {
                     provider: Some(ProviderId::parse("p").unwrap()),
                     model: Some(ModelId::parse("chosen").unwrap()),
-                    effort: Some(lattice_api::Effort::Low),
+                    effort: Some(lattice_local::Effort::Low),
                     settings_version: settings_version(0x22),
                     ..head(0, None, false)
                 },
                 _ => SessionHead {
                     provider: Some(ProviderId::parse("p").unwrap()),
                     model: Some(ModelId::parse("chosen").unwrap()),
-                    effort: Some(lattice_api::Effort::Off),
+                    effort: Some(lattice_local::Effort::Off),
                     settings_version: settings_version(0x33),
                     ..head(0, None, false)
                 },
@@ -2222,7 +2222,7 @@ async fn held_model_query_keeps_view_cancel_and_exit_responsive() {
 
 #[tokio::test(start_paused = true)]
 async fn head_change_retargets_effort_and_ignores_old_results_while_new_query_is_held() {
-    use lattice_api::Effort::{Low, Off};
+    use lattice_local::Effort::{Low, Off};
     for old_success in [true, false] {
         let views = Views::default();
         let view_tx = views.clone();
@@ -2385,13 +2385,12 @@ async fn readonly_open_rejects_mismatched_project_path_before_watch() {
         _ => Reply::Never,
     });
     let current = tempfile::tempdir().expect("创建当前工作区临时目录");
-    let workspace =
-        lattice_api::LocalWorkspaceRoot::from_path(current.path()).expect("解析当前工作区");
+    let workspace = std::fs::canonicalize(current.path()).expect("解析当前工作区");
     let options = crate::TuiOptions {
         session_id: Some("abcd".into()),
         agent: None,
         session_dir: current.path().join("state"),
-        project_root: workspace.canonical_path().to_path_buf(),
+        project_root: workspace.clone(),
     };
     let error = match crate::session::open_or_create(&options, &workspace, &peer.client).await {
         Ok(_) => panic!("只读打开属于另一个项目的会话必须在 watch 之前失败"),
@@ -2406,12 +2405,12 @@ async fn readonly_open_rejects_mismatched_project_path_before_watch() {
         "项目路径不一致时应在读取 log 之前退出"
     );
     let local = error
-        .downcast_ref::<lattice_api::local::LocalError>()
+        .downcast_ref::<lattice_local::LocalError>()
         .expect("启动错误应保持为可被 CLI 分类输出的 LocalError");
-    assert_eq!(local.kind, lattice_api::local::LocalErrorKind::Conflict);
+    assert_eq!(local.kind, lattice_local::LocalErrorKind::Conflict);
     assert_eq!(
         local.conflict,
-        Some(lattice_api::local::ConflictReason::BindingMismatch)
+        Some(lattice_local::ConflictReason::BindingMismatch)
     );
     assert!(
         local.message.contains("/other/project-\u{FFFD}"),
@@ -2433,7 +2432,7 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
             "models" => Reply::Now(model_reply(&r["query"])),
             "configure" => Reply::Hold(cfgs.next().unwrap().unwrap()),
             "submit" => Reply::Now(error_reply(LocalError {
-                conflict: Some(lattice_api::local::ConflictReason::SettingsChanged),
+                conflict: Some(lattice_local::ConflictReason::SettingsChanged),
                 ..local_error(
                     LocalErrorKind::Conflict,
                     "session settings changed before turn acceptance",
@@ -2508,7 +2507,7 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
                         SessionHead {
                             provider: Some(ProviderId::parse("p").unwrap()),
                             model: Some(ModelId::parse("chosen").unwrap()),
-                            effort: Some(lattice_api::Effort::Off),
+                            effort: Some(lattice_local::Effort::Off),
                             settings_version: settings_version(0x44),
                             ..head(0, None, false)
                         },
@@ -2559,7 +2558,7 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
                         SessionHead {
                             provider: Some(ProviderId::parse("p").unwrap()),
                             model: Some(ModelId::parse("chosen").unwrap()),
-                            effort: Some(lattice_api::Effort::Off),
+                            effort: Some(lattice_local::Effort::Off),
                             settings_version: settings_version(0x44),
                             ..head(0, None, false)
                         },
@@ -2597,8 +2596,8 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
 #[tokio::test]
 async fn submit_before_first_watch_head_carries_startup_head_version() {
     let dir = tempfile::tempdir().expect("创建工作区目录");
-    let workspace = lattice_api::LocalWorkspaceRoot::from_path(dir.path()).expect("解析工作区");
-    let raw_cwd = workspace.project_path().as_bytes().to_vec();
+    let workspace = std::fs::canonicalize(dir.path()).expect("解析工作区");
+    let raw_cwd = std::os::unix::ffi::OsStrExt::as_bytes(workspace.as_os_str()).to_vec();
     let views = Views::default();
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str() {
@@ -2629,7 +2628,7 @@ async fn submit_before_first_watch_head_carries_startup_head_version() {
         session_id: Some(SESSION.into()),
         agent: None,
         session_dir: dir.path().join("state"),
-        project_root: workspace.canonical_path().to_path_buf(),
+        project_root: workspace.clone(),
     };
     let ctx = crate::session::open_or_create(&options, &workspace, &peer.client)
         .await
@@ -2738,7 +2737,7 @@ async fn queued_message_uses_enqueued_settings_version_across_later_head_pushes(
 #[tokio::test]
 async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watch() {
     let dir = tempfile::tempdir().expect("创建工作区目录");
-    let workspace = lattice_api::LocalWorkspaceRoot::from_path(dir.path()).expect("解析工作区");
+    let workspace = std::fs::canonicalize(dir.path()).expect("解析工作区");
 
     // 1. 新建会话 configure(New) 失败时以启动错误退出，不开始 watch。
     let fail_peer = Peer::start(|r| match r["operation"].as_str() {
@@ -2750,9 +2749,9 @@ async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watc
     });
     let new_opts = crate::TuiOptions {
         session_id: None,
-        agent: Some(lattice_api::AgentName::parse("coder").unwrap()),
+        agent: Some(lattice_local::AgentName::parse("coder").unwrap()),
         session_dir: dir.path().join("state"),
-        project_root: workspace.canonical_path().to_path_buf(),
+        project_root: workspace.clone(),
     };
     let err = match crate::session::open_or_create(&new_opts, &workspace, &fail_peer.client).await {
         Ok(_) => panic!("新建会话 configure 失败必须以启动错误退出"),
@@ -2776,9 +2775,9 @@ async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watc
             h.agent = "coder".into();
             Reply::Now(configure_reply(
                 h,
-                Some(lattice_api::local::EffortAdjustment {
-                    from: Some(lattice_api::Effort::High),
-                    to: Some(lattice_api::Effort::Low),
+                Some(lattice_local::EffortAdjustment {
+                    from: Some(lattice_local::Effort::High),
+                    to: Some(lattice_local::Effort::Low),
                 }),
             ))
         }
@@ -2791,7 +2790,7 @@ async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watc
     assert!(created_ctx.initial_adjustment.is_some());
 
     // 3. `lattice tui S --agent A` 遇到 Busy 时写明会话正在执行一轮、稍后再试，并退出。
-    let raw_cwd = workspace.project_path().as_bytes().to_vec();
+    let raw_cwd = std::os::unix::ffi::OsStrExt::as_bytes(workspace.as_os_str()).to_vec();
     let busy_peer = Peer::start(move |r| match r["operation"].as_str() {
         Some("resolve_session") => Reply::Now(json!({
             "response": "session",
@@ -2811,9 +2810,9 @@ async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watc
     });
     let existing_agent_opts = crate::TuiOptions {
         session_id: Some("11111111".into()),
-        agent: Some(lattice_api::AgentName::parse("reviewer").unwrap()),
+        agent: Some(lattice_local::AgentName::parse("reviewer").unwrap()),
         session_dir: dir.path().join("state"),
-        project_root: workspace.canonical_path().to_path_buf(),
+        project_root: workspace.clone(),
     };
     let busy_err =
         match crate::session::open_or_create(&existing_agent_opts, &workspace, &busy_peer.client)

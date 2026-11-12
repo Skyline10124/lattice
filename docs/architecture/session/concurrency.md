@@ -92,7 +92,7 @@ stateDiagram-v2
 | IPC 等待 | 单帧 socket 写入最多 5 秒，超时返回传输错误和回执可能未知；后台首请求整帧读取最多 10 秒，超时结束该连接处理。登录后续帧等待首字节不限时，首字节到达后须在 10 秒内完成该帧；人类授权等待不使用观察 idle 时限 | 同文件 WRITE_TIMEOUT、LOGIN_FRAME_TIMEOUT 和 [server.rs::connection](../../../crates/lattice-api/src/local/server.rs)，不是 Turn 总时限 |
 | 后台资源槽 | 同时处理连接最多 64，满时关闭新接入连接；观察者许可最多 32，不足返回 Busy，`head` 等查询不占观察许可；已接管 Owner 最多 32，准入不足返回 Busy | server.rs 的 serve、Backend::new/claim、Owner::new。限制各自对象，观察者额度为查询/取消留连接空间，不承诺延迟 |
 | 内存观察状态 | 每个正在执行的 Turn 一份当前尝试的段列表，受助手正文与 reasoning 上限约束，至多约 4 MiB，同时进行的 Turn 受 Owner 上限约束；每个观察者一份待推送条目的集合与文字的已发位置，受观察者许可约束 | 见[观察与重连](recovery.md#观察与重连)；段列表保存共同回复累积器发出的显示增量，与它组装的完整回复共享来源 |
-| 客户端观察 idle | 当前位置那一轮有 Owner 执行时，300 秒没有任何推送即终止当前观察，交付连接诊断，保留已知结局；会话空闲时不计时；每次建连及收到推送重置期限 | [STREAM_IDLE_TIMEOUT_SECS](../../../crates/lattice-api/src/turn/execute.rs) 与 [LocalClient](../../../crates/lattice-api/src/local/client.rs)；与后台执行及收尾独立 |
+| 客户端观察 idle | 当前位置那一轮有 Owner 执行时，300 秒没有任何推送即终止当前观察，交付连接诊断，保留已知结局；会话空闲时不计时；每次建连及收到推送重置期限 | [STREAM_IDLE_TIMEOUT_SECS](../../../crates/lattice-local/src/operation.rs) 与 [LocalClient](../../../crates/lattice-local/src/client.rs)；与后台执行及收尾独立 |
 | 客户端取消回执 | 每次 Cancel 最多等待 5 秒，超时为 Unknown；一次补发条件由[客户端意图与退出交接](recovery.md#客户端意图与退出交接)限定 | LocalTurn 的 drive_cancel；两个前端共用 |
 | 首次取消时提交仍在途 | 从首次取消起等待提交回执 5 秒，到期报告提交结果不明，原提交任务继续接收迟到回执；提交连接断开后才按 TurnId 查询 | LocalTurn 的 run / handoff_submission；不是普通提交总时限，也不自动重发请求 |
 | 取消后的退出交接 | detach 最多使用 5 秒交接控制回执，Taken 可提前返回；同一取消意图已完成上述未知交接且无在途 Cancel 时，直接结束交接而不等待第二个窗口 | LocalTurn 的 detach / run；普通退出不新增取消。这些是客户端等待预算，不承诺后台完成、阻塞配置 I/O 或 runtime shutdown 在五秒内结束 |

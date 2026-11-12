@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::blocks::BlockId;
-use lattice_api::{
+use lattice_local::{
     Availability, Effort, ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelRef,
 };
 
