@@ -179,6 +179,7 @@ fn run_daemon_serve(
             drain,
             failure,
             instance,
+            shutdown_deadline,
         }) => {
             let has_failure = failure.is_some();
             if let Some(error) = failure {
@@ -194,8 +195,10 @@ fn run_daemon_serve(
                     }
                 }
             };
-            runtime.shutdown_timeout(std::time::Duration::from_secs(5));
-            // 实例锁持有到进程退出，由内核在关闭文件描述符时释放。
+            // 关闭 runtime 用第 6 步剩余的时间；实例锁持有到进程退出，由内核在关闭文件描述符时释放。
+            runtime.shutdown_timeout(
+                shutdown_deadline.saturating_duration_since(std::time::Instant::now()),
+            );
             let _held_until_exit = &instance;
             std::process::exit(code);
         }

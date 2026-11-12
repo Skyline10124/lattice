@@ -150,12 +150,12 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 | --- | --- | --- |
 | 1. 关闭准入 | 首次进入停机时记下 `deadline = 当前时刻 + drain_timeout`，停止元数据调度，调用共享认证对象的 `stop_logins()` 拒绝新登录并取消活动登录；重复请求复用同一期限与结果 | 新工作准入返回 `Stopping`；`access_token()` 保持可用，已接管的 SIWC Turn 仍可取得和刷新 token |
 | 2. 排空 | 继续接受连接以服务查询、取消与 `status`（listener 出错进入停机时跳过新连接接入），等待已接管的操作（Turn、`configure`、`rewind` 及异常任务监督）与进行中的草稿会话清理收尾，无须观察者读完流；停机路径上所有等待在途工作的地方共用 `deadline` | 判定时在途工作已归零即排空完成，这一判定先于期限与信号；到达 `deadline` 或排空期间收到 `SIGTERM`、`SIGINT`（不论停机由信号还是 IPC `stop` 发起）均按排空超时处理：计入 `unconfirmed_operations` 并停写会话库。本阶段结束时保存 `DaemonStatus` 并唤醒全部 IPC `stop` 等待方 |
-| 3. 元数据与认证收尾 | 并发等待元数据调度任务结束、`metadata.drain()` 与认证 `shutdown()`（关闭认证 worker 与必要文件写入），共用 5 秒上限 | 到期即结束本阶段等待 |
-| 4. 连接收尾 | 关闭新连接处理、释放 listener，等待连接任务结束，上限 5 秒 | 到期对剩余连接任务调用 `abort_all()` 并结束等待 |
-| 5. 撤下 socket 与关闭 runtime | 删除 `api.sock`，随后以 `shutdown_timeout` 关闭 runtime，上限 5 秒 | 未完成的后台任务随 runtime 关闭丢弃，不取消在途 Turn，也不伪造持久结局 |
+| 3. 元数据与认证收尾 | 继续接受连接，`status` 正常回答，IPC `stop` 取保存的结果，新工作准入返回 `Stopping`（listener 已出错时跳过新连接接入）；并发等待元数据调度任务结束、`metadata.drain()` 与认证 `shutdown()`（关闭认证 worker 与必要文件写入），共用 5 秒上限 | 到期即结束本阶段等待 |
+| 4. 连接收尾 | 关闭推送并释放 listener 停止接受连接，等待连接任务结束，上限 5 秒 | 到期对剩余连接任务调用 `abort_all()` 并结束等待 |
+| 5. 撤下 socket 与关闭 runtime | 三者共用一个 5 秒期限：在阻塞线程上释放最后的后台资源（排空完成时其中有会话库的最后一个引用，释放即关闭会话库），同时删除 `api.sock`；到期不再等待，用剩余的时间以 `shutdown_timeout` 关闭 runtime | `api.sock` 到期仍未删除时记为运行错误；未完成的后台任务随 runtime 关闭丢弃，不取消在途 Turn，也不伪造持久结局；到期没关完的会话库随进程退出，下次按 redb 的崩溃恢复打开 |
 | 6. 进程退出与锁释放 | 持有实例锁 `InstanceLock` 直至调用进程退出，由内核在关闭文件描述符时释放 `owner.lock` | `api.sock` 先于锁撤下；锁可取得时旧后台所有用户态线程均已结束。实例锁与 socket 清理由[存储后台边界](../storage.md#本地后台与访问边界)维护 |
 
 - **排空上限**：`daemon serve` 接受 `--drain-timeout <时长>`（非负整数加单位 `ms`、`s` 或 `m`，省略单位按秒，默认 `60s`，无效值以 `2` 退出）。
-- **排空超时的停写与计数**：排空超时时，后台在准入锁内将每个尚未退休的操作计入一次 `unconfirmed_operations`（一轮草稿会话清理无论正在处理哪个候选会话都按一个操作计；已被计入的操作随后因错误退休时保持计数不变），释放准入锁后置位会话库租约的 `shutdown` 标志与 `SessionStore` 的写闸 `write_disabled`，并将会话库管理器置入终态。写闸占用每次写入从开始到提交持有的健康锁，停写会等待正在进行的那次提交结束；此后任何写入都返回 `WriteDisabled`，在途 Turn 停在已写入的进度，见[执行者消失后的 Turn](#执行者消失后的-turn)。`unconfirmed_operations` 统计本进程未确认收尾的操作数，不等同于会话库中未关闭 Turn 的数量；连接中断也不能证明后台已停止。
-- **IPC `stop` 回执与客户端等待**：IPC `stop` 在第 2 步结束时立即收到保存的 `DaemonStatus` 回执（早于元数据、认证与连接尾段），排空已结束后到达的 `stop` 直接读取同一份结果。客户端收到回执后在 30 秒内等待 `api.sock` 撤下与 `owner.lock` 可取得，随后返回，调用方即可在同一状态根启动新后台（客户端不等待旧进程完全退出）；30 秒内锁仍被持有时返回 `Stopping`，由用户以 `lattice daemon status` 复核。`unconfirmed_operations` 非零时，`lattice daemon stop` 在标准错误提示有操作未确认收尾并以 `1` 退出。
+- **排空超时的停写与计数**：排空超时时，后台在准入锁内将每个尚未退休的操作计入一次 `unconfirmed_operations`（一轮草稿会话清理无论正在处理哪个候选会话都按一个操作计；已被计入的操作随后因错误退休时保持计数不变），释放准入锁后置位会话库租约的 `shutdown` 标志与 `SessionStore` 的写闸 `write_disabled`，并将会话库管理器置入终态。写闸占用每次写入从开始到提交持有的健康锁，停写只等待正在进行的那次提交结束，停写之后的会话库随最终释放关闭；此后任何写入都返回 `WriteDisabled`，在途 Turn 停在已写入的进度，见[执行者消失后的 Turn](#执行者消失后的-turn)。`unconfirmed_operations` 统计本进程未确认收尾的操作数，不等同于会话库中未关闭 Turn 的数量；连接中断也不能证明后台已停止。
+- **IPC `stop` 回执与客户端等待**：IPC `stop` 在第 2 步结束时立即收到保存的 `DaemonStatus` 回执（早于元数据、认证与连接尾段），排空结束后、进入连接收尾前到达的 `stop` 直接读取同一份保存的结果。客户端收到回执后在 30 秒内等待 `api.sock` 撤下与 `owner.lock` 可取得，随后返回，调用方即可在同一状态根启动新后台（客户端不等待旧进程完全退出）；30 秒内锁仍被持有时返回 `Stopping`，由用户以 `lattice daemon status` 复核。`unconfirmed_operations` 非零时，`lattice daemon stop` 在标准错误提示有操作未确认收尾并以 `1` 退出。
 - **`daemon serve` 退出码**：排空超时（含排空中收到停机信号）退出 `4`，优先于其他运行错误；排空完成但存在绑定后运行错误（如 listener 失败）或启动运行错误退出 `1`；参数错误退出 `2`；排空完成且无运行错误（含就绪前收到停机信号）退出 `0`。尾段到期不改变排空结果。

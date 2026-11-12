@@ -21,6 +21,8 @@ pub(super) struct Gates {
     pub metadata_drain: Mutex<Option<Gate>>,
     /// 回执与排空之后、关闭 listener 之前。
     pub listener_close: Mutex<Option<Gate>>,
+    /// 连接收尾之后、阻塞线程丢掉 Backend 之前。
+    pub final_release: Mutex<Option<Gate>>,
 }
 pub(super) fn arm(slot: &Mutex<Option<Gate>>) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
     let (entered, entry) = oneshot::channel();
@@ -33,6 +35,19 @@ pub(super) async fn pause(slot: &Mutex<Option<Gate>>) {
     if let Some((entered, release)) = gate {
         let _ = entered.send(());
         bounded(release).await.unwrap();
+    }
+}
+pub(super) fn pause_blocking(slot: &Mutex<Option<Gate>>) {
+    let gate = lock(slot).take();
+    if let Some((entered, release)) = gate {
+        let (tx, rx) = std::sync::mpsc::channel();
+        tokio::spawn(async move {
+            let _ = tx.send(bounded(release).await);
+        });
+        let _ = entered.send(());
+        rx.recv_timeout(Duration::from_secs(10))
+            .expect("局部调度超时")
+            .unwrap();
     }
 }
 pub(super) async fn fail_forwarding(slot: &Mutex<Option<Gate>>) {
@@ -1981,6 +1996,7 @@ async fn serve_configured(
             drain,
             failure,
             instance,
+            ..
         } = exit;
         drop(instance);
         match failure {
@@ -2050,6 +2066,7 @@ async fn serve_holding_lock() -> GatedServe {
             drain,
             failure,
             instance,
+            ..
         } = exit;
         let _ = entered_tx.send(());
         bounded(resume).await.unwrap();
@@ -2295,12 +2312,12 @@ async fn ipc_stop_replies_after_drain_timeout_and_before_metadata_tail() {
         "元数据收尾门控未放行时 serve 不应已退出，证明回执先于元数据收尾到达"
     );
 
-    let second_status = backend
-        .dispatch(Request::Stop)
+    let (second_status, _) = tokio::time::timeout(Duration::from_secs(2), client.request_stop())
         .await
-        .expect("重复 stop 请求");
-    assert!(
-        matches!(second_status, Response::Status(ref s) if s == &status),
+        .expect("排空超时进入元数据尾段后经真实 socket 的重复 stop 不应卡住")
+        .expect("重复 IPC stop 请求应返回保存的回执");
+    assert_eq!(
+        second_status, status,
         "第 2 步结束后重复的 stop 应共用同一份 DaemonStatus"
     );
 
@@ -2316,6 +2333,127 @@ async fn ipc_stop_replies_after_drain_timeout_and_before_metadata_tail() {
     provider.release.send_replace(true);
     let _ = provider.finish().await;
     idle(&backend).await;
+}
+
+#[tokio::test]
+async fn duplicate_ipc_stop_and_status_succeed_over_socket_during_metadata_tail() {
+    let (_dir, _layout, client, meta_entered, meta_release, serving) =
+        serve_gated(|gates| &gates.metadata_drain).await;
+
+    let (first_status, departure) = bounded(client.request_stop())
+        .await
+        .expect("首次 IPC stop 应在排空完成后返回回执");
+    bounded(meta_entered)
+        .await
+        .expect("后台应进入元数据收尾尾段并停在门控处");
+    assert!(first_status.stopping, "首次 stop 回执应带 stopping=true");
+
+    let (second_stop, status_reply) = tokio::time::timeout(Duration::from_secs(2), async {
+        tokio::join!(client.request_stop(), client.status())
+    })
+    .await
+    .expect("元数据收尾期间经真实 socket 的重复 stop 与 status 不应被挡在未消费连接队列中");
+    let (second_status, _) = second_stop.expect("元数据尾段期间经真实 socket 的重复 stop 应成功");
+    let current_status = status_reply.expect("元数据尾段期间经真实 socket 的 status 应成功");
+    assert_eq!(
+        second_status, first_status,
+        "第二次 stop 的回执应与第一次保存的 DaemonStatus 相同"
+    );
+    assert!(
+        current_status.stopping,
+        "元数据尾段期间 status 回答应带 stopping=true"
+    );
+
+    meta_release.send(()).unwrap();
+    bounded(departure.wait(Duration::from_secs(5)))
+        .await
+        .expect("放行元数据门控后 socket 应撤下且实例锁应释放");
+    assert_eq!(
+        bounded(serving).await.unwrap().expect("serve 应正常返回"),
+        DrainOutcome::Completed
+    );
+}
+
+#[tokio::test]
+async fn final_release_and_socket_removal_share_the_shutdown_deadline() {
+    let dir = tempfile::tempdir().unwrap();
+    let layout = crate::StateLayout::in_state_root(dir.path());
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+    let (ready_tx, ready_rx) = oneshot::channel();
+    let (serving_layout, backend_layout, home) =
+        (layout.clone(), layout.clone(), dir.path().to_path_buf());
+    let serving = tokio::spawn(serve_with_backend(
+        serving_layout,
+        Duration::from_secs(60),
+        stop_rx,
+        move || {
+            let mut backend = Backend::with_tools(
+                backend_layout,
+                Some(home),
+                crate::turn::default_tool_executor(),
+            );
+            Arc::get_mut(&mut backend)
+                .expect("unshared test backend")
+                .metadata = super::super::metadata::MetadataRefresh::without_network();
+            let armed = arm(&backend.gates.final_release);
+            let _ = ready_tx.send(armed);
+            backend
+        },
+    ));
+    let (release_entered, release_resume) = bounded(ready_rx).await.unwrap();
+    let client = super::super::LocalClient::new(layout.clone());
+    config(dir.path(), "http://127.0.0.1:1/v1");
+    let workspace = crate::LocalWorkspaceRoot::from_path(dir.path())
+        .unwrap()
+        .canonical_path()
+        .to_path_buf();
+    client
+        .configure(configure_new(&workspace, super::super::new_session_id()))
+        .await
+        .expect("先 configure 会话以打开会话库");
+
+    stop_tx.send(()).await.expect("发送停机信号");
+    bounded(release_entered)
+        .await
+        .expect("最终释放任务应进入门控");
+    // 释放被挡住时，serve 在第 6 步的 5 秒期限到达后返回，不随释放无限等待。
+    let exit = tokio::time::timeout(Duration::from_secs(8), serving)
+        .await
+        .expect("最终释放被挡住时 serve 应在第 6 步的期限到达后返回")
+        .unwrap()
+        .expect("serve 应正常完成收尾");
+    assert_eq!(exit.drain, DrainOutcome::Completed);
+    assert!(
+        exit.failure.is_none(),
+        "最终释放超过期限不算运行错误: {:?}",
+        exit.failure
+    );
+    assert!(
+        exit.shutdown_deadline <= std::time::Instant::now(),
+        "serve 应等到第 6 步的期限才放弃等待最终释放"
+    );
+    assert!(
+        !layout.lattice_root().join("local/api.sock").exists(),
+        "最终释放被挡住时 api.sock 仍应在期限内撤下"
+    );
+    assert!(
+        lattice_session::store::SessionStore::open(&layout).is_err(),
+        "最终释放被挡住时会话库仍由释放任务持有"
+    );
+
+    release_resume.send(()).unwrap();
+    drop(exit.instance);
+    // 放行后释放任务丢掉最后一个后台引用，会话库关闭，可以重新打开。
+    let reopened = bounded(async {
+        loop {
+            match lattice_session::store::SessionStore::open(&layout) {
+                Ok(store) => break store,
+                Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
+            }
+        }
+    })
+    .await;
+    drop(reopened);
 }
 
 #[tokio::test(start_paused = true)]

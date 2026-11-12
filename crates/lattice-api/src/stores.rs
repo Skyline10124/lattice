@@ -32,7 +32,10 @@ enum StoreState {
         old: Option<Arc<SessionStore>>,
     },
     Unavailable(ApiError),
-    Stopped,
+    /// 停机排空超时后的终态；停写的库句柄留在这里，随 `StoreManager` 最终释放时关闭会话库。
+    Stopped {
+        _store: Option<Arc<SessionStore>>,
+    },
 }
 
 pub(crate) struct StoreLease {
@@ -72,7 +75,7 @@ impl StoreManager {
     pub(crate) fn is_stopped(&self) -> bool {
         matches!(
             *self.state.lock().expect("store manager poisoned"),
-            StoreState::Stopped
+            StoreState::Stopped { .. }
         )
     }
 
@@ -117,7 +120,7 @@ impl StoreManager {
                     store,
                     shutdown,
                 } => return Ok(self.api(*generation, store.clone(), shutdown.clone(), read)),
-                StoreState::Quiescing { .. } | StoreState::Stopped => {
+                StoreState::Quiescing { .. } | StoreState::Stopped { .. } => {
                     return Err(StoreError::WriteDisabled.into());
                 }
                 StoreState::Unavailable(error) => return Err(error.clone()),
@@ -139,7 +142,7 @@ impl StoreManager {
                     } => {
                         return Ok(manager.api(*generation, store.clone(), shutdown.clone(), read));
                     }
-                    StoreState::Quiescing { .. } | StoreState::Stopped => {
+                    StoreState::Quiescing { .. } | StoreState::Stopped { .. } => {
                         return Err(StoreError::WriteDisabled.into());
                     }
                     StoreState::Unavailable(error) => return Err(error.clone()),
@@ -152,7 +155,7 @@ impl StoreManager {
                     let shutdown = Arc::default();
                     let published = {
                         let mut state = manager.state.lock().expect("store manager poisoned");
-                        if matches!(*state, StoreState::Stopped) {
+                        if matches!(*state, StoreState::Stopped { .. }) {
                             Err(store)
                         } else {
                             let store = Arc::new(store);
@@ -181,7 +184,7 @@ impl StoreManager {
                     if unknown {
                         let should_recover = {
                             let mut state = manager.state.lock().expect("store manager poisoned");
-                            if matches!(*state, StoreState::Stopped) {
+                            if matches!(*state, StoreState::Stopped { .. }) {
                                 false
                             } else {
                                 *state = StoreState::Quiescing {
@@ -197,7 +200,7 @@ impl StoreManager {
                         }
                     } else if !missing {
                         let mut state = manager.state.lock().expect("store manager poisoned");
-                        if !matches!(*state, StoreState::Stopped) {
+                        if !matches!(*state, StoreState::Stopped { .. }) {
                             *state = StoreState::Unavailable(error.clone());
                         }
                     }
@@ -228,24 +231,25 @@ impl StoreManager {
     }
 
     /// 停机排空超时后置位租约停机标志与会话库写闸，进入不再重开的终态。
+    /// 停写的库句柄留在 `Stopped` 中随 `StoreManager` 最终释放，不在停写等待点顺带关库。
     pub(crate) async fn disable_writes(self: &Arc<Self>) {
         let store = {
             let mut state = self.state.lock().expect("store manager poisoned");
-            if matches!(*state, StoreState::Stopped) {
-                return;
-            }
-            let previous = std::mem::replace(&mut *state, StoreState::Stopped);
-            match previous {
+            let store = match &mut *state {
+                StoreState::Stopped { .. } => return,
                 StoreState::Ready {
                     store, shutdown, ..
                 } => {
                     shutdown.store(true, Ordering::Release);
-                    Some(store)
+                    Some(store.clone())
                 }
-                StoreState::Quiescing { old, .. } => old,
+                StoreState::Quiescing { old, .. } => old.take(),
                 StoreState::Unopened | StoreState::Unavailable(_) => None,
-                StoreState::Stopped => unreachable!(),
-            }
+            };
+            *state = StoreState::Stopped {
+                _store: store.clone(),
+            };
+            store
         };
         self.notify();
         if let Some(store) = store {
@@ -305,7 +309,7 @@ impl StoreManager {
                 let (reason, old) = {
                     let mut state = worker_manager.state.lock().expect("store manager poisoned");
                     match &mut *state {
-                        StoreState::Stopped => return,
+                        StoreState::Stopped { .. } => return,
                         StoreState::Quiescing {
                             generation: current,
                             reason,
@@ -320,7 +324,7 @@ impl StoreManager {
                     .map_err(ApiError::from);
                 let discarded = {
                     let mut state = worker_manager.state.lock().expect("store manager poisoned");
-                    if matches!(*state, StoreState::Stopped) {
+                    if matches!(*state, StoreState::Stopped { .. }) {
                         opened.ok()
                     } else {
                         *state = match opened {
@@ -339,7 +343,7 @@ impl StoreManager {
             .await;
             if result.is_err() {
                 let mut state = manager.state.lock().expect("store manager poisoned");
-                if !matches!(*state, StoreState::Stopped) {
+                if !matches!(*state, StoreState::Stopped { .. }) {
                     *state = StoreState::Unavailable(ApiError::WorkerFailed);
                 }
             }
@@ -511,24 +515,37 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let manager = StoreManager::new(StateLayout::in_state_root(tmp.path()));
         let api = manager.acquire(true).await.expect("首次创建会话库");
-        assert!(!api.shutdown().load(Ordering::Acquire));
+        let shutdown = api.shutdown().clone();
+        let store_weak = Arc::downgrade(&api.store);
+        assert!(!shutdown.load(Ordering::Acquire));
+        drop(api);
+        assert_eq!(
+            store_weak.strong_count(),
+            1,
+            "释放租约后应只剩 StoreManager 持有会话库句柄"
+        );
 
         manager.disable_writes().await;
 
         assert!(
-            api.shutdown().load(Ordering::Acquire),
+            shutdown.load(Ordering::Acquire),
             "Ready 停写后租约 shutdown 应已置位"
         );
+        let retained = store_weak
+            .upgrade()
+            .expect("停写阻塞任务结束时不应顺带丢掉最后一个库引用");
         assert!(
             matches!(
-                api.store.with_execution_start(|| ()),
+                retained.with_execution_start(|| ()),
                 Err(StoreError::WriteDisabled)
             ),
             "Ready 停写后底层会话库的写闸应已置位"
         );
-        assert!(
-            matches!(*manager.state.lock().unwrap(), StoreState::Stopped),
-            "停写后状态应进入 Stopped"
+        drop(retained);
+        assert_eq!(
+            store_weak.strong_count(),
+            1,
+            "Stopped 状态应保留库句柄直至 StoreManager 最终释放"
         );
         let err = manager
             .acquire(false)
@@ -538,6 +555,12 @@ mod tests {
         assert!(
             matches!(err, ApiError::Store(ref e) if matches!(e.as_ref(), StoreError::WriteDisabled)),
             "Stopped 状态下 acquire 应返回 WriteDisabled"
+        );
+        drop(manager);
+        assert_eq!(
+            store_weak.strong_count(),
+            0,
+            "最终释放 StoreManager 后会话库句柄应一并释放"
         );
     }
 
@@ -568,8 +591,11 @@ mod tests {
             "Quiescing 停写应置位旧库的写闸"
         );
         assert!(
-            matches!(*manager.state.lock().unwrap(), StoreState::Stopped),
-            "停写后状态应为 Stopped"
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: Some(_) }
+            ),
+            "停写后状态应为保留旧库句柄的 Stopped"
         );
 
         let mut updates = manager.subscribe();
@@ -580,7 +606,10 @@ mod tests {
             .unwrap();
 
         assert!(
-            matches!(*manager.state.lock().unwrap(), StoreState::Stopped),
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: Some(_) }
+            ),
             "放开租约后状态仍应保持 Stopped，不能重开"
         );
         assert_eq!(manager.ready_generation(), None);
@@ -628,7 +657,10 @@ mod tests {
 
         manager.disable_writes().await;
         assert!(
-            matches!(*manager.state.lock().unwrap(), StoreState::Stopped),
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: None }
+            ),
             "首次打开进行中停写应将状态置为 Stopped"
         );
 
@@ -643,7 +675,10 @@ mod tests {
             "首次打开遇到 Stopped 应返回 WriteDisabled"
         );
         assert!(
-            matches!(*manager.state.lock().unwrap(), StoreState::Stopped),
+            matches!(
+                *manager.state.lock().unwrap(),
+                StoreState::Stopped { _store: None }
+            ),
             "打开结束后状态仍应保持 Stopped"
         );
 

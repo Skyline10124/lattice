@@ -43,6 +43,8 @@ pub struct ServeExit {
     pub drain: DrainOutcome,
     pub failure: Option<LocalError>,
     pub instance: ipc::InstanceLock,
+    /// 第 6 步的期限：最终释放与撤下 socket 已在它之前结束或放弃等待，进程入口以剩余时间关闭 runtime。
+    pub shutdown_deadline: std::time::Instant,
 }
 
 /// 单次操作的未确认收尾计数标记；仅在持有 `admission` 锁时经 `Admission::count_unconfirmed` 读写。
@@ -68,6 +70,12 @@ impl StopPhase {
     fn is_stopping(&self) -> bool {
         !matches!(self, Self::Running)
     }
+}
+
+enum DrainDecision {
+    Running,
+    Waiting(tokio::time::Instant),
+    Decided(DrainOutcome),
 }
 
 struct Owner {
@@ -245,13 +253,31 @@ impl Backend {
         lock(&self.admission).stop.is_stopping()
     }
 
-    fn draining_deadline(&self) -> Option<tokio::time::Instant> {
-        match lock(&self.admission).stop {
-            StopPhase::Draining { deadline } => Some(deadline),
-            StopPhase::Running
-            | StopPhase::TimedOutDisablingWrites
-            | StopPhase::Finished { .. } => None,
+    fn decide_drain(&self, force: bool) -> DrainDecision {
+        let mut state = lock(&self.admission);
+        let StopPhase::Draining { deadline } = state.stop else {
+            return DrainDecision::Running;
+        };
+        if state.owners.is_empty() && state.cleanups.is_empty() {
+            let status = self.status_locked(&state);
+            state.stop = StopPhase::Finished { status };
+            self.changed.send_modify(|v| *v += 1);
+            return DrainDecision::Decided(DrainOutcome::Completed);
         }
+        if force || tokio::time::Instant::now() >= deadline {
+            state.stop = StopPhase::TimedOutDisablingWrites;
+            let active_ops: Vec<Arc<OperationRecord>> = state
+                .owners
+                .iter()
+                .map(|owner| owner.operation.clone())
+                .chain(state.cleanups.iter().cloned())
+                .collect();
+            for op in &active_ops {
+                state.count_unconfirmed(op);
+            }
+            return DrainDecision::Decided(DrainOutcome::TimedOut);
+        }
+        DrainDecision::Waiting(deadline)
     }
 
     fn stopped_status(&self) -> Option<DaemonStatus> {
@@ -330,6 +356,7 @@ impl Backend {
         let state = lock(&self.admission);
         self.status_locked(&state)
     }
+    #[cfg(test)]
     fn has_active_work(&self) -> bool {
         let state = lock(&self.admission);
         !state.owners.is_empty() || !state.cleanups.is_empty()
@@ -1573,19 +1600,51 @@ pub async fn serve_for_test(
     .await
 }
 
-async fn cleanup_socket_into_exit(
+/// 第 6 步：在阻塞线程上最终释放后台（排空完成时其中有会话库的最后一个引用，释放即关库落盘），
+/// 同时撤下 socket，两者共用 5 秒期限。到期只停止等待，未结束的阻塞任务交给关闭 runtime；
+/// 撤下 socket 未完成记为运行错误。
+async fn finish_serve(
     endpoint: ipc::SocketEndpoint,
     drain: DrainOutcome,
     mut failure: Option<LocalError>,
     instance: ipc::InstanceLock,
+    backend: Option<Arc<Backend>>,
 ) -> ServeExit {
-    if let Err(error) = blocking(move || endpoint.cleanup()).await {
-        failure.get_or_insert(error);
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let release = tokio::task::spawn_blocking(move || {
+        if let Some(backend) = backend {
+            #[cfg(test)]
+            tests::pause_blocking(&backend.gates.final_release);
+            drop(backend);
+        }
+    });
+    let cleanup = tokio::task::spawn_blocking(move || endpoint.cleanup());
+    let (released, cleaned) = tokio::join!(
+        tokio::time::timeout_at(deadline, release),
+        tokio::time::timeout_at(deadline, cleanup),
+    );
+    match cleaned {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            failure.get_or_insert(error);
+        }
+        Ok(Err(_)) => {
+            failure.get_or_insert_with(internal);
+        }
+        Err(_) => {
+            failure.get_or_insert_with(|| {
+                LocalError::new(LocalErrorKind::Internal, "撤下 socket 超过停机期限")
+            });
+        }
+    }
+    if released.is_err() {
+        tracing::warn!("最终释放后台资源超过停机期限，会话库随进程退出关闭");
     }
     ServeExit {
         drain,
         failure,
         instance,
+        shutdown_deadline: deadline.into_std(),
     }
 }
 
@@ -1602,11 +1661,12 @@ async fn serve_with_backend(
     let listener = match UnixListener::from_std(listener) {
         Ok(listener) => listener,
         Err(error) => {
-            return Ok(cleanup_socket_into_exit(
+            return Ok(finish_serve(
                 endpoint,
                 DrainOutcome::Completed,
                 Some(error.into()),
                 instance,
+                None,
             )
             .await);
         }
@@ -1615,11 +1675,12 @@ async fn serve_with_backend(
         Ok(backend) => backend,
         Err(error) => {
             drop(listener);
-            return Ok(cleanup_socket_into_exit(
+            return Ok(finish_serve(
                 endpoint,
                 DrainOutcome::Completed,
                 Some(error),
                 instance,
+                None,
             )
             .await);
         }
@@ -1657,16 +1718,11 @@ async fn serve_with_backend(
         }
 
         changed.borrow_and_update();
-        if let Some(deadline) = backend.draining_deadline() {
-            if !backend.has_active_work() {
-                break DrainOutcome::Completed;
-            }
-            if force_timeout || tokio::time::Instant::now() >= deadline {
-                break DrainOutcome::TimedOut;
-            }
-        }
-
-        let drain_sleep = backend.draining_deadline().map(tokio::time::sleep_until);
+        let drain_sleep = match backend.decide_drain(force_timeout) {
+            DrainDecision::Decided(outcome) => break outcome,
+            DrainDecision::Waiting(deadline) => Some(tokio::time::sleep_until(deadline)),
+            DrainDecision::Running => None,
+        };
         tokio::pin!(drain_sleep);
 
         tokio::select! {
@@ -1699,63 +1755,70 @@ async fn serve_with_backend(
         }
     };
 
-    match drain {
-        DrainOutcome::Completed => {
-            let mut state = lock(&backend.admission);
-            let status = backend.status_locked(&state);
-            state.stop = StopPhase::Finished { status };
-            backend.changed.send_modify(|v| *v += 1);
-        }
-        DrainOutcome::TimedOut => {
-            {
-                let mut state = lock(&backend.admission);
-                state.stop = StopPhase::TimedOutDisablingWrites;
-                let active_ops: Vec<Arc<OperationRecord>> = state
-                    .owners
-                    .iter()
-                    .map(|owner| owner.operation.clone())
-                    .chain(state.cleanups.iter().cloned())
-                    .collect();
-                for op in &active_ops {
-                    state.count_unconfirmed(op);
-                }
-            }
-            backend.stores.disable_writes().await;
-            {
-                let mut state = lock(&backend.admission);
-                let status = backend.status_locked(&state);
+    // 排空超时停写与元数据、认证尾段期间继续接受连接，服务 status 与重复 IPC stop。
+    let tail_failure = {
+        let tail_backend = backend.clone();
+        let post_drain = async move {
+            if drain == DrainOutcome::TimedOut {
+                tail_backend.stores.disable_writes().await;
+                let mut state = lock(&tail_backend.admission);
+                let status = tail_backend.status_locked(&state);
                 state.stop = StopPhase::Finished { status };
-                backend.changed.send_modify(|v| *v += 1);
+                tail_backend.changed.send_modify(|v| *v += 1);
+            }
+
+            // 尾段 1：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
+            // 三项各自以同一期限包裹：到期只停止等待尚未结束的一项，已经返回的错误照常记录。
+            let tail_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let auth = tail_backend.chatgpt_auth().ok();
+            let metadata = tail_backend.metadata.clone();
+            #[cfg(test)]
+            let metadata_drain_backend = tail_backend.clone();
+            drop(tail_backend);
+            let (meta_join, _, auth_res) = tokio::join!(
+                tokio::time::timeout_at(tail_deadline, metadata_task),
+                tokio::time::timeout_at(tail_deadline, async move {
+                    metadata.drain().await;
+                    #[cfg(test)]
+                    tests::pause(&metadata_drain_backend.gates.metadata_drain).await;
+                }),
+                tokio::time::timeout_at(tail_deadline, async move {
+                    match auth {
+                        Some(auth) => auth.shutdown().await,
+                        None => Ok(()),
+                    }
+                }),
+            );
+            let mut tail_failure = None;
+            if let Ok(Err(_)) = meta_join {
+                tail_failure.get_or_insert_with(internal);
+            }
+            if let Ok(Err(error)) = auth_res {
+                tail_failure.get_or_insert_with(|| super::auth::error(error));
+            }
+            tail_failure
+        };
+        tokio::pin!(post_drain);
+
+        loop {
+            tokio::select! {
+                tail_failure = &mut post_drain => break tail_failure,
+                accepted = listener.accept(), if !accept_failed => match accepted {
+                    Ok((stream, _)) if connections.len() < 64 => {
+                        connections.spawn(connection(backend.clone(), stream));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        failure.get_or_insert_with(|| error.into());
+                        accept_failed = true;
+                    }
+                },
+                _ = connections.join_next(), if !connections.is_empty() => {}
             }
         }
-    }
-
-    // 尾段 1：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
-    // 三项各自以同一期限包裹：到期只停止等待尚未结束的一项，已经返回的错误照常记录。
-    let tail_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-    let auth = backend.chatgpt_auth().ok();
-    let metadata = backend.metadata.clone();
-    #[cfg(test)]
-    let metadata_drain_backend = backend.clone();
-    let (meta_join, _, auth_res) = tokio::join!(
-        tokio::time::timeout_at(tail_deadline, metadata_task),
-        tokio::time::timeout_at(tail_deadline, async move {
-            metadata.drain().await;
-            #[cfg(test)]
-            tests::pause(&metadata_drain_backend.gates.metadata_drain).await;
-        }),
-        tokio::time::timeout_at(tail_deadline, async move {
-            match auth {
-                Some(auth) => auth.shutdown().await,
-                None => Ok(()),
-            }
-        }),
-    );
-    if let Ok(Err(_)) = meta_join {
-        failure.get_or_insert_with(internal);
-    }
-    if let Ok(Err(error)) = auth_res {
-        failure.get_or_insert_with(|| super::auth::error(error));
+    };
+    if let Some(error) = tail_failure {
+        failure.get_or_insert(error);
     }
 
     // 尾段 2：关闭推送与监听套接字，等待连接任务至多 5 秒；到期 abort 后不再等待。
@@ -1772,9 +1835,8 @@ async fn serve_with_backend(
         connections.abort_all();
     }
     drop(connections);
-    drop(backend);
 
-    Ok(cleanup_socket_into_exit(endpoint, drain, failure, instance).await)
+    Ok(finish_serve(endpoint, drain, failure, instance, Some(backend)).await)
 }
 
 /// 告警和单模型配置诊断跨过后台边界前都要遮掉已知凭据。
