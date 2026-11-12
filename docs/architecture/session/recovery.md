@@ -52,7 +52,7 @@ status: active
 视图按会话推送这个会话现在的样子，没有“所选 Turn”。它依次给出：
 
 1. **会话头**：完整字段清单与含义见[实现模块与公开操作](operations.md#实现模块与公开操作)；`configure` 更新会话设置后，观察者收到新的会话头。
-2. **最近几轮**：当前路径上最近 10 轮（[`WATCH_TURNS`](../../../crates/lattice-api/src/local/types.rs)）的对话条目，按路径顺序排列；更早的用历史查询取。
+2. **最近几轮**：当前路径上最近 10 轮（[`WATCH_TURNS`](../../../crates/lattice-ipc/src/types.rs)）的对话条目，按路径顺序排列；更早的用历史查询取。
 3. **之后的变化**：变化的条目整条重推。当前位置沿路径前进时，只推新条目与会话头；当前位置移到别处（`rewind`）时，会话头标明路径已替换，随后给出新路径上最近 10 轮，前端丢弃此前的条目。
 4. **生成中的文字**：当前尝试正在生成的正文与 reasoning，见下文。
 
@@ -76,7 +76,7 @@ status: active
 
 **后台重启。** 段列表与观察者的推送状态随进程消失，未关闭的 Turn 停在已写入的进度。客户端重连后重新开始 `watch`：会话头说明没有 Owner，条目说明它停在哪个阶段和结局。丢失的只有当时正在生成的半截文字，它本就不保存。
 
-**读取更早的对话。** 历史查询 `history { session_id, before, turns }` 取节点 `before` 之前的若干轮：后台沿 `before` 的父链往回收集节点，收到第 `turns` 条 UserMessage 为止。页的边界只落在 UserMessage 之前，每页是完整的 Turn，不切节点。“完整”指所选父链上这一轮的内容：退回到一轮中途的 Step 再追加时，新分支上那一轮只有退回点之前的部分，分页保持它完整而不切开。没有游标：路径上已关闭的节点保持不变，一个节点之前的路径就是它的父链，当前位置改变后同一请求仍然有效。前端往上翻到已装入的最早一轮时，以它的 UserMessage 为 `before` 继续取，默认每次取 10 轮（[`HISTORY_TURNS`](../../../crates/lattice-api/src/local/types.rs)），每次最多 100 轮（[`MAX_HISTORY_TURNS`](../../../crates/lattice-api/src/local/types.rs)）。
+**读取更早的对话。** 历史查询 `history { session_id, before, turns }` 取节点 `before` 之前的若干轮：后台沿 `before` 的父链往回收集节点，收到第 `turns` 条 UserMessage 为止。页的边界只落在 UserMessage 之前，每页是完整的 Turn，不切节点。“完整”指所选父链上这一轮的内容：退回到一轮中途的 Step 再追加时，新分支上那一轮只有退回点之前的部分，分页保持它完整而不切开。没有游标：路径上已关闭的节点保持不变，一个节点之前的路径就是它的父链，当前位置改变后同一请求仍然有效。前端往上翻到已装入的最早一轮时，以它的 UserMessage 为 `before` 继续取，默认每次取 10 轮（[`HISTORY_TURNS`](../../../crates/lattice-ipc/src/types.rs)），每次最多 100 轮（[`MAX_HISTORY_TURNS`](../../../crates/lattice-ipc/src/types.rs)）。
 
 CLI 的人类可读输出在一轮结束时打印一次结局摘要；`--json` 的记录见[实现模块与公开操作](operations.md#实现模块与公开操作)。CLI 按最终结局与执行诊断选择退出码；最终仍读不到内容或核验发现数据损坏时退出 1，不因已知 Completed 而忽略失败。工具按 InvocationId 配对显示，规则见 [TUI 对话记录与工具显示](../tui/transcript.md#对话记录与工具显示)。
 

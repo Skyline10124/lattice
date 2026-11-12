@@ -74,7 +74,7 @@ impl LocalClient {
         match self
             .call(Request::AuthSet {
                 provider: provider.into(),
-                key: super::auth::AuthKey(key),
+                key: super::auth::AuthKey::new(key),
             })
             .await?
         {

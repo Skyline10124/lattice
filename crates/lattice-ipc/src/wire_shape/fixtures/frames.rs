@@ -1,12 +1,11 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lattice-api` Local IPC 根帧、登录帧、结构体片段以及承载 8 个一致性场景的响应帧。
+//! `lattice-ipc` Local IPC 根帧、登录帧、结构体片段以及承载 8 个一致性场景的响应帧。
 
 use std::path::PathBuf;
 
 use lattice_conversation::{Effort, SessionId};
-use lattice_llm::{ModelCandidateQuery, auth::RevocationStatus};
 use lattice_session::store::{NodeId, Page};
 
 use super::{
@@ -23,15 +22,12 @@ use super::{
     turn_id_1, turn_id_2, utf8_store_path,
 };
 use crate::{
-    local::{
-        Acceptance, AuthCatalogOutcome, AuthLoggedOut, AuthLoginOutcome, AuthRemoval,
-        ConfigureReply, ConfigureRequest, ConfigureSession, ConflictReason, DaemonStatus,
-        EffortAdjustment, LocalError, LocalErrorKind, LocalHistory, RecoveryCause, RecoveryNeed,
-        Request, Response, SessionHead, SessionListRow, StoreDiagnostic, TextSegment, TextUpdate,
-        TurnLookup, TurnRequest, TurnView, ViewUpdate,
-        auth::login::{LoginAction, LoginResponse},
-    },
-    turn::TurnRef,
+    Acceptance, AuthCatalogOutcome, AuthLoggedOut, AuthLoginOutcome, AuthRemoval, ConfigureReply,
+    ConfigureRequest, ConfigureSession, ConflictReason, DaemonStatus, EffortAdjustment, LocalError,
+    LocalErrorKind, LocalHistory, LoginAction, LoginResponse, ModelCandidateQuery, RecoveryCause,
+    RecoveryNeed, Request, Response, RevocationStatus, SessionHead, SessionListRow,
+    StoreDiagnostic, TextSegment, TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView,
+    ViewUpdate,
 };
 
 fn daemon_status_sample() -> DaemonStatus {

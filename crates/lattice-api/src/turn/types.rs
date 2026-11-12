@@ -126,23 +126,12 @@ pub enum TurnEvent {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct TurnRef {
-    pub session_id: lattice_conversation::SessionId,
-    pub turn_id: lattice_conversation::TurnId,
-}
+pub use lattice_ipc::{TextSegment, TurnRef};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AttemptSegments {
     pub key: lattice_conversation::ModelAttemptKey,
     pub segments: Vec<TextSegment>,
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum TextSegment {
-    Text { text: String },
-    Reasoning { text: String },
 }
 /// 接受回执与独立完成回执都不从观察窗口推导。
 #[derive(Clone, Debug, PartialEq)]

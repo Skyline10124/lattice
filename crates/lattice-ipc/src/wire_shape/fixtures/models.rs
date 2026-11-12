@@ -1,18 +1,17 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lattice-llm` 线上类型片段（模型查询、候选列表、凭据状态与吊销状态）。
+//! `lattice-ipc` 模型与凭据线上展示类型片段（模型查询、候选列表、凭据状态与吊销状态）。
 
 use std::path::PathBuf;
 
 use lattice_conversation::{Effort, ModelId, ProviderId};
-use lattice_llm::{
-    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery, ModelCandidates,
-    ModelPrice, ModelWarning,
-    auth::{AuthStatus, ProviderAuthStatus, RevocationStatus},
-};
 
 use super::{CaseBook, model_gpt5, model_ref_gpt5, provider_openai};
+use crate::{
+    AuthStatus, Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery,
+    ModelCandidates, ModelPrice, ModelWarning, ProviderAuthStatus, RevocationStatus,
+};
 
 pub(super) fn model_price_full() -> ModelPrice {
     ModelPrice {

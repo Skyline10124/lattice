@@ -110,10 +110,11 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
                     if let Some(expiry) = row.expires_at {
                         print!(" expires_at={expiry}");
                     }
-                    if let Some(diagnostic) = row
-                        .availability
-                        .diagnostic(&row.provider, &status.providers_path)
-                    {
+                    if let Some(diagnostic) = lattice_api::availability_diagnostic(
+                        &row.availability,
+                        &row.provider,
+                        &status.providers_path,
+                    ) {
                         print!(": {diagnostic}");
                     }
                     println!();

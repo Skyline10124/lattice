@@ -3,7 +3,6 @@
 
 use futures::future::BoxFuture;
 use lattice_llm::auth::{ChatgptLogin, LoginError};
-use serde::{Deserialize, Serialize};
 use tokio::{
     net::{UnixStream, unix::OwnedWriteHalf},
     sync::mpsc,
@@ -11,51 +10,15 @@ use tokio::{
 };
 
 use super::AuthKey;
-use crate::local::{
-    LocalError, LocalErrorKind, ProviderAuthStatus, Result, SensitiveLoginUrl, ipc,
-};
+use crate::local::{LocalError, LocalErrorKind, Result, SensitiveLoginUrl, ipc};
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AuthLoginOutcome {
-    SignedIn {
-        status: ProviderAuthStatus,
-        catalog: AuthCatalogOutcome,
-    },
-    Cancelled {},
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
-pub enum AuthCatalogOutcome {
-    Refreshed { model_count: usize },
-    Failed { warning: String },
-}
+pub use lattice_ipc::{AuthCatalogOutcome, AuthLoginOutcome};
+pub(in crate::local) use lattice_ipc::{LoginAction, LoginResponse};
 
 /// 授权 URL 只在登录界面借用，事件本身不提供 Debug 或序列化。
 pub enum AuthLoginEvent {
     Authorization(SensitiveLoginUrl),
     Finished(AuthLoginOutcome),
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(
-    tag = "response",
-    content = "value",
-    rename_all = "snake_case",
-    deny_unknown_fields
-)]
-pub(in crate::local) enum LoginResponse {
-    AuthLoginAuthorization { authorization_url: AuthKey },
-    AuthLoginResult(AuthLoginOutcome),
-    Error(LocalError),
-}
-
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
-pub(in crate::local) enum LoginAction {
-    Callback { url: AuthKey },
-    Cancel {},
 }
 
 /// 单次登录独占一个连接；持续读任务保存分片进度，Drop 关闭前端连接。
@@ -87,7 +50,7 @@ impl LocalAuthLogin {
                         authorized = true;
                         (
                             Ok(AuthLoginEvent::Authorization(SensitiveLoginUrl::new(
-                                std::mem::take(&mut authorization_url.0),
+                                authorization_url.take(),
                             ))),
                             false,
                         )
@@ -120,7 +83,7 @@ impl LocalAuthLogin {
         ipc::write(
             &mut self.write,
             &LoginAction::Callback {
-                url: AuthKey(url.expose().into()),
+                url: AuthKey::new(url.expose().into()),
             },
         )
         .await
@@ -148,7 +111,9 @@ pub(in crate::local) trait LoginAttempt: Send + Sync {
         url: SensitiveLoginUrl,
     ) -> BoxFuture<'_, std::result::Result<(), LoginError>>;
     fn cancel(&self);
-    fn wait(&self) -> BoxFuture<'_, std::result::Result<ProviderAuthStatus, LoginError>>;
+    fn wait(
+        &self,
+    ) -> BoxFuture<'_, std::result::Result<lattice_llm::auth::ProviderAuthStatus, LoginError>>;
 }
 
 impl LoginAttempt for ChatgptLogin {
@@ -164,7 +129,9 @@ impl LoginAttempt for ChatgptLogin {
     fn cancel(&self) {
         self.cancel();
     }
-    fn wait(&self) -> BoxFuture<'_, std::result::Result<ProviderAuthStatus, LoginError>> {
+    fn wait(
+        &self,
+    ) -> BoxFuture<'_, std::result::Result<lattice_llm::auth::ProviderAuthStatus, LoginError>> {
         Box::pin(self.wait())
     }
 }
@@ -180,12 +147,16 @@ impl Drop for Input {
 }
 
 fn outcome(
-    result: std::result::Result<(ProviderAuthStatus, AuthCatalogOutcome), LoginError>,
+    result: std::result::Result<
+        (lattice_llm::auth::ProviderAuthStatus, AuthCatalogOutcome),
+        LoginError,
+    >,
 ) -> LoginResponse {
     match result {
-        Ok((status, catalog)) => {
-            LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn { status, catalog })
-        }
+        Ok((status, catalog)) => LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn {
+            status: crate::local::presentation::provider_auth_status(status),
+            catalog,
+        }),
         Err(LoginError::Cancelled) => {
             LoginResponse::AuthLoginResult(AuthLoginOutcome::Cancelled {})
         }
@@ -207,7 +178,7 @@ fn outcome(
 }
 
 async fn finish(
-    result: std::result::Result<ProviderAuthStatus, LoginError>,
+    result: std::result::Result<lattice_llm::auth::ProviderAuthStatus, LoginError>,
     refresh: &impl Fn() -> BoxFuture<'static, AuthCatalogOutcome>,
 ) -> LoginResponse {
     let result = match result {
@@ -256,7 +227,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
         },
     };
     let authorization = LoginResponse::AuthLoginAuthorization {
-        authorization_url: AuthKey(attempt.authorization_url().expose().into()),
+        authorization_url: AuthKey::new(attempt.authorization_url().expose().into()),
     };
     let written = tokio::select! {
         result = writer.write(&mut write, &authorization) => result,
@@ -282,7 +253,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
                 Some(Ok(Some(LoginAction::Callback { mut url }))) if !callback_sent => {
                     callback_sent = true;
                     // 浏览器可能已先交付回调；仍以该尝试的最终结果为准。
-                    let _ = attempt.submit_callback(SensitiveLoginUrl::new(std::mem::take(&mut url.0))).await;
+                    let _ = attempt.submit_callback(SensitiveLoginUrl::new(url.take())).await;
                 }
                 Some(Ok(Some(LoginAction::Cancel {}))) => {
                     attempt.cancel();

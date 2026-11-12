@@ -6,25 +6,7 @@ use lattice_conversation::SessionId;
 use lattice_session::store::{SessionRead, SessionRecord, SessionStore, SessionUsage, StoreError};
 use std::sync::Arc;
 
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum RequestConflict {
-    TurnIdUsed,
-    SessionExists,
-    BindingMismatch,
-    SettingsChanged,
-}
-
-impl std::fmt::Display for RequestConflict {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::TurnIdUsed => "TurnId is already in use",
-            Self::SessionExists => "session already exists",
-            Self::BindingMismatch => "session is bound to another workspace",
-            Self::SettingsChanged => "session settings changed",
-        })
-    }
-}
+pub use lattice_ipc::RequestConflict;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ApiError {

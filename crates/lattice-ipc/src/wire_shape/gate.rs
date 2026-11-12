@@ -11,7 +11,7 @@ use std::{
 
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
-use super::super::ipc::PROTOCOL_VERSION;
+use crate::ipc::PROTOCOL_VERSION;
 
 const UPDATE_ENV: &str = "LATTICE_UPDATE_WIRE_SHAPE";
 
@@ -165,7 +165,6 @@ fn describe_mismatch(expected_bytes: &[u8], actual_bytes: &[u8]) -> String {
 fn snapshot_path() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src")
-        .join("local")
         .join("wire_shape.json")
 }
 

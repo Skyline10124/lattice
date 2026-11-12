@@ -3,7 +3,7 @@
 
 //! 统一的 provider 与模型可用性判定及修复说明。
 
-use std::{fmt, path::Path};
+use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
@@ -21,22 +21,6 @@ pub enum ConfigurationRequirement {
     ChatgptLogin,
 }
 
-impl ConfigurationRequirement {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Declaration => "declaration",
-            Self::ApiKey => "api_key",
-            Self::ChatgptLogin => "chatgpt_login",
-        }
-    }
-}
-
-impl fmt::Display for ConfigurationRequirement {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum Availability {
@@ -52,14 +36,6 @@ pub enum Availability {
 impl Availability {
     pub fn is_ready(&self) -> bool {
         matches!(self, Self::Ready)
-    }
-
-    pub fn status_str(&self) -> &'static str {
-        match self {
-            Self::Ready => "ready",
-            Self::Unconfigured { .. } => "unconfigured",
-            Self::Invalid { .. } => "invalid",
-        }
     }
 
     /// 由 provider id、可用性结果与实际的 `providers.toml` 路径生成面向用户的说明。
