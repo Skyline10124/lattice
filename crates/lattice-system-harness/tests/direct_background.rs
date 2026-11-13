@@ -3294,8 +3294,8 @@ fn sigint_right_after_ready_exits_zero_and_releases_resources() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        // 就绪后立即发信号，中间不插入提供方准备或其他 IPC 请求。
         world.start_daemon().expect("显式启动后台");
-        let (_server, _gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("idle"));
         world.interrupt_daemon().expect("向自有后台发送 `SIGINT`");
         let exited = world.wait_daemon(Some(wait(&budget))).unwrap();
         evidence.record_command("daemon serve sigint exit", &exited);

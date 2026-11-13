@@ -286,16 +286,17 @@ fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
     let target_ca = world.root().join("target-ca.pem");
     std::fs::write(&startup_ca, foreign.ca_pem()).unwrap();
     std::fs::write(&target_ca, TlsIdentity::shared().unwrap().ca_pem()).unwrap();
-    // 后台以初始证书根启动；前端与工作区 `.env` 指向目标证书根，不能改变已运行后台的信任链。
+    // 启动前放置冲突的 `.env`，核验后台载入证书根时也不会读取工作区配置。
+    world
+        .write_project_file(".env", &format!("SSL_CERT_FILE={}\n", target_ca.display()))
+        .unwrap();
     world
         .start_daemon_with(
             &DaemonOptions::new().env("SSL_CERT_FILE", startup_ca.display().to_string()),
         )
         .expect("以初始证书环境显式启动后台");
+    // 前端随后改用目标证书根，已运行后台仍应保持启动时的信任链。
     world.set_env("SSL_CERT_FILE", target_ca.display().to_string());
-    world
-        .write_project_file(".env", &format!("SSL_CERT_FILE={}\n", target_ca.display()))
-        .unwrap();
     world
         .write_agent_profile("boundary", "local/boundary")
         .unwrap();
