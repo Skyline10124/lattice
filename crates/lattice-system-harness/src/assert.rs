@@ -13,33 +13,29 @@ use crate::artifacts::{
 use crate::driver::CommandOutcome;
 use crate::world::ScenarioWorld;
 
-/// Base directory for persisted failure artifacts.
+/// 持久化失败产物的根目录。
 ///
-/// Override with the `LATTICE_HARNESS_FAILURE_DIR` env var (absolute or
-/// relative to the test process cwd). The default is anchored to the harness
-/// crate's manifest dir so it is absolute and independent of whatever cwd the
-/// test process happens to run with: `<harness crate>/target/harness-failures`.
-/// `target/` is gitignored, so artifacts persist for post-mortem inspection
-/// without polluting the tree. `cargo xtask ci` redirects this to the
-/// workspace-level `$(pwd)/target/harness-failures` so a full local run
-/// collects every scenario's bundle in one place.
+/// 可通过环境变量 `LATTICE_HARNESS_FAILURE_DIR` 覆盖（支持绝对路径或相对于测试进程当前目录的路径）。
+/// 默认锚定在本 crate 清单目录下的 `<harness crate>/target/harness-failures`，保证路径为绝对路径，
+/// 不受测试进程运行目录影响。`target/` 已被版本控制忽略，失败产物可供事后排查且不污染工作树；
+/// `cargo xtask ci` 会将其重定向到工作区级的 `$(pwd)/target/harness-failures`，集中收集整轮场景的失败产物。
 pub fn failure_dir(name: &str) -> Result<PathBuf, EvidenceError> {
     checked_failure_dir(name)
 }
 
 #[derive(Debug, Error)]
 pub enum AssertError {
-    #[error("expected clean exit success, got {actual}")]
+    #[error("预期干净退出码为 0，实际为 {actual}")]
     ExitNotSuccess { actual: String },
-    #[error("expected a clean non-zero exit, got {actual}")]
+    #[error("预期干净非零退出，实际为 {actual}")]
     ExitNotFailure { actual: String },
-    #[error("expected clean exit code {expected}, got {actual}")]
+    #[error("预期干净退出码为 {expected}，实际为 {actual}")]
     ExitCodeMismatch { expected: i32, actual: String },
-    #[error("stdout missing expected substring(s): {expected}")]
+    #[error("标准输出缺少预期子串: {expected}")]
     StdoutMissing { expected: String },
-    #[error("stderr missing expected substring: {expected}")]
+    #[error("标准错误缺少预期子串: {expected}")]
     StderrMissing { expected: String },
-    #[error("output contained forbidden secret sentinel at {location}")]
+    #[error("输出在 {location} 处包含禁止泄露的秘密哨兵")]
     SecretLeak { location: String },
 }
 
@@ -63,11 +59,9 @@ pub fn assert_exit_failure(output: &CommandOutcome) -> Result<(), AssertError> {
     }
 }
 
-/// Assert the process exited with a specific non-zero code. Use this instead
-/// of `assert_exit_failure` when the documented public contract pins a
-/// particular exit code (e.g. `cmd_send_api` returns `ExitCode::from(2)` for
-/// session/profile lookup errors); `assert_exit_failure` only asserts nonzero
-/// and would silently pass a regression from 2 to 1.
+/// 断言进程以指定的精确退出码干净退出。
+/// 当公开合同明确固定了某个非零退出码（例如会话或智能体配置查找错误返回退出码 `2`）时，
+/// 应使用本函数而非 `assert_exit_failure`；后者只断言非零，会放过退出码从 `2` 退化为 `1` 的问题。
 pub fn assert_exit_code(output: &CommandOutcome, expected: i32) -> Result<(), AssertError> {
     if output.is_clean_exit(expected) {
         Ok(())
@@ -90,11 +84,9 @@ pub fn assert_stdout_contains(output: &CommandOutcome, needle: &str) -> Result<(
     }
 }
 
-/// Assert stdout contains every needle, returning the comma-joined list of
-/// missing needles on failure. This is the semantic-assertion helper meant to
-/// be combined with `assert_exit_success` and fed to
-/// `finalize_with_failure_artifacts` so a semantic failure also captures
-/// stdout/stderr for post-mortem.
+/// 断言标准输出同时包含给定的全部子串；失败时返回以逗号拼接的缺失子串列表。
+/// 该语义断言辅助函数与 `assert_exit_success` 配合传入 `finalize_with_failure_artifacts`，
+/// 使语义断言失败时同样落盘标准输出与标准错误供事后排查。
 pub fn assert_stdout_contains_all(
     output: &CommandOutcome,
     needles: &[&str],
@@ -131,18 +123,17 @@ pub fn assert_no_secret(output: &CommandOutcome, secret: &str) -> Result<(), Ass
             || String::from_utf8_lossy(&output.stderr).contains(secret))
     {
         Err(AssertError::SecretLeak {
-            location: "command stdout/stderr".into(),
+            location: "命令标准输出/标准错误".into(),
         })
     } else {
         Ok(())
     }
 }
 
-/// Finalize one fast-path assertion without letting artifact failures replace it.
+/// 收尾单条快速场景断言，不让失败产物落盘错误覆盖原始主断言。
 ///
-/// The raw stdout/stderr are scanned for every secret whatever the assertion
-/// result, so a leak is reported next to the primary assertion instead of
-/// depending on it passing first.
+/// 无论业务断言是否通过，都会对原始标准输出与标准错误扫描全部已知秘密，
+/// 使秘密泄露与主断言并列报告，而不依赖主断言先行通过。
 pub fn finalize_with_failure_artifacts(
     world: &ScenarioWorld,
     scenario_name: &str,
@@ -178,7 +169,7 @@ fn finalize_with_failure_artifacts_at_target(
     // 产物里的副本已脱敏，扫描产物发现不了泄漏，所以在这里扫描原始输出。
     for (stream, bytes) in [("stdout", &output.stdout), ("stderr", &output.stderr)] {
         if contains_secret(bytes, secrets) {
-            report.add_secret_location(format!("command {stream}"), secrets);
+            report.add_secret_location(format!("命令 {stream}"), secrets);
             failed = true;
         }
     }
@@ -186,7 +177,7 @@ fn finalize_with_failure_artifacts_at_target(
     let failed = failed || cleanup.is_err();
     if let Err(errors) = cleanup {
         for error in errors {
-            report.add_evidence_error("daemon cleanup", error, secrets);
+            report.add_evidence_error("清理后台", error, secrets);
         }
     }
     let diagnostic = match (&target, failed) {
@@ -205,26 +196,26 @@ fn finalize_with_failure_artifacts_at_target(
     let dir = match target {
         Ok(dir) => dir,
         Err(error) => {
-            report.add_evidence_error("validate artifact target", error, secrets);
+            report.add_evidence_error("校验失败产物目录", error, secrets);
             return report.finish();
         }
     };
     let _claim = match ArtifactClaim::acquire(&dir) {
         Ok(claim) => claim,
         Err(error) => {
-            report.add_evidence_error("claim artifact target", error, secrets);
+            report.add_evidence_error("占用失败产物目录", error, secrets);
             return report.finish();
         }
     };
     if let Err(error) = clear_stale_bundle(&dir) {
-        report.add_evidence_error("clean stale artifact bundle", error, secrets);
+        report.add_evidence_error("清理旧失败产物", error, secrets);
         return report.finish();
     }
     if !failed {
         return report.finish();
     }
     if let Err(error) = std::fs::create_dir_all(&dir) {
-        report.add_evidence_error("create artifact root", error, secrets);
+        report.add_evidence_error("创建失败产物根目录", error, secrets);
         return report.finish();
     }
 
@@ -265,7 +256,7 @@ fn persist_fast_failure_bundle(
         command_summary,
         secrets,
     ) {
-        report.add_evidence_error("write world.txt", error, secrets);
+        report.add_evidence_error("写入 world.txt", error, secrets);
     }
     scan_bundle_into_report(&artifacts.dir, secrets, report);
 }
@@ -296,7 +287,7 @@ mod tests {
             operation,
             kind: std::io::ErrorKind::Other,
             raw_os_error: None,
-            message: "synthetic cleanup failure".into(),
+            message: "模拟清理故障".into(),
         }
     }
 
@@ -307,7 +298,10 @@ mod tests {
             "736b2d69737375653138352d736563726574",
             "c2staXNzdWUxODUtc2VjcmV0",
         ] {
-            assert!(!text.contains(form), "diagnostic leaked {form:?}: {text}");
+            assert!(
+                !text.contains(form),
+                "诊断信息泄露了秘密形式 {form:?}: {text}"
+            );
         }
     }
 
@@ -322,11 +316,11 @@ mod tests {
         assert_secret_forms_absent(&error);
         assert!(
             error.contains("stdout_bytes: 18"),
-            "missing byte count: {error}"
+            "缺少标准输出字节计数: {error}"
         );
         assert!(
             error.contains("stderr_bytes: 18"),
-            "missing byte count: {error}"
+            "缺少标准错误字节计数: {error}"
         );
     }
 
@@ -375,7 +369,7 @@ mod tests {
         for value in contaminated {
             assert!(
                 assert_exit_code(&value, 2).is_err(),
-                "accepted contaminated outcome: {value:?}"
+                "不应接受受污染的命令结果: {value:?}"
             );
         }
     }
@@ -390,13 +384,13 @@ mod tests {
         assert!(matches!(
             error,
             AssertError::SecretLeak { ref location }
-                if location == "command stdout/stderr"
+                if location == "命令标准输出/标准错误"
         ));
         let display = error.to_string();
         let debug = format!("{error:?}");
         assert!(!display.contains(secret));
         assert!(!debug.contains(secret));
-        assert!(display.contains("command stdout/stderr"));
+        assert!(display.contains("命令标准输出/标准错误"));
     }
 
     #[test]
@@ -437,9 +431,9 @@ mod tests {
         assert!(text.contains("primary [REDACTED]"));
         assert!(text.contains("leak.txt"));
         assert!(text.contains("invalid-link"));
-        assert!(text.contains("command diagnostics:"));
-        let stdout_error = text.find("write stdout.txt").unwrap();
-        let stderr_error = text.find("write stderr.txt").unwrap();
+        assert!(text.contains("命令诊断:"));
+        let stdout_error = text.find("写入 stdout.txt").unwrap();
+        let stderr_error = text.find("写入 stderr.txt").unwrap();
         assert!(stdout_error < stderr_error);
         assert_eq!(
             std::fs::read_to_string(artifacts.dir.join("leak.txt")).unwrap(),
@@ -478,7 +472,7 @@ mod tests {
             .unwrap_err();
 
             let text = report.to_string();
-            assert!(text.contains(&format!("- command {stream}")), "{text}");
+            assert!(text.contains(&format!("- 命令 {stream}")), "{text}");
             assert_eq!(
                 text.contains("business failed"),
                 primary.is_some(),
@@ -510,38 +504,35 @@ mod tests {
         .unwrap_err()
         .to_string();
 
-        assert!(
-            !report.contains(secret),
-            "diagnostic must stay redacted: {report}"
-        );
+        assert!(!report.contains(secret), "诊断输出必须保持脱敏: {report}");
         assert!(
             report.contains("stdout head [REDACTED]"),
-            "diagnostic must show the redacted stdout head: {report}"
+            "诊断输出必须包含脱敏后的标准输出开头: {report}"
         );
         assert!(
             report.contains("error: profile rejected"),
-            "diagnostic must show stderr: {report}"
+            "诊断输出必须包含标准错误内容: {report}"
         );
-        // 2048 字节内是 "stdout head [REDACTED]\n"（23 字节）加 2025 个 x，余下 2975 个 x。
+        // 2048 字节内是 `"stdout head [REDACTED]\n"`（23 字节）加 2025 个 `x`，余下 2975 个 `x`。
         assert!(
-            report.contains("... [2975 more bytes truncated]"),
-            "long stdout must be cut to a bounded head: {report}"
+            report.contains("... [其余 2975 字节已截断]"),
+            "超长标准输出必须截断为有界开头: {report}"
         );
         assert!(
             !report.contains(&"x".repeat(2_026)),
-            "diagnostic must not exceed the 2048-byte head: {report}"
+            "诊断摘要不得超过 2048 字节上限: {report}"
         );
         assert!(
             report.contains(&format!(
-                "full redacted copy: {}",
+                "完整脱敏副本: {}",
                 dir.join("stdout.txt").display()
             )),
-            "diagnostic must point at the evidence copy: {report}"
+            "诊断输出必须指向证据目录中的完整副本: {report}"
         );
         let saved = std::fs::read_to_string(dir.join("stdout.txt")).unwrap();
         assert!(
             saved.starts_with("stdout head [REDACTED]\n"),
-            "evidence copy uses the same redaction"
+            "证据目录副本应使用相同的脱敏结果"
         );
     }
 

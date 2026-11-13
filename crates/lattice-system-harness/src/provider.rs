@@ -15,7 +15,7 @@ pub enum ProviderProtocol {
     GenerateContent,
 }
 
-/// 区分所测 provider 的内置 id 与自定义 id。
+/// 区分所测 provider 的内置标识与自定义标识。
 #[derive(Clone, Copy, Debug)]
 pub enum ProviderTarget<'a> {
     Builtin(&'a str),
@@ -39,7 +39,7 @@ impl<'a> ProviderFixture<'a> {
         }
     }
 
-    /// profile 与接线使用同一模型引用；profile 可以先于 fake server 创建。
+    /// 智能体配置与 provider 接线使用同一模型引用；智能体配置可以先于假模型服务创建。
     pub fn model_ref(self) -> Result<String, WorldError> {
         Ok(format!("{}/{}", self.id(), self.model))
     }
@@ -50,14 +50,14 @@ impl<'a> ProviderFixture<'a> {
         }
     }
 
-    /// 内置 provider 只覆盖地址；自定义 provider 显式声明协议与认证。
+    /// 内置 provider 只覆盖地址；自定义 provider 显式声明协议与认证方式。
     pub fn configure(self, world: &ScenarioWorld, base_url: &str) -> Result<(), WorldError> {
         let directory = world.home().join(".lattice");
         std::fs::create_dir_all(&directory)?;
         let path = directory.join("providers.toml");
         let mut config: toml::Table = match std::fs::read_to_string(&path) {
             Ok(source) => toml::from_str(&source)
-                .map_err(|_| WorldError::Provider("invalid fixture providers.toml"))?,
+                .map_err(|_| WorldError::Provider("夹具 providers.toml 格式无效"))?,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => toml::Table::new(),
             Err(error) => return Err(error.into()),
         };
@@ -65,7 +65,7 @@ impl<'a> ProviderFixture<'a> {
             .entry("providers")
             .or_insert_with(|| toml::Value::Table(toml::Table::new()))
             .as_table_mut()
-            .ok_or(WorldError::Provider("invalid fixture providers table"))?;
+            .ok_or(WorldError::Provider("夹具 providers 表结构无效"))?;
         let mut entry = providers
             .get(self.id())
             .and_then(toml::Value::as_table)
@@ -92,14 +92,14 @@ impl<'a> ProviderFixture<'a> {
         }
         providers.insert(self.id().into(), toml::Value::Table(entry));
         let source = toml::to_string(&config)
-            .map_err(|_| WorldError::Provider("cannot serialize fixture provider"))?;
+            .map_err(|_| WorldError::Provider("无法序列化夹具 provider 配置"))?;
         std::fs::write(path, source)?;
         Ok(())
     }
 }
 
 impl ScenarioWorld {
-    /// 把 fake server 与非空凭据接到所测协议，返回可写入 profile 的模型引用。
+    /// 把假模型服务与非空凭据接入所测协议，返回可写入智能体配置的模型引用。
     pub fn wire_provider(
         &self,
         provider: ProviderFixture<'_>,
@@ -111,19 +111,18 @@ impl ScenarioWorld {
         provider.model_ref()
     }
 
-    /// 设置非空 provider 凭据；`None` 移除已有凭据。
-    /// key 只通过标准输入录入，不进入参数或证据。
+    /// 设置非空 provider 凭据；传入 `None` 时移除已有凭据。
+    /// 密钥只通过标准输入录入，不进入命令行参数或失败产物。
     pub fn register_key(
         &self,
         provider: ProviderFixture<'_>,
         key: Option<&str>,
     ) -> Result<(), WorldError> {
         if key.is_some_and(str::is_empty) {
-            return Err(WorldError::Provider("provider key must not be empty"));
+            return Err(WorldError::Provider("provider 密钥不能为空"));
         }
-        let driver = LatticeDriver::from_env().map_err(|_| {
-            WorldError::Provider("LATTICE_BIN must point to the built lattice binary")
-        })?;
+        let driver = LatticeDriver::from_env()
+            .map_err(|_| WorldError::Provider("LATTICE_BIN 必须指向已构建的 lattice 二进制"))?;
         let command = LatticeCommand {
             args: vec![
                 "auth".into(),
@@ -138,9 +137,9 @@ impl ScenarioWorld {
         };
         let outcome = driver
             .run_with_stdin(self, &command, key.unwrap_or_default().as_bytes())
-            .map_err(|_| WorldError::Provider("credential command failed"))?;
+            .map_err(|_| WorldError::Provider("执行凭据命令失败"))?;
         if !outcome.is_clean_exit(0) {
-            return Err(WorldError::Provider("credential command was rejected"));
+            return Err(WorldError::Provider("凭据命令被拒绝"));
         }
         Ok(())
     }

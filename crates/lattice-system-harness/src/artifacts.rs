@@ -1,21 +1,21 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 场景的失败证据：终端上的失败报告与持久化的 bundle。
+//! 场景的失败证据：终端上的失败报告与持久化的失败产物目录。
 //!
-//! - 失败报告依次保留：排序去重的秘密泄露位置、原始断言、命令诊断、按发生顺序的证据错误。
-//!   命令诊断先于 bundle I/O 形成；场景失败时附每条命令 stdout 与 stderr 的开头（先脱敏再截断，
-//!   每个流最多 2,048 字节，注明截掉的字节数）与完整脱敏副本的路径。
-//! - bundle 根目录取 `LATTICE_HARNESS_FAILURE_DIR`，未设置时为本 crate 下的
-//!   `target/harness-failures/`。场景名称由 `validate_artifact_name` 核对：单个普通路径分量，
-//!   保留名 `.claims` 除外。
-//! - 写者在清理旧产物之前取得 `<base>/.claims/<scenario>.lock` 的非阻塞独占锁，持有到持久化与
-//!   扫描结束；同名的并发写者立即失败，锁文件保留。[`ScenarioEvidence`] 从构造起持有占用权，
-//!   嵌套记录器使用不同的场景名称。
-//! - 输出错误与持久副本先做字面脱敏。递归字节扫描先记录泄露位置再修改副本；遍历、读取、重写、
-//!   符号链接与特殊文件的错误分别保留，扫描继续检查其他可达条目。工作区快照把符号链接本身记为叶子。
+//! - 失败报告依次保留：排序去重的秘密泄露位置、主断言、命令诊断、按发生顺序的证据错误。
+//!   命令诊断先于产物磁盘读写生成；场景失败时附带每条命令 stdout 与 stderr 的开头
+//!   （先脱敏再截断，每个输出流最多 2,048 字节，并注明截断字节数）以及完整脱敏副本的路径。
+//! - 失败产物根目录取 `LATTICE_HARNESS_FAILURE_DIR`，未设置时为本 crate 下的
+//!   `target/harness-failures/`。场景名称由 `validate_artifact_name` 核对：必须为单个普通路径分量，
+//!   且不能为保留名 `.claims`。
+//! - 写者在清理旧产物之前取得 `<base>/.claims/<scenario>.lock` 的非阻塞独占锁，并一直持有到持久化与
+//!   秘密扫描结束；同名的并发写者立即失败，锁文件保留。[`ScenarioEvidence`] 从构造起持有占用权，
+//!   嵌套记录器须使用不同的场景名称。
+//! - 输出错误与持久副本先做字面量脱敏。递归字节扫描先记录泄露位置再原地修补副本；遍历、读取、重写、
+//!   符号链接与特殊文件的错误分别保留，扫描继续检查其余可达条目。工作区快照将符号链接本身记为叶子节点。
 //! - 证据目录里的命令文件不含证据路径；`world.txt` 以绝对路径记录场景临时目录。
-//! - 只有失败的场景写 bundle。
+//! - 只有失败的场景才写入失败产物目录。
 
 use std::ffi::{OsStr, OsString};
 use std::fmt;
@@ -45,7 +45,7 @@ pub(crate) fn checked_failure_dir(name: &str) -> Result<PathBuf, EvidenceError> 
     Ok(base.join(name))
 }
 
-/// Redacted failure bundle written when a scenario fails.
+/// 场景失败时准备写入磁盘的已脱敏失败产物。
 #[derive(Debug, Clone)]
 pub(crate) struct FailureArtifacts {
     pub(crate) dir: PathBuf,
@@ -54,7 +54,7 @@ pub(crate) struct FailureArtifacts {
     pub(crate) command_text: String,
 }
 
-/// One safe, composable account of a failed scenario and its evidence pipeline.
+/// 单次失败场景及其证据流水线的脱敏汇总报告。
 pub struct FailureReport {
     primary_assertion: Option<String>,
     secret_leaks: Vec<String>,
@@ -110,7 +110,7 @@ impl fmt::Display for FailureReport {
         let mut wrote_section = false;
 
         if !self.secret_leaks.is_empty() {
-            writeln!(formatter, "secret leaks:")?;
+            writeln!(formatter, "秘密泄露:")?;
             for location in &self.secret_leaks {
                 writeln!(formatter, "- {location}")?;
             }
@@ -121,7 +121,7 @@ impl fmt::Display for FailureReport {
             if wrote_section {
                 writeln!(formatter)?;
             }
-            writeln!(formatter, "primary assertion:")?;
+            writeln!(formatter, "主断言:")?;
             write!(formatter, "{primary}")?;
             if !primary.ends_with('\n') {
                 writeln!(formatter)?;
@@ -133,9 +133,9 @@ impl fmt::Display for FailureReport {
             if wrote_section {
                 writeln!(formatter)?;
             }
-            writeln!(formatter, "command diagnostics:")?;
+            writeln!(formatter, "命令诊断:")?;
             for (index, diagnostic) in self.command_diagnostics.iter().enumerate() {
-                writeln!(formatter, "[command {index}]")?;
+                writeln!(formatter, "[命令 {index}]")?;
                 write!(formatter, "{diagnostic}")?;
                 if !diagnostic.ends_with('\n') {
                     writeln!(formatter)?;
@@ -148,7 +148,7 @@ impl fmt::Display for FailureReport {
             if wrote_section {
                 writeln!(formatter)?;
             }
-            writeln!(formatter, "evidence errors:")?;
+            writeln!(formatter, "证据错误:")?;
             for error in &self.evidence_errors {
                 writeln!(formatter, "- {error}")?;
             }
@@ -156,7 +156,7 @@ impl fmt::Display for FailureReport {
         }
 
         if !wrote_section {
-            write!(formatter, "failure report")?;
+            write!(formatter, "失败报告")?;
         }
         Ok(())
     }
@@ -190,7 +190,7 @@ pub(crate) fn render_command_text(
     secrets: &[&str],
 ) -> String {
     redact(
-        &format!("{summary}\noutcome: {}\n", outcome.summary()),
+        &format!("{summary}\n结果: {}\n", outcome.summary()),
         secrets,
     )
 }
@@ -203,7 +203,7 @@ const DIAGNOSTIC_EXCERPT_BYTES: usize = 2048;
 fn redacted_excerpt(bytes: &[u8], secrets: &[&str]) -> String {
     let text = redact(&String::from_utf8_lossy(bytes), secrets);
     if text.is_empty() {
-        return "(empty)\n".into();
+        return "（空）\n".into();
     }
     let mut end = text.len().min(DIAGNOSTIC_EXCERPT_BYTES);
     while !text.is_char_boundary(end) {
@@ -214,10 +214,7 @@ fn redacted_excerpt(bytes: &[u8], secrets: &[&str]) -> String {
         excerpt.push('\n');
     }
     if end < text.len() {
-        excerpt.push_str(&format!(
-            "... [{} more bytes truncated]\n",
-            text.len() - end
-        ));
+        excerpt.push_str(&format!("... [其余 {} 字节已截断]\n", text.len() - end));
     }
     excerpt
 }
@@ -237,7 +234,7 @@ pub(crate) fn render_failed_command_text(
     ] {
         text.push_str(&redact(
             &format!(
-                "{stream} (redacted, first {DIAGNOSTIC_EXCERPT_BYTES} bytes at most; full redacted copy: {}):\n",
+                "{stream}（已脱敏，最多前 {DIAGNOSTIC_EXCERPT_BYTES} 字节；完整脱敏副本: {}）:\n",
                 copy.display()
             ),
             secrets,
@@ -268,19 +265,19 @@ pub(crate) fn write_failure_artifacts_collecting(
     report: &mut FailureReport,
 ) {
     attempt(
-        "write stdout.txt",
+        "写入 stdout.txt",
         std::fs::write(artifacts.dir.join("stdout.txt"), &artifacts.stdout),
         secrets,
         &mut report.evidence_errors,
     );
     attempt(
-        "write stderr.txt",
+        "写入 stderr.txt",
         std::fs::write(artifacts.dir.join("stderr.txt"), &artifacts.stderr),
         secrets,
         &mut report.evidence_errors,
     );
     attempt(
-        "write command.txt",
+        "写入 command.txt",
         std::fs::write(artifacts.dir.join("command.txt"), &artifacts.command_text),
         secrets,
         &mut report.evidence_errors,
@@ -302,9 +299,9 @@ fn attempt<T>(
     }
 }
 
-/// Recursively scan persisted artifacts for byte-level secret sentinels.
+/// 递归扫描持久化产物时的字节级秘密扫描错误。
 #[derive(Debug, Error)]
-#[error("secret scan failed at {}: {source}", path.display())]
+#[error("在 {} 处扫描秘密失败: {source}", path.display())]
 pub struct ArtifactScanError {
     pub path: PathBuf,
     #[source]
@@ -317,8 +314,8 @@ struct ScanCollection {
     errors: Vec<ArtifactScanError>,
 }
 
-/// Recursively scan regular files for byte-level sentinels. Any I/O failure is
-/// returned: a bundle that could not be completely inspected is not clean.
+/// 递归扫描普通文件中的字节级秘密哨兵；任何读写失败都会直接返回错误，
+/// 未能完整检查的失败产物目录不视为干净。
 pub fn scan_artifacts_for_secrets(
     dir: &Path,
     secrets: &[&str],
@@ -403,7 +400,7 @@ fn scan_dir_collecting(
                 &path,
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    "artifact is neither a regular file nor a directory",
+                    "产物条目既不是普通文件也不是目录",
                 ),
                 secrets,
             ));
@@ -468,11 +465,11 @@ pub(crate) fn scan_bundle_into_report(dir: &Path, secrets: &[&str], report: &mut
         report.add_secret_location(location, secrets);
     }
     for error in collection.errors {
-        report.add_evidence_error("secret scan", error, secrets);
+        report.add_evidence_error("扫描秘密字面量", error, secrets);
     }
     if !locations.is_empty() {
         let text = format!(
-            "post-write sentinel scan redacted {} file(s):\n{}\n",
+            "落盘后秘密扫描已脱敏 {} 个文件:\n{}\n",
             locations.len(),
             locations
                 .iter()
@@ -481,7 +478,7 @@ pub(crate) fn scan_bundle_into_report(dir: &Path, secrets: &[&str], report: &mut
                 .join("\n")
         );
         attempt(
-            "write sentinel_scan.txt",
+            "写入 sentinel_scan.txt",
             std::fs::write(dir.join("sentinel_scan.txt"), text),
             secrets,
             &mut report.evidence_errors,
@@ -509,11 +506,11 @@ fn redact_bytes(mut bytes: Vec<u8>, secrets: &[&[u8]]) -> Vec<u8> {
 
 #[derive(Debug, Error)]
 pub enum EvidenceError {
-    #[error("invalid artifact name")]
+    #[error("失败产物名称无效")]
     InvalidArtifactName,
-    #[error("artifact target is already claimed")]
+    #[error("失败产物目标目录已被占用")]
     ArtifactClaimBusy,
-    #[error("evidence I/O failed: {0}")]
+    #[error("失败证据读写失败: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -554,8 +551,7 @@ impl ArtifactClaim {
             .create(true)
             .truncate(false)
             .open(claims_dir.join(lock_name))?;
-        // SAFETY: `file` owns a valid descriptor for the duration of the call and
-        // remains alive in `ArtifactClaim` until the lock should be released.
+        // SAFETY: `file` 在调用期间持有有效文件描述符，并由 `ArtifactClaim` 保持存活直到释放锁。
         let result = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
         if result != 0 {
             let error = std::io::Error::last_os_error();
@@ -570,10 +566,10 @@ impl ArtifactClaim {
 
 impl Drop for ArtifactClaim {
     fn drop(&mut self) {
-        // flock 锁属于打开文件描述（open file description），而不是某个 fd。同一进程中
-        // 其他测试并行启动子进程时，子进程在 fork 之后、exec 之前持有该描述的副本
-        // （O_CLOEXEC 要到 exec 才关闭），只关闭本 fd 不会释放锁，紧接着的重新获取会
-        // 得到 ArtifactClaimBusy（#228）。显式 LOCK_UN 作用于整个描述，副本也随之解锁。
+        // `flock` 锁属于打开文件描述，而非单个文件描述符。同一进程中其他测试并行启动子进程时，
+        // 子进程在 `fork` 之后、`exec` 之前持有该描述的副本（`O_CLOEXEC` 要到 `exec` 才关闭），
+        // 仅关闭本描述符不会释放锁，紧接着的重新获取会得到 `ArtifactClaimBusy`（#228）。
+        // 显式 `LOCK_UN` 作用于整个打开文件描述，副本也随之解锁。
         // SAFETY: `self.file` 在调用期间持有有效描述符。
         unsafe { libc::flock(self.file.as_raw_fd(), libc::LOCK_UN) };
     }
@@ -592,13 +588,13 @@ struct RecordedCommand {
     outcome: CommandOutcome,
 }
 
-/// Failure-only scenario recorder. Construction claims the target and clears
-/// stale artifacts so a passing rerun cannot leave an older failure current.
+/// 仅在失败时落盘的场景证据记录器；构造时即占用目标目录并清理旧产物，
+/// 确保重跑通过后不会残留旧的失败产物。
 pub struct ScenarioEvidence {
     failure_dir: PathBuf,
     _claim: ArtifactClaim,
     daemon: std::sync::Arc<crate::daemon::ScenarioDaemon>,
-    /// 与世界共享的场景预算槽：收尾时普通 stop 只用同一起点的剩余量。
+    /// 与世界共享的场景预算槽：收尾时普通 `daemon stop` 只用同一起点的剩余量。
     budget: std::sync::Arc<crate::world::BudgetSlot>,
     project_dir: PathBuf,
     before: WorkspaceSnapshot,
@@ -694,7 +690,7 @@ impl ScenarioEvidence {
                 ("stderr", &command.outcome.stderr),
             ] {
                 if crate::assert::contains_secret(bytes, &secrets) {
-                    report.add_secret_location(format!("command {index} {stream}"), &secrets);
+                    report.add_secret_location(format!("命令 {index} {stream}"), &secrets);
                     persist = true;
                 }
             }
@@ -711,12 +707,11 @@ impl ScenarioEvidence {
                 persist = true;
             }
         }
-        // Captures omit credential headers; bodies and retained client identity
-        // headers have no legitimate use for a scenario's secret sentinels.
+        // 捕获的请求本身不含凭据请求头；请求体与保留的客户端身份头绝不应合法携带场景秘密哨兵。
         for (index, capture) in self.captures.iter().enumerate() {
-            let bytes = serde_json::to_vec(capture).expect("serialize captured request");
+            let bytes = serde_json::to_vec(capture).expect("序列化捕获的模型请求失败");
             if crate::assert::contains_secret(&bytes, &secrets) {
-                report.add_secret_location(format!("capture {index}"), &secrets);
+                report.add_secret_location(format!("捕获请求 {index}"), &secrets);
                 persist = true;
             }
         }
@@ -724,7 +719,7 @@ impl ScenarioEvidence {
         let persist = persist || cleanup.is_err();
         if let Err(errors) = cleanup {
             for error in errors {
-                report.add_evidence_error("daemon cleanup", error, &secrets);
+                report.add_evidence_error("清理后台", error, &secrets);
             }
         }
         for (index, command) in self.commands.iter().enumerate() {
@@ -746,13 +741,13 @@ impl ScenarioEvidence {
             return report.finish();
         }
         if let Err(error) = std::fs::create_dir_all(&self.failure_dir) {
-            report.add_evidence_error("create artifact root", error, &secrets);
+            report.add_evidence_error("创建失败产物根目录", error, &secrets);
             return report.finish();
         }
 
         for (name, value) in &self.attachments {
             attempt(
-                "write JSON evidence",
+                "写入 JSON 证据",
                 std::fs::write(
                     self.failure_dir.join(format!("{name}.json")),
                     redact(&value.to_string(), &secrets),
@@ -763,7 +758,7 @@ impl ScenarioEvidence {
         }
         for (index, bytes) in self.pty_output.iter().enumerate() {
             attempt(
-                "write PTY output",
+                "写入 PTY 输出",
                 std::fs::write(
                     self.failure_dir.join(format!("{index}-pty.txt")),
                     redact(&String::from_utf8_lossy(bytes), &secrets),
@@ -775,7 +770,7 @@ impl ScenarioEvidence {
 
         for (index, command) in self.commands.iter().enumerate() {
             attempt(
-                &format!("write {index}-command.txt"),
+                &format!("写入 {index}-command.txt"),
                 std::fs::write(
                     self.failure_dir.join(format!("{index}-command.txt")),
                     render_command_text(&command.summary, &command.outcome, &secrets),
@@ -784,7 +779,7 @@ impl ScenarioEvidence {
                 &mut report.evidence_errors,
             );
             attempt(
-                &format!("write {index}-stdout.txt"),
+                &format!("写入 {index}-stdout.txt"),
                 std::fs::write(
                     self.failure_dir.join(format!("{index}-stdout.txt")),
                     redact(&String::from_utf8_lossy(&command.outcome.stdout), &secrets),
@@ -793,7 +788,7 @@ impl ScenarioEvidence {
                 &mut report.evidence_errors,
             );
             attempt(
-                &format!("write {index}-stderr.txt"),
+                &format!("写入 {index}-stderr.txt"),
                 std::fs::write(
                     self.failure_dir.join(format!("{index}-stderr.txt")),
                     redact(&String::from_utf8_lossy(&command.outcome.stderr), &secrets),
@@ -804,13 +799,13 @@ impl ScenarioEvidence {
         }
 
         attempt(
-            "write fake LLM log",
+            "写入假模型请求日志",
             write_fake_llm_log(&self.failure_dir, &self.captures, &secrets),
             &secrets,
             &mut report.evidence_errors,
         );
         if let Some(after) = attempt(
-            "capture workspace after",
+            "采集收尾工作区快照",
             WorkspaceSnapshot::capture(&self.project_dir),
             &secrets,
             &mut report.evidence_errors,
@@ -828,7 +823,7 @@ impl ScenarioEvidence {
     }
 }
 
-/// Persist the fake LLM's captured request log into a failure bundle.
+/// 将假模型服务捕获的请求日志持久化写入失败产物目录。
 pub fn write_fake_llm_log(
     failure_dir: &Path,
     captures: &[crate::fake_llm::CapturedRequest],
@@ -857,7 +852,7 @@ pub fn write_fake_llm_log(
     std::fs::write(failure_dir.join("fake_llm_requests.txt"), text)
 }
 
-/// A captured workspace listing: `(relative_path, size_bytes)` entries, sorted by path.
+/// 工作区文件列表快照：按相对路径排序的 `(相对路径, 字节数)` 条目。
 #[derive(Debug, Clone)]
 pub struct WorkspaceSnapshot {
     pub entries: Vec<(String, u64)>,
@@ -886,9 +881,9 @@ pub fn write_workspace_listing(
     secrets: &[&str],
 ) -> std::io::Result<()> {
     let snapshot = WorkspaceSnapshot::capture(root)?;
-    let mut text = format!("workspace listing (root: {}):\n", root.display());
+    let mut text = format!("工作区文件列表（根目录: {}）:\n", root.display());
     for (rel, size) in &snapshot.entries {
-        text.push_str(&format!("  {rel} ({size} bytes)\n"));
+        text.push_str(&format!("  {rel}（{size} 字节）\n"));
     }
     std::fs::write(
         failure_dir.join("workspace_listing.txt"),
@@ -921,19 +916,19 @@ fn write_workspace_diff_collecting(
     let after_text = redact(&after.render(), secrets);
     let diff = redact(&unified_listing_diff(before, after), secrets);
     attempt(
-        "write workspace_before.txt",
+        "写入 workspace_before.txt",
         std::fs::write(failure_dir.join("workspace_before.txt"), before_text),
         secrets,
         &mut report.evidence_errors,
     );
     attempt(
-        "write workspace_after.txt",
+        "写入 workspace_after.txt",
         std::fs::write(failure_dir.join("workspace_after.txt"), after_text),
         secrets,
         &mut report.evidence_errors,
     );
     attempt(
-        "write workspace_diff.txt",
+        "写入 workspace_diff.txt",
         std::fs::write(failure_dir.join("workspace_diff.txt"), diff),
         secrets,
         &mut report.evidence_errors,
@@ -1056,13 +1051,10 @@ mod tests {
         let leaked = (2..=secret.len())
             .rev()
             .find(|len| excerpt.contains(&secret[..*len]));
-        assert_eq!(
-            leaked, None,
-            "no prefix of the secret may appear in the excerpt"
-        );
+        assert_eq!(leaked, None, "摘要中不得出现秘密的任何前缀");
         assert!(
-            excerpt.contains("more bytes truncated"),
-            "excerpt must still be truncated, got tail {:?}",
+            excerpt.contains("字节已截断"),
+            "摘要仍应带有截断提示，实际末尾为 {:?}",
             &excerpt[excerpt.len().saturating_sub(80)..]
         );
     }
@@ -1125,7 +1117,7 @@ mod tests {
         assert_eq!(
             paths,
             vec!["a.txt", "m/", "m/mid.txt", "z.txt"],
-            "snapshot entries must be sorted by path"
+            "快照条目必须按路径排序"
         );
     }
 
@@ -1139,7 +1131,7 @@ mod tests {
         std::fs::write(root.join("changed.txt"), "v1").unwrap();
         let before = WorkspaceSnapshot::capture(&root).unwrap();
 
-        // Mutate the tree: remove gone.txt, change changed.txt, add new.txt.
+        // 修改目录树：删除 `gone.txt`，改动 `changed.txt`，新增 `new.txt`。
         std::fs::remove_file(root.join("gone.txt")).unwrap();
         std::fs::write(root.join("changed.txt"), "v2-longer").unwrap();
         std::fs::write(root.join("new.txt"), "new").unwrap();
@@ -1148,18 +1140,18 @@ mod tests {
         let out_dir = TempDir::new().unwrap();
         write_workspace_diff(out_dir.path(), &before, &after, &[]).unwrap();
         let diff = std::fs::read_to_string(out_dir.path().join("workspace_diff.txt")).unwrap();
-        // changed.txt size changed (2 -> 9): both - and + lines.
+        // `changed.txt` 大小变化（2 -> 9）：同时输出 `-` 行与 `+` 行。
         assert!(diff.contains("- changed.txt\t2"));
         assert!(diff.contains("+ changed.txt\t9"));
-        // gone.txt removed: only - line.
+        // `gone.txt` 被删除：仅输出 `-` 行。
         assert!(diff.contains("- gone.txt\t3"));
         assert!(!diff.contains("+ gone.txt"));
-        // new.txt added: only + line.
+        // `new.txt` 新增：仅输出 `+` 行。
         assert!(diff.contains("+ new.txt\t3"));
         assert!(!diff.contains("- new.txt"));
-        // kept.txt unchanged: no line at all.
+        // `kept.txt` 未改动：不出现在差异中。
         assert!(!diff.contains("kept.txt"));
-        // before/after listings were also written.
+        // 前后快照列表文件也一并落盘。
         assert!(out_dir.path().join("workspace_before.txt").is_file());
         assert!(out_dir.path().join("workspace_after.txt").is_file());
     }
@@ -1183,7 +1175,7 @@ mod tests {
 
     #[test]
     fn write_world_context_writes_scenario_command_paths_and_env() {
-        let world = ScenarioWorld::new("lattice-harness-ctx").expect("world");
+        let world = ScenarioWorld::new("lattice-harness-ctx").expect("创建场景环境");
         let out_dir = TempDir::new().unwrap();
         write_world_context(
             out_dir.path(),
@@ -1204,7 +1196,7 @@ mod tests {
 
     #[test]
     fn write_world_context_redacts_secret_env_value() {
-        let world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("world");
+        let world = ScenarioWorld::new("lattice-harness-ctx-redact").expect("创建场景环境");
         world.set_env("CUSTOM_BEARER", "sk-leak-me");
         let out_dir = TempDir::new().unwrap();
         write_world_context(out_dir.path(), &world, "s", "c", &["sk-leak-me"]).unwrap();
@@ -1217,8 +1209,7 @@ mod tests {
     #[test]
     fn scan_artifacts_for_secrets_patches_leaked_file_in_place() {
         let dir = TempDir::new().unwrap();
-        // Simulate a pre-write redaction that missed an edge: a secret
-        // survives into the on-disk stdout.txt.
+        // 模拟落盘前脱敏遗漏边界的情况：秘密字面量残留进了磁盘上的 `stdout.txt`。
         std::fs::write(dir.path().join("stdout.txt"), "ok sk-leak-survived more").unwrap();
         std::fs::write(dir.path().join("clean.txt"), "no secret here").unwrap();
         let leaked = scan_artifacts_for_secrets(dir.path(), &["sk-leak-survived"]).unwrap();
@@ -1227,7 +1218,7 @@ mod tests {
         let after = std::fs::read_to_string(dir.path().join("stdout.txt")).unwrap();
         assert!(after.contains("[REDACTED]"));
         assert!(!after.contains("sk-leak-survived"));
-        // clean.txt untouched.
+        // `clean.txt` 保持原样不变。
         assert_eq!(
             std::fs::read_to_string(dir.path().join("clean.txt")).unwrap(),
             "no secret here"
@@ -1266,12 +1257,9 @@ mod tests {
         let evidence =
             ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
                 .unwrap();
-        assert!(
-            !failure_dir.exists(),
-            "constructor must clear stale evidence"
-        );
+        assert!(!failure_dir.exists(), "构造记录器时必须清理旧失败产物");
         evidence.finish_report(None).unwrap();
-        assert!(!failure_dir.exists(), "passing scenarios write no bundle");
+        assert!(!failure_dir.exists(), "通过的场景不得写入失败产物目录");
 
         let evidence =
             ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
@@ -1301,7 +1289,7 @@ mod tests {
             operation,
             kind: std::io::ErrorKind::Other,
             raw_os_error: None,
-            message: "synthetic cleanup failure".into(),
+            message: "模拟清理故障".into(),
         })
         .collect();
         let outcome = CommandOutcome {
@@ -1322,7 +1310,7 @@ mod tests {
             },
         };
 
-        evidence.record_command("lattice test", &outcome);
+        evidence.record_command("执行测试命令", &outcome);
         evidence
             .finish_report(Some("scenario failed".into()))
             .unwrap_err();
@@ -1339,7 +1327,7 @@ mod tests {
             "InspectProcessGroup(ReadProc)",
             "surviving_pids: [11, 22]",
         ] {
-            assert!(command.contains(fact), "missing {fact:?} in {command}");
+            assert!(command.contains(fact), "命令记录缺少 {fact:?}: {command}");
         }
         assert_eq!(
             std::fs::read(failure_dir.join("0-stdout.txt")).unwrap(),
@@ -1370,13 +1358,13 @@ mod tests {
             cleanup: ProcessGroupCleanup::default(),
         };
 
-        evidence.record_command("lattice test", &outcome);
+        evidence.record_command("执行测试命令", &outcome);
         let report = evidence
             .finish_report(Some("scenario failed".into()))
             .unwrap_err()
             .to_string();
-        assert!(report.contains("- command 0 stdout"), "{report}");
-        assert!(report.contains("- command 0 stderr"), "{report}");
+        assert!(report.contains("- 命令 0 stdout"), "{report}");
+        assert!(report.contains("- 命令 0 stderr"), "{report}");
         assert!(!report.contains(secret), "{report}");
 
         for entry in std::fs::read_dir(&failure_dir).unwrap() {
@@ -1391,7 +1379,7 @@ mod tests {
                 ] {
                     assert!(
                         !text.contains(form),
-                        "artifact {} leaked {form:?}: {text}",
+                        "产物文件 {} 泄露了秘密形式 {form:?}: {text}",
                         path.display()
                     );
                 }
@@ -1425,15 +1413,15 @@ mod tests {
             stdout: b"ok".to_vec(),
             ..outcome.clone()
         };
-        passing.record_command("lattice send", &clean);
+        passing.record_command("发送会话消息", &clean);
         passing
             .finish_report(None)
-            .expect("a passing scenario has no diagnostic");
+            .expect("通过的场景不应返回失败报告");
 
         let mut evidence =
             ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
                 .unwrap();
-        evidence.record_command("lattice send", &outcome);
+        evidence.record_command("发送会话消息", &outcome);
         let report = evidence
             .finish_report(Some("scenario failed".into()))
             .unwrap_err()
@@ -1441,18 +1429,18 @@ mod tests {
         assert!(!report.contains(secret), "{report}");
         assert!(
             report.contains("{\"error\":\"[REDACTED] rejected\"}"),
-            "diagnostic must show the redacted stdout: {report}"
+            "诊断输出必须显示脱敏后的标准输出: {report}"
         );
         assert!(
             report.contains(&format!(
-                "full redacted copy: {}",
+                "完整脱敏副本: {}",
                 failure_dir.join("0-stdout.txt").display()
             )),
-            "diagnostic must point at the evidence copy: {report}"
+            "诊断输出必须指向证据目录中的完整副本: {report}"
         );
         assert!(
-            report.contains("(empty)"),
-            "empty stderr is labelled: {report}"
+            report.contains("（空）"),
+            "空标准错误必须标注为空: {report}"
         );
     }
 
@@ -1512,10 +1500,10 @@ mod tests {
 
         assert!(!text.contains(secret));
         assert!(text.contains(REDACTED));
-        let leaks = text.find("secret leaks:").unwrap();
-        let primary = text.find("primary assertion:").unwrap();
-        let commands = text.find("command diagnostics:").unwrap();
-        let evidence = text.find("evidence errors:").unwrap();
+        let leaks = text.find("秘密泄露:").unwrap();
+        let primary = text.find("主断言:").unwrap();
+        let commands = text.find("命令诊断:").unwrap();
+        let evidence = text.find("证据错误:").unwrap();
         assert!(leaks < primary && primary < commands && commands < evidence);
         assert!(text.find("a-[REDACTED]").unwrap() < text.find("z-[REDACTED]").unwrap());
     }
@@ -1536,14 +1524,14 @@ mod tests {
             artifacts.stderr.as_str(),
             artifacts.command_text.as_str(),
         ] {
-            assert!(!text.contains(secret), "artifact leaked sentinel: {text}");
+            assert!(!text.contains(secret), "失败产物泄露了秘密哨兵: {text}");
         }
         assert!(
             artifacts
                 .command_text
                 .contains("lattice --token [REDACTED]")
         );
-        assert!(artifacts.command_text.contains("outcome: CommandOutcome"));
+        assert!(artifacts.command_text.contains("结果: CommandOutcome"));
         assert!(artifacts.command_text.contains("Signaled(15)"));
         assert!(artifacts.command_text.contains("stdout_complete: false"));
         assert!(artifacts.command_text.contains("surviving_pids: [41]"));
@@ -1558,7 +1546,7 @@ mod tests {
                     validate_artifact_name(OsStr::new(invalid)),
                     Err(EvidenceError::InvalidArtifactName)
                 ),
-                "accepted invalid artifact name {invalid:?}"
+                "不应接受无效的失败产物名称 {invalid:?}"
             );
         }
         validate_artifact_name(OsStr::new("scenario-name")).unwrap();
@@ -1606,20 +1594,20 @@ mod tests {
         drop(second);
     }
 
-    /// 失败方式（#228）：同一进程里另一个线程 fork 出的子进程在 exec 之前共享锁文件的
-    /// 打开描述，claim 释放后锁仍被子进程的副本持有，紧接着的重新获取得到
-    /// ArtifactClaimBusy。这里用一个只 fork、不 exec 的子进程确定性地制造该窗口。
+    /// 失败方式（#228）：同一进程里另一个线程 `fork` 出的子进程在 `exec` 之前共享锁文件的
+    /// 打开描述，占用权释放后锁仍被子进程的副本持有，紧接着的重新获取得到
+    /// `ArtifactClaimBusy`。这里用一个只 `fork`、不 `exec` 的子进程确定性地制造该窗口。
     #[test]
     fn released_claim_is_free_while_a_forked_child_still_shares_the_descriptor() {
         let root = TempDir::new().unwrap();
         let target = root.path().join("scenario");
         let first = ArtifactClaim::acquire(&target).unwrap();
 
-        // fork 返回时子进程已经复制了全部描述符，包括锁文件的打开描述；子进程只
-        // pause()，由父进程在断言前 SIGKILL 并回收，所以不存在等待它自行退出的路径。
-        // SAFETY: 子进程只调用 async-signal-safe 的 pause 与 _exit。
+        // `fork` 返回时子进程已经复制了全部描述符，包括锁文件的打开描述；子进程只调用
+        // `pause()`，由父进程在断言前发送 `SIGKILL` 并回收，因此不存在等待它自行退出的路径。
+        // SAFETY: 子进程只调用异步信号安全的 `pause` 与 `_exit`。
         let child = unsafe { libc::fork() };
-        assert!(child >= 0, "fork failed");
+        assert!(child >= 0, "fork 调用失败");
         if child == 0 {
             // SAFETY: 见上。
             unsafe {
@@ -1631,14 +1619,14 @@ mod tests {
         drop(first);
         let second = ArtifactClaim::acquire(&target);
 
-        // SAFETY: `child` 是本测试刚 fork 出的子进程。
+        // SAFETY: `child` 是本测试刚 `fork` 出的子进程。
         unsafe {
             libc::kill(child, libc::SIGKILL);
             libc::waitpid(child, std::ptr::null_mut(), 0);
         }
         assert!(
             second.is_ok(),
-            "released claim must be reacquirable while a forked child shares the lock descriptor"
+            "子进程共享锁文件描述符时，已释放的占用锁必须仍可重新获取"
         );
     }
 
@@ -1670,7 +1658,10 @@ mod tests {
         let mut evidence =
             ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), [secret.to_string()])
                 .unwrap();
-        evidence.record_command(format!("lattice {secret}"), &report_test_outcome(secret));
+        evidence.record_command(
+            format!("执行测试命令 {secret}"),
+            &report_test_outcome(secret),
+        );
 
         std::fs::create_dir_all(&failure_dir).unwrap();
         std::fs::create_dir(failure_dir.join("0-command.txt")).unwrap();
@@ -1689,10 +1680,10 @@ mod tests {
         assert!(!text.contains(secret));
         assert!(text.contains("primary [REDACTED]"));
         assert!(text.contains("leak.txt"));
-        assert!(text.contains("command diagnostics:"));
-        assert!(text.contains("outcome: CommandOutcome"));
-        let command_error = text.find("write 0-command.txt").unwrap();
-        let stdout_error = text.find("write 0-stdout.txt").unwrap();
+        assert!(text.contains("命令诊断:"));
+        assert!(text.contains("结果: CommandOutcome"));
+        let command_error = text.find("写入 0-command.txt").unwrap();
+        let stdout_error = text.find("写入 0-stdout.txt").unwrap();
         assert!(command_error < stdout_error);
         assert!(text.contains("invalid-link"));
         assert_eq!(
@@ -1730,36 +1721,34 @@ mod tests {
         let world = ScenarioWorld::new("direct-finalizer-raw-scan").unwrap();
         let root = TempDir::new().unwrap();
         for primary in [None, Some("business failed")] {
-            for location in [
-                "command 0 stdout",
-                "command 0 stderr",
-                "PTY 0",
-                "JSON cut",
-                "capture 0",
+            for (slug, location) in [
+                ("cmd-stdout", "命令 0 stdout"),
+                ("cmd-stderr", "命令 0 stderr"),
+                ("pty", "PTY 0"),
+                ("json", "JSON cut"),
+                ("capture", "捕获请求 0"),
             ] {
-                let failure = root
-                    .path()
-                    .join(format!("{}-{location}", primary.is_some()));
+                let failure = root.path().join(format!("{}-{slug}", primary.is_some()));
                 let mut evidence =
                     ScenarioEvidence::new_at_dir(&world, failure.clone(), [secret.to_string()])
                         .unwrap();
                 let mut command = report_test_outcome("clean");
                 let mut bytes = vec![0xff];
                 bytes.extend_from_slice(secret.as_bytes());
-                match location {
-                    "command 0 stdout" => command.stdout = bytes,
-                    "command 0 stderr" => command.stderr = bytes,
-                    "PTY 0" => evidence.record_pty(&bytes),
-                    "JSON cut" => evidence
+                match slug {
+                    "cmd-stdout" => command.stdout = bytes,
+                    "cmd-stderr" => command.stderr = bytes,
+                    "pty" => evidence.record_pty(&bytes),
+                    "json" => evidence
                         .record_json("cut", &json!({"secret":secret}))
                         .unwrap(),
-                    "capture 0" => evidence.record_captures(vec![CapturedRequest {
+                    "capture" => evidence.record_captures(vec![CapturedRequest {
                         raw: json!({"messages":[{"role":"tool","content":secret}]}),
                         ..Default::default()
                     }]),
-                    _ => unreachable!(),
+                    _ => unreachable!("未知的测试分支"),
                 }
-                evidence.record_command("lattice test", &command);
+                evidence.record_command("执行测试命令", &command);
                 let report = evidence
                     .finish_report(primary.map(str::to_string))
                     .unwrap_err();
@@ -1789,7 +1778,7 @@ mod tests {
         let mut evidence =
             ScenarioEvidence::new_at_dir(&world, failure_dir.clone(), Vec::<String>::new())
                 .unwrap();
-        evidence.record_command("lattice test", &report_test_outcome("clean"));
+        evidence.record_command("执行测试命令", &report_test_outcome("clean"));
         std::fs::write(&failure_dir, "root type conflict").unwrap();
 
         let report = evidence
@@ -1797,9 +1786,9 @@ mod tests {
             .unwrap_err();
         let text = report.to_string();
         assert!(text.contains("primary assertion"));
-        assert!(text.contains("command diagnostics:"));
-        assert!(text.contains("outcome: CommandOutcome"));
-        assert!(text.contains("create artifact root"));
+        assert!(text.contains("命令诊断:"));
+        assert!(text.contains("结果: CommandOutcome"));
+        assert!(text.contains("创建失败产物根目录"));
     }
 
     #[test]

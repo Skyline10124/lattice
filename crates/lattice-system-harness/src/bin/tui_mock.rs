@@ -6,7 +6,7 @@ use std::process::ExitCode;
 use lattice_system_harness::{TuiMockScenario, run_tui_mock};
 
 fn usage() {
-    eprintln!("usage: tui-mock [--scenario <name>] [--list]");
+    eprintln!("用法: tui-mock [--scenario <名称>] [--list]");
 }
 
 fn main() -> ExitCode {
@@ -23,7 +23,7 @@ fn main() -> ExitCode {
             (Some(name), None) => match name.parse() {
                 Ok(scenario) => scenario,
                 Err(error) => {
-                    eprintln!("error: {error}");
+                    eprintln!("错误: {error}");
                     usage();
                     return ExitCode::from(2);
                 }
@@ -43,7 +43,7 @@ fn main() -> ExitCode {
         Ok(status) if status.success() => ExitCode::SUCCESS,
         Ok(status) => ExitCode::from(status.code().unwrap_or(1).clamp(1, u8::MAX as i32) as u8),
         Err(error) => {
-            eprintln!("error: {error}");
+            eprintln!("错误: {error}");
             ExitCode::FAILURE
         }
     }

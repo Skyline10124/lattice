@@ -20,7 +20,7 @@ use std::{
 };
 
 pub(crate) fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
+    LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的 lattice 二进制")
 }
 
 /// 调用者先记录原始命令，再核验 JSON 提交回执，避免失败时丢失证据。
@@ -33,13 +33,13 @@ pub(crate) fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOu
 pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertError> {
     if execution.clean_exit_code().is_none() {
         return Err(AssertError::StdoutMissing {
-            expected: format!("session send did not exit cleanly: {}", execution.summary()),
+            expected: format!("session send 未干净退出：{}", execution.summary()),
         });
     }
     if !execution.malformed_lines.is_empty() {
         return Err(AssertError::StdoutMissing {
             expected: format!(
-                "session send emitted malformed JSONL: {:?}",
+                "session send 输出了格式错误的 JSONL：{:?}",
                 execution.malformed_lines
             ),
         });
@@ -51,7 +51,7 @@ pub(crate) fn assert_clean_send(execution: &SendExecution) -> Result<(), AssertE
 pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), AssertError> {
     require(
         outcome.receipt_error.is_none(),
-        format!("invalid submission receipt: {:?}", outcome.receipt_error),
+        format!("提交回执非法：{:?}", outcome.receipt_error),
     )?;
     let Some(SendRecord::Submit(Submit::Sending {
         turn_id,
@@ -59,18 +59,18 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
         ..
     })) = outcome.records.first()
     else {
-        return require(false, "first record must be the sending submit");
+        return require(false, "首条记录必须是 sending 阶段的提交回执");
     };
     require(
         outcome.accepted_turn_id() == Some(turn_id.as_str())
             && outcome.accepted_session_id() == Some(session_id.as_str()),
-        "acceptance must confirm the identity written before sending",
+        "接受回执必须确认发送前写出的同一组身份",
     )?;
     require(
         outcome
             .closed_result()
             .is_some_and(|(sid, tid, _)| sid == session_id && tid == turn_id),
-        "closed result must belong to the submitted Turn",
+        "关闭结果必须归属本次提交的轮次",
     )?;
     // 逐条看原始记录：每条 `entry` 属于这一轮，每条 `text` 的节点是这一轮的条目节点。
     let mut nodes = std::collections::BTreeSet::new();
@@ -78,7 +78,7 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
         if let SendRecord::Entry(entry) = record {
             require(
                 entry.turn_id == *turn_id,
-                format!("entry {} belongs to another Turn", entry.node),
+                format!("条目节点 {} 属于另一轮次", entry.node),
             )?;
             nodes.insert(entry.node);
         }
@@ -88,11 +88,11 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
             SendRecord::Text(text) => nodes.contains(&text.node),
             _ => true,
         }),
-        "session send --json outputs only this Turn's text",
+        "session send --json 只能输出归属当前轮次的文本增量",
     )
 }
 
-/// CLI 输出中这一轮的 `TurnSummary` 与各 Step 详情（按 `node` 覆盖后的最新值），
+/// CLI 输出中这一轮的 `TurnSummary` 与各 `Step` 详情（按 `node` 覆盖后的最新值），
 /// 与 `session turn` 详情中同名字段同形，用于核验实时观察与重新打开看到的相同。
 pub(crate) fn live_turn(outcome: &SendOutcome) -> Value {
     let entries = outcome.entries();
@@ -103,7 +103,7 @@ pub(crate) fn live_turn(outcome: &SendOutcome) -> Value {
     })
 }
 
-/// 实时条目与重新读取的 `session turn` 详情给出同一结局与同一组 Step。
+/// 实时条目与重新读取的 `session turn` 详情给出同一结局与同一组 `Step`。
 pub(crate) fn same_turn(live: &Value, detail: &Value) -> bool {
     live["summary"] == detail["summary"] && live["steps"] == detail["steps"]
 }
@@ -137,7 +137,7 @@ pub(crate) fn require(condition: bool, expected: impl Into<String>) -> Result<()
 }
 
 pub(crate) fn evidence(world: &ScenarioWorld, spec: &ScenarioSpec) -> ScenarioEvidence {
-    ScenarioEvidence::new(world, &spec.name, [FAKE_API_KEY.to_string()]).expect("scenario evidence")
+    ScenarioEvidence::new(world, &spec.name, [FAKE_API_KEY.to_string()]).expect("创建场景证据失败")
 }
 
 pub(crate) fn finish_scenario(
@@ -166,7 +166,7 @@ pub(crate) fn record_session(
     let log = session
         .run_command(&["--json", "session", "log", sid])
         .unwrap();
-    evidence.record_command("--json session log", &log);
+    evidence.record_command("查询会话树（--json session log）", &log);
     assert!(log.is_clean_exit(0));
     let tree: Value = serde_json::from_slice(&log.stdout).unwrap();
     for args in [
@@ -174,14 +174,14 @@ pub(crate) fn record_session(
         vec!["--json", "session", "list"],
     ] {
         let out = session.run_command(&args).unwrap();
-        evidence.record_command(args.join(" "), &out);
+        evidence.record_command(format!("执行命令（{}）", args.join(" ")), &out);
         assert!(out.is_clean_exit(0));
     }
     for node in tree["nodes"].as_array().unwrap() {
         if let Some(tid) = node["turn_start"]["turn_id"].as_str() {
             let args = ["--json", "session", "turn", tid];
             let out = session.run_command(&args).unwrap();
-            evidence.record_command(args.join(" "), &out);
+            evidence.record_command(format!("查询轮次详情（{}）", args.join(" ")), &out);
             assert!(out.is_clean_exit(0));
         }
     }
@@ -189,14 +189,14 @@ pub(crate) fn record_session(
     evidence.record_json("parameters", &parameters).unwrap();
 }
 
-/// 失败时写入失败报告并 panic；成功时只排空场景后台，不写产物。
+/// 失败时写入失败报告并触发 panic；成功时只排空场景后台，不写产物。
 pub(crate) fn finish_recorded(evidence: ScenarioEvidence, result: std::thread::Result<()>) {
     let primary = result.err().map(|error| {
         error
             .downcast_ref::<String>()
             .cloned()
             .or_else(|| error.downcast_ref::<&str>().map(|text| text.to_string()))
-            .unwrap_or_else(|| "scenario panicked with a non-text payload".into())
+            .unwrap_or_else(|| "场景以非文本载荷触发了 panic".into())
     });
     evidence
         .finish_report(primary)
@@ -207,14 +207,14 @@ pub(crate) fn wire_fake_llm(
     agent: &str,
     script: SseScript,
 ) -> FakeLlmServer {
-    let server = FakeLlmServer::start(script).expect("start fake llm");
+    let server = FakeLlmServer::start(script).expect("启动假模型服务失败");
     world
         .wire_provider(
             ProviderFixture::chat_completions(agent),
             &server,
             FAKE_API_KEY,
         )
-        .expect("wire fake provider");
+        .expect("接入假 provider 配置失败");
     server
 }
 
@@ -223,14 +223,14 @@ pub(crate) fn wire_gated_fake_llm(
     agent: &str,
     script: SseScript,
 ) -> (FakeLlmServer, ResponseGate) {
-    let (server, gate) = FakeLlmServer::start_gated(script).expect("start gated fake llm");
+    let (server, gate) = FakeLlmServer::start_gated(script).expect("启动带门闩的假模型服务失败");
     world
         .wire_provider(
             ProviderFixture::chat_completions(agent),
             &server,
             FAKE_API_KEY,
         )
-        .expect("wire gated fake provider");
+        .expect("接入带门闩的假 provider 配置失败");
     (server, gate)
 }
 
@@ -240,7 +240,7 @@ pub(crate) fn direct_world(
     extra_profile: &str,
 ) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(prefix);
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
     let model = ProviderFixture::chat_completions(agent)
         .model_ref()
         .unwrap();
@@ -251,8 +251,8 @@ pub(crate) fn direct_world(
     );
     world
         .write_project_file(&format!(".lattice/agents/{agent}/agent.toml"), &toml)
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
+        .expect("写入 agent.toml 失败");
+    world.init_git_project().expect("初始化 Git 项目失败");
     (world, spec)
 }
 
@@ -308,14 +308,14 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
                 timeout: Some(spec.step_timeout()),
             },
         )
-        .expect("drive lattice")
+        .expect("驱动 lattice 命令失败")
 }
 
-/// 与 `lattice_local::test_support::FRAME_MAGIC` 相同；harness 不能依赖产品 crate，用同一版本号拼出帧魔数。
+/// 与 `lattice_local::test_support::FRAME_MAGIC` 相同；测试框架不能依赖产品 crate，用同一版本号拼出帧魔数。
 const PROTOCOL_VERSION: u8 = 63;
 const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
 
-/// 公开 Local IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
+/// 公开本地 IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
 pub(crate) struct Wire {
     stream: UnixStream,
     message: u64,
@@ -324,7 +324,7 @@ pub(crate) struct Wire {
 impl Wire {
     pub(crate) fn connect(world: &ScenarioWorld, timeout: Duration, request: &Value) -> Self {
         let mut stream = UnixStream::connect(world.session_store_dir().join("local/api.sock"))
-            .expect("connect Local IPC");
+            .expect("连接本地 IPC 套接字失败");
         stream.set_read_timeout(Some(timeout)).unwrap();
         stream.set_write_timeout(Some(timeout)).unwrap();
         let body = serde_json::to_vec(request).unwrap();
@@ -342,7 +342,7 @@ impl Wire {
     pub(crate) fn next(&mut self) -> Value {
         self.message(None)
     }
-    /// `wait` 内没有新消息时返回 None；一旦开始收到就读完整条消息，不留半帧。
+    /// `wait` 内没有新消息时返回 `None`；一旦开始收到就读完整条消息，不留半帧。
     pub(crate) fn next_within(&mut self, wait: Duration) -> Option<Value> {
         self.stream.set_read_timeout(Some(wait)).unwrap();
         let mut first = [0; 1];
@@ -358,7 +358,7 @@ impl Wire {
             {
                 None
             }
-            other => panic!("read a local frame header: {other:?}"),
+            other => panic!("读取本地 IPC 帧头失败：{other:?}"),
         }
     }
     /// 读一条逻辑消息；`first` 是已读出的帧头首字节。
@@ -373,9 +373,7 @@ impl Wire {
                 }
                 None => &mut header[..],
             };
-            self.stream
-                .read_exact(rest)
-                .expect("read a local frame header");
+            self.stream.read_exact(rest).expect("读取本地 IPC 帧头失败");
             assert_eq!(&header[..8], FRAME_MAGIC);
             let length = u32::from_be_bytes(header[8..].try_into().unwrap()) as usize;
             assert!((1..=16 * 1024 * 1024).contains(&length));
@@ -424,7 +422,7 @@ pub(crate) fn submit_request(
         "workspace":path_bytes(world.project_dir()),"input":input,"expected_settings":null}})
 }
 
-/// 按 TurnId 查询：已接受、在途，或 `not_found` 错误。
+/// 按 `TurnId` 查询：已接受、在途，或 `not_found` 错误。
 pub(crate) fn turn_lookup(world: &ScenarioWorld, timeout: Duration, turn_id: &str) -> Value {
     ipc(
         world,
@@ -484,15 +482,11 @@ impl Watcher {
     /// 以收到 `head.position` 对应的条目为准；整批受一个截止时间约束。
     pub(crate) fn initial(&mut self) -> &ViewState {
         let deadline = Instant::now() + self.wire.timeout;
-        self.until(
-            deadline,
-            "the initial head and its position entry",
-            |view| {
-                view.head.as_ref().is_some_and(|head| {
-                    head.position == 0 || view.entries.contains_key(&head.position)
-                })
-            },
-        )
+        self.until(deadline, "初始会话头及其位点条目", |view| {
+            view.head
+                .as_ref()
+                .is_some_and(|head| head.position == 0 || view.entries.contains_key(&head.position))
+        })
     }
     /// 读到持有的视图满足条件为止；超过截止时间即失败，并报告等待的条件与最后持有的视图。
     pub(crate) fn until(
@@ -512,7 +506,7 @@ impl Watcher {
                 }
                 None => {
                     let held = describe(&self.view);
-                    panic!("watch did not reach `{condition}` before the deadline; held {held}")
+                    panic!("`watch` 未在截止时间前满足条件（{condition}）；当前持有视图：{held}")
                 }
             }
         }
@@ -556,7 +550,7 @@ fn describe(view: &ViewState) -> String {
     format!("head={head:?} entries={entries:?} texts={texts:?}")
 }
 
-/// 视图中这一轮的最后一个 Step 条目已带关闭的结局。
+/// 视图中这一轮的最后一个 `Step` 条目已带关闭的结局。
 pub(crate) fn turn_closed(view: &ViewState, turn_id: &str) -> bool {
     view.entries.values().any(|entry| {
         entry.turn_id == turn_id

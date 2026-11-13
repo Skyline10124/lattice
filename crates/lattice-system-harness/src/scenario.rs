@@ -7,11 +7,10 @@ use std::time::Duration;
 use serde::Deserialize;
 use thiserror::Error;
 
-/// Harness test layer (see RFC #41, Codeberg #19).
+/// 验收套件的测试分层（见 RFC #41，Codeberg #19）。
 ///
-/// After #62 (Codeberg #40) there is no Microsandbox layer: every scenario
-/// runs Direct-Local against the canonical project root — no KVM, no MSB
-/// daemon, no OCI image. `PtySmoke` remains as the TUI-entrypoint layer.
+/// 自 #62（Codeberg #40）起已移除沙盒虚拟层：所有场景均直接针对规范化项目根目录以本地直连方式运行，
+/// 不依赖 KVM、沙盒后台或 OCI 镜像；`PtySmoke` 保留为 TUI 入口冒烟层。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ScenarioLayer {
@@ -19,17 +18,12 @@ pub enum ScenarioLayer {
     PtySmoke,
 }
 
-/// Scenario metadata (inline builder or JSON fixture under `tests/scenarios/`).
+/// 场景元数据（内联构造或从 `tests/scenarios/` 下的 JSON 夹具加载）。
 ///
-/// `step_timeout_secs` is the per-command timeout enforced by
-/// `LatticeDriver::run` for every invocation derived from this spec.
-/// `total_timeout_secs` is an optional whole-scenario wall-clock budget
-/// (PRD user story 19, RFC #41 decision eight): a multi-step scenario
-/// records its start time and asserts the budget has not elapsed before each
-/// step, so a sequence of steps that each finish within their step timeout
-/// but never terminates is still bounded. `None` (the default) leaves only
-/// the per-command timeout in effect, preserving the #42 (Codeberg #20)
-/// single-step behavior for fast scenarios.
+/// `step_timeout_secs` 是 `LatticeDriver::run` 对该规格派生的每次命令调用强制执行的单命令超时上限。
+/// `total_timeout_secs` 是可选的整场景墙钟预算（需求用户故事 19，RFC #41 决策八）：
+/// 多步骤场景在开始时记录起点，并在每一步前断言预算尚未耗尽，使每步虽在单步超时内返回但永不收敛的步骤序列仍然有界。
+/// 默认值 `None` 仅启用单命令超时，保留 #42（Codeberg #20）快速场景的单步行为。
 #[derive(Debug, Clone, Deserialize)]
 pub struct ScenarioSpec {
     pub name: String,
@@ -42,9 +36,9 @@ pub struct ScenarioSpec {
 
 #[derive(Debug, Error)]
 pub enum ScenarioError {
-    #[error("failed to read scenario fixture: {0}")]
+    #[error("读取场景夹具失败: {0}")]
     Io(#[from] std::io::Error),
-    #[error("invalid scenario fixture: {0}")]
+    #[error("场景夹具格式无效: {0}")]
     Parse(#[from] serde_json::Error),
 }
 
@@ -62,7 +56,7 @@ impl ScenarioSpec {
         }
     }
 
-    /// Multi-step Direct-Local scenario with both step and whole-run bounds.
+    /// 同时具备单步超时与整场景总预算的多步骤本地直连场景。
     pub fn direct_local(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -72,18 +66,17 @@ impl ScenarioSpec {
         }
     }
 
-    /// Per-command timeout enforced by `LatticeDriver::run`.
+    /// 由 `LatticeDriver::run` 强制执行的单命令超时预算。
     pub fn step_timeout(&self) -> Duration {
         Duration::from_secs(self.step_timeout_secs)
     }
 
-    /// Whole-scenario wall-clock budget, or `None` if only the per-command
-    /// timeout is in effect.
+    /// 整场景墙钟总预算；若仅单命令超时生效则返回 `None`。
     pub fn total_timeout(&self) -> Option<Duration> {
         self.total_timeout_secs.map(Duration::from_secs)
     }
 
-    /// Load a scenario JSON fixture from the harness crate `tests/scenarios/` tree.
+    /// 从本 crate 的 `tests/scenarios/` 目录加载场景 JSON 夹具。
     pub fn load_fixture(relative: &str) -> Result<Self, ScenarioError> {
         let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/scenarios");
         let path = base.join(relative);
@@ -137,15 +130,13 @@ impl ScenarioBudget {
             .map_or(step_deadline, |limit| step_deadline.min(self.start + limit))
     }
 
-    /// 多步骤场景在每步之前调用；预算耗尽即 panic，没有总预算时不作检查。
+    /// 多步骤场景在每步之前调用；预算耗尽即触发 panic，没有总预算时不作检查。
     pub fn check(&self, scenario_name: &str) {
         if let Some(limit) = self.limit
             && self.start.elapsed() >= limit
         {
             panic!(
-                "scenario '{scenario_name}' exceeded total timeout {limit:?} \
-                 (elapsed {:?}); a multi-step sequence must terminate within \
-                 the whole-scenario budget",
+                "场景 '{scenario_name}' 超出总预算 {limit:?}（已耗时 {:?}）；多步骤序列必须在整场景预算内结束",
                 self.start.elapsed()
             );
         }

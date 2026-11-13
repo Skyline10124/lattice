@@ -4,8 +4,8 @@
 //! 通过公开 JSONL 驱动 Turn；业务结局、正文交付和原始进程结果分别保留。
 //!
 //! `--json` 只有七种记录（会话合同“实现模块与公开操作”）。会话头、对话条目与生成中的文字
-//! 和 Local IPC 视图的 `view` 消息同形，解析函数两处共用。读者按 `node` 覆盖条目，
-//! 结局取本轮最后一个 Step 条目的 `summary`。
+//! 和本地 IPC 视图的 `view` 消息同形，解析函数两处共用。读者按 `node` 覆盖条目，
+//! 结局取本轮最后一个 `Step` 条目的 `summary`。
 use std::collections::BTreeMap;
 
 use serde_json::Value;
@@ -14,7 +14,7 @@ use crate::driver::{CommandOutcome, DriverError, LatticeCommand, LatticeDriver, 
 use crate::scenario::{ScenarioBudget, ScenarioSpec};
 use crate::world::ScenarioWorld;
 
-/// CLI 的 0/1/2 退出分类；2 同时用于前提拒绝与用户取消，须结合记录解释。
+/// CLI 的 `0`/`1`/`2` 退出分类；`2` 同时用于前提拒绝与用户取消，须结合记录解释。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SendExitCode {
     Committed,
@@ -105,7 +105,7 @@ pub struct TurnSummary {
     pub progress: StepProgress,
 }
 
-/// 安排过重试的尝试的提示；等级固定为 warn，解析时已核验。
+/// 安排过重试的尝试的提示；等级固定为 `warn`，解析时已核验。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RetryNotice {
     pub attempt: u64,
@@ -157,7 +157,7 @@ pub enum SlotState {
     Terminal,
 }
 
-/// Step 条目中一个调用槽位的结论；`error_code` 取 Failed 原因中的工具错误码。
+/// `Step` 条目中一个调用槽位的结论；`error_code` 取 `Failed` 原因中的工具错误码。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Slot {
     pub invocation_id: String,
@@ -178,7 +178,7 @@ pub enum AttemptState {
 pub struct StepEntry {
     pub ordinal: u64,
     pub progress: StepProgress,
-    /// 回复的正文与 reasoning parts，按原顺序、未合并；Tool 调用见 `slots`。
+    /// 回复的正文与推理片段，按原顺序且未合并；工具调用见 `slots`。
     pub reply: Vec<Segment>,
     pub attempts: Vec<AttemptState>,
     pub slots: Vec<Slot>,
@@ -274,7 +274,7 @@ pub enum ReceiptResult {
         user_node: u64,
     },
     Rejected(LocalError),
-    /// 按 TurnId 查询为 NotFound：确定未被接受。
+    /// 按 `TurnId` 查询为 `NotFound`：确定未被接受。
     NotAccepted,
     Unknown(Option<LocalError>),
 }
@@ -283,7 +283,7 @@ pub enum ReceiptResult {
 pub struct Receipt {
     pub turn_id: String,
     pub result: ReceiptResult,
-    /// 结果来自按 TurnId 查询，而不是提交连接上的回执。
+    /// 结果来自按 `TurnId` 查询，而不是提交连接上的回执。
     pub recovered: bool,
 }
 
@@ -363,35 +363,35 @@ fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, String> {
     value
         .get(field)
         .and_then(Value::as_str)
-        .ok_or_else(|| format!("`{field}` must be a string"))
+        .ok_or_else(|| format!("字段 `{field}` 必须为字符串"))
 }
 fn uint(value: &Value, field: &str) -> Result<u64, String> {
     value
         .get(field)
         .and_then(Value::as_u64)
-        .ok_or_else(|| format!("`{field}` must be an unsigned integer"))
+        .ok_or_else(|| format!("字段 `{field}` 必须为无符号整数"))
 }
 fn boolean(value: &Value, field: &str) -> Result<bool, String> {
     value
         .get(field)
         .and_then(Value::as_bool)
-        .ok_or_else(|| format!("`{field}` must be a boolean"))
+        .ok_or_else(|| format!("字段 `{field}` 必须为布尔值"))
 }
 fn array<'a>(value: &'a Value, field: &str) -> Result<&'a Vec<Value>, String> {
     value
         .get(field)
         .and_then(Value::as_array)
-        .ok_or_else(|| format!("`{field}` must be an array"))
+        .ok_or_else(|| format!("字段 `{field}` 必须为数组"))
 }
-/// 字段必须出现，值为字符串或 null。
+/// 字段必须出现，值为字符串或 `null`。
 fn nullable_string(value: &Value, field: &str) -> Result<Option<String>, String> {
     match value.get(field) {
         Some(Value::Null) => Ok(None),
         Some(Value::String(s)) => Ok(Some(s.clone())),
-        _ => Err(format!("`{field}` must be a string or null")),
+        _ => Err(format!("字段 `{field}` 必须为字符串或 null")),
     }
 }
-/// 字段可以缺省；出现时为字符串或 null。
+/// 字段可以缺省；出现时为字符串或 `null`。
 fn optional_string(value: &Value, field: &str) -> Result<Option<String>, String> {
     match value.get(field) {
         None => Ok(None),
@@ -414,10 +414,10 @@ fn local_error(value: &Value) -> Result<LocalError, String> {
             "turn_id_used" | "session_exists" | "binding_mismatch" | "settings_changed"
         )
     {
-        return Err(format!("unknown conflict reason `{reason}`"));
+        return Err(format!("未知的冲突原因 `{reason}`"));
     }
     if (kind == "conflict") != conflict.is_some() {
-        return Err("conflict reason must accompany exactly the conflict kind".into());
+        return Err("冲突原因字段必须且仅能与 `conflict` 错误类别同时出现".into());
     }
     Ok(LocalError {
         kind,
@@ -432,7 +432,7 @@ fn step_end(value: &Value) -> Result<StepEnd, String> {
         "stop" => StepEnd::Stop {
             cause: string(&value["cause"], "cause")?.into(),
         },
-        _ => return Err("unknown step end".into()),
+        _ => return Err("未知的步骤结束方式".into()),
     })
 }
 fn step_progress(value: &Value) -> Result<StepProgress, String> {
@@ -441,7 +441,7 @@ fn step_progress(value: &Value) -> Result<StepProgress, String> {
         "requesting" => StepProgress::Requesting,
         "executing" => StepProgress::Executing,
         "closed" => StepProgress::Closed(step_end(&value["end"])?),
-        _ => return Err("unknown step progress".into()),
+        _ => return Err("未知的步骤进度状态".into()),
     })
 }
 fn summary(value: &Value) -> Result<TurnSummary, String> {
@@ -450,7 +450,7 @@ fn summary(value: &Value) -> Result<TurnSummary, String> {
         "completed" => Outcome::Completed,
         "failed" => Outcome::Failed,
         "cancelled" => Outcome::Cancelled,
-        _ => return Err("invalid outcome".into()),
+        _ => return Err("无效的轮次结局".into()),
     };
     let notice = match (outcome, value.get("notice")) {
         (Outcome::Completed, Some(Value::Null)) => None,
@@ -462,28 +462,28 @@ fn summary(value: &Value) -> Result<TurnSummary, String> {
             };
             let level = string(notice, "level")?;
             if level != expected {
-                return Err("summary notice level differs from outcome".into());
+                return Err("摘要提示级别与轮次结局不一致".into());
             }
             let text = string(notice, "text")?;
             if text.is_empty() || text.chars().count() > 2048 {
-                return Err("invalid bounded notice".into());
+                return Err("摘要提示文本长度超出有效范围".into());
             }
             Some(Notice {
                 level: level.into(),
                 text: text.into(),
             })
         }
-        _ => return Err("invalid outcome or notice".into()),
+        _ => return Err("无效的轮次结局或提示字段".into()),
     };
     if let StepProgress::Closed(end) = &progress {
         let expected = match end {
             StepEnd::Finish => Outcome::Completed,
             StepEnd::Stop { cause } if cause == "cancelled" => Outcome::Cancelled,
             StepEnd::Stop { .. } => Outcome::Failed,
-            StepEnd::Continue => return Err("a Turn summary cannot end with continue".into()),
+            StepEnd::Continue => return Err("轮次摘要不能以 `continue` 结束".into()),
         };
         if expected != outcome {
-            return Err("summary differs from the last step conclusion".into());
+            return Err("轮次摘要与最后一步结论不一致".into());
         }
     }
     Ok(TurnSummary {
@@ -495,14 +495,14 @@ fn summary(value: &Value) -> Result<TurnSummary, String> {
 fn usage(value: &Value) -> Result<(), String> {
     if !value.is_null() {
         if !value.is_object() {
-            return Err("usage must be an object".into());
+            return Err("`usage` 必须为对象".into());
         }
         for key in ["input", "cache_read", "cache_write", "output", "reasoning"] {
             let field = value
                 .get(key)
-                .ok_or_else(|| format!("missing usage.{key}"))?;
+                .ok_or_else(|| format!("缺少 `usage.{key}`"))?;
             if !field.is_null() && field.as_u64().is_none() {
-                return Err(format!("invalid usage.{key}"));
+                return Err(format!("无效的 `usage.{key}`"));
             }
         }
     }
@@ -517,7 +517,7 @@ fn validate_replay_origin(origin: &Value) -> Result<(), String> {
             | "generate-content"
             | "interactions"
     ) {
-        return Err("unknown attempt protocol".into());
+        return Err("未知的尝试协议".into());
     }
     let provider = string(origin, "provider_id")?;
     if provider.is_empty()
@@ -527,7 +527,7 @@ fn validate_replay_origin(origin: &Value) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {
-        return Err("invalid attempt provider id".into());
+        return Err("无效的尝试 provider 标识".into());
     }
     Ok(())
 }
@@ -543,25 +543,25 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
     if let StepProgress::Closed(closed) = &progress
         && *closed != end
     {
-        return Err("closed step end differs from progress".into());
+        return Err("已关闭步骤的 `end` 与 `progress` 不一致".into());
     }
     let mut attempts = Vec::new();
     for attempt in array(value, "attempts")? {
         uint(attempt, "attempt")?;
         let origin = &attempt["origin"];
         validate_replay_origin(origin)?;
-        usage(attempt.get("usage").ok_or("missing usage")?)?;
+        usage(attempt.get("usage").ok_or("缺少 `usage` 字段")?)?;
         if !matches!(string(attempt, "usage_kind")?, "complete" | "partial") {
-            return Err("invalid usage_kind".into());
+            return Err("无效的 `usage_kind`".into());
         }
-        let cost = attempt.get("cost").ok_or("missing cost")?;
+        let cost = attempt.get("cost").ok_or("缺少 `cost` 字段")?;
         if !cost.is_null()
             && (!cost["usd"]
                 .as_f64()
                 .is_some_and(|value| value.is_finite() && value >= 0.0)
                 || !cost["exact"].is_boolean())
         {
-            return Err("invalid cost".into());
+            return Err("无效的 `cost`".into());
         }
         attempts.push(match string(&attempt["progress"], "progress")? {
             "sent" => AttemptState::Sent,
@@ -569,11 +569,11 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
                 if attempt["progress"]["end"]["end"] != attempt["end"]["end"]
                     || attempt["progress"]["end"]["cause"] != attempt["end"]["cause"]
                 {
-                    return Err("attempt progress/end mismatch".into());
+                    return Err("尝试的 `progress` 与 `end` 不一致".into());
                 }
                 AttemptState::Ended
             }
-            _ => return Err("unknown attempt progress".into()),
+            _ => return Err("未知的尝试进度状态".into()),
         });
         match string(&attempt["end"], "end")? {
             "completed" => {
@@ -584,12 +584,12 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
                 string(&attempt["end"]["cause"], "cause")?;
                 nullable_string(&attempt["end"], "diagnostic")?;
             }
-            _ => return Err("unknown attempt end".into()),
+            _ => return Err("未知的尝试结束方式".into()),
         }
         match attempt.get("retry_delay_ms") {
             Some(Value::Null) => {}
             Some(n) if n.as_u64().is_some() => {}
-            _ => return Err("retry_delay_ms must be null or integer".into()),
+            _ => return Err("`retry_delay_ms` 必须为 null 或无符号整数".into()),
         }
     }
     let mut slots = Vec::new();
@@ -598,20 +598,20 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
             "registered" => SlotState::Registered,
             "started" => SlotState::Started,
             "terminal" => SlotState::Terminal,
-            _ => return Err("unknown slot progress".into()),
+            _ => return Err("未知的槽位进度状态".into()),
         };
         let outcome = match string(slot, "outcome")? {
             "succeeded" => SlotOutcome::Succeeded,
             "failed" => SlotOutcome::Failed,
             "not_executed" => SlotOutcome::NotExecuted,
             "indeterminate" => SlotOutcome::Indeterminate,
-            _ => return Err("unknown slot outcome".into()),
+            _ => return Err("未知的槽位结局".into()),
         };
         let error_code = match &slot["reason"] {
             Value::Null => None,
             reason if reason["kind"] == "failed" => Some(string(&reason["value"], "code")?.into()),
             reason if reason["kind"] == "indeterminate" => None,
-            _ => return Err("unknown slot reason".into()),
+            _ => return Err("未知的槽位原因格式".into()),
         };
         slots.push(Slot {
             invocation_id: string(slot, "invocation_id")?.into(),
@@ -626,7 +626,7 @@ fn step_detail(value: &Value) -> Result<(Vec<AttemptState>, Vec<Slot>), String> 
 fn retry_notice(value: &Value) -> Result<RetryNotice, String> {
     let notice = &value["notice"];
     if string(notice, "level")? != "warn" {
-        return Err("retry notice must be warn".into());
+        return Err("重试提示级别必须为 `warn`".into());
     }
     Ok(RetryNotice {
         attempt: uint(value, "attempt")?,
@@ -645,7 +645,7 @@ fn message_segments(message: &Value) -> Result<Vec<Segment>, String> {
         } else if semantic.get("tool_call").is_some() {
             continue;
         } else {
-            return Err("unknown message part".into());
+            return Err("未知的消息片段类别".into());
         };
         segments.push(Segment {
             kind,
@@ -661,7 +661,7 @@ fn segment_list(value: &Value) -> Result<Vec<Segment>, String> {
             let kind = match string(segment, "kind")? {
                 "text" => SegmentKind::Text,
                 "reasoning" => SegmentKind::Reasoning,
-                _ => return Err("unknown text segment kind".into()),
+                _ => return Err("未知的文本流片段类别".into()),
             };
             Ok(Segment {
                 kind,
@@ -679,18 +679,18 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
     let turn_id = string(content, "turn_id")?.to_owned();
     let kind = string(value, "kind")?;
     if kind != string(content, "kind")? {
-        return Err("entry kind differs from its node".into());
+        return Err("条目外层 `kind` 与节点内容不一致".into());
     }
     let parsed = match kind {
         "user_message" => {
             for field in ["step", "retries", "summary"] {
                 if value.get(field).is_some() {
-                    return Err(format!("UserMessage entry must not carry `{field}`"));
+                    return Err(format!("用户消息条目不得携带 `{field}`"));
                 }
             }
             let ordinal = uint(value, "ordinal")?;
             if ordinal == 0 {
-                return Err("UserMessage ordinal counts from one".into());
+                return Err("用户消息序号必须从 1 起算".into());
             }
             let text = message_segments(&content["message"])?
                 .into_iter()
@@ -705,7 +705,7 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
         }
         "step" => {
             if value.get("ordinal").is_some() {
-                return Err("Step entry must not carry an ordinal".into());
+                return Err("`Step` 条目顶层不得携带 `ordinal`".into());
             }
             let ordinal = uint(content, "step_ordinal")?;
             let progress = step_progress(&content["progress"])?;
@@ -717,19 +717,19 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                     validate_replay_origin(origin)?;
                     let stored = array(content, "attempts")?
                         .last()
-                        .ok_or("reply requires a completed attempt")?;
+                        .ok_or("携带回复时必须存在已完成的尝试")?;
                     let detailed = array(&value["step"], "attempts")?
                         .last()
-                        .ok_or("reply requires attempt detail")?;
+                        .ok_or("携带回复时必须存在步骤尝试详情")?;
                     for attempt in [stored, detailed] {
                         if attempt["progress"]["progress"] != "ended"
                             || attempt["progress"]["end"]["end"] != "completed"
                         {
-                            return Err("reply requires a completed attempt".into());
+                            return Err("携带回复时必须存在已完成的尝试".into());
                         }
                     }
                     if origin != &stored["origin"] || origin != &detailed["origin"] {
-                        return Err("reply source differs from the completed attempt".into());
+                        return Err("回复来源与已完成尝试不一致".into());
                     }
                     message_segments(reply)?
                 }
@@ -742,7 +742,7 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                 || detail["progress"] != content["progress"]
                 || attempts.len() != stored_attempts
             {
-                return Err("step detail differs from the node".into());
+                return Err("步骤详情与节点内容不一致".into());
             }
             let retries = array(value, "retries")?
                 .iter()
@@ -754,14 +754,12 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                 Some(raw) if !continued => {
                     let summary = summary(raw)?;
                     if summary.progress != progress {
-                        return Err("summary progress differs from the step".into());
+                        return Err("轮次摘要进度与步骤进度不一致".into());
                     }
                     Some(summary)
                 }
                 _ => {
-                    return Err(
-                        "exactly the step not closed with continue carries the Turn summary".into(),
-                    );
+                    return Err("有且仅有不以 `continue` 关闭的步骤携带轮次摘要".into());
                 }
             };
             EntryContent::Step(StepEntry {
@@ -774,7 +772,7 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                 summary,
             })
         }
-        _ => return Err("entry content must be a user message or a step".into()),
+        _ => return Err("条目内容必须为用户消息或步骤".into()),
     };
     Ok(Entry {
         node,
@@ -786,17 +784,17 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
 }
 fn head(value: &Value) -> Result<Head, String> {
     if value.get("profile_default_effort").is_some() {
-        return Err("`profile_default_effort` has been removed from head".into());
+        return Err("会话头已移除 `profile_default_effort` 字段".into());
     }
     let position = uint(value, "position")?;
     let turn_id = nullable_string(value, "turn_id")?;
     if (position == 0) != turn_id.is_none() {
-        return Err("only the root position has no Turn".into());
+        return Err("有且仅有根位置不带 Turn".into());
     }
     let model = nullable_string(value, "model")?;
     let provider = nullable_string(value, "provider")?;
     if model.is_some() != provider.is_some() {
-        return Err("`model` and `provider` must be both strings or both null".into());
+        return Err("`model` 与 `provider` 必须同为字符串或同为 null".into());
     }
     let settings_version = string(value, "settings_version")?.to_owned();
     if settings_version.len() != 64
@@ -804,7 +802,7 @@ fn head(value: &Value) -> Result<Head, String> {
             .bytes()
             .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
     {
-        return Err("`settings_version` must be 64 lowercase hex chars".into());
+        return Err("`settings_version` 必须为 64 位小写十六进制字符".into());
     }
     Ok(Head {
         session_id: string(value, "session_id")?.into(),
@@ -819,7 +817,7 @@ fn head(value: &Value) -> Result<Head, String> {
         diagnostic: match value.get("diagnostic") {
             Some(Value::Null) => None,
             Some(error) => Some(local_error(error)?),
-            None => return Err("`diagnostic` must be present".into()),
+            None => return Err("必须存在 `diagnostic` 字段".into()),
         },
         path_replaced: boolean(value, "path_replaced")?,
     })
@@ -829,7 +827,7 @@ fn submit(value: &Value) -> Result<Submit, String> {
     Ok(match string(value, "stage")? {
         "sending" => {
             if value.get("new").is_some() {
-                return Err("`new` must not appear on sending record".into());
+                return Err("`sending` 记录不得包含 `new` 字段".into());
             }
             Submit::Sending {
                 turn_id,
@@ -842,7 +840,7 @@ fn submit(value: &Value) -> Result<Submit, String> {
                 "accepted" => {
                     let turn = &value["turn"];
                     if string(turn, "turn_id")? != turn_id {
-                        return Err("accepted Turn differs from the submitted identity".into());
+                        return Err("接受回执中的 `turn_id` 与提交身份不一致".into());
                     }
                     ReceiptResult::Accepted {
                         session_id: string(turn, "session_id")?.into(),
@@ -852,7 +850,7 @@ fn submit(value: &Value) -> Result<Submit, String> {
                 "rejected" => ReceiptResult::Rejected(local_error(&value["error"])?),
                 "not_accepted" => ReceiptResult::NotAccepted,
                 "unknown" => ReceiptResult::Unknown(optional_error(value, "error")?),
-                _ => return Err("unknown submit result".into()),
+                _ => return Err("未知的提交回执结果".into()),
             };
             Submit::Receipt(Receipt {
                 turn_id,
@@ -860,7 +858,7 @@ fn submit(value: &Value) -> Result<Submit, String> {
                 recovered,
             })
         }
-        _ => return Err("unknown submit stage".into()),
+        _ => return Err("未知的提交阶段".into()),
     })
 }
 fn cancel(value: &Value) -> Result<CancelRecord, String> {
@@ -868,10 +866,10 @@ fn cancel(value: &Value) -> Result<CancelRecord, String> {
     Ok(match nullable_string(value, "turn_id")? {
         None => {
             if string(value, "status")? != "none" {
-                return Err("nothing to cancel requires status none".into());
+                return Err("无可取消轮次时 `status` 必须为 `none`".into());
             }
             CancelRecord::NothingToCancel {
-                session_id: session_id.ok_or("nothing to cancel names the session")?,
+                session_id: session_id.ok_or("无可取消轮次的记录必须指明 `session_id`")?,
             }
         }
         Some(turn_id) => CancelRecord::Reply {
@@ -881,7 +879,7 @@ fn cancel(value: &Value) -> Result<CancelRecord, String> {
                 "taken" => CancelStatus::Taken,
                 "not_taken" => CancelStatus::NotTaken,
                 "unknown" => CancelStatus::Unknown,
-                _ => return Err("unknown cancel status".into()),
+                _ => return Err("未知的取消状态".into()),
             },
             owned: match value.get("owned") {
                 None | Some(Value::Null) => None,
@@ -896,9 +894,9 @@ fn configure(value: &Value) -> Result<ConfigureRecord, String> {
     let session_id = string(value, "session_id")?.to_owned();
     let result = match string(value, "result")? {
         "configured" => {
-            let head = head(value.get("head").ok_or("`head` must be present")?)?;
+            let head = head(value.get("head").ok_or("必须存在 `head` 字段")?)?;
             if head.session_id != session_id {
-                return Err("configured head session_id differs from configure record".into());
+                return Err("`configured` 会话头的 `session_id` 与外层记录不一致".into());
             }
             let adjustment = match value.get("adjustment") {
                 Some(Value::Null) => None,
@@ -906,7 +904,7 @@ fn configure(value: &Value) -> Result<ConfigureRecord, String> {
                     from: nullable_string(adj, "from")?,
                     to: nullable_string(adj, "to")?,
                 }),
-                None => return Err("`adjustment` must be present".into()),
+                None => return Err("必须存在 `adjustment` 字段".into()),
             };
             ConfigureResult::Configured {
                 head: Box::new(head),
@@ -915,12 +913,12 @@ fn configure(value: &Value) -> Result<ConfigureRecord, String> {
         }
         "rejected" => ConfigureResult::Rejected(local_error(&value["error"])?),
         "unknown" => ConfigureResult::Unknown(optional_error(value, "error")?),
-        _ => return Err("unknown configure result".into()),
+        _ => return Err("未知的配置结果".into()),
     };
     Ok(ConfigureRecord { session_id, result })
 }
 
-/// 解析一条 `--json` 记录，或 Local IPC `view` 消息的 `value`（同样以 `type` 为标签）。
+/// 解析一条 `--json` 记录，或本地 IPC `view` 消息的 `value`（同样以 `type` 为标签）。
 pub fn parse_record(value: &Value) -> Result<SendRecord, String> {
     let kind = string(value, "type")?;
     Ok(match kind {
@@ -929,7 +927,7 @@ pub fn parse_record(value: &Value) -> Result<SendRecord, String> {
         "cancel" => SendRecord::Cancel(cancel(value)?),
         "head" => SendRecord::Head(head(value)?),
         "entry" => {
-            // 条目本身不含传输标签；去掉 `type` 后与历史查询给出的 Entry 同形。
+            // 条目本身不含传输标签；去掉 `type` 后与历史查询给出的 `Entry` 同形。
             let mut entry = value.clone();
             entry.as_object_mut().map(|fields| fields.remove("type"));
             SendRecord::Entry(Box::new(parse_entry(&entry)?))
@@ -945,7 +943,7 @@ pub fn parse_record(value: &Value) -> Result<SendRecord, String> {
                 "eof" => ConnectionStatus::Eof,
                 "idle" => ConnectionStatus::Idle,
                 "error" => ConnectionStatus::Error,
-                _ => return Err("unknown connection status".into()),
+                _ => return Err("未知的连接状态".into()),
             },
             error: optional_error(value, "error")?,
         },
@@ -957,8 +955,8 @@ pub fn parse_record(value: &Value) -> Result<SendRecord, String> {
     })
 }
 
-/// 同一节点的新值只能延续旧值；同一个值重推允许。UserMessage 与已关闭的 Step 不再改变；
-/// 未关闭的 Step 阶段不回退，已写入的回复、已结束的尝试与已到终态的槽位原样保留，
+/// 同一节点的新值只能延续旧值；同一个值重推允许。`UserMessage` 与已关闭的 `Step` 不再改变；
+/// 未关闭的 `Step` 阶段不回退，已写入的回复、已结束的尝试与已到终态的槽位原样保留，
 /// 尚未结束的尝试与槽位只前进，重试提示只在末尾追加（会话合同“已写入的节点”）。
 fn continues(old: &Entry, new: &Entry) -> bool {
     if old.raw == new.raw {
@@ -999,7 +997,7 @@ fn continues(old: &Entry, new: &Entry) -> bool {
             })
 }
 
-/// 一次观察连接持有的视图：最新会话头、按 NodeId 覆盖的条目与各尝试的生成中文字。
+/// 一次观察连接持有的视图：最新会话头、按 `NodeId` 覆盖的条目与各尝试的生成中文字。
 /// 每条连接用新的 `ViewState`：文字偏移按这条连接已收到的字节计算。
 #[derive(Debug, Clone, Default)]
 pub struct ViewState {
@@ -1024,7 +1022,7 @@ impl ViewState {
                     && !continues(old, entry)
                 {
                     let node = entry.node;
-                    return Err(format!("node {node} does not continue its held value"));
+                    return Err(format!("节点 {node} 的新值未延续已持有的旧值"));
                 }
                 self.entries.insert(entry.node, (**entry).clone());
             }
@@ -1040,7 +1038,7 @@ impl ViewState {
                 let sent = held.iter().map(|segment| segment.text.len()).sum::<usize>() as u64;
                 if *offset != sent {
                     return Err(format!(
-                        "text for node {node} attempt {attempt} resumed at {offset} after {sent} bytes"
+                        "节点 {node} 尝试 {attempt} 的文本在已发 {sent} 字节后从偏移 {offset} 续接"
                     ));
                 }
                 for segment in segments {
@@ -1051,7 +1049,7 @@ impl ViewState {
         }
         Ok(())
     }
-    /// 条目按 NodeId 排列；同一 Session 路径上的节点按追加顺序编号，因此即路径顺序。
+    /// 条目按 `NodeId` 排列；同一 Session 路径上的节点按追加顺序编号，因此即路径顺序。
     pub fn raw_entries(&self) -> Vec<&Value> {
         self.entries.values().map(|entry| &entry.raw).collect()
     }
@@ -1065,11 +1063,11 @@ pub struct MalformedJsonLine {
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum SubmissionReceiptError {
-    #[error("expected exactly one sending record, got {actual}")]
+    #[error("预期恰好一条 sending 记录，实际收到 {actual} 条")]
     SendingCount { actual: usize },
-    #[error("expected exactly one submission receipt, got {actual}")]
+    #[error("预期恰好一条提交回执，实际收到 {actual} 条")]
     ReceiptCount { actual: usize },
-    #[error("submission receipt does not match the sending TurnId")]
+    #[error("提交回执与 sending 记录的 TurnId 不一致")]
     TurnIdMismatch,
 }
 #[derive(Debug, Clone, Default)]
@@ -1112,7 +1110,7 @@ impl std::ops::Deref for SendExecution {
 }
 impl SendOutcome {
     /// `sending` 之后这次提交（可选经过一条 `configure`）以一条 `rejected` 回执结束、
-    /// 没有别的记录时，回执中的 LocalError。
+    /// 没有别的记录时，回执中的 `LocalError`。
     pub fn rejection(&self) -> Option<&LocalError> {
         match &self.records[..] {
             [
@@ -1135,7 +1133,7 @@ impl SendOutcome {
             _ => None,
         }
     }
-    /// 第一条 `submit`（发出请求前）写明的 TurnId 与 SessionId。
+    /// 第一条 `submit`（发出请求前）写明的 `TurnId` 与 `SessionId`。
     pub fn sending(&self) -> Option<(&str, &str)> {
         self.records.iter().find_map(|record| match record {
             SendRecord::Submit(Submit::Sending {
@@ -1187,7 +1185,7 @@ impl SendOutcome {
             _ => None,
         })
     }
-    /// 按 `node` 覆盖后的条目，按 NodeId 即路径顺序排列。
+    /// 按 `node` 覆盖后的条目，按 `NodeId` 即路径顺序排列。
     pub fn entries(&self) -> Vec<&Entry> {
         latest_entries(&self.records).into_values().collect()
     }
@@ -1199,7 +1197,7 @@ impl SendOutcome {
         }
         Ok(view)
     }
-    /// SessionId、TurnId、三态结局；本轮结束后才有。
+    /// `SessionId`、`TurnId`、三态结局；本轮结束后才有。
     pub fn closed_result(&self) -> Option<(&str, &str, &str)> {
         closed_result(&self.records).map(|(sid, tid, outcome)| (sid, tid, outcome.as_str()))
     }
@@ -1207,7 +1205,7 @@ impl SendOutcome {
         self.closed_result()
             .is_some_and(|(_, _, outcome)| outcome == "completed")
     }
-    /// 本轮各 Step 条目最新值中的回复正文，按路径顺序连接。
+    /// 本轮各 `Step` 条目最新值中的回复正文，按路径顺序连接。
     pub fn reply_text(&self) -> String {
         self.entries()
             .into_iter()
@@ -1217,7 +1215,7 @@ impl SendOutcome {
             .map(|segment| segment.text.as_str())
             .collect()
     }
-    /// 本轮各 Step 条目最新值中的调用槽位，按路径与槽位顺序。
+    /// 本轮各 `Step` 条目最新值中的调用槽位，按路径与槽位顺序。
     pub fn slots(&self) -> Vec<&Slot> {
         self.entries()
             .into_iter()
@@ -1242,7 +1240,7 @@ fn latest_entries(records: &[SendRecord]) -> BTreeMap<u64, &Entry> {
     }
     entries
 }
-/// 这一轮结束：最后一步的 `progress` 为 Closed，或未关闭且最新会话头说明这一轮没有 Owner。
+/// 这一轮结束：最后一步的 `progress` 为 `Closed`，或未关闭且最新会话头说明这一轮没有 Owner。
 fn closed_result(records: &[SendRecord]) -> Option<(&str, &str, Outcome)> {
     let last = latest_entries(records)
         .into_values()
@@ -1273,7 +1271,7 @@ fn usage_error(error: &LocalError) -> bool {
     )
 }
 /// 按记录推导退出码：先核对观察错误和已输出的回执，再使用持久结局。
-/// 身份生成前的使用错误退出 2；进入流式观察后的 error 记录一律退出 1。
+/// 身份生成前的使用错误退出 `2`；进入流式观察后的 `error` 记录一律退出 `1`。
 /// 进程退出、干预、EOF、回执规则和畸形行仍必须另外核验。
 pub fn derive_send_exit_code(records: &[SendRecord]) -> SendExitCode {
     let error = records.iter().rev().find_map(|record| match record {
@@ -1334,8 +1332,8 @@ pub fn derive_send_exit_code(records: &[SendRecord]) -> SendExitCode {
         _ => SendExitCode::Failed,
     }
 }
-/// 仅用于 JSON 模式的 send/run/follow 输出；正常退出的提交必须交付唯一回执。
-/// `exit_code` 为 None 表示进程未正常退出，允许保留缺少回执的部分输出。
+/// 仅用于 JSON 模式的 `send`/`run`/`follow` 输出；正常退出的提交必须交付唯一回执。
+/// `exit_code` 为 `None` 表示进程未正常退出，允许保留缺少回执的部分输出。
 pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
     let mut result = SendOutcome {
         exit_code: SendExitCode::from_code(exit_code),
@@ -1359,7 +1357,7 @@ pub fn parse_send_stdout(stdout: &[u8], exit_code: Option<i32>) -> SendOutcome {
             }),
         }
     }
-    // 返回违规而非 panic，让场景先保存命令证据，再判定失败。
+    // 返回违规而非触发 panic，让场景先保存命令证据，再判定失败。
     if exit_code.is_some() {
         result.receipt_error = submission_receipt_error(&result.records);
     }
@@ -1446,11 +1444,11 @@ impl<'a> SessionSendDriver<'a> {
             && let Some(id) = parsed.accepted_session_id()
         {
             if let Some(previous) = self.session_id() {
-                assert_eq!(previous, id, "accepted Session changed");
+                assert_eq!(previous, id, "已接受的会话标识发生变化");
             } else {
                 self.session_id
                     .set(id.to_owned())
-                    .expect("single scenario driver writer");
+                    .expect("单场景发送驱动只应初始化一次会话标识");
             }
         }
         SendExecution { command, parsed }

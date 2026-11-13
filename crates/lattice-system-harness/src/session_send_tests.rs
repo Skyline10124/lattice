@@ -23,7 +23,7 @@ fn user(node: u64, ordinal: u64) -> Value {
         "turn_id":"t","accepted_at":"2026-10-16T00:00:00Z","agent_name":"reader","model":"m","provider":"p",
         "limits":{},"config_digest":"00","message":{"role":"user","parts":[{"semantic":{"text":{"text":"hi"}},"replay_state":null}]}}})
 }
-/// Step 条目；`summary` 为 None 时不带该字段。
+/// `Step` 条目；`summary` 为 `None` 时不带该字段。
 fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply: &str) -> Value {
     let end = match &progress["end"] {
         Value::Null => json!({"end":"stop","cause":{"cause":"process_exit"}}),
@@ -199,7 +199,7 @@ fn exit_code_follows_the_latest_value_of_the_last_step() {
             0,
             Some("completed"),
         ),
-        // 结局按 node 覆盖后的最新值计算，同一条目重复推送不改变结果。
+        // 结局按 `node` 覆盖后的最新值计算，同一条目重复推送不改变结果。
         (
             "repeated_final_entry",
             with(vec![done.clone(), done.clone()]),
@@ -352,7 +352,7 @@ fn summaries_are_checked_and_only_the_last_step_carries_one() {
     bad.push(mislabeled);
     for value in bad {
         let parsed = parse(&[sending(), accepted(), head(true), user(1, 1), value.clone()]);
-        assert_eq!(parsed.malformed_lines.len(), 1, "accepted {value}");
+        assert_eq!(parsed.malformed_lines.len(), 1, "不应接受畸形记录 {value}");
         assert_ne!(derive_send_exit_code(&parsed.records).as_i32(), 0);
     }
 }
@@ -530,32 +530,32 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         assert!(parse_record(&metered).is_ok(), "{metered}");
     }
     for (field, value, error) in [
-        ("usage_kind", json!("unknown"), "invalid usage_kind"),
-        ("cost", json!({"usd":-1.0,"exact":true}), "invalid cost"),
-        ("cost", json!({"usd":0.0,"exact":"yes"}), "invalid cost"),
+        ("usage_kind", json!("unknown"), "无效的 `usage_kind`"),
+        ("cost", json!({"usd":-1.0,"exact":true}), "无效的 `cost`"),
+        ("cost", json!({"usd":0.0,"exact":"yes"}), "无效的 `cost`"),
     ] {
         let mut invalid = base.clone();
         invalid["step"]["attempts"][0][field] = value;
         assert_eq!(parse_record(&invalid).unwrap_err(), error);
     }
     let invalid_origins = [
-        (json!(null), "`protocol` must be a string"),
-        (json!("open_ai_compatible"), "`protocol` must be a string"),
+        (json!(null), "字段 `protocol` 必须为字符串"),
+        (json!("open_ai_compatible"), "字段 `protocol` 必须为字符串"),
         (
             json!({"provider_id":"primary"}),
-            "`protocol` must be a string",
+            "字段 `protocol` 必须为字符串",
         ),
         (
             json!({"protocol":"chat-completions"}),
-            "`provider_id` must be a string",
+            "字段 `provider_id` 必须为字符串",
         ),
         (
             json!({"protocol":"unknown","provider_id":"primary"}),
-            "unknown attempt protocol",
+            "未知的尝试协议",
         ),
         (
             json!({"protocol":"chat-completions","provider_id":"Bad_id"}),
-            "invalid attempt provider id",
+            "无效的尝试 provider 标识",
         ),
     ];
     let mut without_reply = step(
@@ -593,7 +593,7 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         invalid["content"]["reply"]["provider_origin"] = origin;
         assert_eq!(
             parse_record(&invalid).unwrap_err(),
-            "reply source differs from the completed attempt"
+            "回复来源与已完成尝试不一致"
         );
     }
     for progress in [
@@ -609,15 +609,15 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
             }
             assert_eq!(
                 parse_record(&invalid).unwrap_err(),
-                "reply requires a completed attempt",
+                "携带回复时必须存在已完成的尝试",
                 "{location}: {progress}"
             );
         }
     }
     let parsed = |value: &Value| parse_record(value).unwrap();
-    // 记录去掉 `type` 后就是历史查询给出的同一个 Entry。
+    // 记录去掉 `type` 后就是历史查询给出的同一个 `Entry`。
     let SendRecord::Entry(entry) = parsed(&base) else {
-        panic!("entry record");
+        panic!("预期解析为条目记录");
     };
     let mut stored = base.clone();
     stored.as_object_mut().unwrap().remove("type");
@@ -648,13 +648,10 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
 #[test]
 fn receipt_violations_preserve_command_evidence() {
     for (records, reason) in [
-        (
-            vec![sending()],
-            "expected exactly one submission receipt, got 0",
-        ),
+        (vec![sending()], "预期恰好一条提交回执，实际收到 0 条"),
         (
             vec![sending(), accepted(), accepted()],
-            "expected exactly one submission receipt, got 2",
+            "预期恰好一条提交回执，实际收到 2 条",
         ),
     ] {
         let stdout = records
@@ -845,7 +842,7 @@ fn configure_records_head_settings_version_and_settings_changed_conflict_parse()
         Some("settings_changed")
     );
 
-    // model 与 provider 必须同时为字符串或同时为 null。
+    // `model` 与 `provider` 必须同时为字符串或同时为 `null`。
     let mut half_model = draft_head;
     half_model["type"] = json!("head");
     half_model["model"] = json!("m");
