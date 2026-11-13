@@ -539,25 +539,35 @@ fn settle_killed_residuals(
     }
 }
 
-/// 回收已确认退出的未回收组首领，并按组内是否仍有存活确认成员迁移到 `Reaped` 或 `ReapedResiduals`。
+/// 检查与成员捕获成功后才回收组首领；失败时保留 `Unreaped`，供后续清理继续持有整组归属。
 fn reap_exited_leader(
-    mut owned: UnreapedDaemon,
+    state: &mut DaemonState,
     inspect: &mut impl FnMut(u32) -> Result<Vec<u32>, CleanupError>,
-) -> Result<(CommandOutcome, DaemonState), DriverError> {
-    if let Ok(pids) = inspect(owned.pgid) {
-        let _ = refresh_unreaped_members(&mut owned, &pids);
-    }
+) -> Result<CommandOutcome, DriverError> {
+    let DaemonState::Unreaped(owned) = state else {
+        unreachable!("只回收未回收态的组首领")
+    };
+    let pids =
+        inspect(owned.pgid).map_err(|error| std::io::Error::new(error.kind, error.message))?;
+    refresh_unreaped_members(owned, &pids)?;
+    let DaemonState::Unreaped(mut owned) = std::mem::replace(state, DaemonState::Idle) else {
+        unreachable!()
+    };
     let pgid = owned.pgid;
     let leader_pid = owned.child.pid();
-    let outcome = owned.child.reap_exited(ProcessGroupCleanup::default())?;
+    let stderr = owned.child.stderr_snapshot();
+    let outcome = owned.child.reap_exited(ProcessGroupCleanup::default());
     owned.members.retain(|m| m.pid != leader_pid);
-    let next_state = reaped_or_residuals(
+    // 输出收集失败也不能丢掉已确认的存活后代。
+    *state = reaped_or_residuals(
         pgid,
-        Some(outcome.clone()),
-        outcome.stderr.clone(),
+        outcome.as_ref().ok().cloned(),
+        outcome
+            .as_ref()
+            .map_or(stderr, |outcome| outcome.stderr.clone()),
         owned.members,
     );
-    Ok((outcome, next_state))
+    outcome
 }
 
 fn reap_unreaped_state(
@@ -566,16 +576,12 @@ fn reap_unreaped_state(
     context: &str,
     errors: &mut Vec<String>,
 ) {
-    let DaemonState::Unreaped(owned) = std::mem::replace(state, DaemonState::Idle) else {
-        return;
-    };
-    match reap_exited_leader(owned, inspect) {
-        Ok((_, next_state)) => *state = next_state,
-        Err(error) => errors.push(format!("{context}: {error}")),
+    if let Err(error) = reap_exited_leader(state, inspect) {
+        errors.push(format!("{context}: {error}"));
     }
 }
 
-/// 强制终止尚未回收的自有后台：仅在回收组首领前（且检查无误时）可向数值 `pgid` 发 `SIGKILL`，
+/// 强制终止尚未回收的自有后台：仅在回收组首领前可向数值 `pgid` 发 `SIGKILL`，
 /// 同时经 `pidfd` 终止并等待已确认成员退出，随后回收组首领并在宽限期内收尾残留后代。
 fn force_clean_unreaped(
     mut owned: UnreapedDaemon,
@@ -613,7 +619,7 @@ fn force_clean_unreaped(
         }
         Err(error) => {
             report.errors.push(format!(
-                "强制清理前检查后台进程组失败: pgid={pgid} {}；仅经已持有 pidfd 终止并回收确定自有的进程，无法确认其余同组成员",
+                "强制清理前检查后台进程组失败: pgid={pgid} {}；无法确认其余同组成员，仍在回收自有组首领前向整组发送 SIGKILL",
                 error.message
             ));
             cleanup.errors.push(error);
@@ -621,8 +627,9 @@ fn force_clean_unreaped(
         }
     };
 
-    if inspected_ok
-        && let Err(error) = signal_process_group(pgid, libc::SIGKILL)
+    // 直接子进程尚未回收，数值 pgid 仍由它占用；扫描失败不会撤销这份归属。
+    // 先终止整组，才能覆盖就绪后派生、尚未进入 pidfd 缓存的后代。
+    if let Err(error) = signal_process_group(pgid, libc::SIGKILL)
         && error.raw_os_error() != Some(libc::ESRCH)
     {
         report.errors.push(format!(
@@ -1064,17 +1071,18 @@ impl ScenarioDaemon {
                                 + deadline
                                     .saturating_duration_since(Instant::now())
                                     .clamp(REAP_GRACE, Duration::from_secs(1));
-                            let (outcome, next_state) = if matches!(
+                            let outcome = if matches!(
                                 startup_owned.leader.wait_exited(Some(reap_until)),
                                 Ok(true)
                             ) {
-                                reap_exited_leader(startup_owned, &mut processes_in_pgid)?
+                                *guard = DaemonState::Unreaped(startup_owned);
+                                reap_exited_leader(&mut guard, &mut processes_in_pgid)?
                             } else {
                                 let r =
                                     force_clean_unreaped(startup_owned, &mut processes_in_pgid)?;
-                                (r.reaped_outcome.expect("已回收未回收态后台"), r.next_state)
+                                *guard = r.next_state;
+                                r.reaped_outcome.expect("已回收未回收态后台")
                             };
-                            *guard = next_state;
                             return Err(unowned_ready_error(
                                 Some(listener_pid),
                                 child_pid,
@@ -1128,8 +1136,8 @@ impl ScenarioDaemon {
         }
 
         if leader_exited || startup_owned.leader.has_exited().unwrap_or(false) {
-            let (outcome, next_state) = reap_exited_leader(startup_owned, &mut processes_in_pgid)?;
-            *guard = next_state;
+            *guard = DaemonState::Unreaped(startup_owned);
+            let outcome = reap_exited_leader(&mut guard, &mut processes_in_pgid)?;
             return Err(classify_startup_exit(
                 &self.state_root,
                 &api_sock,
@@ -1250,28 +1258,25 @@ impl ScenarioDaemon {
             DaemonState::Unreaped(owned) => {
                 let deadline = timeout.map(|limit| Instant::now() + limit);
                 let exited = owned.leader.wait_exited(deadline)?;
+                if exited {
+                    return Ok(reap_exited_leader(&mut guard, &mut processes_in_pgid)?);
+                }
                 let DaemonState::Unreaped(mut owned) =
                     std::mem::replace(&mut *guard, DaemonState::Idle)
                 else {
                     unreachable!()
                 };
-                if exited {
-                    let (outcome, next_state) = reap_exited_leader(owned, &mut processes_in_pgid)?;
-                    *guard = next_state;
-                    Ok(outcome)
-                } else {
-                    if let Some(limit) = timeout {
-                        owned
-                            .child
-                            .record_intervention(HarnessIntervention::TimedOut(limit));
-                    }
-                    let report = force_clean_unreaped(owned, &mut processes_in_pgid)?;
-                    *guard = report.next_state;
-                    if let Some(error) = report.pidfd_error {
-                        return Err(DaemonError::Io(error));
-                    }
-                    Ok(report.reaped_outcome.expect("已回收未回收态后台"))
+                if let Some(limit) = timeout {
+                    owned
+                        .child
+                        .record_intervention(HarnessIntervention::TimedOut(limit));
                 }
+                let report = force_clean_unreaped(owned, &mut processes_in_pgid)?;
+                *guard = report.next_state;
+                if let Some(error) = report.pidfd_error {
+                    return Err(DaemonError::Io(error));
+                }
+                Ok(report.reaped_outcome.expect("已回收未回收态后台"))
             }
         }
     }
@@ -1990,6 +1995,58 @@ mod tests {
             wait_group_empty(pgid).is_empty(),
             "清理后自有进程组不应残留任何成员"
         );
+    }
+
+    #[test]
+    fn failed_reap_inspection_preserves_late_descendants_for_cleanup_and_drop() {
+        for explicit_cleanup in [false, true] {
+            let (fixture, daemon, pgid) = DirectFakeDaemon::spawn_into(false);
+            // 就绪时可能只登记了组首领，后续派生的同组后代尚未被查询捕获。
+            {
+                let mut state = daemon.state.lock().expect("自有后台锁");
+                let DaemonState::Unreaped(owned) = &mut *state else {
+                    unreachable!()
+                };
+                owned.members.retain(|member| member.pid == pgid);
+            }
+            fixture.trigger_leader_exit(pgid);
+            let mut fail_scan = |_| {
+                Err(CleanupError {
+                    operation: CleanupOperation::InspectProcessGroup(
+                        ProcessInspectionOperation::ReadProc,
+                    ),
+                    kind: std::io::ErrorKind::PermissionDenied,
+                    raw_os_error: Some(libc::EACCES),
+                    message: "回收前模拟进程组扫描失败".into(),
+                })
+            };
+            let mut errors = Vec::new();
+            let retained_child = {
+                let mut state = daemon.state.lock().expect("自有后台锁");
+                reap_unreaped_state(&mut state, &mut fail_scan, "回收失败", &mut errors);
+                matches!(*state, DaemonState::Unreaped(_))
+            };
+            // 显式清理继续模拟扫描故障；另一分支由恢复扫描后的 Drop 清理。
+            let cleanup = explicit_cleanup
+                .then(|| daemon.cleanup_with_inspection(Instant::now(), &mut fail_scan));
+            drop(daemon);
+            // 先观察清理结果，再让 fixture 的兜底 Drop 运行，避免兜底掩盖泄漏。
+            let survivors = wait_group_empty(pgid);
+            assert!(
+                survivors.is_empty(),
+                "扫描失败后不得遗漏未缓存的同组后代（显式清理={explicit_cleanup}）: {survivors:?}"
+            );
+            assert!(retained_child, "扫描失败时必须保留未回收的首进程句柄");
+            assert!(
+                errors
+                    .iter()
+                    .any(|error| error.contains("回收前模拟进程组扫描失败")),
+                "必须报告原始扫描错误: {errors:?}"
+            );
+            if let Some(cleanup) = cleanup {
+                assert!(cleanup.is_err(), "后代被强制清理时不得报告干净停止");
+            }
+        }
     }
 
     #[test]
