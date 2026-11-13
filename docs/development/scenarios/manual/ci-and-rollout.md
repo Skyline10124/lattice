@@ -34,7 +34,7 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 | 结果 | 含义与下一步 |
 | --- | --- |
 | `docs-check` 通过 | 输出通过文件数；失败逐行报缺失项 |
-| `xtask ci` 输出 `All checks passed.` | 两轮验证与带 feature 的 clippy 全部通过（第二轮用带 `test-fake-tools,test-crash-barriers` 的构建覆盖 `target/debug/lattice`）；单 crate 超 `LATTICE_TEST_TIMEOUT_SECS`（默认 `300` 秒，`CARGO_BUILD_JOBS=4`）时回收进程组终止 |
+| `xtask ci` 输出 `All checks passed.` | 两轮验证与带 feature 的 clippy 全部通过（第二轮用带 `lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 的构建覆盖 `target/debug/lattice`）；单 crate 超 `LATTICE_TEST_TIMEOUT_SECS`（默认 `300` 秒，`CARGO_BUILD_JOBS=4`）时回收进程组终止 |
 
 门禁差异（三处均执行两轮验证与测试 feature 的 clippy，见[门禁](../../validation-guide.md#门禁)）：
 

@@ -15,7 +15,7 @@ pub struct TuiMockArgs {
     scenario: String,
 }
 
-/// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，被测二进制须带 `test-fake-tools`。
+/// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，被测二进制须开启 `lattice-server/test-fake-tools`。
 fn build_args() -> [&'static str; 7] {
     [
         "build",
@@ -24,7 +24,7 @@ fn build_args() -> [&'static str; 7] {
         "--bin",
         "lattice",
         "--features",
-        "test-fake-tools",
+        "lattice-server/test-fake-tools",
     ]
 }
 

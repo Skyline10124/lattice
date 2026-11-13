@@ -66,6 +66,7 @@ pub const CLOSURE_RULES: &[NormalClosureRule] = &[
             "lattice-llm",
             "lattice-profile",
             "lattice-agent",
+            "lattice-im",
         ],
     },
     NormalClosureRule {
@@ -75,6 +76,7 @@ pub const CLOSURE_RULES: &[NormalClosureRule] = &[
             "lattice-llm",
             "lattice-profile",
             "lattice-agent",
+            "lattice-im",
         ],
     },
 ];
@@ -1223,6 +1225,50 @@ mod tests {
         assert!(
             err.to_string().contains("悬空节点"),
             "报错应指出悬空节点：{err}"
+        );
+    }
+
+    #[test]
+    fn closure_rule_lattice_tui_rejects_lattice_im() {
+        // `lattice-im` 尚未建包；断开 `lattice-tui -> lattice-local`，单独验证 `lattice-tui` 闭包规则拒绝 `lattice-im`。
+        let metadata = build_graph_metadata(
+            &["lattice-tui", "lattice-local", "lattice-im"],
+            &["im-bridge"],
+            &[
+                ("lattice-tui", "im-bridge", &[None]),
+                ("im-bridge", "lattice-im", &[None]),
+            ],
+            true,
+        );
+        let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
+        assert_eq!(
+            hits,
+            vec![
+                "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-tui -> im-bridge -> lattice-im"
+            ],
+            "`lattice-tui` 的普通依赖闭包规则应单独检出可达 `lattice-im` 的路径，实际：{hits:?}"
+        );
+    }
+
+    #[test]
+    fn closure_rule_lattice_local_rejects_lattice_im() {
+        // 断开 `lattice-tui -> lattice-local`，单独验证 `lattice-local` 闭包规则拒绝 `lattice-im`。
+        let metadata = build_graph_metadata(
+            &["lattice-tui", "lattice-local", "lattice-im"],
+            &["im-bridge"],
+            &[
+                ("lattice-local", "im-bridge", &[None]),
+                ("im-bridge", "lattice-im", &[None]),
+            ],
+            true,
+        );
+        let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
+        assert_eq!(
+            hits,
+            vec![
+                "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-local -> im-bridge -> lattice-im"
+            ],
+            "`lattice-local` 的普通依赖闭包规则应单独检出可达 `lattice-im` 的路径，实际：{hits:?}"
         );
     }
 }

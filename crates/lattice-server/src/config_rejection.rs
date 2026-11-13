@@ -8,7 +8,7 @@ use std::fmt;
 pub struct ConfigRejection(String);
 
 impl ConfigRejection {
-    pub fn new(message: &str, auth: Option<&lattice_llm::auth::AuthStore>) -> Self {
+    pub(crate) fn new(message: &str, auth: Option<&lattice_llm::auth::AuthStore>) -> Self {
         let reason = auth
             .and_then(|auth| {
                 auth.with_credential_values(|known| crate::redact::redact(message, known))

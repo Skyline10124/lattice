@@ -1,25 +1,25 @@
 # lattice-server 工作指引
 
-提供 `SessionApi`、本地后台服务入口 `local::serve`、`TurnCoordinator` 与 `ToolExecutor` 接缝，跨领域协调会话库、请求网关、profile 与工具执行器，被 `lattice-cli` 的 `daemon serve` 调用。
+提供本地后台宿主入口（`serve`、`ServeExit`、`DrainOutcome`、`InstanceLock`），内部跨领域协调会话库、请求网关、profile、模型元数据与工具执行器，被 `lattice-cli` 的 `daemon serve` 调用。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs`、`src/root.rs`、`src/models.rs` | 后台公开接口重导出、后台规范工作区根路径解析 `resolve_local_workspace_root` 与 IPC 模型展示类型重导出 |
-| `src/session.rs` | `SessionApi` 会话列表、树形日志、退回、历史、用量、详情读取与 `SessionId` 精确/前缀解析 |
+| `src/lib.rs`、`src/root.rs` | 根模块生产公开面四项重导出（`serve`、`ServeExit`、`DrainOutcome`、`InstanceLock`）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
+| `src/session.rs` | 内部会话库异步门面 `SessionApi`（`spawn_blocking` 封装、写异常上报、`SessionId` 精确/前缀解析与 `usage` 查询；类型本身与 `from_store` 仅在 `test` 或 `test-utils` 下对外导出） |
 | `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
 | `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写与关闭重开、以及排空超时停写终态（`disable_writes`） |
-| `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地后台控制面导出（`serve`、`InstanceLock`、`ServeExit`、`DrainOutcome`）、模块内部类型别名与 `InstanceLock` 实例锁句柄及 socket 绑定/残留核验/清理（分帧、目录权限与对端 UID 核验委托 `lattice-ipc`） |
+| `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地后台宿主入口与不透明 `InstanceLock` 重导出、模块内部类型别名，以及基于 `rustix::fs::flock` 的实例锁持有与 socket 绑定/残留核验/清理（分帧、目录权限与对端 UID 核验委托 `lattice-ipc`） |
 | `src/local/error.rs`、`src/local/presentation.rs` | `ApiError` 到 `LocalError` 的分类与安全存储诊断映射；后台边界 `lattice-llm` 与 `lattice-ipc` 模型查询、模型候选及凭据状态的逐字段无通配符转换，以及测试中 `Availability::diagnostic` 的逐变体配对对照 |
-| `src/local/server.rs` | `serve` 实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与草稿清理（`cleanup_drafts`）、提交准入、视图推送、`Owner` 独立监督，以及信号与 IPC `stop` 共用的有界停机顺序（返回 `ServeExit`） |
+| `src/local/server.rs` | `serve`（及测试入口 `serve_for_test`）实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与草稿清理（`cleanup_drafts`）、提交准入、基于 `rustix::net::recv`（`PEEK \| DONTWAIT`）的连接存活探测、视图推送、`Owner` 独立监督，以及信号与 IPC `stop` 共用的有界停机顺序（返回 `ServeExit`） |
 | `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令存储调用、错误映射，以及后台同连接 SIWC 登录交换（登录成功帧经 `presentation` 转换 `ProviderAuthStatus`，授权链接以 `AuthKey` 发送） |
 | `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
-| `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、生产后台接线 `start_turn` 及 `test-utils` 复用的 `run_turn` |
+| `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、后台生产执行入口 `start_execution`、测试入口 `start_turn` 及仅限内部单元测试（`#[cfg(test)]`）的 `run_turn` |
 | `src/turn/coordinator.rs`、`src/turn/saga.rs` | 全 Turn `SessionExecutionLock` 持有、`spawn_blocking` 存储适配、模型重试、顺序调用分发及 Step/Turn 关闭 |
-| `src/turn/tools.rs` | `ToolExecutor` / `TurnTools` / `ToolSpec` / `ToolOutcome` 工具执行接缝、生产默认注入 `NoTools`，以及 `test-fake-tools` feature 下的假执行器 `FakeToolExecutor`（按后台启动环境 `LATTICE_TEST_TOOLS` 启用） |
+| `src/turn/tools.rs` | `ToolExecutor` / `TurnTools` / `ToolSpec` / `ToolOutcome` 工具执行接缝、生产默认注入私有 `NoTools`，以及 `test-fake-tools` feature 下的假执行器 `FakeToolExecutor`（按后台启动环境 `LATTICE_TEST_TOOLS` 启用） |
 | `src/turn/observer.rs` | 当前尝试的生成中文字段列表，以及各观察者待推节点与文字游标 |
-| `src/turn/crash_barrier.rs` | `test-crash-barriers` feature 控制的提交后停点、基于 Step/槽位标识的 marker 写入与观察调度插桩 |
+| `src/turn/crash_barrier.rs` | `test-crash-barriers` feature 控制的提交后停点（经 `rustix::process::kill_process` 发送 `Signal::STOP`）、基于 Step/槽位标识的 marker 写入与观察调度插桩 |
 
 ## 先读
 
@@ -34,7 +34,8 @@
 
 ## 约束
 
-- `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 禁止引入 `lattice-local`（仅允许在 `dev-dependencies` 中用于后台与客户端端到端协议测试），由 `cargo xtask crate-boundary` 检查。
+- 内部子模块全部私有；生产公开面仅由根模块导出 `serve`、`ServeExit`、`DrainOutcome`、`InstanceLock`（不透明句柄，内部字段私有）四项，不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；仅供集成测试复用的 `serve_for_test`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
+- `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 禁止引入 `lattice-local`（仅允许在 `dev-dependencies` 中用于后台与客户端端到端协议测试），由 `cargo xtask crate-boundary` 检查；系统调用统一经 `rustix` 完成并直接以 `std::io::Error::from(errno)` 转换错误，不引入直接 `libc` 依赖。
 - `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的模型驱动与工具分发路径；阻塞式会话库访问放入 `spawn_blocking`，写事务内不等待模型、工具执行器或网络。
 - `submit` 只接受新请求，找回统一走按 `TurnId` 查询；`observer.rs` 为每个观察者维护最新待推条目与文字游标并以非阻塞通知解耦观察背压、实时排空与持久提交；Step 重试提示与 `TurnSummary` notice 按[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)生成，接受与观察交接见[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)与[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。
 - `local/server.rs` 的 `configure(New)` 在请求处理完毕并尝试写回响应后（无论请求成功或被拒、响应写出成功或失败）触发受后台监督的草稿会话清理，并在准入锁边界与 `watch` 观察者登记串行，见[会话状态与草稿清理](../../docs/architecture/session/concurrency.md#会话状态与草稿清理)；`serve_with_backend` 作为唯一的停机执行点处理信号与 IPC `stop`、单次持锁排空判定、超时停写、尾段连接服务与收尾及阻塞线程最终释放（最终释放与撤下 socket 共用第 6 步期限，经 `ServeExit` 把实例锁与该期限交给进程入口），见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
@@ -49,7 +50,7 @@
 
 | 改动 | 运行 |
 | --- | --- |
-| 任何改动 | `cargo test -p lattice-server` 与 `cargo test -p lattice-server --features test-fake-tools,test-crash-barriers`（含提交、取消交接、视图切点、库级故障、执行者消失、假工具执行及 `tests/session_without_workspace_history.rs`） |
+| 任何改动 | `cargo test -p lattice-server` 与 `cargo test -p lattice-server --features test-utils,test-fake-tools,test-crash-barriers`（含提交、取消交接、视图切点、库级故障、执行者消失、假工具执行及 `tests/session_without_workspace_history.rs`） |
 | 修改 `Cargo.toml` 依赖 | `cargo xtask crate-boundary` |
 | 修改 Turn 协调、流消费或工具接线 | `cargo test -p lattice-agent`、`cargo test -p lattice-session` |
 | 联动修改 `lattice-ipc` 请求、响应、登录帧或展示类型 | `env -u LATTICE_UPDATE_WIRE_SHAPE cargo test -p lattice-ipc wire_shape`（见 [`crates/lattice-ipc/AGENTS.md`](../lattice-ipc/AGENTS.md)） |

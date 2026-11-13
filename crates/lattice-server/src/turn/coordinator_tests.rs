@@ -20,9 +20,9 @@ fn iid(n: u64) -> InvocationId {
 fn input() -> AcceptTurn {
     let config = FrozenTurnConfig {
         effort: None,
-        agent_name: crate::AgentName::parse("alpha").unwrap(),
-        model: crate::ModelId::parse("model").unwrap(),
-        provider: crate::ProviderId::parse("openai").unwrap(),
+        agent_name: lattice_session::AgentName::parse("alpha").unwrap(),
+        model: lattice_conversation::ModelId::parse("model").unwrap(),
+        provider: lattice_conversation::ProviderId::parse("openai").unwrap(),
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(vec![ToolCatalogEntry {
             name: "observe__workspace".into(),
@@ -32,7 +32,7 @@ fn input() -> AcceptTurn {
         }])
         .unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: crate::TurnTimeout::default(),
+            timeout_secs: lattice_session::TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 3,
         },
@@ -59,7 +59,7 @@ async fn seed_and_accept(io: &CoordinatorStoreIo, mut accepted: AcceptTurn) -> A
 fn origin() -> AttemptOrigin {
     AttemptOrigin {
         protocol: AttemptProtocol::ChatCompletions,
-        provider_id: crate::ProviderId::parse("openai").unwrap(),
+        provider_id: lattice_conversation::ProviderId::parse("openai").unwrap(),
     }
 }
 fn reply(turn_id: TurnId) -> CompleteReply {
@@ -77,7 +77,7 @@ fn reply(turn_id: TurnId) -> CompleteReply {
             MessageRole::Assistant,
             Some(lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
-                provider_id: crate::ProviderId::parse("openai").unwrap(),
+                provider_id: lattice_conversation::ProviderId::parse("openai").unwrap(),
             }),
             vec![
                 MessagePart::semantic_only(MessageSemantic::Text {
@@ -428,7 +428,8 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         .unwrap();
     let mut accepted = input();
     accepted.project_path = key;
-    accepted.config.provider = crate::ProviderId::parse("openai-compatible").unwrap();
+    accepted.config.provider =
+        lattice_conversation::ProviderId::parse("openai-compatible").unwrap();
     accepted.config.system_prompt = Some("冻结提示".into());
     accepted.config.catalog = ToolCatalogSnapshot::new(
         tools
@@ -455,7 +456,8 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
             model: crate::turn::saga::ModelExecution::Injected {
                 driver: Arc::new(ModelStepDriver::new(llm.clone())),
                 origin: AttemptOrigin {
-                    provider_id: crate::ProviderId::parse("openai-compatible").unwrap(),
+                    provider_id: lattice_conversation::ProviderId::parse("openai-compatible")
+                        .unwrap(),
                     protocol: AttemptProtocol::ChatCompletions,
                 },
             },
@@ -590,7 +592,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
             ])
             .build(),
     );
-    let alpha = crate::AgentName::parse("alpha").unwrap();
+    let alpha = lattice_session::AgentName::parse("alpha").unwrap();
     let loaded_profile =
         lattice_profile::load_agent_profile(&alpha, &paths, crate::local::ipc::uid()).unwrap();
     let workspace = crate::root::LocalWorkspaceRoot::from_path(project.path()).unwrap();
@@ -743,7 +745,7 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
         model: crate::turn::saga::ModelExecution::Injected {
             driver: Arc::new(ModelStepDriver::new(llm.clone())),
             origin: AttemptOrigin {
-                provider_id: crate::ProviderId::parse("openai").unwrap(),
+                provider_id: lattice_conversation::ProviderId::parse("openai").unwrap(),
                 protocol: AttemptProtocol::ChatCompletions,
             },
         },
@@ -1344,7 +1346,7 @@ mod fake_tools_tests {
         );
         let fixture_dl = setup_fixture(llm_deadline, &[]);
         fixture_dl.update_settings(|s| {
-            s.profile.timeout_secs = crate::TurnTimeout::new(1).unwrap();
+            s.profile.timeout_secs = lattice_session::TurnTimeout::new(1).unwrap();
         });
         let mut req_dl = fixture_dl.request.clone();
         req_dl.tools = Some(executor);

@@ -29,7 +29,7 @@ fn profile_rejections_preserve_diagnostics_and_redact_secrets() {
     };
     let path = paths.project_agents_dir().join("test/agent.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let test_agent = crate::AgentName::parse("test").unwrap();
+    let test_agent = lattice_session::AgentName::parse("test").unwrap();
     let uid = crate::local::ipc::uid();
     let prefix = format!("schema_version=1\n[agent]\nname='test'\nmodel='local/{SENTINEL}'\n");
     let cases = [
@@ -135,7 +135,7 @@ fn toml_locations_keep_parser_message_without_source_excerpt() {
     };
     let path = paths.project_agents_dir().join("test/agent.toml");
     std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-    let test_agent = crate::AgentName::parse("test").unwrap();
+    let test_agent = lattice_session::AgentName::parse("test").unwrap();
     let uid = crate::local::ipc::uid();
     for source in [
         format!("# 中文\r\nschema_version = @{SENTINEL}\r\n"),
@@ -249,8 +249,8 @@ fn named_profile_validation_shows_redacted_declared_name() {
         <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
     )
     .unwrap();
-    let selected = crate::AgentName::parse("selected").unwrap();
-    let missing = crate::AgentName::parse("missing").unwrap();
+    let selected = lattice_session::AgentName::parse("selected").unwrap();
+    let missing = lattice_session::AgentName::parse("missing").unwrap();
     let result = LocalError::from(
         crate::profile::load_for_turn(&selected, &root, &configuration_dir).unwrap_err(),
     );

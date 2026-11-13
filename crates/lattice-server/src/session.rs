@@ -6,7 +6,7 @@ use lattice_conversation::SessionId;
 use lattice_session::store::{SessionRead, SessionRecord, SessionStore, SessionUsage, StoreError};
 use std::sync::Arc;
 
-pub use lattice_ipc::RequestConflict;
+pub(crate) use lattice_ipc::RequestConflict;
 
 #[derive(Clone, Debug, thiserror::Error)]
 pub enum ApiError {
@@ -15,7 +15,7 @@ pub enum ApiError {
     #[error("bad request: {0}")]
     BadRequest(String),
     #[error("{0}")]
-    Configuration(crate::ConfigRejection),
+    Configuration(crate::config_rejection::ConfigRejection),
     #[error("conflict: {0}")]
     Conflict(RequestConflict),
     #[error("internal error: {0}")]
@@ -56,7 +56,7 @@ impl ApiError {
             StoreError::CommitFailed { .. } | StoreError::CreationDurabilityUnknown { .. }))
     }
 }
-pub type Result<T> = std::result::Result<T, ApiError>;
+pub(crate) type Result<T> = std::result::Result<T, ApiError>;
 
 #[derive(Clone)]
 pub struct SessionApi {
@@ -133,7 +133,7 @@ impl SessionApi {
     }
 
     /// 整个读事务在阻塞线程内完成，只返回已物化数据。
-    pub async fn read<T: Send + 'static>(
+    pub(crate) async fn read<T: Send + 'static>(
         &self,
         operation: impl FnOnce(&SessionRead) -> lattice_session::store::Result<T> + Send + 'static,
     ) -> Result<T> {
@@ -141,12 +141,15 @@ impl SessionApi {
             .await
     }
 
-    pub async fn resolve_session(&self, prefix: String) -> Result<SessionRecord> {
+    pub async fn resolve_session(
+        &self,
+        prefix: String,
+    ) -> std::result::Result<SessionRecord, ApiError> {
         self.blocking(move |api| resolve_session(&api.store.begin_read()?, &prefix))
             .await
     }
 
-    pub async fn usage(&self, prefix: String) -> Result<SessionUsage> {
+    pub async fn usage(&self, prefix: String) -> std::result::Result<SessionUsage, ApiError> {
         self.blocking(move |api| {
             let read = api.store.begin_read()?;
             let id = resolve_session_id(&read, &prefix)?;

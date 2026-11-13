@@ -1,6 +1,6 @@
 # lattice-cli 工作指引
 
-维护 `lattice` 二进制入口、命令行解析、文本与 JSONL 渲染及退出码，客户端命令与日志初始化全部经 `lattice-local` 与 `lattice-tui` 完成，仅 `daemon serve` 子命令经 `lattice_server::local::serve` 托管本地后台。
+维护 `lattice` 二进制入口、命令行解析、文本与 JSONL 渲染及退出码，客户端命令与日志初始化全部经 `lattice-local` 与 `lattice-tui` 完成，仅 `daemon serve` 子命令经 `lattice_server::{serve, ServeExit, DrainOutcome}` 托管本地后台。
 
 ## 模块
 
@@ -27,7 +27,7 @@
 
 ## 约束
 
-- CLI 客户端命令只依赖 `lattice-local`（不直接引入 `lattice-session` 或后台内部类型），保持配置与环境读取中立，把会话、凭据与模型操作经 `lattice_local::LocalClient` 交给后台执行；仅 `daemon serve` 入口调用 `lattice_server::local::serve`，见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)与[Crate 职责与依赖边界](../../docs/architecture/crates.md)。
+- CLI 客户端命令只依赖 `lattice-local`（不直接引入 `lattice-session` 或后台内部类型），保持配置与环境读取中立，把会话、凭据与模型操作经 `lattice_local::LocalClient` 交给后台执行；仅 `daemon serve` 入口调用 `lattice_server::{serve, ServeExit, DrainOutcome}`。`Cargo.toml` 不定义测试转发 feature，构建带假工具或崩溃屏障的被测二进制时显式传入 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers`（或 `--features lattice-server/test-fake-tools`），见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)、[Crate 职责与依赖边界](../../docs/architecture/crates.md)与[测试工程](../../docs/development/testing.md)。
 - 前端对工作区只读取 `std::env::current_dir()` 原样发送（`workspace_override` 原样透传），不在前端做 `canonicalize`；`current_dir()` 失败时在前端按 `Internal` 固定文案报错并以 `1` 退出，规范路径校验统一交由后台处理。
 - API key 只从无回显终端或标准输入读取，并在命令行解析错误处做脱敏拦截；SIWC 登录只输出授权 URL 与最终结果，使敏感材料隔离于命令行参数、日志、错误与标准输出，见[凭据命令](../../docs/architecture/llm/credentials.md#凭据命令)。
 - `--model` 与 `--effort` 在前端只校验 `<provider>/<model>` 与档位名语法；提交前先生成并输出请求身份（新会话同时生成 `SessionId`），新建会话或显式传入 `--agent`、`--model`、`--effort` 时先调用 `configure` 再发出 `submit`，找回与历史读取统一走后台公开只读查询，见[会话设置](../../docs/architecture/session/settings.md#会话设置)与[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)。

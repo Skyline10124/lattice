@@ -175,7 +175,7 @@ fn run_daemon_serve(
         result
     });
     match outcome {
-        Ok(lattice_server::local::ServeExit {
+        Ok(lattice_server::ServeExit {
             drain,
             failure,
             instance,
@@ -186,8 +186,8 @@ fn run_daemon_serve(
                 commands::run::report_daemon_failure(&error);
             }
             let code = match drain {
-                lattice_server::local::DrainOutcome::TimedOut => 4,
-                lattice_server::local::DrainOutcome::Completed => {
+                lattice_server::DrainOutcome::TimedOut => 4,
+                lattice_server::DrainOutcome::Completed => {
                     if has_failure {
                         1
                     } else {

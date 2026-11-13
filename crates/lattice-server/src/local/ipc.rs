@@ -2,14 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::types::{LocalError, LocalErrorKind, Result};
+use rustix::fs::{FlockOperation, OFlags};
 use std::{
     fs::{self, File, OpenOptions},
-    os::{
-        fd::AsRawFd,
-        unix::{
-            fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
-            net::UnixListener,
-        },
+    os::unix::{
+        fs::{DirBuilderExt, FileTypeExt, MetadataExt, OpenOptionsExt, PermissionsExt},
+        net::UnixListener,
     },
     path::{Path, PathBuf},
 };
@@ -54,7 +52,7 @@ pub(super) struct Instance {
 }
 
 impl Instance {
-    pub(super) fn bind(layout: &crate::StateLayout) -> Result<(Self, UnixListener)> {
+    pub(super) fn bind(layout: &lattice_session::StateLayout) -> Result<(Self, UnixListener)> {
         if !layout.lattice_root().is_absolute() {
             return Err(permission());
         }
@@ -77,15 +75,15 @@ impl Instance {
             .read(true)
             .write(true)
             .mode(0o600)
-            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
             .open(directory.join("owner.lock"))?;
         let meta = lock.metadata()?;
         if meta.uid() != uid() {
             return Err(permission());
         }
         // 持有文件描述符直至后台宿主退出；不按 PID、mtime 或客户端连接数释放或抢占。
-        if unsafe { libc::flock(lock.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
-            let error = std::io::Error::last_os_error();
+        if let Err(errno) = rustix::fs::flock(&lock, FlockOperation::NonBlockingLockExclusive) {
+            let error = std::io::Error::from(errno);
             return Err(if error.kind() == std::io::ErrorKind::WouldBlock {
                 LocalError::new(
                     LocalErrorKind::AlreadyRunning,

@@ -6,7 +6,9 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use lattice_conversation::SessionId;
-use lattice_session::store::{SettingsVersion, TurnDetail, TurnSummary, UsageSummary};
+use lattice_session::store::{SettingsVersion, TurnDetail};
+#[cfg(test)]
+use lattice_session::store::{TurnSummary, UsageSummary};
 
 /// 执行核心的冻结输入；会话设置由会话库持有，请求配置与凭据由后台网关读取。
 #[derive(Clone)]
@@ -41,8 +43,9 @@ impl RunTurnRequest {
     }
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct RunTurnResult {
+pub(crate) struct RunTurnResult {
     pub turn: TurnRef,
     pub summary: TurnSummary,
     pub usage: UsageSummary,
@@ -51,17 +54,10 @@ pub struct RunTurnResult {
 
 /// 所有终结事件仅来自已经提交的关闭事实。
 ///
-/// Serializes with `#[serde(tag = "type", rename_all = "snake_case")]`, so
-/// each variant produces JSON of the form `{"type": "snake_case_name", ...}`.
-/// Unit variants serialize as `{"type": "snake_case_name"}`.
-///
-/// The vocabulary covers turn lifecycle (`TurnStarted`, terminal events,
-/// commit events), per-request model activity (`ModelStarted`,
-/// `ModelFinished`), incremental deltas (`TokenDelta`, `ReasoningDelta`),
-/// and tool execution (`ToolCallStarted`, `ToolCallFinished`).
+/// 按 `#[serde(tag = "type", rename_all = "snake_case")]` 序列化为 `{"type": "...", ...}`。
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
-pub enum TurnEvent {
+pub(crate) enum TurnEvent {
     TurnStarted {
         turn: TurnRef,
         user_node: lattice_session::store::NodeId,
@@ -126,10 +122,10 @@ pub enum TurnEvent {
     },
 }
 
-pub use lattice_ipc::{TextSegment, TurnRef};
+pub(crate) use lattice_ipc::{TextSegment, TurnRef};
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
-pub struct AttemptSegments {
+pub(crate) struct AttemptSegments {
     pub key: lattice_conversation::ModelAttemptKey,
     pub segments: Vec<TextSegment>,
 }
@@ -151,7 +147,12 @@ pub enum TurnCompletion {
 }
 
 pub struct TurnExecution {
-    pub acceptance: tokio::sync::oneshot::Receiver<crate::session::Result<TurnAcceptance>>,
-    pub completion: tokio::sync::oneshot::Receiver<crate::session::Result<TurnCompletion>>,
+    pub acceptance: tokio::sync::oneshot::Receiver<
+        std::result::Result<TurnAcceptance, crate::session::ApiError>,
+    >,
+    pub completion: tokio::sync::oneshot::Receiver<
+        std::result::Result<TurnCompletion, crate::session::ApiError>,
+    >,
+    #[cfg(any(test, feature = "test-utils"))]
     pub cancel_flag: Arc<AtomicBool>,
 }

@@ -116,7 +116,7 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
 /// 经真实本地 socket 与 `LocalClient::auth_login` 建立登录连接，并在接管后立即释放监听与锁。
 async fn open_login() -> (LocalAuthLogin, UnixStream) {
     let directory = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(directory.path());
+    let layout = lattice_session::StateLayout::in_state_root(directory.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = tokio::net::UnixListener::from_std(listener).unwrap();
     let client = LocalClient::new(layout);

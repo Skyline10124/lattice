@@ -17,14 +17,14 @@ async fn backend() -> (
     tokio::task::JoinHandle<()>,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(dir.path());
+    let layout = StateLayout::in_state_root(dir.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     let listener = UnixListener::from_std(listener).unwrap();
     let backend = Backend::with_tls_roots(
         layout.clone(),
         Some(dir.path().into()),
         vec![include_bytes!("test_root.der").to_vec()],
-        Arc::new(crate::NoTools),
+        Arc::new(crate::turn::NoTools),
     );
     let server = backend.clone();
     let task = tokio::spawn(async move {

@@ -20,12 +20,12 @@ async fn model_query_fetches_only_a_missing_signed_in_account_catalog_and_preser
             "expires_at":(chrono::Utc::now() + chrono::TimeDelta::hours(1)).to_rfc3339(),"scopes":["chatgpt.tokens.use.direct"]}
     }}}).to_string()).unwrap();
     std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600)).unwrap();
-    let layout = crate::StateLayout::in_state_root(home.path());
+    let layout = StateLayout::in_state_root(home.path());
     let mut backend = Backend::with_tls_roots(
         layout,
         Some(home.path().into()),
         vec![],
-        Arc::new(crate::NoTools),
+        Arc::new(crate::turn::NoTools),
     );
     let gateway = backend.gateway.as_ref().unwrap().clone();
     let calls = Arc::new(AtomicUsize::new(0));

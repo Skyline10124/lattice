@@ -64,7 +64,7 @@ async fn credential_cleanup_preserves_each_remote_revocation_result() {
     let config = home.path().join(".lattice");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let layout = crate::StateLayout::in_state_root(home.path());
+    let layout = lattice_session::StateLayout::in_state_root(home.path());
     let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
     let backend_home = home.path().to_path_buf();
     let backend_layout = layout.clone();
@@ -128,7 +128,7 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
             json!(["off", "minimal", "low", "medium", "high", "xhigh", "max"])
         };
         // 未配置与配置无效的模型随列表一并返回各自 availability。
-        let expected: crate::ModelCandidates = serde_json::from_value(json!({
+        let expected: lattice_ipc::ModelCandidates = serde_json::from_value(json!({
             "models":[{"provider":"local", "model":"org/model", "name":null, "context":null,
                 "output":null, "cost":null,
                 "availability":{"status":"unconfigured", "requirement":"api_key"},
@@ -144,13 +144,13 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
         assert_eq!(expected.models[0].model, "org/model");
         assert_eq!(
             expected.models[0].availability,
-            crate::Availability::Unconfigured {
-                requirement: crate::ConfigurationRequirement::ApiKey
+            Availability::Unconfigured {
+                requirement: ConfigurationRequirement::ApiKey
             }
         );
         assert_eq!(
             expected.models[1].availability,
-            crate::Availability::Invalid {
+            Availability::Invalid {
                 reason: "invalid effort".into()
             }
         );
@@ -192,7 +192,7 @@ async fn models_queries_preserve_exact_targets_capabilities_warnings_and_errors(
     let config = home.path().join(".lattice");
     std::fs::create_dir_all(&config).unwrap();
     std::fs::set_permissions(&config, std::fs::Permissions::from_mode(0o700)).unwrap();
-    let layout = crate::StateLayout::in_state_root(home.path());
+    let layout = lattice_session::StateLayout::in_state_root(home.path());
     let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
     let backend_home = home.path().to_path_buf();
     let backend_layout = layout.clone();
@@ -247,7 +247,7 @@ struct Wire {
 impl Peer {
     fn new() -> Self {
         let directory = tempfile::tempdir().unwrap();
-        let layout = crate::StateLayout::in_state_root(directory.path());
+        let layout = lattice_session::StateLayout::in_state_root(directory.path());
         let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
         Self {
             _directory: directory,
@@ -1056,7 +1056,7 @@ fn user_entry(id: TurnId) -> Box<ConversationEntry> {
             model: ModelId::parse("test").unwrap(),
             provider: ProviderId::parse("openai-compatible").unwrap(),
             limits: lattice_session::store::TurnExecutionLimits {
-                timeout_secs: crate::TurnTimeout::default(),
+                timeout_secs: lattice_session::TurnTimeout::default(),
                 max_model_steps: 32,
                 max_model_attempts: 2,
             },
@@ -1659,7 +1659,7 @@ async fn status_against(
 ) -> LocalError {
     within(async {
         let directory = tempfile::tempdir().unwrap();
-        let layout = crate::StateLayout::in_state_root(directory.path());
+        let layout = lattice_session::StateLayout::in_state_root(directory.path());
         let (_instance, listener) = ipc::Instance::bind(&layout).unwrap();
         let listener = UnixListener::from_std(listener).unwrap();
         let server = tokio::spawn(async move {

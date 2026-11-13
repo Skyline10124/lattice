@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 
 use lattice_session::ProjectPath;
 
-use crate::session::{ApiError, Result};
+use crate::session::ApiError;
 
 /// 已显式解析并规范化的本地工作区根目录。
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -19,17 +19,8 @@ pub struct LocalWorkspaceRoot {
 }
 
 impl LocalWorkspaceRoot {
-    /// Resolve the current Local Workspace root from the process working
-    /// directory (the production resolution).
-    pub fn resolve() -> Result<Self> {
-        let cwd = std::env::current_dir().map_err(|source| {
-            ApiError::Internal(format!("cannot read process working directory: {source}"))
-        })?;
-        Self::from_path(&cwd)
-    }
-
-    /// Resolve from an explicit path (tests, embedders).
-    pub fn from_path(path: &Path) -> Result<Self> {
+    /// 解析并规范化显式传入的工作区根路径。
+    pub fn from_path(path: &Path) -> std::result::Result<Self, ApiError> {
         let canonical = std::fs::canonicalize(path).map_err(|source| {
             ApiError::BadRequest(format!(
                 "cannot canonicalize workspace root '{}': {source}",
@@ -41,7 +32,7 @@ impl LocalWorkspaceRoot {
         Ok(Self { canonical })
     }
 
-    /// The canonical root path.
+    /// 已规范化的工作区根路径。
     pub fn canonical_path(&self) -> &Path {
         &self.canonical
     }
@@ -50,9 +41,4 @@ impl LocalWorkspaceRoot {
     pub fn project_path(&self) -> ProjectPath {
         ProjectPath::from_path(&self.canonical).expect("已校验的规范项目路径")
     }
-}
-
-/// Resolve the current Local Workspace root (see [`LocalWorkspaceRoot`]).
-pub fn resolve_local_workspace_root() -> Result<LocalWorkspaceRoot> {
-    LocalWorkspaceRoot::resolve()
 }

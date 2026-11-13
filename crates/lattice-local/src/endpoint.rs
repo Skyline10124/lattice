@@ -5,10 +5,7 @@
 
 use std::{
     fs::{self, OpenOptions},
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::PathBuf,
     time::Duration,
 };
@@ -18,6 +15,7 @@ use lattice_ipc::{
     ipc::{check_dir, check_peer, permission, uid},
 };
 use lattice_store::StateLayout;
+use rustix::fs::{FlockOperation, OFlags};
 use tokio::net::UnixStream;
 
 /// 不创建运行资源的客户端寻址；使用规范路径，避免同一 STATE_ROOT 的锁别名。
@@ -85,22 +83,23 @@ impl Departure {
             let lock = endpoint(&layout)?.with_file_name("owner.lock");
             let file = match OpenOptions::new()
                 .read(true)
-                .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+                .custom_flags((OFlags::NOFOLLOW | OFlags::CLOEXEC).bits() as i32)
                 .open(lock)
             {
                 Ok(file) => file,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(true),
                 Err(error) => return Err(error.into()),
             };
-            // SAFETY: flock 只作用于本函数打开的 fd；关闭 fd 即释放试探取得的锁。
-            if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_SH | libc::LOCK_NB) } == 0 {
-                return Ok(true);
-            }
-            let error = std::io::Error::last_os_error();
-            if error.kind() == std::io::ErrorKind::WouldBlock {
-                Ok(false)
-            } else {
-                Err(error.into())
+            match rustix::fs::flock(&file, FlockOperation::NonBlockingLockShared) {
+                Ok(()) => Ok(true),
+                Err(errno) => {
+                    let error = std::io::Error::from(errno);
+                    if error.kind() == std::io::ErrorKind::WouldBlock {
+                        Ok(false)
+                    } else {
+                        Err(error.into())
+                    }
+                }
             }
         })
         .await

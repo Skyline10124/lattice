@@ -63,9 +63,9 @@ impl PreparedModel {
 pub(crate) fn require_settings_model(
     settings: &SessionSettings,
     auth: Option<&lattice_llm::auth::AuthStore>,
-) -> Result<crate::ModelRef> {
+) -> Result<lattice_conversation::ModelRef> {
     settings.model.clone().ok_or_else(|| {
-        ApiError::Configuration(crate::ConfigRejection::new(
+        ApiError::Configuration(crate::config_rejection::ConfigRejection::new(
             "session has no model selected; choose one with /model or --model",
             auth,
         ))
@@ -77,10 +77,13 @@ fn prepare_rejection(
     auth: Option<&lattice_llm::auth::AuthStore>,
 ) -> ApiError {
     let message = crate::configure::EffortSource::SessionSettings.format_unsupported(error);
-    ApiError::Configuration(crate::ConfigRejection::new(&message, auth))
+    ApiError::Configuration(crate::config_rejection::ConfigRejection::new(
+        &message, auth,
+    ))
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
+#[cfg(any(test, feature = "test-utils"))]
 pub fn start_turn(
     session: SessionApi,
     turn_id: TurnId,
@@ -101,11 +104,14 @@ pub fn start_turn(
 }
 
 pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
+    #[cfg(any(test, feature = "test-utils"))]
     let cancel_flag = input
         .request
         .cancel_flag
         .get_or_insert_with(Arc::default)
         .clone();
+    #[cfg(not(any(test, feature = "test-utils")))]
+    let _ = input.request.cancel_flag.get_or_insert_with(Arc::default);
     let (accepted, acceptance) = oneshot::channel();
     let (completed, completion) = oneshot::channel();
     tokio::spawn(async move {
@@ -135,6 +141,7 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
     TurnExecution {
         acceptance,
         completion,
+        #[cfg(any(test, feature = "test-utils"))]
         cancel_flag,
     }
 }
@@ -357,8 +364,8 @@ async fn execute_owned(
     Ok(TurnCompletion::Closed(Box::new(detail)))
 }
 
-#[cfg(any(test, feature = "test-utils"))]
-pub async fn run_turn(
+#[cfg(test)]
+pub(crate) async fn run_turn(
     session: SessionApi,
     workspace: LocalWorkspaceRoot,
     request: RunTurnRequest,
@@ -387,18 +394,19 @@ pub async fn run_turn(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lattice_conversation::Effort::Off;
+    use lattice_conversation::{Effort::Off, ModelRef};
+    use lattice_session::{AgentName, RetryPolicy, TurnTimeout};
 
     #[test]
     fn admission_requires_model_and_attributes_unsupported_effort_to_session_settings() {
         let modeless = SessionSettings {
             profile: EffectiveProfile {
-                agent_name: crate::AgentName::parse("test").unwrap(),
+                agent_name: AgentName::parse("test").unwrap(),
                 description: None,
                 default_model: None,
                 default_effort: None,
-                timeout_secs: crate::TurnTimeout::default(),
-                retry: crate::RetryPolicy::default(),
+                timeout_secs: TurnTimeout::default(),
+                retry: RetryPolicy::default(),
             },
             system_prompt: None,
             model: None,
@@ -415,7 +423,7 @@ mod tests {
         );
 
         let unsupported = lattice_llm::PrepareError::UnsupportedEffort {
-            model: crate::ModelRef::parse("openai/gpt-5").unwrap(),
+            model: ModelRef::parse("openai/gpt-5").unwrap(),
             effort: Off,
         };
         let ApiError::Configuration(rejection) = prepare_rejection(&unsupported, None) else {

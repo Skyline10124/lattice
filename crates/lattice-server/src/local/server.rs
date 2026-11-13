@@ -2,11 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::{ipc, types::*};
-use crate::turn::{
-    coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
-    observer::ObserverSink,
+use crate::{
+    config_rejection::ConfigRejection,
+    root::LocalWorkspaceRoot,
+    session::{ApiError, SessionApi},
+    turn::{
+        RunTurnRequest, ToolExecutor, TurnAcceptance, TurnCompletion,
+        coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
+        observer::ObserverSink,
+    },
 };
 use futures::FutureExt;
+use lattice_session::{AgentName, StateLayout};
 use std::{
     collections::HashMap,
     sync::{
@@ -86,8 +93,8 @@ struct Owner {
     observer: ObserverLease,
     execution_cancel: Arc<AtomicBool>,
     started: AtomicBool,
-    core: Mutex<Option<oneshot::Receiver<crate::session::Result<crate::TurnCompletion>>>>,
-    store: Mutex<Option<crate::SessionApi>>,
+    core: Mutex<Option<oneshot::Receiver<crate::session::Result<TurnCompletion>>>>,
+    store: Mutex<Option<SessionApi>>,
     operation: Arc<OperationRecord>,
 }
 impl Owner {
@@ -128,11 +135,11 @@ impl Admission {
 }
 struct Backend {
     #[cfg(test)]
-    layout: crate::StateLayout,
+    layout: StateLayout,
     home: Option<std::path::PathBuf>,
-    gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
+    gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, ConfigRejection>,
     metadata: Arc<super::metadata::MetadataRefresh>,
-    tools: Arc<dyn crate::ToolExecutor>,
+    tools: Arc<dyn ToolExecutor>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -229,7 +236,7 @@ impl Backend {
         self.gateway
             .as_ref()
             .map(|gateway| gateway.chatgpt_auth())
-            .map_err(|error| crate::ApiError::Configuration(error.clone()).into())
+            .map_err(|error| ApiError::Configuration(error.clone()).into())
     }
 
     fn begin_stop(&self) {
@@ -290,27 +297,27 @@ impl Backend {
     }
 
     fn with_tools(
-        layout: crate::StateLayout,
+        layout: StateLayout,
         home: Option<std::path::PathBuf>,
-        tools: Arc<dyn crate::ToolExecutor>,
+        tools: Arc<dyn ToolExecutor>,
     ) -> Arc<Self> {
         Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der(), tools)
     }
 
     fn with_tls_roots(
-        layout: crate::StateLayout,
+        layout: StateLayout,
         home: Option<std::path::PathBuf>,
         roots: Vec<Vec<u8>>,
-        tools: Arc<dyn crate::ToolExecutor>,
+        tools: Arc<dyn ToolExecutor>,
     ) -> Arc<Self> {
         let directory = super::auth::directory(home.as_deref())
-            .map_err(|error| crate::ConfigRejection::new(&error.message, None));
+            .map_err(|error| ConfigRejection::new(&error.message, None));
         let gateway = directory.clone().and_then(|directory| {
             let auth = lattice_llm::auth::AuthStore::new(directory.clone());
             // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
             lattice_llm::RequestGateway::new(directory, roots)
                 .map(Arc::new)
-                .map_err(|error| crate::ConfigRejection::new(&error.to_string(), Some(&auth)))
+                .map_err(|error| ConfigRejection::new(&error.to_string(), Some(&auth)))
         });
         let stores = crate::stores::StoreManager::new(layout.clone());
         Arc::new(Self {
@@ -460,13 +467,13 @@ impl Backend {
                     Err(crate::turn::coordinator::CoordinatorIoError::Store(
                         lattice_session::store::StoreError::Busy { .. },
                     )) => return Ok(()),
-                    Err(error) => return Err(crate::ApiError::from(error)),
+                    Err(error) => return Err(ApiError::from(error)),
                 };
                 owner.started.store(true, Ordering::Release);
                 io.delete_draft(cutoff)
                     .await
                     .map(|_| ())
-                    .map_err(crate::ApiError::from)
+                    .map_err(ApiError::from)
             })
             .catch_unwind()
             .await;
@@ -514,10 +521,10 @@ impl Backend {
             }
         }
     }
-    async fn open(&self) -> Result<crate::SessionApi> {
+    async fn open(&self) -> Result<SessionApi> {
         self.stores.acquire(false).await.map_err(Into::into)
     }
-    async fn optional_store(&self) -> Result<Option<crate::SessionApi>> {
+    async fn optional_store(&self) -> Result<Option<SessionApi>> {
         let mut changed = self.stores.subscribe();
         loop {
             changed.borrow_and_update();
@@ -618,7 +625,7 @@ impl Backend {
                     .map_err(|_| LocalError::recovery(RecoveryCause::WorkerFailed))
                     .and_then(|r| r.map_err(Into::into))
                 {
-                    Ok(crate::TurnCompletion::Closed(_)) => {}
+                    Ok(TurnCompletion::Closed(_)) => {}
                     Err(error) => result = Err(error),
                 }
             }
@@ -684,12 +691,12 @@ impl Backend {
                 }
                 let io = CoordinatorStoreIo::acquire_api(api, session_id)
                     .await
-                    .map_err(crate::ApiError::from)?;
+                    .map_err(ApiError::from)?;
                 owner.started.store(true, Ordering::Release);
                 let record = TurnCoordinator::new(io, Arc::new(RandomIdSource))
                     .rewind(target, root.project_path())
                     .await
-                    .map_err(crate::ApiError::from)?;
+                    .map_err(ApiError::from)?;
                 #[cfg(test)]
                 tests::pause(&self.gates.rewind_committed).await;
                 owner.observer.replace_path(target);
@@ -717,7 +724,7 @@ impl Backend {
         let is_new = matches!(request.session, ConfigureSession::New(_));
 
         enum BaseSource {
-            Agent(crate::AgentName),
+            Agent(AgentName),
             Current(lattice_session::store::SessionSettings),
         }
 
@@ -738,7 +745,7 @@ impl Backend {
                     Some(api) => Some(
                         CoordinatorStoreIo::acquire_api(api.clone(), sid)
                             .await
-                            .map_err(crate::ApiError::from)?,
+                            .map_err(ApiError::from)?,
                     ),
                     None => None,
                 };
@@ -748,7 +755,7 @@ impl Backend {
                 let api = api.as_ref().ok_or_else(not_found)?;
                 let record = match api.read(move |r| r.session(sid)).await {
                     Ok(record) => record,
-                    Err(crate::ApiError::Store(error))
+                    Err(ApiError::Store(error))
                         if matches!(
                             error.as_ref(),
                             lattice_session::store::StoreError::NotFound { .. }
@@ -763,14 +770,14 @@ impl Backend {
                 }
                 let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
                     .await
-                    .map_err(crate::ApiError::from)?;
+                    .map_err(ApiError::from)?;
                 let current = io
                     .read(move |read| {
                         read.session(sid)?;
                         read.session_settings(sid)
                     })
                     .await
-                    .map_err(crate::ApiError::from)?;
+                    .map_err(ApiError::from)?;
                 let base_source = match request.agent {
                     Some(agent_name) => BaseSource::Agent(agent_name),
                     None => BaseSource::Current(current),
@@ -803,12 +810,12 @@ impl Backend {
                     lattice_llm::model_supported_efforts(&directory, target)
                 })
                 .map_err(|rejection| {
-                    crate::ApiError::Configuration(crate::ConfigRejection::new(
+                    ApiError::Configuration(ConfigRejection::new(
                         &rejection.to_string(),
                         Some(&auth),
                     ))
                 })?;
-            settings.validate().map_err(crate::ApiError::from)?;
+            settings.validate().map_err(ApiError::from)?;
             Ok((settings, adjustment))
         })
         .await?;
@@ -820,7 +827,7 @@ impl Backend {
                 *lock(&owner.store) = Some(api.clone());
                 CoordinatorStoreIo::acquire_api(api, sid)
                     .await
-                    .map_err(crate::ApiError::from)?
+                    .map_err(ApiError::from)?
             }
         };
 
@@ -829,23 +836,23 @@ impl Backend {
             let session = io
                 .create_session(workspace.project_path(), settings)
                 .await
-                .map_err(crate::ApiError::from)?;
+                .map_err(ApiError::from)?;
             #[cfg(feature = "test-crash-barriers")]
             crate::turn::crash_barrier::configure_hit(&session)
                 .await
-                .map_err(crate::ApiError::from)?;
+                .map_err(ApiError::from)?;
             #[cfg(not(feature = "test-crash-barriers"))]
             let _ = session;
         } else {
             io.update_settings(workspace.project_path(), settings)
                 .await
-                .map_err(crate::ApiError::from)?;
+                .map_err(ApiError::from)?;
         }
 
         let mut head = io
             .read(move |read| crate::turn::observer::session_head(read, sid))
             .await
-            .map_err(crate::ApiError::from)?;
+            .map_err(ApiError::from)?;
         {
             let state = lock(&self.admission);
             (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
@@ -880,7 +887,7 @@ impl Backend {
         let api = api.ok_or_else(not_found)?;
         let record = match api.read(move |r| r.session(sid)).await {
             Ok(record) => record,
-            Err(crate::ApiError::Store(error))
+            Err(ApiError::Store(error))
                 if matches!(
                     error.as_ref(),
                     lattice_session::store::StoreError::NotFound { .. }
@@ -918,7 +925,7 @@ impl Backend {
         check_submitter(submitter.as_ref())?;
         let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
             .await
-            .map_err(crate::ApiError::from)?;
+            .map_err(ApiError::from)?;
         let (settings, settings_version) = io
             .read(move |read| {
                 read.session(sid)?;
@@ -927,7 +934,7 @@ impl Backend {
                 Ok((settings, version))
             })
             .await
-            .map_err(crate::ApiError::from)?;
+            .map_err(ApiError::from)?;
         if let Some(expected) = &request.expected_settings
             && *expected != settings_version
         {
@@ -935,10 +942,7 @@ impl Backend {
         }
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
-        let gateway = self
-            .gateway
-            .clone()
-            .map_err(crate::ApiError::Configuration)?;
+        let gateway = self.gateway.clone().map_err(ApiError::Configuration)?;
         let prepared_model =
             crate::turn::execute::PreparedModel::resolve(&gateway, &settings).await?;
         let shutdown = api.shutdown();
@@ -954,7 +958,7 @@ impl Backend {
             workspace,
             shutdown,
             observer: owner.observer.clone(),
-            request: crate::RunTurnRequest {
+            request: RunTurnRequest {
                 input: request.input,
                 session_id: sid,
                 expected_settings: request.expected_settings,
@@ -986,10 +990,10 @@ impl Backend {
         #[cfg(test)]
         tests::fail_forwarding(&self.gates.forward_panic).await;
         owner.reply(Response::Acceptance(match accepted {
-            crate::TurnAcceptance::Accepted { turn } => Acceptance::Accepted {
+            TurnAcceptance::Accepted { turn } => Acceptance::Accepted {
                 turn: TurnView::from(&turn),
             },
-            crate::TurnAcceptance::ConfirmationUnknown { turn_id, .. } => {
+            TurnAcceptance::ConfirmationUnknown { turn_id, .. } => {
                 Acceptance::ConfirmationUnknown {
                     turn_id,
                     session_id: sid,
@@ -1131,7 +1135,7 @@ impl Backend {
                             lattice_llm::model_candidates(&check_directory, &check_query)
                                 .map(|_| ())
                                 .map_err(|error| {
-                                    crate::ApiError::Configuration(crate::ConfigRejection::new(
+                                    ApiError::Configuration(ConfigRejection::new(
                                         &error.to_string(),
                                         Some(&auth),
                                     ))
@@ -1172,7 +1176,7 @@ impl Backend {
                             Response::Models(super::presentation::model_candidates(candidates))
                         })
                         .map_err(|error| {
-                            crate::ApiError::Configuration(crate::ConfigRejection::new(
+                            ApiError::Configuration(ConfigRejection::new(
                                 &error.to_string(),
                                 Some(&auth),
                             ))
@@ -1455,30 +1459,25 @@ fn check_submitter(submitter: Option<&UnixStream>) -> Result<()> {
     Ok(())
 }
 fn connected(stream: &UnixStream) -> Result<bool> {
-    use std::os::fd::AsRawFd;
-    let mut byte = 0u8;
+    use rustix::net::RecvFlags;
+    let mut byte = [0u8; 1];
     // 非阻塞窥读检查连接当前是否已关闭，不消费后续协议数据，也不依赖缓存的 readiness。
-    let result = unsafe {
-        libc::recv(
-            stream.as_raw_fd(),
-            (&mut byte as *mut u8).cast(),
-            1,
-            libc::MSG_PEEK | libc::MSG_DONTWAIT,
-        )
-    };
-    if result >= 0 {
-        return Ok(result != 0);
-    }
-    let error = std::io::Error::last_os_error();
-    if error.kind() == std::io::ErrorKind::WouldBlock {
-        Ok(true)
-    } else {
-        Err(error.into())
+    match rustix::net::recv(stream, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
+        Ok((_, 0)) => Ok(false),
+        Ok(_) => Ok(true),
+        Err(errno) => {
+            let error = std::io::Error::from(errno);
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(true)
+            } else {
+                Err(error.into())
+            }
+        }
     }
 }
-async fn canonical_workspace(path: std::path::PathBuf) -> Result<crate::LocalWorkspaceRoot> {
+async fn canonical_workspace(path: std::path::PathBuf) -> Result<LocalWorkspaceRoot> {
     blocking(move || {
-        let root = crate::LocalWorkspaceRoot::from_path(&path)?;
+        let root = LocalWorkspaceRoot::from_path(&path)?;
         if root.canonical_path() != path {
             return Err(LocalError::new(
                 LocalErrorKind::BadRequest,
@@ -1575,7 +1574,7 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
 /// 实例锁唯一持有者；按统一停机顺序执行有界排空、收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(
-    layout: crate::StateLayout,
+    layout: StateLayout,
     home: Option<std::path::PathBuf>,
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
@@ -1591,7 +1590,7 @@ pub async fn serve(
 /// 测试后台以空动作替代自动与手动元数据刷新，其余操作沿用正式入口。
 #[cfg(any(test, feature = "test-utils"))]
 pub async fn serve_for_test(
-    layout: crate::StateLayout,
+    layout: StateLayout,
     home: Option<std::path::PathBuf>,
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
@@ -1657,7 +1656,7 @@ async fn finish_serve(
 }
 
 async fn serve_with_backend(
-    layout: crate::StateLayout,
+    layout: StateLayout,
     drain_timeout: Duration,
     mut stop_requests: tokio::sync::mpsc::Receiver<()>,
     build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
@@ -1853,7 +1852,7 @@ pub(super) fn redact_model_candidates(
     auth: &lattice_llm::auth::AuthStore,
 ) {
     let redact = |message: &mut String| {
-        *message = crate::ConfigRejection::new(message, Some(auth)).to_string();
+        *message = ConfigRejection::new(message, Some(auth)).to_string();
     };
     for warning in &mut candidates.warnings {
         redact(&mut warning.message);

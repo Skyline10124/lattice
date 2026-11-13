@@ -98,7 +98,7 @@ struct State {
 }
 
 pub(super) struct MetadataRefresh {
-    directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
+    directory: Option<std::result::Result<PathBuf, crate::config_rejection::ConfigRejection>>,
     work: Box<Work>,
     catalog: Box<Catalog>,
     state: Mutex<State>,
@@ -140,7 +140,8 @@ async fn metadata_error(
         };
         LocalError::new(
             kind,
-            &crate::ConfigRejection::new(&error.to_string(), Some(&auth)).to_string(),
+            &crate::config_rejection::ConfigRejection::new(&error.to_string(), Some(&auth))
+                .to_string(),
         )
     })
     .await
@@ -154,8 +155,11 @@ async fn metadata_error(
 
 impl MetadataRefresh {
     pub(super) fn new(
-        gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, crate::ConfigRejection>,
-        directory: std::result::Result<PathBuf, crate::ConfigRejection>,
+        gateway: std::result::Result<
+            Arc<lattice_llm::RequestGateway>,
+            crate::config_rejection::ConfigRejection,
+        >,
+        directory: std::result::Result<PathBuf, crate::config_rejection::ConfigRejection>,
     ) -> Arc<Self> {
         let inspect_gateway = gateway.clone();
         Self::with_sources(
@@ -163,8 +167,9 @@ impl MetadataRefresh {
             move |source, cancel| {
                 let gateway = gateway.clone();
                 Box::pin(async move {
-                    let gateway = gateway
-                        .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
+                    let gateway = gateway.map_err(|error| {
+                        LocalError::from(crate::session::ApiError::Configuration(error))
+                    })?;
                     let result = match source {
                         Source::ModelsDev => gateway.refresh_metadata(cancel).await.map(|()| 0),
                         Source::Chatgpt => gateway.refresh_chatgpt_models(cancel).await,
@@ -178,8 +183,9 @@ impl MetadataRefresh {
             move || {
                 let gateway = inspect_gateway.clone();
                 Box::pin(async move {
-                    let gateway = gateway
-                        .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
+                    let gateway = gateway.map_err(|error| {
+                        LocalError::from(crate::session::ApiError::Configuration(error))
+                    })?;
                     let reader = gateway.clone();
                     match tokio::task::spawn_blocking(move || reader.chatgpt_catalog_state()).await
                     {
@@ -196,7 +202,7 @@ impl MetadataRefresh {
     }
 
     pub(super) fn with_sources(
-        directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
+        directory: Option<std::result::Result<PathBuf, crate::config_rejection::ConfigRejection>>,
         work: impl Fn(Source, Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<usize>>
         + Send
         + Sync
@@ -219,7 +225,7 @@ impl MetadataRefresh {
 
     #[cfg(any(test, feature = "test-utils"))]
     fn with_work(
-        directory: Option<std::result::Result<PathBuf, crate::ConfigRejection>>,
+        directory: Option<std::result::Result<PathBuf, crate::config_rejection::ConfigRejection>>,
         work: impl Fn(Arc<MetadataRefreshControl>) -> BoxFuture<'static, Result<()>>
         + Send
         + Sync
@@ -253,13 +259,15 @@ impl MetadataRefresh {
             return Ok(true);
         };
         tokio::task::spawn_blocking(move || {
-            let directory = directory
-                .map_err(|error| LocalError::from(crate::ApiError::Configuration(error)))?;
+            let directory = directory.map_err(|error| {
+                LocalError::from(crate::session::ApiError::Configuration(error))
+            })?;
             let auth = lattice_llm::auth::AuthStore::new(directory.clone());
             lattice_llm::metadata_auto_refresh_enabled(&directory).map_err(|error| {
                 LocalError::new(
                     LocalErrorKind::BadRequest,
-                    &crate::ConfigRejection::new(&error.to_string(), Some(&auth)).to_string(),
+                    &crate::config_rejection::ConfigRejection::new(&error.to_string(), Some(&auth))
+                        .to_string(),
                 )
             })
         })

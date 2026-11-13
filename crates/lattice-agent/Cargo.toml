@@ -11,9 +11,10 @@ lattice-llm = { workspace = true }
 lattice-conversation = { workspace = true }
 async-trait = { workspace = true }
 tokio = { workspace = true }
-serde_json = { workspace = true }
 futures = { workspace = true }
-unicode-width = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
 
 [features]
 test-utils = ["lattice-llm/test-utils"]

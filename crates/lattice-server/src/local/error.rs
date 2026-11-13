@@ -6,7 +6,7 @@
 use lattice_ipc::{ConflictReason, LocalError, LocalErrorKind, RecoveryCause, StoreDiagnostic};
 use lattice_session::store::StoreError;
 
-use crate::ApiError;
+use crate::session::ApiError;
 
 impl From<ApiError> for LocalError {
     fn from(error: ApiError) -> Self {

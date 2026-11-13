@@ -86,7 +86,7 @@ fn outcome(
                 | lattice_llm::LlmError::StreamRead { .. } => LocalErrorKind::Transport,
                 _ => LocalErrorKind::Internal,
             };
-            let reason = crate::ConfigRejection::new(&error.to_string(), None);
+            let reason = crate::config_rejection::ConfigRejection::new(&error.to_string(), None);
             LoginResponse::Error(LocalError::new(kind, &reason.to_string()))
         }
     }

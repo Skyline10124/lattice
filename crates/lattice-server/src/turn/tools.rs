@@ -12,7 +12,7 @@ use lattice_conversation::{SessionId, ToolError};
 use lattice_session::store::StartedInvocation;
 use tokio::time::Instant;
 
-use crate::LocalWorkspaceRoot;
+use crate::root::LocalWorkspaceRoot;
 
 /// 单个工具在轮次冻结目录与模型请求中的公开定义。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -27,6 +27,11 @@ pub struct ToolSpec {
 ///
 /// [`ToolOutcome::Deadline`] 表示本次执行因轮次 `deadline` 中止，协调层不提交终态槽位，
 /// 直接关闭当前 Step，使该槽位保持持久 `Started` 并按 `Indeterminate(NoResult)` 读出。
+// 生产默认执行器仅返回 Indeterminate，其余变体由协议匹配与测试/假工具接缝构造。
+#[cfg_attr(
+    not(any(test, feature = "test-utils", feature = "test-fake-tools")),
+    allow(dead_code)
+)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum ToolOutcome {
     Succeeded(serde_json::Value),
@@ -43,7 +48,7 @@ pub trait ToolExecutor: Send + Sync {
         &self,
         session_id: SessionId,
         workspace: &LocalWorkspaceRoot,
-    ) -> crate::session::Result<Box<dyn TurnTools>>;
+    ) -> std::result::Result<Box<dyn TurnTools>, crate::session::ApiError>;
 }
 
 /// 绑定到单个轮次的冻结工具集与调用分发入口。
@@ -63,7 +68,7 @@ pub trait TurnTools: Send + Sync {
 
 /// 不暴露任何工具的生产默认执行器。
 #[derive(Clone, Copy, Debug, Default)]
-pub struct NoTools;
+pub(crate) struct NoTools;
 
 #[async_trait::async_trait]
 impl ToolExecutor for NoTools {
@@ -104,7 +109,7 @@ pub(crate) fn default_tool_executor() -> Arc<dyn ToolExecutor> {
 }
 
 #[cfg(feature = "test-fake-tools")]
-pub mod fake {
+pub(crate) mod fake {
     //! 仅在显式开启 `test-fake-tools` 时编译的确定性假工具执行器。
     //!
     //! 进程启动环境设置 `LATTICE_TEST_TOOLS`（逗号分隔的工具名列表）时启用；
@@ -135,7 +140,7 @@ pub mod fake {
     use tokio::time::Instant;
 
     use super::{ToolExecutor, ToolOutcome, ToolSpec, TurnTools};
-    use crate::LocalWorkspaceRoot;
+    use crate::root::LocalWorkspaceRoot;
 
     pub const TEST_TOOLS_ENV: &str = "LATTICE_TEST_TOOLS";
 

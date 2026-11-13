@@ -59,7 +59,7 @@ impl ModelExecution {
         target: &lattice_llm::ModelTarget,
     ) -> (
         AttemptOrigin,
-        std::result::Result<Arc<ModelStepDriver>, crate::ConfigRejection>,
+        std::result::Result<Arc<ModelStepDriver>, crate::config_rejection::ConfigRejection>,
     ) {
         match self {
             Self::Gateway { turn, last_origin } => {
@@ -79,7 +79,7 @@ impl ModelExecution {
                         };
                         (
                             origin,
-                            Err(crate::ConfigRejection::new(
+                            Err(crate::config_rejection::ConfigRejection::new(
                                 &error.to_string(),
                                 Some(&turn.auth_store()),
                             )),
@@ -100,7 +100,7 @@ pub(crate) struct LiveExecution {
     /// 库代故障，不是用户取消。退出时不向失败代写入内存结果。
     pub shutdown: Arc<AtomicBool>,
     pub deadline: Instant,
-    pub retry: crate::RetryPolicy,
+    pub retry: lattice_session::RetryPolicy,
 }
 
 impl LiveExecution {
@@ -206,7 +206,10 @@ pub(crate) async fn run_coordinator_saga(
                 attempt_ordinal: attempt,
             };
             let target = lattice_llm::ModelTarget {
-                model: crate::ModelRef::new(config.provider.clone(), config.model.clone()),
+                model: lattice_conversation::ModelRef::new(
+                    config.provider.clone(),
+                    config.model.clone(),
+                ),
                 effort: config.effort,
             };
             let (origin, driver) = live.model.resolve(&target).await;
@@ -771,7 +774,9 @@ mod resolution_tests {
         configure("chat-completions");
         let gateway = lattice_llm::RequestGateway::new(directory.path().into(), vec![]).unwrap();
         let turn = gateway.open_turn();
-        let target = lattice_llm::ModelTarget::new(crate::ModelRef::parse("local/model").unwrap());
+        let target = lattice_llm::ModelTarget::new(
+            lattice_conversation::ModelRef::parse("local/model").unwrap(),
+        );
         let initial = turn.resolve(&target).await.unwrap();
         let mut execution = ModelExecution::gateway(turn, &initial);
         configure("generate-content");

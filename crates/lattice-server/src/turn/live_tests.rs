@@ -22,13 +22,13 @@ fn seed(
     let lock = fixture.store.try_lock_session(sid).unwrap();
     let config = FrozenTurnConfig {
         effort: None,
-        agent_name: crate::AgentName::parse("test").unwrap(),
-        model: crate::ModelId::parse("old-model").unwrap(),
-        provider: crate::ProviderId::parse("openai-compatible").unwrap(),
+        agent_name: lattice_session::AgentName::parse("test").unwrap(),
+        model: lattice_conversation::ModelId::parse("old-model").unwrap(),
+        provider: lattice_conversation::ProviderId::parse("openai-compatible").unwrap(),
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: crate::TurnTimeout::default(),
+            timeout_secs: lattice_session::TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 1,
         },
@@ -357,7 +357,7 @@ async fn continue_at_library_step_limit_closes_reserved_step_32_without_request(
             MessageRole::Assistant,
             Some(lattice_conversation::ReplayOrigin {
                 protocol: Protocol::ChatCompletions,
-                provider_id: crate::ProviderId::parse("local").unwrap(),
+                provider_id: lattice_conversation::ProviderId::parse("local").unwrap(),
             }),
             vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: UnboundToolCall {

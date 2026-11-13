@@ -130,7 +130,7 @@ async fn backend_with_roots(
     roots: Vec<Vec<u8>>,
 ) -> (tempfile::TempDir, Arc<Backend>, LocalClient, TestServerTask) {
     let dir = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(dir.path());
+    let layout = StateLayout::in_state_root(dir.path());
     let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
     let (ready_tx, ready_rx) = oneshot::channel();
     let serving_layout = layout.clone();
@@ -146,7 +146,7 @@ async fn backend_with_roots(
                     backend_layout,
                     Some(home),
                     roots,
-                    Arc::new(crate::NoTools),
+                    Arc::new(crate::turn::NoTools),
                 );
                 Arc::get_mut(&mut backend)
                     .expect("unshared test backend")
@@ -702,7 +702,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
             system_prompt: None,
             catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
             limits: TurnExecutionLimits {
-                timeout_secs: crate::TurnTimeout::default(),
+                timeout_secs: lattice_session::TurnTimeout::default(),
                 max_model_steps: 32,
                 max_model_attempts: 2,
             },
@@ -890,7 +890,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     let sid = new_session_id();
     let turn_id = seed_round(&backend, sid, true).await;
     let sink = backend.observer(sid);
-    sink.emit(crate::TurnEvent::TurnStarted {
+    sink.emit(crate::turn::TurnEvent::TurnStarted {
         turn: TurnRef {
             session_id: sid,
             turn_id,
@@ -912,16 +912,16 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         provider_id: ProviderId::parse("local").unwrap(),
     };
     io.start_request(key, attempt_origin.clone()).await.unwrap();
-    sink.emit(crate::TurnEvent::ModelStarted {
+    sink.emit(crate::turn::TurnEvent::ModelStarted {
         key,
         origin: attempt_origin.clone(),
         model: "test".into(),
     });
-    sink.emit(crate::TurnEvent::TokenDelta {
+    sink.emit(crate::turn::TurnEvent::TokenDelta {
         key,
         content: "你".into(),
     });
-    sink.emit(crate::TurnEvent::TokenDelta {
+    sink.emit(crate::turn::TurnEvent::TokenDelta {
         key,
         content: "好".into(),
     });
@@ -954,7 +954,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     );
     assert_eq!(text.offset, 0);
     sink.sent(&fast, text);
-    sink.emit(crate::TurnEvent::TokenDelta {
+    sink.emit(crate::turn::TurnEvent::TokenDelta {
         key,
         content: "！".into(),
     });
@@ -977,7 +977,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     })
     .await
     .unwrap();
-    sink.emit(crate::TurnEvent::LlmRetry {
+    sink.emit(crate::turn::TurnEvent::LlmRetry {
         key,
         delay_ms: 1,
         notice: Notice {
@@ -987,12 +987,12 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
     });
     key.attempt_ordinal = 1;
     io.start_request(key, attempt_origin.clone()).await.unwrap();
-    sink.emit(crate::TurnEvent::ModelStarted {
+    sink.emit(crate::turn::TurnEvent::ModelStarted {
         key,
         origin: attempt_origin.clone(),
         model: "test".into(),
     });
-    sink.emit(crate::TurnEvent::ReasoningDelta {
+    sink.emit(crate::turn::TurnEvent::ReasoningDelta {
         key,
         content: "新尝试".into(),
     });
@@ -1005,7 +1005,7 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
         panic!("text")
     };
     sink.sent(&slow, text);
-    sink.emit(crate::TurnEvent::TokenDelta {
+    sink.emit(crate::turn::TurnEvent::TokenDelta {
         key,
         content: "继续".into(),
     });
@@ -1154,7 +1154,7 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
     let sid = new_session_id();
     let first = seed_round(&backend, sid, true).await;
     let sink = backend.observer(sid);
-    sink.emit(crate::TurnEvent::TurnStarted {
+    sink.emit(crate::turn::TurnEvent::TurnStarted {
         turn: TurnRef {
             session_id: sid,
             turn_id: first,
@@ -1175,7 +1175,7 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
     // 丢弃这一批之前，让旧条目移出最近十轮，并发生一次完整的 Owner 交接。
     for ordinal in 1..=11 {
         let id = seed_round(&backend, sid, false).await;
-        sink.emit(crate::TurnEvent::TurnStarted {
+        sink.emit(crate::turn::TurnEvent::TurnStarted {
             turn: TurnRef {
                 session_id: sid,
                 turn_id: id,
@@ -1240,7 +1240,7 @@ async fn accepted_read_failure_before_turn_started_republishes_position_after_re
             tokio::spawn(async move { client.submit(input).await })
         };
         bounded(accepted).await.unwrap();
-        assert!(!sink.events().iter().any(|event| matches!(event, crate::TurnEvent::TurnStarted { turn, .. } if turn.turn_id == input.turn_id)));
+        assert!(!sink.events().iter().any(|event| matches!(event, crate::turn::TurnEvent::TurnStarted { turn, .. } if turn.turn_id == input.turn_id)));
         let TurnLookup::Accepted { turn: detail } = client.turn(input.turn_id).await.unwrap()
         else {
             panic!("accepted")
@@ -1944,7 +1944,7 @@ async fn invalid_request_is_rejected_before_claiming_session() {
 type GateSlot = fn(&Gates) -> &Mutex<Option<Gate>>;
 type GatedServe = (
     tempfile::TempDir,
-    crate::StateLayout,
+    StateLayout,
     LocalClient,
     oneshot::Receiver<()>,
     oneshot::Sender<()>,
@@ -1952,7 +1952,7 @@ type GatedServe = (
 );
 struct ConfiguredServe {
     dir: tempfile::TempDir,
-    layout: crate::StateLayout,
+    layout: StateLayout,
     backend: Arc<Backend>,
     client: LocalClient,
     stop: tokio::sync::mpsc::Sender<()>,
@@ -1968,7 +1968,7 @@ async fn serve_configured(
     Option<(oneshot::Receiver<()>, oneshot::Sender<()>)>,
 ) {
     let dir = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(dir.path());
+    let layout = StateLayout::in_state_root(dir.path());
     let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
     let (ready_tx, ready_rx) = oneshot::channel();
     let (serving_layout, backend_layout, home) =
@@ -2034,7 +2034,7 @@ async fn serve_gated(slot: GateSlot) -> GatedServe {
 /// 测试宿主在 `serve` 返回后继续持有 `InstanceLock`，直至收到放行信号再释放。
 async fn serve_holding_lock() -> GatedServe {
     let dir = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(dir.path());
+    let layout = StateLayout::in_state_root(dir.path());
     let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
     let (entered_tx, entry) = oneshot::channel();
     let (release, resume) = oneshot::channel();
@@ -2080,10 +2080,10 @@ async fn serve_holding_lock() -> GatedServe {
 }
 
 /// 另开文件描述做非阻塞 flock；同进程内的后台锁同样会冲突。
-fn owner_lock_free(layout: &crate::StateLayout) -> bool {
-    use std::os::fd::AsRawFd;
+fn owner_lock_free(layout: &lattice_session::StateLayout) -> bool {
+    use rustix::fs::{FlockOperation, flock};
     let file = std::fs::File::open(layout.lattice_root().join("local/owner.lock")).unwrap();
-    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) == 0 }
+    flock(&file, FlockOperation::NonBlockingLockExclusive).is_ok()
 }
 /// stop 回执之后后台停在退场窗口：stop 不能先返回，放行后返回时实例锁已释放、socket 已撤下。
 async fn stop_waits_for_departure(gated: GatedServe) {
@@ -2181,7 +2181,7 @@ async fn symlinked_workspace_shares_canonical_project_binding() {
 #[tokio::test]
 async fn stop_request_queued_before_serve_drains_immediately_and_removes_socket() {
     let dir = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(dir.path());
+    let layout = StateLayout::in_state_root(dir.path());
     let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
     stop_tx.send(()).await.expect("预先向停机通道写入请求");
 
@@ -2375,7 +2375,7 @@ async fn duplicate_ipc_stop_and_status_succeed_over_socket_during_metadata_tail(
 #[tokio::test]
 async fn final_release_and_socket_removal_share_the_shutdown_deadline() {
     let dir = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(dir.path());
+    let layout = StateLayout::in_state_root(dir.path());
     let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
     let (ready_tx, ready_rx) = oneshot::channel();
     let (serving_layout, backend_layout, home) =

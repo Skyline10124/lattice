@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use lattice_local::*;
-use lattice_server::{StateLayout, local::serve_for_test};
-use lattice_session::store::*;
+use lattice_server::serve_for_test;
+use lattice_session::{TurnTimeout, store::*};
 use std::time::Duration;
 
 fn session_id() -> SessionId {
@@ -29,7 +29,7 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
         system_prompt: None,
         catalog: ToolCatalogSnapshot::new(vec![]).unwrap(),
         limits: TurnExecutionLimits {
-            timeout_secs: lattice_server::TurnTimeout::default(),
+            timeout_secs: TurnTimeout::default(),
             max_model_steps: 32,
             max_model_attempts: 2,
         },

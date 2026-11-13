@@ -120,7 +120,7 @@ async fn stream_turn_retry_uses_profile_backoff_and_cap() {
     let llm = timed(3);
     let fixture = setup_fixture(llm.clone(), &[]);
     fixture.update_settings(|s| {
-        s.profile.retry = crate::RetryPolicy::new(3, 40, 60).unwrap();
+        s.profile.retry = lattice_session::RetryPolicy::new(3, 40, 60).unwrap();
     });
     let (detail, events) = fixture.run(fixture.request.clone()).await;
     let delays: Vec<_> = events
@@ -249,7 +249,7 @@ async fn stream_turn_final_provider_failure_only_emits_terminal_notice() {
         }
         let fixture = setup_fixture(Arc::new(builder.build()), &[]);
         fixture.update_settings(|s| {
-            s.profile.retry = crate::RetryPolicy::new(2, 1, 1).unwrap();
+            s.profile.retry = lattice_session::RetryPolicy::new(2, 1, 1).unwrap();
         });
         let (detail, events) = fixture.run(fixture.request.clone()).await;
         let attempts = &detail.steps[0].attempts;
@@ -319,7 +319,7 @@ async fn stream_turn_retry_cancellation_closes_without_another_request() {
     let llm = timed(1);
     let fixture = setup_fixture(llm.clone(), &[]);
     fixture.update_settings(|s| {
-        s.profile.retry = crate::RetryPolicy::new(1, 10_000, 10_000).unwrap();
+        s.profile.retry = lattice_session::RetryPolicy::new(1, 10_000, 10_000).unwrap();
     });
     let cancel = Arc::new(AtomicBool::new(false));
     let mut request = fixture.request.clone();
@@ -346,14 +346,14 @@ async fn stream_turn_retry_cancellation_closes_without_another_request() {
 #[tokio::test(start_paused = true)]
 async fn stream_turn_retry_respects_explicit_and_default_deadlines() {
     for (timeout, seconds, count) in [
-        (crate::TurnTimeout::new(1).unwrap(), 1, 1),
-        (crate::TurnTimeout::default(), 300, 5),
+        (lattice_session::TurnTimeout::new(1).unwrap(), 1, 1),
+        (lattice_session::TurnTimeout::default(), 300, 5),
     ] {
         let llm = timed(10);
         let fixture = setup_fixture(llm.clone(), &[]);
         fixture.update_settings(|s| {
             s.profile.timeout_secs = timeout;
-            s.profile.retry = crate::RetryPolicy::new(10, 60_000, 60_000).unwrap();
+            s.profile.retry = lattice_session::RetryPolicy::new(10, 60_000, 60_000).unwrap();
         });
         let (detail, events) = tokio::time::timeout(
             Duration::from_secs(seconds + 1),

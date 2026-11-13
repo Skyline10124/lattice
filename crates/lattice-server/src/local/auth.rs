@@ -17,7 +17,12 @@ pub(super) fn directory(home: Option<&std::path::Path>) -> super::Result<std::pa
         Some(_) => "HOME must be an absolute path",
         None => "HOME is not set",
     };
-    Err(crate::ApiError::Configuration(crate::ConfigRejection::new(reason, None)).into())
+    Err(
+        crate::session::ApiError::Configuration(crate::config_rejection::ConfigRejection::new(
+            reason, None,
+        ))
+        .into(),
+    )
 }
 
 pub(super) fn error(error: lattice_llm::auth::AuthError) -> super::LocalError {

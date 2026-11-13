@@ -3,10 +3,14 @@
 
 //! 后台按项目与配置目录读取 profile，并冻结提示与模型预算。
 
-use crate::session::{ApiError, Result};
+use crate::{
+    config_rejection::ConfigRejection,
+    root::LocalWorkspaceRoot,
+    session::{ApiError, Result},
+};
+use lattice_profile::LoadedAgentProfile;
+use lattice_session::AgentName;
 use std::path::Path;
-
-pub use lattice_profile::LoadedAgentProfile;
 
 /// 已解析的执行输入，只持有有效值和提示正文，不借用源文件路径。
 pub(crate) struct TurnProfile {
@@ -34,8 +38,8 @@ impl TurnProfile {
 
 /// 配置目录来自后台启动环境；项目根已经与会话绑定核对。
 pub(crate) fn load_for_turn(
-    agent_name: &crate::AgentName,
-    workspace: &crate::LocalWorkspaceRoot,
+    agent_name: &AgentName,
+    workspace: &LocalWorkspaceRoot,
     configuration_dir: &Path,
 ) -> Result<LoadedAgentProfile> {
     let auth = lattice_llm::auth::AuthStore::new(configuration_dir.to_owned());
@@ -50,7 +54,7 @@ pub(crate) fn load_for_turn(
         crate::local::ipc::uid(),
     )
     .map_err(|error| {
-        ApiError::Configuration(crate::ConfigRejection::new(
+        ApiError::Configuration(ConfigRejection::new(
             &profile_error_message(&error),
             Some(&auth),
         ))
@@ -97,8 +101,8 @@ mod tests {
             "schema_version=1\n[agent]\nname='test'\nmodel='local/test'\n[prompt]\nsystem_path='prompt.md'\n",
         )
         .unwrap();
-        let workspace = crate::LocalWorkspaceRoot::from_path(&project).unwrap();
-        let test_agent = crate::AgentName::parse("test").unwrap();
+        let workspace = LocalWorkspaceRoot::from_path(&project).unwrap();
+        let test_agent = AgentName::parse("test").unwrap();
         let loaded = load_for_turn(&test_agent, &workspace, &configuration_dir).unwrap();
         std::fs::remove_dir_all(package).unwrap();
         assert_eq!(loaded.system_prompt, prompt);
@@ -121,7 +125,8 @@ mod tests {
         // EffectiveProfile 为私有持久结构，E2E 无法在不跑满长流的情况下直接读取该字段。
         for timeout_secs in [3601, 86_400] {
             let mut explicit = loaded.clone();
-            explicit.profile.llm.timeout_secs = crate::TurnTimeout::new(timeout_secs).unwrap();
+            explicit.profile.llm.timeout_secs =
+                lattice_session::TurnTimeout::new(timeout_secs).unwrap();
             let prepared = TurnProfile::from_loaded(&explicit);
             assert_eq!(prepared.effective.timeout_secs.as_secs(), timeout_secs);
         }

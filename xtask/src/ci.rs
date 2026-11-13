@@ -15,7 +15,7 @@
 //! `git show ead22771^:docs/archive/records/FIX.md` 中的 L-26-01。
 //!
 //! 门禁按两轮验证被测二进制：第一轮构建无测试 feature 的生产二进制并跑全部默认测试；
-//! 第二轮先检查测试 feature 下的 clippy，再用 `--features test-fake-tools,test-crash-barriers`
+//! 第二轮先检查测试 feature 下的 clippy，再用 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers`
 //! 重新构建并覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 路径不变），随后运行假执行器与
 //! 全部 harness 目标（含假工具场景与崩溃屏障）。`xtask ci` 结束后，`target/debug/lattice`
 //! 留存的是第二轮带测试 feature 的构建产物。
@@ -101,7 +101,7 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
                 "lattice-cli",
                 "--all-targets",
                 "--features",
-                "test-fake-tools,test-crash-barriers",
+                "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
                 "--",
                 "-D",
                 "warnings",
@@ -138,7 +138,7 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
                 "--bin",
                 "lattice",
                 "--features",
-                "test-fake-tools,test-crash-barriers",
+                "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
             ],
             &build_jobs,
         )

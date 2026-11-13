@@ -5,7 +5,8 @@
 
 use std::path::PathBuf;
 
-use crate::{ConfigRejection, Effort, ModelRef, local::EffortAdjustment, profile::TurnProfile};
+use crate::{config_rejection::ConfigRejection, local::EffortAdjustment, profile::TurnProfile};
+use lattice_conversation::{Effort, ModelRef};
 use lattice_llm::{EffortPolicy, PrepareError};
 use lattice_session::store::SessionSettings;
 

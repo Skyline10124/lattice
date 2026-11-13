@@ -104,25 +104,27 @@ pub(crate) async fn configure_hit(
 async fn stop(marker: Marker) -> Result<(), CoordinatorIoError> {
     tokio::task::spawn_blocking(move || {
         let path = PathBuf::from(
-            std::env::var_os("LATTICE_TEST_TURN_BARRIER_ACK").expect("barrier ack required"),
+            std::env::var_os("LATTICE_TEST_TURN_BARRIER_ACK").expect("缺少屏障确认文件路径"),
         );
-        assert!(path.is_absolute(), "barrier ack must be absolute");
+        assert!(path.is_absolute(), "屏障确认文件路径必须是绝对路径");
         let mut file = std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
             .open(&path)
-            .expect("create barrier ack");
-        serde_json::to_writer(&mut file, &marker).expect("encode barrier ack");
-        file.write_all(b"\n").expect("terminate barrier ack");
-        file.sync_all().expect("sync barrier ack");
-        std::fs::File::open(path.parent().expect("ack parent"))
-            .expect("open parent")
+            .expect("创建屏障确认文件失败");
+        serde_json::to_writer(&mut file, &marker).expect("编码屏障确认失败");
+        file.write_all(b"\n").expect("写入屏障确认结尾换行失败");
+        file.sync_all().expect("同步屏障确认文件失败");
+        std::fs::File::open(path.parent().expect("屏障确认文件缺少父目录"))
+            .expect("打开屏障确认文件的父目录失败")
             .sync_all()
-            .expect("sync parent");
-        // SAFETY: only the current explicitly feature-enabled process is stopped.
-        // Harness must verify this marker and process ownership before SIGKILL.
+            .expect("同步屏障确认文件的父目录失败");
+        // 向调用线程自身发送 SIGSTOP：信号挂在本线程上，系统调用返回前整个进程即停住，
+        // 本线程不会再执行后面的语句。发给整个进程的信号可能先由别的线程处理，本线程会在停住前继续运行。
+        // harness 在发送 SIGKILL 前必须核对 marker 与进程归属。
+        // SAFETY: `raise` 只向调用线程发送信号，不访问内存；只在显式启用测试屏障的产物中编译。
         let result = unsafe { libc::raise(libc::SIGSTOP) };
-        panic!("crash barrier resumed unexpectedly ({result})");
+        panic!("崩溃屏障停住后意外恢复执行（raise 返回 {result}）");
     })
     .await?;
     Ok(())
@@ -135,10 +137,10 @@ pub(crate) async fn schedule(name: &str, marker: serde_json::Value) {
         return;
     };
     let root = PathBuf::from(root);
-    assert!(root.is_absolute(), "schedule directory must be absolute");
+    assert!(root.is_absolute(), "调度目录必须是绝对路径");
     if !tokio::fs::try_exists(root.join(format!("{name}.arm")))
         .await
-        .expect("read schedule arm")
+        .expect("读取调度开关文件失败")
     {
         return;
     }
@@ -150,22 +152,22 @@ pub(crate) async fn schedule(name: &str, marker: serde_json::Value) {
     {
         Ok(file) => file,
         Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => return,
-        Err(error) => panic!("claim schedule gate: {error}"),
+        Err(error) => panic!("占用调度窗口失败：{error}"),
     };
     ready
-        .write_all(&serde_json::to_vec(&marker).expect("encode schedule marker"))
+        .write_all(&serde_json::to_vec(&marker).expect("编码调度标记失败"))
         .await
-        .expect("write schedule marker");
-    ready.sync_all().await.expect("sync schedule marker");
+        .expect("写入调度标记失败");
+    ready.sync_all().await.expect("同步调度标记失败");
     let release = root.join(format!("{name}.release"));
     tokio::time::timeout(std::time::Duration::from_secs(30), async {
         while !tokio::fs::try_exists(&release)
             .await
-            .expect("read schedule release")
+            .expect("读取调度放行文件失败")
         {
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     })
     .await
-    .expect("schedule gate was not released");
+    .expect("调度窗口在 30 秒内没有放行");
 }

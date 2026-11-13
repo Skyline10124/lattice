@@ -12,7 +12,7 @@ use std::sync::Arc;
 pub(super) struct TestFixture {
     pub api: crate::SessionApi,
     pub store: Arc<SessionStore>,
-    pub layout: crate::StateLayout,
+    pub layout: lattice_session::StateLayout,
     pub root: crate::LocalWorkspaceRoot,
     pub session_id: lattice_conversation::SessionId,
     pub request: RunTurnRequest,
@@ -42,7 +42,7 @@ struct StaticTestTools {
 impl StaticTestTools {
     fn from_names(names: &[&str]) -> Arc<dyn crate::ToolExecutor> {
         if names.is_empty() {
-            return Arc::new(crate::NoTools);
+            return Arc::new(crate::turn::NoTools);
         }
         Arc::new(Self {
             specs: names
@@ -105,10 +105,10 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         "schema_version=1\n[agent]\nname='test'\nmodel='local/sonnet'\n[prompt]\nsystem='System from profile.'\n",
     )
     .unwrap();
-    let layout = crate::StateLayout::in_state_root(state.path());
+    let layout = lattice_session::StateLayout::in_state_root(state.path());
     let store = Arc::new(SessionStore::create(&layout).unwrap());
     let root = crate::LocalWorkspaceRoot::from_path(project.path()).unwrap();
-    let agent = crate::AgentName::parse("test").unwrap();
+    let agent = lattice_session::AgentName::parse("test").unwrap();
     let loaded_profile =
         lattice_profile::load_agent_profile(&agent, &paths, crate::local::ipc::uid()).unwrap();
     let session_id = lattice_local::new_session_id();

@@ -1,46 +1,34 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! LATTICE 公开应用接口。
+//! LATTICE 本地后台：实例锁持有、IPC 连接服务、准入与 Owner 监督、停机排空及 Turn 协调。
 //!
-//! [`SessionApi`] 提供会话操作，[`local::serve`] 提供本地控制面后台服务入口，
-//! [`start_turn`] 提供后台执行接线；`run_turn` 只在测试或 `test-utils` 下复用执行核心。
-//!
-//! # Boundary
-//!
-//! This crate does not export topology migration tables or compatibility
-//! shims. Public callers receive typed request, response, event, and session
-//! facade values only.
+//! 生产公开面仅由根模块导出 [`serve`]、[`ServeExit`]、[`DrainOutcome`] 与 [`InstanceLock`]；
+//! 测试与 `test-utils` 下额外导出集成测试所需的 `serve_for_test`、`SessionApi`、`ApiError`、
+//! `LocalWorkspaceRoot`、`start_turn` 及工具执行接缝类型。
 
 mod config_rejection;
 mod configure;
-mod redact;
-pub use config_rejection::ConfigRejection;
-pub mod local;
-mod models;
+mod local;
 mod profile;
-pub mod root;
+mod redact;
+mod root;
 mod session;
 mod stores;
-pub mod turn;
+mod turn;
 
-pub use lattice_conversation::Effort;
-pub use lattice_session::store::{NodeId, SettingsVersion, TurnSummary, UsageSummary};
-pub use lattice_session::{
-    AgentName, AgentNameError, ProjectPath, RetryPolicy, RetryPolicyError, StateLayout,
-    TurnTimeout, TurnTimeoutError,
-};
-pub use models::{
-    Availability, ConfigurationRequirement, ModelCandidate, ModelCandidateQuery, ModelCandidates,
-    ModelId, ModelIdError, ModelPrice, ModelRef, ModelRefError, ModelWarning, ProviderId,
-    ProviderIdError,
-};
-pub use profile::LoadedAgentProfile;
-pub use root::{LocalWorkspaceRoot, resolve_local_workspace_root};
+pub use local::{DrainOutcome, InstanceLock, ServeExit, serve};
+
+#[cfg(any(test, feature = "test-utils"))]
+pub use config_rejection::ConfigRejection;
+#[cfg(any(test, feature = "test-utils"))]
+pub use local::serve_for_test;
+#[cfg(any(test, feature = "test-utils"))]
+pub use root::LocalWorkspaceRoot;
+#[cfg(any(test, feature = "test-utils"))]
 pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]
-pub use turn::run_turn;
 pub use turn::{
-    NoTools, RunTurnRequest, RunTurnResult, ToolExecutor, ToolOutcome, ToolSpec, TurnAcceptance,
-    TurnCompletion, TurnEvent, TurnExecution, TurnRef, TurnTools, start_turn,
+    RunTurnRequest, ToolExecutor, ToolOutcome, ToolSpec, TurnAcceptance, TurnCompletion,
+    TurnExecution, TurnTools, start_turn,
 };

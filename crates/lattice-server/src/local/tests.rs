@@ -7,7 +7,7 @@ use tokio::io::AsyncWriteExt;
 #[tokio::test]
 async fn private_socket_rejects_second_owner_and_oversized_frame() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(directory.path());
+    let layout = lattice_session::StateLayout::in_state_root(directory.path());
     let (instance, listener) = ipc::Instance::bind(&layout).unwrap();
     assert!(matches!(
         ipc::Instance::bind(&layout),

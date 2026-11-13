@@ -3,8 +3,8 @@
 
 //! Session 由 create_session 显式创建；首轮接受、重开及同身份冲突保持冻结配置和原始输入。
 use lattice_llm::testing::ScriptEvent;
-use lattice_local::{AgentName, ConflictReason, new_session_id, new_turn_id};
-use lattice_server::{RunTurnRequest, SessionApi, StateLayout, TurnAcceptance, TurnCompletion};
+use lattice_local::{AgentName, ConflictReason, StateLayout, new_session_id, new_turn_id};
+use lattice_server::{RunTurnRequest, SessionApi, TurnAcceptance, TurnCompletion};
 use lattice_session::store::{EffectiveProfile, PublicTurnOutcome, SessionSettings, SessionStore};
 use std::sync::Arc;
 

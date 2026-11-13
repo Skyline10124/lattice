@@ -10,7 +10,7 @@ use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 const KEY: &str = "auth-ipc-test-secret-9E82";
 
 fn spawn_test_server(
-    layout: crate::StateLayout,
+    layout: lattice_session::StateLayout,
     home: Option<std::path::PathBuf>,
 ) -> tokio::task::JoinHandle<local::Result<()>> {
     let (_stop_tx, stop_rx) = tokio::sync::mpsc::channel(1);
@@ -24,7 +24,7 @@ fn spawn_test_server(
 #[tokio::test]
 async fn stop_cancels_browser_login_and_releases_the_backend_instance() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(directory.path());
+    let layout = lattice_session::StateLayout::in_state_root(directory.path());
     let server = spawn_test_server(layout.clone(), Some(directory.path().into()));
     let client = LocalClient::new(layout);
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -58,7 +58,7 @@ async fn stop_cancels_browser_login_and_releases_the_backend_instance() {
 #[tokio::test]
 async fn auth_ipc_uses_current_files_and_never_returns_credentials() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = crate::StateLayout::in_state_root(directory.path());
+    let layout = lattice_session::StateLayout::in_state_root(directory.path());
     let config = directory.path().join(".lattice");
     let server = spawn_test_server(layout.clone(), Some(directory.path().into()));
     let client = LocalClient::new(layout);
@@ -234,7 +234,7 @@ async fn invalid_home_only_rejects_operations_that_need_configuration() {
         ),
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let layout = crate::StateLayout::in_state_root(directory.path());
+        let layout = lattice_session::StateLayout::in_state_root(directory.path());
         let server = spawn_test_server(layout.clone(), home);
         let client = LocalClient::new(layout);
         tokio::time::timeout(Duration::from_secs(5), async {

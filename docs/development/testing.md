@@ -64,8 +64,8 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 ### 假工具与故障注入
 
-- 生产二进制不暴露内置工具。需要工具循环的场景配合带 `test-fake-tools` 的被测二进制与 harness 的 `fake-tools` feature，在后台首次启动前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 传入逗号分隔的工具名启用假执行器。
-- 崩溃、调度交错与模拟错误由产品 feature `test-crash-barriers` 插桩，钩子只在这个 feature 下编译；harness 用 `crash-barriers` feature 启用对应场景。
+- 生产二进制不暴露内置工具。需要工具循环的场景配合开启 `lattice-server/test-fake-tools` 构建的被测二进制与 harness 的 `fake-tools` feature，在后台首次启动前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 传入逗号分隔的工具名启用假执行器。
+- 崩溃、调度交错与模拟错误由后台 feature `test-crash-barriers`（转发 `lattice-session/test-crash-barriers`）插桩，钩子只在这个 feature 下编译；构建被测 CLI 时显式开启 `lattice-server/test-crash-barriers`，harness 用 `crash-barriers` feature 启用对应场景。
 
 | 插桩 | 作用 |
 | --- | --- |
@@ -122,13 +122,13 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 
 ### 验证集与显式 feature
 
-`xtask ci`、`ci.yml` 与 `full-gate.yml` 均按两轮运行：第一轮构建无测试 feature 的生产二进制，运行全部 crate 默认测试与默认 harness 场景；第二轮先对 `lattice-server`、`lattice-cli`（`test-fake-tools,test-crash-barriers`）及 `lattice-system-harness`（`fake-tools,crash-barriers`）执行 clippy，再用带 `test-fake-tools,test-crash-barriers` 的构建覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 不变），运行 `lattice-server`（`test-fake-tools,test-crash-barriers`）与 `lattice-system-harness`（`fake-tools,crash-barriers`）的全部目标。
+`xtask ci`、`ci.yml` 与 `full-gate.yml` 均按两轮运行：第一轮构建无测试 feature 的生产二进制，运行全部 crate 默认测试与默认 harness 场景；第二轮先对 `lattice-server`、`lattice-cli`（`--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers`）及 `lattice-system-harness`（`--features fake-tools,crash-barriers`）执行 clippy，再用 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 构建并覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 不变），运行 `lattice-server`（`test-fake-tools,test-crash-barriers`）与 `lattice-system-harness`（`fake-tools,crash-barriers`）的全部目标。
 
 | 验证集 | 内容 | 运行 |
 | --- | --- | --- |
 | 普通验证 | 默认启用的快速、Direct-Local 与 PTY 场景，配无测试 feature 的 `lattice` 二进制 | 三处 CI 门禁第一轮、`rollout`（release 二进制）；本地按需 |
-| 假工具场景 | `lattice-server` 的假执行器测试，以及标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景（需要带 `test-fake-tools` 的被测二进制、harness 的 `fake-tools` feature 与后台启动前设置的 `LATTICE_TEST_TOOLS`） | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
-| 崩溃屏障 | `direct_crash_barriers`：需要带 `test-fake-tools,test-crash-barriers` 的被测二进制与 harness 的 `fake-tools,crash-barriers` feature | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
+| 假工具场景 | `lattice-server` 的假执行器测试，以及标有 `#[cfg(feature = "fake-tools")]` 的工具循环场景（需要带 `lattice-server/test-fake-tools` 的被测二进制、harness 的 `fake-tools` feature 与后台启动前设置的 `LATTICE_TEST_TOOLS`） | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
+| 崩溃屏障 | `direct_crash_barriers`：需要带 `lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 的被测二进制与 harness 的 `fake-tools,crash-barriers` feature | 三处 CI 门禁第二轮；本地按影响范围构建运行 |
 
 报告列明测试目标、feature、构建模式与实际结果；普通套件的结论只覆盖普通套件。
 
