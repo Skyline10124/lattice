@@ -139,15 +139,17 @@ impl FromStr for TuiMockScenario {
 
 #[derive(Debug, Error)]
 pub enum TuiMockError {
-    #[error("unknown TUI mock scenario '{0}'")]
+    #[error("未知的 TUI 模拟场景 '{0}'")]
     UnknownScenario(String),
+    #[error(transparent)]
+    Daemon(#[from] crate::DaemonError),
     #[error(transparent)]
     Driver(#[from] DriverError),
     #[error(transparent)]
     World(#[from] WorldError),
     #[error(transparent)]
     Server(#[from] ServeError),
-    #[error("failed to run lattice TUI: {0}")]
+    #[error("运行 lattice TUI 失败: {0}")]
     Io(#[from] std::io::Error),
 }
 
@@ -155,9 +157,10 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
     let driver = LatticeDriver::from_env()?;
     let world = ScenarioWorld::new("tui-mock")?;
     if let Some(tools) = scenario.test_tools() {
-        // `wire_provider` 会经 `lattice auth set` 自动拉起后台，必须在那之前注入假工具名单。
+        // 假工具名单由后台启动时的环境快照读取，必须在显式启动后台前设置。
         world.set_env("LATTICE_TEST_TOOLS", tools);
     }
+    world.start_daemon()?;
     let server = scenario.start_server()?;
     let model = world.wire_provider(
         ProviderFixture::chat_completions(AGENT),

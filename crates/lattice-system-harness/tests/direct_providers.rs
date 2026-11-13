@@ -103,6 +103,8 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
     };
     let (world, spec) = provider_world(&provider);
     world.set_env("LATTICE_TEST_TOOLS", "read_note,read_second");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let steps = vec![
         json!({"type":"model_output","content":[{"type":"text","text":"Inspecting files."}]}),
         json!({"type":"thought","signature":"fixture-thought-signature","summary":[{"type":"text","text":"Check both."},{"type":"text","text":"Read results."}]}),
@@ -223,6 +225,8 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
         evidence.record_command("stop before Interactions replay", &stopped);
         assert!(stopped.is_clean_exit(0));
+        world.daemon_departed().unwrap();
+        world.start_daemon().expect("显式重启后台");
         let second = send.send("continue after restart").unwrap();
         evidence.record_command("Interactions restarted append", &second.command);
         assert!(second.has_completed() && second.command.is_clean_exit(0));
@@ -270,6 +274,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
     let spec = ScenarioSpec::direct_local("interactions-failed-and-incomplete");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let fixture = interactions_fixture();
     world.write_project_file(".lattice/agents/interactions/agent.toml",&format!("schema_version=1\n[agent]\nname='interactions'\nmodel='{}'\n[prompt]\nsystem='test'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
     world.init_git_project().unwrap();
@@ -413,6 +418,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         evidence.record_command("stop after Interactions incomplete", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.daemon_departed().unwrap();
+        world.start_daemon().expect("显式重启后台");
         let reopened = send
             .run_command(&["--json", "session", "log", send.session_id().unwrap()])
             .unwrap();
@@ -527,6 +533,8 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
     };
     let (world, spec) = provider_world(&provider);
     world.set_env("LATTICE_TEST_TOOLS", "read_note,read_second");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let output = vec![
         json!({"type":"message","id":"msg_comment","role":"assistant","status":"completed","phase":"commentary","content":[{"type":"output_text","text":"Inspecting two files.","annotations":[],"logprobs":[]}]}),
         json!({"type":"reasoning","id":"rs","summary":[{"type":"summary_text","text":"Check both inputs."}],"encrypted_content":"fixture-final-cipher"}),
@@ -643,6 +651,8 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
         evidence.record_command("stop before replay", &stopped);
         assert!(stopped.is_clean_exit(0));
+        world.daemon_departed().unwrap();
+        world.start_daemon().expect("显式重启后台");
         let second = send.send("continue after restart").unwrap();
         evidence.record_command("Responses restarted append", &second.command);
         assert!(second.has_completed() && second.command.is_clean_exit(0));
@@ -698,6 +708,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
     let spec = ScenarioSpec::direct_local("responses-failure-and-incomplete");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let fixture = responses_fixture();
     world.write_project_file(".lattice/agents/responses/agent.toml",&format!("schema_version=1\n[agent]\nname='responses'\nmodel='{}'\n[prompt]\nsystem='test'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n",fixture.model_ref().unwrap())).unwrap();
     world.init_git_project().unwrap();
@@ -828,6 +839,8 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
         evidence.record_command("stop after saved incomplete reply", &stopped);
         assert!(stopped.is_clean_exit(0));
+        world.daemon_departed().unwrap();
+        world.start_daemon().expect("显式重启后台");
         let rejected = send.send("reject truncated arguments").unwrap();
         evidence.record_command("Responses incomplete invalid tool Turn", &rejected.command);
         assert!(rejected.command.is_clean_exit(1));
@@ -1069,6 +1082,8 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
     for provider in &PROVIDERS {
         let (world, spec) = provider_world(provider);
         world.set_env("LATTICE_TEST_TOOLS", "read_note");
+        world.budget(&spec);
+        world.start_daemon().expect("显式启动带测试工具的后台");
         let sentinel = format!("sentinel-{}", provider.name);
         let call_args = serde_json::json!({
             "action": "read",
@@ -1150,6 +1165,8 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
             .run_command(&["--json", "session", "turn", tid])
             .unwrap();
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+        world.daemon_departed().unwrap();
+        world.start_daemon().expect("显式重启后台");
         let reopened = send
             .run_command(&["--json", "session", "turn", tid])
             .unwrap();
@@ -1341,6 +1358,7 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
         let spec = ScenarioSpec::direct_local(name);
         let world = ScenarioWorld::new(&spec.name).unwrap();
         world.budget(&spec);
+        world.start_daemon().expect("显式启动后台");
         let fixture = ProviderFixture {
             protocol: ProviderProtocol::GenerateContent,
             target: ProviderTarget::Custom("google-generate"),
@@ -1467,6 +1485,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
         let world = ScenarioWorld::new(&spec.name).unwrap();
         world.budget(&spec);
         world.set_env("LATTICE_TEST_TOOLS", "read_note");
+        world.start_daemon().expect("显式启动带测试工具的后台");
         let fixture = ProviderFixture {
             protocol,
             target: ProviderTarget::Builtin(id),
@@ -1521,6 +1540,8 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
             let stop = send.run_command(&["daemon", "stop"]).unwrap();
             evidence.record_command("stop builtin backend", &stop);
             assert!(stop.is_clean_exit(0));
+            world.daemon_departed().unwrap();
+            world.start_daemon().expect("显式重启后台");
             let reopened = send.send("continue builtin after restart").unwrap();
             evidence.record_command("builtin reopened append", &reopened.command);
             assert!(reopened.command.is_clean_exit(0) && reopened.has_completed());
@@ -1641,6 +1662,7 @@ fn builtin_text_history_projects_across_protocols() {
     let spec = ScenarioSpec::direct_local("builtin-text-projection");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     world
         .write_agent_profile("builtin-text", "openai-chat/current")
         .unwrap();
@@ -1823,6 +1845,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.start_daemon().expect("显式启动带测试工具的后台");
     world.write_project_file(".lattice/agents/replay/agent.toml",
         "schema_version=1\n[agent]\nname='replay'\nmodel='openai-chat/first'\n[prompt]\nsystem='Read the requested file.'\n").unwrap();
     world.init_git_project().unwrap();
@@ -1966,6 +1989,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         evidence.record_command("stop before reopening", &stop);
         assert!(stop.is_clean_exit(0));
         world.daemon_departed().unwrap();
+        world.start_daemon().expect("显式重启后台");
         let reopened = support::cli(&world, &spec, &["--json", "session", "log", sid]);
         evidence.record_command("reopen persisted Session before IPC selection", &reopened);
         assert!(reopened.is_clean_exit(0), "{}", reopened.summary());

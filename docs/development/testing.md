@@ -105,17 +105,21 @@ LATTICE_BIN 未设置、路径不存在或不能规范化  → 验证失败
 - `direct_failures` 以短 `[llm] timeout_secs` 覆盖产品内部的 Turn deadline：模型流停滞与部分用量后的超时关闭（`direct_failure_profile_deadline_while_stalled_commits_error`、`direct_failure_deadline_after_reported_usage_preserves_cost`），以及 `fake-tools` 下假工具 `block` 在调用期内到达本轮 deadline（`tool_call_deadline_leaves_slot_started_and_stops_turn`：执行器返回 `Deadline`，协调层不补写槽位终态，Step 以 `Stop { Deadline }` 关闭，已进入执行的槽位留在 `Started` 并读出 `Indeterminate(NoResult)`，同一步后续槽位留在 `Registered` 且不执行，Turn 以 `failed` 与提示 `turn deadline exceeded` 结束，随后同一会话的新一轮纯文本提交照常完成）；两次分发之间的 deadline 收尾与崩溃恢复由 `direct_crash_barriers` 的 `dispatch_deadline_tail_is_atomic_and_survives_crash` 覆盖。
 - 前端子进程与产品后台各在独立的 Linux 进程组中运行；超时与受控中断保留已收集的输出，回收子进程并清理进程组。命令结果的判定见 [`CommandOutcome`](../../crates/lattice-system-harness/src/driver.rs)。
 - PTY raw 模式用回车 `\r` 提交；读取输出时按 deadline 等待，阻塞的 read 同样受超时约束。
-- Direct-Local 使用场景自有的后台，经正式入口自动启动或显式启动，与开发者正在运行的后台、虚拟机或容器镜像无关；隔离与清理要求覆盖所有可能自动启动后台的 fast、Direct 与 PTY 场景。已选场景的环境故障按失败报告。
+- `Direct-Local`、`fast_*`、`pty_tui_smoke` 与 `tui_mock` 统一显式管理场景自有后台，与开发者正在运行的后台、虚拟机或容器镜像互不干扰；已选场景的环境故障按失败报告：
+  - **显式启动与环境快照**：需要后台的场景在录入凭据或发起前端调用前，经 `ScenarioWorld::start_daemon`（或 `start_daemon_with`）以直接子进程与独立进程组启动 `$LATTICE_BIN daemon serve --state-root <场景状态根>`（按需附带 `--drain-timeout`）。启动时从场景环境变量白名单取一份快照传给后台，后续前端环境的改动不影响已运行的后台；需要修改后台环境（根证书、`HOME`、`LATTICE_TEST_TOOLS`、崩溃屏障变量等）时，经 `restart_daemon` 或 `restart_daemon_with` 显式重启。
+  - **限时就绪探测**：启动后在有截止时间的轮询中等待后台就绪，截止时间取场景剩余预算与 `5` 秒中的较小值，每次公开的 `lattice --json daemon status` 探测请求受同一截止时间约束（退出码 `0` 且 `stopping == false`），并在探测成功后经 `api.sock` 的 `SO_PEERCRED` 核对监听者确为自有直接子进程，不以 `api.sock` 文件存在判定就绪；轮询期间同时检查直接子进程是否提前退出，提前退出时立即失败并报告退出码与 `stderr`。
+  - **显式重启与单次停止**：`restart_daemon` 先停止当前后台并确认其完全退出，再按指定环境快照启动并等待就绪；`stop_daemon` 只执行停止、清理与残留检查，绝不隐式重启，也不重置场景预算。
 
-后台的清理顺序：
+后台的清理与残留检查顺序：
 
 ```text
-1. 首次可能自动启动后台之前，登记当前产物与自有状态根
-2. 结束时请求正常 stop，等待接管的任务与必要收尾
-3. stop 干净返回时，立即核验 socket 已撤下、owner.lock 可以取得（stop 提前返回由单元测试守护）
+1. 场景显式启动后台时，保存直接子进程句柄、独立进程组号与组成员身份
+2. 结束或显式停止时，在场景剩余单步期限内请求正常 daemon stop，等待已接管的任务与必要收尾
+3. daemon stop 干净返回时，立即核验 api.sock 已撤下、owner.lock 可以取得（提前返回由单元测试守护）
 4. 在有上限的时间窗内等待自有后台进程组退空；超时按失败报告
-5. 出现异常时，只对核验了产物、参数、状态根与组归属的自有进程组强制清理
-6. 清理完成后再删除临时状态；清理失败时保留诊断与所需状态，原始断言仍是首要失败
+5. 组首领先退出、正常停止失败、预算耗尽或断言 panic 时，只对核验过进程身份的自有后台进程组强制清理并回收直接子进程，不误杀非自有进程
+6. 按 /proc/<pid>/cmdline 扫描 daemon serve --state-root <场景状态根> 执行残留检查（只用于发现残留，不作为归属来源）；存在残留或非自有后台时按失败报告
+7. 确认清理完成后再删除临时状态；未确认清理完成时保留诊断与所需状态，原始断言仍是首要失败
 ```
 
 判断整个组是否退出，以进程组是否退空为准。超时后重试之前，先确认旧验证进程已经退出；编译并发与重型验证的数量按[工程规范](engineering.md#验证)执行。

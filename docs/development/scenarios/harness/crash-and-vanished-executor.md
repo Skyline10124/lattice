@@ -7,13 +7,13 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 后台在 Turn 推进的各会话库提交点退出后，重开不经任何写入即可读到这一轮的结局；随后的 `send` 或 `rewind` 直接进行，旧 Turn 的节点保持原样 |
-| 前提 | 启用 harness 的 `fake-tools,crash-barriers` feature 与带 `test-fake-tools,test-crash-barriers` 的产品二进制，后台启动前以 `LATTICE_TEST_TOOLS` 注册假工具；在 Turn 推进的各会话库提交点设置屏障：接受（`turn_accepted`）、开始请求（`request_started`）、尝试停止（`attempt_stopped`，可重试与不可重试）、登记调用（`calls_registered`）、调用开始（`invocation_started`）、调用返回（`invocation_finished`，含取消与超限结果）与关闭 Step（`step_closed`）（`configure` 提交点的崩溃屏障 `configure_committed` 见[会话设置与草稿会话](session-settings-and-drafts.md)）；核验后台身份与屏障 marker（会话、Turn、Step 与调用槽位标识）；脚本为带多个假工具调用的多步 Turn |
+| 前提 | 启用测试框架的 `fake-tools,crash-barriers` `feature` 与带 `test-fake-tools,test-crash-barriers` 的产品二进制，显式启动或重启后台前以 `LATTICE_TEST_TOOLS` 注册假工具，并按环境快照传入 `Turn` 推进各会话库提交点的崩溃屏障变量：接受（`turn_accepted`）、开始请求（`request_started`）、尝试停止（`attempt_stopped`，可重试与不可重试）、登记调用（`calls_registered`）、调用开始（`invocation_started`）、调用返回（`invocation_finished`，含取消与超限结果）与关闭 `Step`（`step_closed`）（`configure` 提交点的崩溃屏障 `configure_committed` 见[会话设置与草稿会话](session-settings-and-drafts.md)）；核验自有后台身份与屏障标记（会话、`Turn`、`Step` 与调用槽位标识）；脚本为带多个假工具调用的多步 `Turn` |
 | 相关测试 | `direct_crash_barriers`：`redb_commit_windows_read_conclusions_without_writes_and_preserve_facts`、`r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step`、`memory_only_cancel_crash_is_process_exit_and_next_send_runs_once`、`dispatch_deadline_tail_is_atomic_and_survives_crash`、`cross_project_operator_lifecycle_cursor_and_payload_isolation`；`direct_background`：`vanished_owner_is_reported_by_the_session_head` |
 
 ## 操作
 
-1. 命中屏障后以 SIGKILL 中断后台，保留前端独立退出的证据。
-2. 新客户端先查询，再发送新消息或执行 `rewind`。
+1. 命中屏障（或在途窗口）后以 `SIGKILL` 中断自有后台，保留前端独立退出的证据。
+2. 以清除屏障变量后的环境显式启动新后台，新客户端先查询，再发送新消息或执行 `rewind`。
 
 ## 断言
 

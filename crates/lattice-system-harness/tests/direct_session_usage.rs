@@ -178,6 +178,8 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let driver = support::driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "priced");
     world
@@ -492,7 +494,10 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
         evidence.record_command("stop before read-only reopening", &stopped);
         assert!(stopped.is_clean_exit(0));
-        world.stop_daemon().unwrap();
+        world.daemon_departed().unwrap();
+        world
+            .start_daemon()
+            .expect("显式重启后台后再核对只读用量及代次");
         assert_eq!(usage(&send, &mut evidence, &sid), original_path);
         assert_ne!(
             query(&send, &mut evidence, &["--json", "daemon", "status"])["epoch"],

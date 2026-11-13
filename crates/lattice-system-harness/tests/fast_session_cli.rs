@@ -9,6 +9,7 @@ use support::{assert_clean_send, cli, direct_world, driver, parse_send_stdout, w
 #[test]
 fn session_queries_and_rewind_preserve_the_tree_across_restart() {
     let (world, spec) = direct_world("session-query-tree", "plain", "");
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(&world, "plain", SseScript::plain("durable answer"));
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
@@ -37,7 +38,9 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         let turn = query(&["--json", "session", "turn", tid]);
         assert_eq!(turn["summary"]["outcome"], "completed");
         assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
-        world.stop_daemon().unwrap();
+        world
+            .restart_daemon()
+            .expect("显式重启后台后再查询持久历史");
         assert_eq!(query(&["--json", "session", "log", sid]), log);
         assert_eq!(query(&["--json", "session", "turn", tid]), turn);
         let moved = query(&["--json", "session", "rewind", sid, "0"]);
@@ -98,6 +101,8 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
 fn missing_store_read_does_not_create_a_database() {
     let spec = lattice_system_harness::ScenarioSpec::fast("session-missing-store");
     let world = lattice_system_harness::ScenarioWorld::new(&spec.name).unwrap();
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let out = cli(&world, &spec, &["session", "list"]);
@@ -127,6 +132,7 @@ fn missing_store_read_does_not_create_a_database() {
 #[test]
 fn missing_session_and_missing_profile_fail_before_dispatch() {
     let (world, spec) = direct_world("session-lookup-refusal", "plain", "");
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(&world, "plain", SseScript::plain("seed"));
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
@@ -242,6 +248,7 @@ fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
     use serde_json::json;
     let (world, spec) = direct_world("usage-prefix", "plain", "");
     let budget = world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let driver = driver();
     let send = SessionSendDriver::new(&driver, &world, &spec, "plain");
     let server = wire_fake_llm(&world, "plain", SseScript::plain("seed"));
@@ -340,6 +347,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
         ("cli-effort", "does not support reasoning effort off"),
     ] {
         let (world, spec) = direct_world(&format!("config-rejection-{case}"), "plain", "");
+        world.start_daemon().expect("显式启动后台");
         let server = wire_fake_llm(&world, "plain", SseScript::plain("must not be requested"));
         let path = world.project_dir().join(".lattice/agents/plain/agent.toml");
         let original = std::fs::read_to_string(&path).unwrap();
@@ -637,6 +645,7 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
     use std::os::unix::ffi::{OsStrExt, OsStringExt};
 
     let (world, spec) = direct_world("session-non-utf8-project-path", "plain", "");
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(
         &world,
         "plain",

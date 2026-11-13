@@ -104,6 +104,8 @@ fn request_messages(capture: &CapturedRequest) -> Vec<(&str, &str)> {
 fn direct_local_plain_text_turn_commits_and_exit_zero() {
     let driver = driver();
     let (world, spec) = turn_world("direct-local-plain-turn", "dl-plain");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(&world, "dl-plain", SseScript::plain("ok"));
     let scenario_evidence = evidence(&world, &spec);
 
@@ -156,6 +158,8 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
 fn direct_local_session_reopen_after_external_change() {
     let driver = driver();
     let (world, spec) = turn_world("direct-local-reopen", "dl-reopen");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(
         &world,
         "dl-reopen",
