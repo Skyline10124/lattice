@@ -11,23 +11,23 @@ pub fn run() -> anyhow::Result<()> {
     let manifest = root.join("crates/lattice-system-harness/Cargo.toml");
 
     boundary_report::run_groups(
-        "system harness boundary check passed",
-        "system harness boundary check failed",
+        "harness 边界检查通过",
+        "harness 边界检查失败",
         &[
             (
-                "manifest forbidden deps (toml)",
+                "清单中的禁止依赖（toml）",
                 check::manifest_forbidden_deps(&manifest, &root)?,
             ),
             (
-                "manifest workspace inheritance",
+                "清单中的 workspace 继承",
                 check::manifest_workspace_inheritance(&manifest)?,
             ),
             (
-                "cargo metadata product dependencies (transitive)",
+                "cargo metadata 中的产品依赖（含传递依赖）",
                 check::metadata_transitive_workspace_members(&root)?,
             ),
             (
-                "test-only features reachable from production features/dependencies",
+                "生产 feature 或普通依赖可达的测试专用 feature",
                 check::production_test_feature_hits(&root)?,
             ),
         ],

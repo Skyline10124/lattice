@@ -1,24 +1,22 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Alpha rollout gate (#47).
+//! alpha 发布门禁（#47）。
 //!
-//! Runs the release evidence lane against a LOCKED RELEASE binary and records
-//! a versioned JSON record:
+//! 对锁定依赖构建的 release 二进制运行发布取证流程，并写出带版本号的 JSON 记录：
 //!
-//!   1. clean tracked worktree check (explicit rejection on tracked dirt)
-//!   2. capability probes (rustc pin, informational host facts)
+//!   1. 已跟踪工作树干净检查（已跟踪文件有改动时明确拒绝）
+//!   2. 能力探测（核验固定的 rustc 版本，另记录仅供参考的主机信息）
 //!   3. `cargo build --locked --release -p lattice-cli --bin lattice`
-//!   4. artifact identity (sha256 + size)
-//!   5. `cargo xtask harness-boundary` (dependency/architecture boundary check)
-//!   6. Direct-Local harness scenarios against the release binary (`LATTICE_BIN`)
-//!   7. offline correctness suites (with an anti-vacuous zero-pass guard)
+//!   4. 产物身份（sha256 与大小）
+//!   5. `cargo xtask harness-boundary`（依赖与架构边界检查）
+//!   6. 以 release 二进制（`LATTICE_BIN`）运行 Direct-Local harness 场景
+//!   7. 离线正确性测试组（带零通过保护，空跑不算通过）
 //!
-//! SKIPPED IS NOT PASS: every planned step is seeded `blocked` and only
-//! overwritten by actually running it; the verdict is `pass` iff every
-//! required step is `passed` (see [`verdict`]).
+//! 跳过不等于通过：每个计划步骤先以 `blocked` 写入记录，只有实际运行后才会覆盖；
+//! 全部必需步骤为 `passed` 时结论才是 `pass`（见 [`verdict`]）。
 //!
-//! No KVM, no Microsandbox, no OCI image, no physical-isolation dependency.
+//! 不依赖 KVM、Microsandbox、OCI 镜像，也不依赖任何物理隔离。
 
 use std::env;
 use std::fs;
@@ -36,25 +34,23 @@ use crate::repo_root;
 
 pub const SCHEMA_VERSION: u32 = 1;
 
-/// Max bytes of a failed step's captured output retained in the record.
+/// 失败步骤的捕获输出在记录中最多保留的字节数。
 const TAIL_MAX_BYTES: usize = 800;
 
-/// Boundary checks only scan/metadata the workspace; keep them bounded.
+/// 边界检查只扫描 workspace 并读取 cargo metadata，上限较短。
 const CMD_TIMEOUT: Duration = Duration::from_secs(600);
-/// A cold locked release build is the long pole of the gate.
+/// 冷缓存下锁定依赖的 release 构建是门禁中最耗时的一步。
 const BUILD_TIMEOUT: Duration = Duration::from_secs(3600);
-/// Direct-Local scenarios have their own 30s/180s budgets; this is the
-/// whole-suite backstop so one hung test binary cannot stall the gate.
+/// Direct-Local 场景各有 30 秒或 180 秒的预算；这里是整组测试的兜底上限，挂起的测试二进制拖不住整个门禁。
 const TEST_TIMEOUT: Duration = Duration::from_secs(1800);
 
 #[derive(Args, Debug)]
 pub struct RolloutArgs {
-    /// Rollout channel (`alpha` is the only valid value today).
-    #[arg(long, value_enum)]
+    /// 发布通道，目前只有 `alpha`。
+    #[arg(long, value_enum, value_name = "通道", hide_possible_values = true)]
     pub channel: Channel,
-    /// Override the primary record output path
-    /// (default: target/rollout/rollout-<channel>-<timestamp>.json).
-    #[arg(long)]
+    /// 主记录的输出路径，默认为 `target/rollout/rollout-<通道>-<时间戳>.json`。
+    #[arg(long, value_name = "路径")]
     pub out: Option<PathBuf>,
 }
 
@@ -128,11 +124,9 @@ pub enum Verdict {
     Fail,
 }
 
-/// The ONLY verdict rule: every required step must be `Passed`. `Failed`,
-/// `Blocked` (never ran), and `Skipped` all yield `Fail`. Steps are seeded
-/// `Blocked` before execution and overwritten only by actually running them,
-/// so a required step that was skipped or never attempted can never read as
-/// success.
+/// 唯一的结论规则：每个必需步骤都必须是 `Passed`；`Failed`、`Blocked`（没有运行）与 `Skipped`
+/// 都判为 `Fail`。步骤在执行前先置为 `Blocked`，只有实际运行才会覆盖，因此被跳过或从未执行的
+/// 必需步骤不可能被当作成功。
 fn verdict(steps: &[StepRecord]) -> Verdict {
     if steps
         .iter()
@@ -144,10 +138,8 @@ fn verdict(steps: &[StepRecord]) -> Verdict {
     }
 }
 
-/// Absolute paths for everything the gate touches. `LATTICE_BIN` is resolved
-/// by the harness via `is_file()` from the TEST-PROCESS cwd (the crate dir
-/// under `cargo test -p`), so relative paths silently miss the release
-/// artifact; absolute paths are mandatory here.
+/// 门禁涉及的路径一律用绝对路径。harness 在测试进程的当前目录（`cargo test -p` 下是该 crate
+/// 的目录）中用 `is_file()` 解析 `LATTICE_BIN`，相对路径会悄悄找不到 release 产物。
 struct Ctx {
     root: PathBuf,
     lattice_bin: PathBuf,
@@ -172,7 +164,7 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
     let root = repo_root::repo_root()?;
     let rollout_dir = root.join("target/rollout");
     let harness_failures = rollout_dir.join("harness-failures");
-    fs::create_dir_all(&harness_failures).context("create rollout harness-failure dir")?;
+    fs::create_dir_all(&harness_failures).context("创建 rollout 的 harness 失败产物目录")?;
     let ctx = Ctx {
         root: root.clone(),
         lattice_bin: root.join("target/release/lattice"),
@@ -191,15 +183,14 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
 
     let mut plan = build_plan(&ctx);
 
-    // Commit SHA is captured BEFORE the dirtiness decision so even a
-    // rejection record identifies its source.
+    // 先取提交 SHA，再判断工作树是否干净，被拒绝的记录也能标明来源。
     let commit_sha = match git_output(&root, &["rev-parse", "HEAD"]) {
         Ok(sha) => sha.trim().to_owned(),
         Err(e) => {
             let mut record = seed_record(channel, "unknown", &plan);
-            record.rejection = Some(format!("git failure: {e}"));
+            record.rejection = Some(format!("Git 失败：{e}"));
             persist(&record, &record_paths)?;
-            eprintln!("rollout rejected: git failure: {e}");
+            eprintln!("rollout 被拒绝：Git 失败：{e}");
             std::process::exit(2);
         }
     };
@@ -219,7 +210,7 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
             .steps
             .iter_mut()
             .find(|s| s.id == planned.id)
-            .expect("seeded step exists");
+            .expect("计划步骤已预置在记录中");
         slot.duration_ms = duration_ms;
         let passed = match outcome {
             Ok(()) => {
@@ -244,10 +235,10 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
                     &git_output(&root, &["status", "--porcelain=v1", "--untracked-files=no"])
                         .map_err(anyhow::Error::msg)?,
                 );
-                record.rejection = Some(format!("tracked-dirty worktree ({} paths)", dirty.len()));
+                record.rejection = Some(format!("已跟踪文件有改动（{} 个路径）", dirty.len()));
                 persist(&record, &record_paths)?;
                 eprintln!(
-                    "rollout requires a clean tracked worktree; {} tracked path(s) differ from HEAD:",
+                    "rollout 要求已跟踪文件没有改动；{} 个已跟踪路径与 HEAD 不同：",
                     dirty.len()
                 );
                 for p in &dirty {
@@ -265,9 +256,9 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
     }
 
     println!();
-    println!("verdict: {:?}", record.verdict);
-    println!("rollout record: {}", primary.display());
-    println!("latest copy:    {}", latest.display());
+    println!("rollout 结论：{:?}", record.verdict);
+    println!("rollout 记录：{}", primary.display());
+    println!("最新记录副本：{}", latest.display());
     std::process::exit(exit_code);
 }
 
@@ -285,10 +276,7 @@ fn execute(planned: &mut Planned, ctx: &Ctx, record: &mut RolloutRecord) -> Resu
             if failed.is_empty() {
                 Ok(())
             } else {
-                Err(format!(
-                    "gating capability probe(s) failed: {}",
-                    failed.join(", ")
-                ))
+                Err(format!("门禁能力探测未通过：{}", failed.join(", ")))
             }
         }
         Action::ArtifactIdentity => match hash_artifact(&ctx.lattice_bin) {
@@ -347,12 +335,12 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
     vec![
         Planned {
             id: "clean_worktree",
-            display: "<internal: git status --porcelain=v1 --untracked-files=no>".into(),
+            display: "<内部：git status --porcelain=v1 --untracked-files=no>".into(),
             action: Action::CleanWorktree,
         },
         Planned {
             id: "capability_probes",
-            display: "<internal: probes>".into(),
+            display: "<内部：能力探测>".into(),
             action: Action::Probes,
         },
         Planned {
@@ -362,7 +350,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         },
         Planned {
             id: "artifact_identity",
-            display: format!("<internal: sha256 {}>", ctx.lattice_bin.display()),
+            display: format!("<内部：sha256 {}>", ctx.lattice_bin.display()),
             action: Action::ArtifactIdentity,
         },
         Planned {
@@ -393,9 +381,7 @@ fn seed_record(channel: &str, commit_sha: &str, plan: &[Planned]) -> RolloutReco
         finished_utc: now,
         artifact: None,
         probes: vec![],
-        // Every planned step seeded `blocked` ("not executed"): it is
-        // structurally impossible for a required step to be absent from the
-        // record or to remain silently unaccounted.
+        // 每个计划步骤先置为 `blocked`（未执行）：必需步骤不可能从记录中缺失，也不可能悄悄漏记。
         steps: plan
             .iter()
             .map(|p| StepRecord {
@@ -414,21 +400,18 @@ fn seed_record(channel: &str, commit_sha: &str, plan: &[Planned]) -> RolloutReco
     }
 }
 
-/// The clean-worktree contract. Untracked files are intentionally NOT fatal
-/// (`--untracked-files=no`): the contract is a clean *tracked* worktree.
-/// Source identity is pinned by commit_sha + tracked cleanliness; untracked
-/// scratch (.env, editor files, agent work products) and ignored build output
-/// (target/) must not block a local rollout, or the gate would be unusable on
-/// any real developer machine.
+/// 工作树干净的约定：只要求已跟踪文件没有改动，未跟踪文件不算失败（`--untracked-files=no`）。
+/// 源码身份由 `commit_sha` 加上已跟踪文件干净共同确定；未跟踪的临时文件（`.env`、编辑器文件、
+/// agent 产物）与被忽略的构建输出（`target/`）不阻塞本地 rollout，否则门禁在真实的开发机上无法使用。
 fn clean_worktree(root: &Path) -> Result<(), String> {
     let porcelain = git_output(root, &["status", "--porcelain=v1", "--untracked-files=no"])
-        .map_err(|e| format!("git status failed: {e}"))?;
+        .map_err(|e| format!("git status 失败：{e}"))?;
     let dirty = tracked_dirty_paths(&porcelain);
     if dirty.is_empty() {
         Ok(())
     } else {
         Err(format!(
-            "rollout requires a clean tracked worktree; {} tracked path(s) differ from HEAD:\n{}",
+            "rollout 要求已跟踪文件没有改动；{} 个已跟踪路径与 HEAD 不同：\n{}",
             dirty.len(),
             dirty
                 .iter()
@@ -439,34 +422,31 @@ fn clean_worktree(root: &Path) -> Result<(), String> {
     }
 }
 
-/// Pure predicate over `git status --porcelain=v1 --untracked-files=no`
-/// output: any non-empty, non-`??` line is a tracked deviation from HEAD
-/// (unstaged modifications, staged changes, staged deletions, type changes).
-/// Staged-only lines like `M  path` (index column set, worktree column blank)
-/// count as dirty.
+/// 对 `git status --porcelain=v1 --untracked-files=no` 输出的纯判定：任何非空且不以 `??` 开头的行，
+/// 都表示已跟踪文件与 HEAD 不同（未暂存的修改、已暂存的改动、已暂存的删除、类型变化）。
+/// 只在暂存区有改动的行（如 `M  path`，索引列有值、工作树列为空）同样算作有改动。
 fn tracked_dirty_paths(porcelain: &str) -> Vec<String> {
     porcelain
         .lines()
         .filter(|l| !l.is_empty() && !l.starts_with("??"))
         .map(|l| {
             let path = l.get(3..).unwrap_or("").trim();
-            // Rename lines look like `R  old -> new`; report the new path.
+            // 重命名行形如 `R  old -> new`，报告新路径。
             path.rsplit(" -> ").next().unwrap_or(path).to_owned()
         })
         .collect()
 }
 
 fn git_output(root: &Path, args: &[&str]) -> Result<String, String> {
-    // Raw stdout, NOT trimmed: porcelain status lines are column-based and a
-    // leading worktree-column space on the first line is significant.
+    // 原样返回 stdout，不做 trim：porcelain 状态行按列解析，第一行开头的工作树列空格有意义。
     let out = Command::new("git")
         .current_dir(root)
         .args(args)
         .output()
-        .map_err(|e| format!("failed to run git: {e}"))?;
+        .map_err(|e| format!("无法运行 git：{e}"))?;
     if !out.status.success() {
         return Err(format!(
-            "`git {}` failed: {}",
+            "`git {}` 失败：{}",
             args.join(" "),
             String::from_utf8_lossy(&out.stderr).trim()
         ));
@@ -485,8 +465,8 @@ fn collect_probes() -> Vec<CapabilityProbe> {
             let ok = v.contains("1.96.0");
             (v, ok)
         }
-        Ok(_) => ("`rustc --version` failed".to_owned(), false),
-        Err(e) => (format!("failed to run `rustc --version`: {e}"), false),
+        Ok(_) => ("`rustc --version` 执行失败".to_owned(), false),
+        Err(e) => (format!("无法运行 `rustc --version`：{e}"), false),
     };
     probes.push(CapabilityProbe {
         name: "rustc_version".into(),
@@ -498,7 +478,7 @@ fn collect_probes() -> Vec<CapabilityProbe> {
     let git = Command::new("git").arg("--version").output();
     let (value, ok) = match git {
         Ok(o) if o.status.success() => (String::from_utf8_lossy(&o.stdout).trim().to_owned(), true),
-        _ => ("`git --version` failed".to_owned(), false),
+        _ => ("`git --version` 执行失败".to_owned(), false),
     };
     probes.push(CapabilityProbe {
         name: "git_version".into(),
@@ -507,8 +487,7 @@ fn collect_probes() -> Vec<CapabilityProbe> {
         ok,
     });
 
-    // KVM presence is recorded but NEVER gating: host physical isolation is
-    // not a Direct-Local prerequisite and must not influence any step.
+    // 只记录 KVM 是否存在，不参与门禁判定：主机物理隔离不是 Direct-Local 的前提，不影响任何步骤。
     probes.push(CapabilityProbe {
         name: "dev_kvm_present".into(),
         value: Path::new("/dev/kvm").exists().to_string(),
@@ -531,7 +510,7 @@ fn collect_probes() -> Vec<CapabilityProbe> {
 }
 
 fn hash_artifact(path: &Path) -> Result<ArtifactIdentity, String> {
-    let bytes = fs::read(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let bytes = fs::read(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
     Ok(ArtifactIdentity {
         path: path.display().to_string(),
         sha256: hex(&Sha256::digest(&bytes)),
@@ -547,30 +526,30 @@ struct TimedOutput {
 
 fn status_check(out: &TimedOutput) -> Result<(), String> {
     if out.timed_out {
-        return Err("step timed out".to_owned());
+        return Err("步骤超时".to_owned());
     }
     if !out.success {
-        return Err(format!("command failed:\n{}", tail(&out.output)));
+        return Err(format!("命令失败：\n{}", tail(&out.output)));
     }
     Ok(())
 }
 
-/// A `cargo test` step passes only if the exit status is 0 AND the summed
-/// `test result: ok. N passed` counts are > 0. A filter that matches zero
-/// tests exits 0 vacuously (the v1.4 `commit_baseline` failure mode); that is
-/// a gate failure, never a pass.
+/// `cargo test` 步骤只有在退出码为 0、且各 `test result: ok. N passed` 的通过数之和大于 0 时才算通过。
+/// 过滤条件匹配不到任何测试时 cargo test 同样以 0 退出（即 v1.4 `commit_baseline` 的失败方式），
+/// 这按门禁失败处理，不算通过。
 fn cargo_test_passed(out: &TimedOutput) -> Result<(), String> {
     status_check(out)?;
     if passed_test_count(&out.output) == 0 {
         return Err(
-            "cargo test exited 0 but ran 0 tests (vacuous filter is a gate failure)".to_owned(),
+            "cargo test 以 0 退出，但没有运行任何测试（过滤条件没有匹配到测试，按门禁失败处理）"
+                .to_owned(),
         );
     }
     Ok(())
 }
 
 fn passed_test_count(output: &str) -> u64 {
-    let re = regex::Regex::new(r"test result: \w+\. (\d+) passed").expect("valid regex");
+    let re = regex::Regex::new(r"test result: \w+\. (\d+) passed").expect("正则表达式合法");
     re.captures_iter(output)
         .filter_map(|c| c[1].parse::<u64>().ok())
         .sum()
@@ -580,24 +559,18 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-/// Last ~800 bytes of a step's output, for the failure detail stored in the
-/// record.
+/// 取步骤输出的最后约 800 字节，作为记录中的失败详情。
 ///
-/// Must not slice on a raw byte index: `&s[s.len() - 800..]` panics when the cut
-/// lands inside a multi-byte codepoint, and step output routinely contains
-/// non-ASCII (rustc diagnostics quote source, and gate-covered crates have
-/// non-ASCII comments and test literals). A panic here would replace an ordinary
-/// step failure with a crashed gate: the step's status would stay seeded
-/// `Blocked`, `detail` would stay `None`, no failure artifact would be written,
-/// and the process would exit 101 instead of 1 — losing exactly the diagnostic
-/// this function exists to produce.
+/// 不能按原始字节下标切片：切点落在多字节字符内部时 `&s[s.len() - 800..]` 会 panic，而步骤输出
+/// 经常含有非 ASCII 字符（rustc 诊断会引用源码，门禁覆盖的 crate 有非 ASCII 的注释与测试字面量）。
+/// 在这里 panic 会把一次普通的步骤失败变成门禁崩溃：步骤状态停在预置的 `Blocked`，`detail` 仍为
+/// `None`，不写失败产物，进程以 101 而不是 1 退出，恰好丢掉本函数要提供的诊断。
 fn tail(output: &str) -> String {
     let trimmed = output.trim();
     if trimmed.len() <= TAIL_MAX_BYTES {
         return trimmed.to_owned();
     }
-    // Walk forward to the next char boundary at or after the cut point, so the
-    // slice is always valid and never longer than TAIL_MAX_BYTES.
+    // 从切点向后找到第一个字符边界，切片因此总是合法，且不超过 TAIL_MAX_BYTES。
     let mut cut = trimmed.len() - TAIL_MAX_BYTES;
     while cut < trimmed.len() && !trimmed.is_char_boundary(cut) {
         cut += 1;
@@ -605,23 +578,24 @@ fn tail(output: &str) -> String {
     format!("…{}", &trimmed[cut..])
 }
 
-/// Run a command under a hard timeout, capturing combined stdout+stderr.
-/// Mirrors `xtask/src/ci.rs`'s process-group kill so a timeout takes down the
-/// whole tree (cargo + rustc + test binaries) instead of orphaning them.
+/// 在硬超时下运行命令，合并捕获 stdout 与 stderr。与 `xtask/src/ci.rs` 一样按进程组终止，
+/// 超时时整棵进程树（cargo、rustc 与测试二进制）一起结束，不留下孤儿进程。
 fn run_timed(cmd: &mut Command, timeout: Duration) -> anyhow::Result<TimedOutput> {
-    let file = tempfile::NamedTempFile::new().context("create step output temp file")?;
+    let file = tempfile::NamedTempFile::new().context("创建步骤输出临时文件")?;
     // 两个输出流共享同一个文件偏移：调两次 `reopen()` 会拿到两个偏移独立的描述符
     //（`reopen` 只是普通 `open`，不带 `O_APPEND`），交错写入时 stdout 与 stderr 会互相覆盖，
     // 破坏后续 `passed_test_count` 对 `test result:` 的解析与 `tail()` 截取的失败详情。
     // `try_clone` 复制同一个底层文件表项，两个流按到达顺序追加。
-    let out = file.reopen().context("reopen step output for stdout")?;
-    let err = out.try_clone().context("clone step output for stderr")?;
+    let out = file.reopen().context("为 stdout 重新打开步骤输出文件")?;
+    let err = out
+        .try_clone()
+        .context("为 stderr 复制步骤输出文件描述符")?;
     cmd.stdout(Stdio::from(out))
         .stderr(Stdio::from(err))
-        // Own process group so a timeout can kill the whole tree.
+        // 子进程自成进程组，超时时可以终止整棵进程树。
         .process_group(0);
     let start = Instant::now();
-    let mut child = cmd.spawn().context("spawn step command")?;
+    let mut child = cmd.spawn().context("启动步骤命令")?;
     let pgid = child.id();
 
     let (success, timed_out) = loop {
@@ -644,11 +618,9 @@ fn run_timed(cmd: &mut Command, timeout: Duration) -> anyhow::Result<TimedOutput
         }
     };
 
-    // Lossy rather than `read_to_string(..).unwrap_or_default()`: that silently
-    // turned any decode failure into an EMPTY string, and empty output makes
-    // `passed_test_count` return 0, which `cargo_test_passed` reports as "exited
-    // 0 but ran 0 tests" — a green artifact rejected with no diagnosable detail.
-    // Keep whatever bytes arrived instead of discarding the lot.
+    // 用有损解码，不用 `read_to_string(..).unwrap_or_default()`：后者遇到解码失败会悄悄得到空字符串，
+    // 空输出让 `passed_test_count` 返回 0，`cargo_test_passed` 随之报告“以 0 退出，但没有运行任何测试”，
+    // 合格的产物被拒绝且没有可诊断的详情。已收到的字节全部保留。
     let output = String::from_utf8_lossy(&fs::read(file.path()).unwrap_or_default()).into_owned();
     if !output.is_empty() {
         print!("{output}");
@@ -684,8 +656,8 @@ fn rel_path(root: &Path, path: &Path) -> String {
         .to_string()
 }
 
-/// Records the real argv + explicit env of a `Command` (never executed via a
-/// shell, so no `&&`/`env X=Y` shell syntax is involved).
+/// 记录 `Command` 的实际参数与显式设置的环境变量。命令不经 shell 执行，不涉及 `&&`、`env X=Y`
+/// 之类的 shell 语法。
 fn display_command(cmd: &Command) -> String {
     let mut s = String::new();
     for (k, v) in cmd.get_envs() {
@@ -709,15 +681,15 @@ fn now_rfc3339() -> String {
 }
 
 fn persist(record: &RolloutRecord, paths: &[PathBuf]) -> anyhow::Result<()> {
-    let json = serde_json::to_string_pretty(record).context("serialize rollout record")?;
+    let json = serde_json::to_string_pretty(record).context("序列化 rollout 记录")?;
     for path in paths {
-        write_atomic(path, &json).with_context(|| format!("write {}", path.display()))?;
+        write_atomic(path, &json).with_context(|| format!("写入 {}", path.display()))?;
     }
     Ok(())
 }
 
-/// Atomic rewrite (temp file + rename) so a crash mid-run still leaves a
-/// valid, failing record — a partial record can never read as success.
+/// 原子重写（先写临时文件再重命名）：运行中途崩溃也会留下一份完整、结论为失败的记录，
+/// 不完整的记录不可能被当作成功。
 fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     fs::write(&tmp, contents)?;
@@ -728,22 +700,20 @@ fn write_atomic(path: &Path, contents: &str) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
-    /// `tail` byte-sliced the captured output, which panics when the cutoff
-    /// lands inside a multibyte character. Cargo diagnostics routinely carry
-    /// non-ASCII paths and test messages, so this aborted the rollout while it
-    /// was reporting a step failure, masking the original error.
+    /// `tail` 不能按字节切片：切点落在多字节字符内部时会 panic。cargo 诊断经常带有非 ASCII 的路径与
+    /// 测试消息，panic 会让 rollout 在报告步骤失败时中止，掩盖原始错误。
     #[test]
     fn tail_truncates_on_a_char_boundary() {
-        // 3 bytes per char, so the naive `len() - 800` cutoff lands mid-char.
+        // 每个字符 3 字节，直接用 `len() - 800` 作切点会落在字符中间。
         let multibyte = "错误".repeat(500);
         assert!(multibyte.len() > TAIL_MAX_BYTES);
         let out = tail(&multibyte);
-        assert!(out.starts_with('\u{2026}'), "expected the ellipsis marker");
-        // Still bounded, and valid UTF-8 by construction (it is a String).
+        assert!(out.starts_with('\u{2026}'), "应以省略号开头");
+        // 长度仍有上限；结果是 String，本身就是合法的 UTF-8。
         assert!(out.len() <= TAIL_MAX_BYTES + '\u{2026}'.len_utf8() + 3);
         assert!(multibyte.ends_with(out.trim_start_matches('\u{2026}')));
 
-        // ASCII shorter than the cap is returned untouched.
+        // 短于上限的 ASCII 文本只去掉首尾空白。
         assert_eq!(tail("  short  "), "short");
     }
 
@@ -772,14 +742,14 @@ mod tests {
             assert_eq!(
                 verdict(&steps),
                 Verdict::Fail,
-                "{bad:?} required step must fail the gate"
+                "必需步骤为 {bad:?} 时门禁应判为失败"
             );
         }
     }
 
     #[test]
     fn build_plan_runs_production_release_steps_without_test_features() {
-        let temp = tempfile::tempdir().expect("tempdir");
+        let temp = tempfile::tempdir().expect("创建临时目录");
         let ctx = Ctx {
             root: temp.path().to_path_buf(),
             lattice_bin: temp.path().join("target/release/lattice"),
@@ -859,7 +829,7 @@ mod tests {
             "verdict",
             "rejection",
         ] {
-            assert!(json.contains(&format!("\"{key}\"")), "missing key {key}");
+            assert!(json.contains(&format!("\"{key}\"")), "缺少字段 {key}");
         }
         let back: RolloutRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back.schema_version, SCHEMA_VERSION);
@@ -868,7 +838,7 @@ mod tests {
         assert!(back.started_utc.ends_with('Z'));
         assert_eq!(back.steps.len(), 2);
         assert_eq!(back.verdict, Verdict::Pass);
-        let art = back.artifact.expect("artifact present");
+        let art = back.artifact.expect("记录应包含产物身份");
         assert_eq!(art.sha256.len(), 64);
         assert!(art.size_bytes > 0);
     }
@@ -882,21 +852,21 @@ mod tests {
             dirty,
             vec!["crates/foo.rs", "crates/staged_only.rs", "crates/added.rs"]
         );
-        // Staged-only line (index column set, worktree column blank) is dirty.
+        // 只在暂存区有改动的行（索引列有值、工作树列为空）算作有改动。
         assert_eq!(
             tracked_dirty_paths("M  only_staged.rs"),
             vec!["only_staged.rs"]
         );
-        // Staged deletion counts too.
+        // 已暂存的删除也算。
         assert_eq!(tracked_dirty_paths("D  gone.rs"), vec!["gone.rs"]);
         assert!(tracked_dirty_paths("").is_empty());
-        // Untracked-only trees are clean per the tracked-worktree contract.
+        // 按已跟踪工作树的约定，只有未跟踪文件的工作树算干净。
         assert!(tracked_dirty_paths("?? untracked_only").is_empty());
     }
 
     #[test]
     fn zero_pass_output_fails_the_guard() {
-        // The v1.4 `commit_baseline` failure mode: exit 0, 0 passed.
+        // v1.4 `commit_baseline` 的失败方式：以 0 退出，0 个测试通过。
         let vacuous = "running 3 tests\n\n\n3 filtered out\n\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 3 filtered out\n";
         let out = TimedOutput {
             success: true,
@@ -927,33 +897,28 @@ mod tests {
     fn run_timed_interleaves_stdout_and_stderr_without_overwriting() {
         let mut cmd = Command::new("sh");
         cmd.arg("-c")
-            // stderr first, then stdout, then stderr again: with independent
-            // offsets the second stderr write clobbers the stdout line.
+            // 先写 stderr，再写 stdout，再写 stderr：两个流的偏移各自独立时，第二次写 stderr 会覆盖 stdout 那一行。
             .arg(
                 "echo compiling >&2; echo 'test result: ok. 7 passed; 0 failed'; echo running >&2",
             );
 
-        let out = run_timed(&mut cmd, Duration::from_secs(30)).expect("run");
+        let out = run_timed(&mut cmd, Duration::from_secs(30)).expect("运行测试命令");
 
-        assert!(
-            out.success,
-            "fixture command must succeed: {:?}",
-            out.output
-        );
+        assert!(out.success, "测试命令应成功：{:?}", out.output);
         assert!(
             out.output.contains("compiling") && out.output.contains("running"),
-            "stderr lines must survive: {:?}",
+            "stderr 的行应完整保留：{:?}",
             out.output
         );
         assert!(
             out.output.contains("test result: ok. 7 passed"),
-            "stdout line must survive: {:?}",
+            "stdout 的行应完整保留：{:?}",
             out.output
         );
         assert_eq!(
             passed_test_count(&out.output),
             7,
-            "the gate's pass count must be parseable from the captured text: {:?}",
+            "门禁应能从捕获文本中解析出通过数：{:?}",
             out.output
         );
     }

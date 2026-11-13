@@ -24,7 +24,7 @@ pub fn manifest_forbidden_deps(
     let data: Value = toml::from_str(&raw)?;
     let manifest_dir = manifest_path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("manifest has no parent"))?;
+        .ok_or_else(|| anyhow::anyhow!("清单文件没有上级目录"))?;
     let crates_dir = repo_root.join("crates");
 
     let mut hits = Vec::new();
@@ -32,7 +32,7 @@ pub fn manifest_forbidden_deps(
         let (actual_name, path_val) = dep_identity(dep_key, dep_val);
         if actual_name.starts_with("lattice-") {
             hits.push(format!(
-                "{}: [{table_path}] {dep_key}: forbidden product crate name '{actual_name}'",
+                "{}: [{table_path}] {dep_key} 指向禁止的产品 crate '{actual_name}'",
                 manifest_path.display()
             ));
         }
@@ -40,7 +40,7 @@ pub fn manifest_forbidden_deps(
             let resolved = manifest_dir.join(path_val);
             if under_crates_dir(&resolved, &crates_dir) {
                 hits.push(format!(
-                    "{}: [{table_path}] {dep_key}: product path dependency -> {}",
+                    "{}: [{table_path}] {dep_key} 的路径依赖指向产品目录 {}",
                     manifest_path.display(),
                     resolved.display()
                 ));
@@ -79,9 +79,7 @@ pub fn transitive_workspace_member_hits(metadata: &Metadata) -> anyhow::Result<V
         .iter()
         .find(|p| p.name == HARNESS_PACKAGE)
         .map(|p| &p.id)
-        .ok_or_else(|| {
-            anyhow::anyhow!("metadata: {HARNESS_PACKAGE} package missing from workspace")
-        })?;
+        .ok_or_else(|| anyhow::anyhow!("cargo metadata 中缺少 {HARNESS_PACKAGE} 包"))?;
 
     let nodes: HashMap<&PackageId, &cargo_metadata::Node> = metadata
         .resolve
@@ -98,10 +96,8 @@ pub fn transitive_workspace_member_hits(metadata: &Metadata) -> anyhow::Result<V
             continue;
         }
         if pid != root_id && workspace_members.contains(pid) {
-            let name = id_to_name.get(pid).copied().unwrap_or("unknown");
-            hits.push(format!(
-                "metadata: forbidden workspace-member dependency {name}"
-            ));
+            let name = id_to_name.get(pid).copied().unwrap_or("（未知包）");
+            hits.push(format!("cargo metadata：依赖了 workspace 成员 {name}"));
         }
         if let Some(node) = nodes.get(pid) {
             for dep_id in &node.dependencies {
@@ -185,7 +181,7 @@ pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<Stri
         {
             if feature_reaches_test_only(&pkg.features, feature, &mut BTreeSet::new()) {
                 parts.push(format!(
-                    "{}: production feature '{feature}' forwards to a test-only feature",
+                    "{}: 生产 feature '{feature}' 转发到测试专用 feature",
                     pkg.name
                 ));
             }
@@ -214,7 +210,7 @@ pub fn production_test_feature_hits(repo_root: &Path) -> anyhow::Result<Vec<Stri
             }
             if !flagged.is_empty() {
                 parts.push(format!(
-                    "{}: [dependencies] {} enables test-only feature(s) {}; move the feature to the [dev-dependencies] entry",
+                    "{}: [dependencies] {} 启用了测试专用 feature {}；请把它们移到 [dev-dependencies] 中的对应条目",
                     pkg.name.as_str(),
                     dep.name,
                     flagged.join(", ")
@@ -278,7 +274,7 @@ lattice-server = "0.1"
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(joined(&out).contains("forbidden product crate name 'lattice-server'"));
+        assert!(joined(&out).contains("指向禁止的产品 crate 'lattice-server'"));
     }
 
     #[test]
@@ -296,7 +292,7 @@ guard = { package = "lattice-session", path = '../crates/lattice-session' }
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(joined(&out).contains("forbidden product crate name 'lattice-session'"));
+        assert!(joined(&out).contains("指向禁止的产品 crate 'lattice-session'"));
     }
 
     #[test]
@@ -314,7 +310,7 @@ foo = { path = 'crates/foo' }
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(joined(&out).contains("product path dependency"));
+        assert!(joined(&out).contains("的路径依赖指向产品目录"));
     }
 
     #[test]
@@ -334,7 +330,7 @@ guard = { path = '../../crates/net-guard' }
         )
         .unwrap();
         let out = manifest_forbidden_deps(&manifest, dir.path()).unwrap();
-        assert!(joined(&out).contains("product path dependency"));
+        assert!(joined(&out).contains("的路径依赖指向产品目录"));
     }
 
     #[test]
@@ -385,9 +381,8 @@ edition = "2024"
         assert!(joined(&out).contains("net-guard"));
     }
 
-    /// A two-crate virtual workspace where the consumer enables `test-utils`
-    /// from both dependency sections. Only the `[dependencies]` entry is a
-    /// finding; the `[dev-dependencies]` one is the fix #88 applied.
+    /// 两个 crate 组成的虚拟 workspace：consumer 在两个依赖段中都启用 `test-utils`。
+    /// 只有 `[dependencies]` 中的条目算违规；`[dev-dependencies]` 中的写法正是 #88 采用的修正。
     fn write_test_feature_workspace(root: &Path, production_features: &str) {
         fs::write(
             root.join("Cargo.toml"),
@@ -424,13 +419,9 @@ edition = "2024"
         let text = joined(&hits);
         assert!(
             text.contains("consumer") && text.contains("test-utils"),
-            "production test-utils not flagged: {text}"
+            "生产依赖中的 test-utils 应被报告：{text}"
         );
-        assert_eq!(
-            hits.len(),
-            1,
-            "dev-dependencies entry must not count: {text}"
-        );
+        assert_eq!(hits.len(), 1, "dev-dependencies 中的条目不应计入：{text}");
     }
 
     #[test]
@@ -442,7 +433,7 @@ edition = "2024"
         text.push_str("[features]\nrelease = [\"helper/test-utils\"]\n");
         fs::write(&manifest, text).unwrap();
         let hits = production_test_feature_hits(dir.path()).unwrap();
-        assert!(joined(&hits).contains("production feature 'release'"));
+        assert!(joined(&hits).contains("生产 feature 'release'"));
     }
 
     #[test]

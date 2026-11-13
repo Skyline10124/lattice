@@ -35,12 +35,10 @@ use crate::{crate_boundary, docs_check, harness_boundary, repo_root};
 #[derive(Args, Debug)]
 pub struct CiArgs {}
 
-/// Default cargo build/test parallelism for the local CI gate. Override with
-/// `CARGO_BUILD_JOBS`. See the module docs for why this is capped.
+/// 本地 CI 门禁中 cargo 构建与测试的默认并发数，可用 `CARGO_BUILD_JOBS` 覆盖；设上限的原因见模块文档。
 const DEFAULT_BUILD_JOBS: &str = "4";
 
-/// Per-crate test timeout in seconds. Override with
-/// `LATTICE_TEST_TIMEOUT_SECS`.
+/// 每个 crate 的测试超时秒数，可用 `LATTICE_TEST_TIMEOUT_SECS` 覆盖。
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
 
 pub fn run(_args: CiArgs) -> anyhow::Result<()> {
@@ -49,15 +47,15 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     let harness_failures = root.join("target/harness-failures");
     let build_jobs = env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| DEFAULT_BUILD_JOBS.to_owned());
 
-    step("toolchain precheck", check_toolchain)?;
+    step("工具链预检", check_toolchain)?;
 
-    step("docs-check", docs_check::run)?;
+    step("文档链接检查", docs_check::run)?;
 
-    step("fmt", || {
+    step("格式检查", || {
         run_cargo(&root, &["fmt", "--all", "--check"], &build_jobs)
     })?;
 
-    step("clippy", || {
+    step("clippy 检查", || {
         run_cargo(
             &root,
             &[
@@ -72,7 +70,7 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    step("build lattice (debug)", || {
+    step("构建 lattice（debug）", || {
         run_cargo(
             &root,
             &["build", "-p", "lattice-cli", "--bin", "lattice"],
@@ -80,37 +78,40 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    step("system harness boundary", harness_boundary::run)?;
+    step("harness 边界检查", harness_boundary::run)?;
 
-    step("crate dependency boundary", crate_boundary::run)?;
+    step("crate 依赖边界检查", crate_boundary::run)?;
 
-    step("test", || {
+    step("测试", || {
         run_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
     })?;
 
     // 第二轮：检查测试专用 feature 的编译与 lint，再用带测试 feature 的产物覆盖同一个
     // target/debug/lattice（LATTICE_BIN 不变），运行假执行器单元测试、假工具场景与崩溃屏障。
-    step("clippy (test features: product)", || {
-        run_cargo(
-            &root,
-            &[
-                "clippy",
-                "-p",
-                "lattice-server",
-                "-p",
-                "lattice-cli",
-                "--all-targets",
-                "--features",
-                "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
-                "--",
-                "-D",
-                "warnings",
-            ],
-            &build_jobs,
-        )
-    })?;
+    step(
+        "clippy 检查（带测试 feature：产品 crate）",
+        || {
+            run_cargo(
+                &root,
+                &[
+                    "clippy",
+                    "-p",
+                    "lattice-server",
+                    "-p",
+                    "lattice-cli",
+                    "--all-targets",
+                    "--features",
+                    "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+                &build_jobs,
+            )
+        },
+    )?;
 
-    step("clippy (test features: harness)", || {
+    step("clippy 检查（带测试 feature：harness）", || {
         run_cargo(
             &root,
             &[
@@ -128,7 +129,7 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    step("build lattice (debug, test features)", || {
+    step("构建 lattice（debug，带测试 feature）", || {
         run_cargo(
             &root,
             &[
@@ -144,12 +145,12 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    step("test (test features)", || {
+    step("测试（带测试 feature）", || {
         run_feature_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
     })?;
 
     println!();
-    println!("\u{1b}[1;32mAll checks passed.\u{1b}[0m");
+    println!("\u{1b}[1;32m全部检查通过\u{1b}[0m");
     Ok(())
 }
 
@@ -167,13 +168,13 @@ fn check_toolchain() -> anyhow::Result<()> {
         .arg("--version")
         .stderr(Stdio::inherit())
         .output()
-        .context("failed to run `rustc --version`")?;
+        .context("无法运行 `rustc --version`")?;
     if !rustc_out.status.success() {
-        anyhow::bail!("`rustc --version` failed");
+        anyhow::bail!("`rustc --version` 执行失败");
     }
     let version = String::from_utf8_lossy(&rustc_out.stdout);
     if !version.contains("1.96.0") {
-        anyhow::bail!("pinned rustc 1.96.0 required; got: {version}");
+        anyhow::bail!("需要固定版本 rustc 1.96.0，实际为：{}", version.trim());
     }
 
     Ok(())
@@ -188,7 +189,7 @@ fn run_cargo(root: &std::path::Path, args: &[&str], build_jobs: &str) -> anyhow:
         .stderr(Stdio::inherit())
         .status()?;
     if !status.success() {
-        anyhow::bail!("cargo {} failed", args.join(" "));
+        anyhow::bail!("`cargo {}` 失败", args.join(" "));
     }
     Ok(())
 }
@@ -209,13 +210,13 @@ fn run_tests(
     let metadata = MetadataCommand::new()
         .current_dir(root)
         .exec()
-        .map_err(|e| anyhow::anyhow!("failed to read workspace metadata: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("无法读取 workspace 元数据：{e}"))?;
     let crates = ordered_test_crates(&metadata)?;
     let timeout_secs = test_timeout_secs();
 
     println!();
     println!(
-        "\u{1b}[1m── test ({} crates, {build_jobs} build jobs, {timeout_secs}s/crate) ──\u{1b}[0m",
+        "\u{1b}[1m── 测试（{} 个 crate，构建并发 {build_jobs}，每个 crate 限时 {timeout_secs} 秒） ──\u{1b}[0m",
         crates.len()
     );
 
@@ -230,9 +231,9 @@ fn run_tests(
             harness_failures,
             timeout_secs,
         ) {
-            Ok(()) => println!("\u{1b}[0;32m✓\u{1b}[0m test {name}"),
+            Ok(()) => println!("\u{1b}[0;32m✓\u{1b}[0m 测试 {name}"),
             Err(e) => {
-                println!("\u{1b}[0;31m✗\u{1b}[0m test {name}: {e}");
+                println!("\u{1b}[0;31m✗\u{1b}[0m 测试 {name}：{e}");
                 failures.push(name.clone());
             }
         }
@@ -240,7 +241,7 @@ fn run_tests(
 
     if !failures.is_empty() {
         anyhow::bail!(
-            "cargo test failed for {} crate(s): {}",
+            "cargo test 在 {} 个 crate 上失败：{}",
             failures.len(),
             failures.join(", ")
         );
@@ -262,13 +263,13 @@ fn run_feature_tests(
 
     println!();
     println!(
-        "\u{1b}[1m── test (test features: {} crates, {build_jobs} build jobs, {timeout_secs}s/crate) ──\u{1b}[0m",
+        "\u{1b}[1m── 测试（带测试 feature：{} 个 crate，构建并发 {build_jobs}，每个 crate 限时 {timeout_secs} 秒） ──\u{1b}[0m",
         targets.len()
     );
 
     let mut failures: Vec<String> = Vec::new();
     for (name, features) in targets {
-        let label = format!("{name} ({features})");
+        let label = format!("{name}（{features}）");
         match run_cargo_test(
             root,
             name,
@@ -278,9 +279,9 @@ fn run_feature_tests(
             harness_failures,
             timeout_secs,
         ) {
-            Ok(()) => println!("\u{1b}[0;32m✓\u{1b}[0m test {label}"),
+            Ok(()) => println!("\u{1b}[0;32m✓\u{1b}[0m 测试 {label}"),
             Err(e) => {
-                println!("\u{1b}[0;31m✗\u{1b}[0m test {label}: {e}");
+                println!("\u{1b}[0;31m✗\u{1b}[0m 测试 {label}：{e}");
                 failures.push(label);
             }
         }
@@ -320,8 +321,7 @@ fn run_cargo_test(
     }
     cmd.stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        // Put cargo in its own process group so a timeout can kill the whole
-        // tree (cargo + rustc + test binaries) instead of orphaning them.
+        // 让 cargo 自成进程组，超时时整棵进程树（cargo、rustc 与测试二进制）一起终止，不留下孤儿进程。
         .process_group(0);
     if env::var_os("LATTICE_BIN").is_none() {
         cmd.env("LATTICE_BIN", lattice_bin);
@@ -335,8 +335,7 @@ fn run_cargo_test(
     let mut child = cmd
         .spawn()
         .with_context(|| format!("启动 `{cmd_desc}` 失败"))?;
-    // `process_group(0)` makes the child its own pgrp leader, so its pid is the
-    // pgrp id used to signal the whole tree on timeout.
+    // `process_group(0)` 让子进程成为进程组组长，它的 pid 就是超时时向整棵进程树发信号所用的进程组 id。
     let pgid = child.id();
 
     loop {
@@ -349,8 +348,7 @@ fn run_cargo_test(
             }
             None => {
                 if start.elapsed() >= deadline {
-                    // Kill the whole process group, then the cargo child as a
-                    // backstop, and reap it so we don't leave a zombie.
+                    // 先终止整个进程组，再单独终止 cargo 子进程兜底，并回收它，避免留下僵尸进程。
                     let _ = Command::new("kill")
                         .arg("-KILL")
                         .arg(format!("-{pgid}"))
@@ -369,9 +367,8 @@ fn run_cargo_test(
     }
 }
 
-/// Workspace member crate names in dependency order (dependencies before
-/// dependents), excluding `xtask` (which has no tests). Deterministic: ties
-/// are broken by name so the gate output is stable across runs.
+/// 按依赖顺序（被依赖的在前）列出 workspace 成员 crate 名，不含 `xtask`。顺序是确定的：
+/// 同层按名称排序，门禁输出在多次运行之间保持一致。
 fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
     use std::collections::{BTreeMap, HashSet};
 
@@ -390,7 +387,7 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
     let mut order: Vec<String> = Vec::new();
     let mut visited: HashSet<&PackageId> = HashSet::new();
 
-    // Deterministic start set: all workspace members sorted by name.
+    // 起点集合固定：全部 workspace 成员按名称排序。
     let mut roots: Vec<&PackageId> = member_ids.iter().copied().collect();
     roots.sort_by_key(|id| id_to_name.get(id).copied().unwrap_or(""));
 
