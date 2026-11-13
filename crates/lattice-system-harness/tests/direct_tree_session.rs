@@ -30,10 +30,10 @@ fn first_prompt_is_the_only_session_creation_and_request() {
         assert_eq!(send.session_id(), None);
         assert!(
             !world.session_store_dir().join("lattice.redb").exists(),
-            "construction must not create a Session"
+            "构造发送驱动本身不得创建会话存储"
         );
         let result = send.send("first real input").unwrap();
-        evidence.record_command("first send", &result.command);
+        evidence.record_command("首轮真实发送", &result.command);
         support::assert_clean_send(&result).unwrap();
         assert!(result.command.is_clean_exit(0), "{:?}", result.command);
         assert!(
@@ -41,33 +41,33 @@ fn first_prompt_is_the_only_session_creation_and_request() {
             "{:?}",
             result.malformed_lines
         );
-        let sid = result.accepted_session_id().expect("accepted SID");
-        let tid = result.accepted_turn_id().expect("accepted TurnId");
+        let sid = result.accepted_session_id().expect("应有已接受的会话标识");
+        let tid = result.accepted_turn_id().expect("应有已接受的轮次标识");
         // CLI 在发出请求前生成并输出身份，先经 `configure(New)` 建立草稿再提交本轮。
         assert_eq!(result.sending(), Some((tid, sid)));
         assert_eq!(result.configures().count(), 1);
         let list = send.run_command(&["--json", "session", "list"]).unwrap();
-        evidence.record_command("session list", &list);
+        evidence.record_command("查询会话列表", &list);
         let list: Value = serde_json::from_slice(&list.stdout).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 1);
         assert_eq!(list[0]["session_id"], sid);
         let log = send
             .run_command(&["--json", "session", "log", sid])
             .unwrap();
-        evidence.record_command("tree log", &log);
+        evidence.record_command("查询会话树日志", &log);
         assert!(log.is_clean_exit(0));
         let tree: Value = serde_json::from_slice(&log.stdout).unwrap();
         assert_eq!(tree["nodes"].as_array().unwrap().len(), 3);
         let detail = send
             .run_command(&["--json", "session", "turn", tid])
             .unwrap();
-        evidence.record_command("turn detail", &detail);
+        evidence.record_command("查询轮次详情", &detail);
         assert!(detail.is_clean_exit(0));
         let detail: Value = serde_json::from_slice(&detail.stdout).unwrap();
         assert_eq!(detail["summary"]["outcome"], "completed");
         assert_eq!(detail["steps"].as_array().unwrap().len(), 1);
         let captures = provider.captured_requests();
-        assert_eq!(captures.len(), 1, "no bootstrap request");
+        assert_eq!(captures.len(), 1, "不应产生额外的引导请求");
         assert_eq!(
             captures[0].raw["messages"]
                 .as_array()
@@ -98,7 +98,7 @@ fn cli_json(
     args: &[&str],
 ) -> Value {
     let out = support::cli(world, spec, args);
-    evidence.record_command(args.join(" "), &out);
+    evidence.record_command(format!("执行 JSON 命令（{}）", args.join(" ")), &out);
     assert!(out.is_clean_exit(0), "{}", out.summary());
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -167,7 +167,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let first = send.send("original").unwrap();
-        evidence.record_command("multi-step original", &first.command);
+        evidence.record_command("首轮多步工具调用发送", &first.command);
         support::assert_clean_send(&first).unwrap();
         assert!(first.command.is_clean_exit(0));
         let sid = send.session_id().unwrap();
@@ -243,7 +243,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             "survives cancel\n"
         );
         let busy = support::cli(&world, &spec, &["--json", "session", "rewind", sid, "2"]);
-        evidence.record_command("rewind while beta Owner executes", &busy);
+        evidence.record_command("beta 占有方执行期间尝试回退", &busy);
         assert!(busy.is_clean_exit(1));
         assert_eq!(
             serde_json::from_slice::<Value>(&busy.stdout).unwrap()["kind"],
@@ -268,7 +268,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             )
         );
         let cancelled = running.wait(None).unwrap();
-        evidence.record_command("beta cancelled after real mutation", &cancelled);
+        evidence.record_command("beta 在产生真实文件改动后被取消", &cancelled);
         assert!(cancelled.is_clean_exit(2), "{}", cancelled.summary());
         support::parse_send_stdout(&cancelled.stdout, cancelled.exit_code());
         let beta_closed = cli_json(
@@ -311,7 +311,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(before["nodes"].as_array().unwrap().len(), 7);
         assert_eq!(before["current_agent"], "beta");
         let invalid = support::cli(&world, &spec, &["--json", "session", "rewind", sid, "999"]);
-        evidence.record_command("nonexistent node refusal", &invalid);
+        evidence.record_command("拒绝回退到不存在的节点", &invalid);
         assert!(invalid.is_clean_exit(2));
         assert_eq!(
             cli_json(
@@ -342,7 +342,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &spec,
             &["--json", "session", "send", "fork", "--session", sid],
         );
-        evidence.record_command("fork inherits latest beta copy", &fork);
+        evidence.record_command("分叉轮次沿用最新 beta 智能体副本", &fork);
         assert!(fork.is_clean_exit(0), "{}", fork.summary());
         support::parse_send_stdout(&fork.stdout, fork.exit_code());
         let tree = cli_json(
@@ -415,7 +415,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             &spec,
             &["--json", "session", "send", "no agent", "--session", sid],
         );
-        evidence.record_command("root inherits beta copy", &inherited);
+        evidence.record_command("根位点轮次沿用 beta 智能体副本", &inherited);
         assert!(inherited.is_clean_exit(0), "{}", inherited.summary());
         let inherited = support::parse_send_stdout(&inherited.stdout, inherited.exit_code());
         assert_eq!(inherited.heads().last().unwrap().agent, "beta");
@@ -440,7 +440,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
                 "beta",
             ],
         );
-        evidence.record_command("beta rewrites first message", &root);
+        evidence.record_command("beta 在根位点重写首条消息", &root);
         assert!(root.is_clean_exit(0));
         support::parse_send_stdout(&root.stdout, root.exit_code());
         let after = cli_json(
@@ -488,7 +488,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(captures.len(), 5);
         assert_eq!(captures[2].raw["model"], "beta");
         assert_eq!(captures[3].raw["model"], "beta");
-        // 固定夹具的规定投影：来源是公开历史；不导入产品投影器，也不使用上一请求作 oracle。
+        // 固定夹具的规定投影：来源是公开历史；不导入产品投影器，也不拿上一次请求作参照。
         let step = &fork_history["entries"][1]["content"];
         let call = &step["reply"]["parts"][0]["semantic"]["tool_call"]["call"];
         assert_eq!(call["provider_call_id"], "create");
@@ -529,7 +529,7 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             vec!["--json", "session", "list"],
         ] {
             let out = support::cli(&world, &spec, &args);
-            evidence.record_command(args.join(" "), &out);
+            evidence.record_command(format!("执行查询命令（{}）", args.join(" ")), &out);
             assert!(out.is_clean_exit(0), "{}", out.summary());
         }
         evidence
@@ -607,7 +607,7 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
                 vec!["--json", "session", "list"],
             ] {
                 let out = support::cli(&world, &spec, &args);
-                evidence.record_command(args.join(" "), &out);
+                evidence.record_command(format!("旧版存储拒绝检查（{}）", args.join(" ")), &out);
                 assert!(out.is_clean_exit(1), "{}", out.summary());
                 assert!(out.stderr.is_empty());
                 let records: Vec<Value> = std::str::from_utf8(&out.stdout)

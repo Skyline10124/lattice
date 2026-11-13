@@ -16,13 +16,13 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let first = send.send("first").unwrap();
-        evidence.record_command("first", &first.command);
+        evidence.record_command("首轮会话发送", &first.command);
         assert_clean_send(&first).unwrap();
         let sid = send.session_id().unwrap();
         let tid = first.accepted_turn_id().unwrap();
         let mut query = |args: &[&str]| {
             let out = cli(&world, &spec, args);
-            evidence.record_command(args.join(" "), &out);
+            evidence.record_command(format!("查询会话状态（{}）", args.join(" ")), &out);
             assert!(out.is_clean_exit(0), "{}", out.summary());
             serde_json::from_slice::<Value>(&out.stdout).unwrap()
         };
@@ -62,10 +62,10 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         );
         assert_eq!(rewound["session"]["current"], 0);
         let branch = send.send("branch").unwrap();
-        evidence.record_command("branch", &branch.command);
+        evidence.record_command("回退后分叉发送", &branch.command);
         assert_clean_send(&branch).unwrap();
         let tree = cli(&world, &spec, &["session", "log", sid]);
-        evidence.record_command("text tree", &tree);
+        evidence.record_command("查询会话树文本输出", &tree);
         assert!(tree.is_clean_exit(0));
         let text = String::from_utf8(tree.stdout).unwrap();
         assert!(text.contains("current=4"));
@@ -78,11 +78,11 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         ] {
             assert!(
                 text.lines().any(|line| line == node),
-                "missing tree row {node}: {text}"
+                "缺少预期会话树节点行 `{node}`：{text}"
             );
         }
         let out = cli(&world, &spec, &["--json", "session", "list"]);
-        evidence.record_command("list after branch", &out);
+        evidence.record_command("分叉后查询会话列表", &out);
         let list: Value = serde_json::from_slice(&out.stdout).unwrap();
         assert_eq!(list[0]["node_count"], 5);
         assert_eq!(server.captured_requests().len(), 2);
@@ -106,7 +106,7 @@ fn missing_store_read_does_not_create_a_database() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let out = cli(&world, &spec, &["session", "list"]);
-        evidence.record_command("session list", &out);
+        evidence.record_command("查询空会话列表", &out);
         lattice_system_harness::assert_exit_code(&out, 1).unwrap();
         lattice_system_harness::assert_stderr_contains(&out, "store unavailable").unwrap();
         let exists = world.session_store_dir().join("lattice.redb").exists();
@@ -139,7 +139,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let seed = send.send("seed").unwrap();
-        evidence.record_command("seed", &seed.command);
+        evidence.record_command("建立初始会话种子", &seed.command);
         assert_clean_send(&seed).unwrap();
         for args in [
             vec!["--json", "session", "log", "nope-sid"],
@@ -154,7 +154,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             ],
         ] {
             let out = send.run_command(&args).unwrap();
-            evidence.record_command(args.join(" "), &out);
+            evidence.record_command(format!("校验不存在的会话（{}）", args.join(" ")), &out);
             assert!(out.is_clean_exit(2), "{}", out.summary());
             let error: Value = serde_json::from_slice(&out.stdout).unwrap();
             assert_eq!(error["kind"], "not_found");
@@ -166,7 +166,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             &spec,
             &["--json", "session", "send", "hello", "--session", sid],
         );
-        evidence.record_command("inherited copy after source removal", &out);
+        evidence.record_command("删除源配置后沿用已继承副本发送", &out);
         assert!(out.is_clean_exit(0), "{}", out.summary());
         let inherited = parse_send_stdout(&out.stdout, out.exit_code());
         support::assert_accepted_and_closed(&inherited).unwrap();
@@ -191,7 +191,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             ],
         ] {
             let rejected = cli(&world, &spec, &args);
-            evidence.record_command("explicit missing profile", &rejected);
+            evidence.record_command("拒绝显式指定的不存在配置", &rejected);
             assert!(rejected.is_clean_exit(2), "{}", rejected.summary());
             let sent = parse_send_stdout(&rejected.stdout, rejected.exit_code());
             assert_eq!(
@@ -217,18 +217,18 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             let mut args = subcommand;
             args.extend(["oversized agent", "--agent", &oversized_agent]);
             let rejected = cli(&world, &spec, &args);
-            evidence.record_command("oversized CLI --agent", &rejected);
+            evidence.record_command("拒绝超长的 CLI --agent 参数", &rejected);
             assert!(rejected.is_clean_exit(2), "{}", rejected.summary());
             let stdout = String::from_utf8_lossy(&rejected.stdout);
             let stderr = String::from_utf8_lossy(&rejected.stderr);
             assert!(
                 stderr.contains("agent name must be at most 128 bytes"),
-                "expected agent name length error in stderr, got: {stderr}"
+                "标准错误应报告 agent 名称长度限制错误，实际输出：{stderr}"
             );
             assert!(
                 !stdout.contains("new Session requires explicit agent")
                     && !stderr.contains("new Session requires explicit agent"),
-                "oversized --agent must not report missing explicit agent"
+                "超长 --agent 不得误报缺少显式 agent"
             );
         }
         assert_eq!(server.captured_requests().len(), 2);
@@ -281,7 +281,7 @@ fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
                 let out = send
                     .run_command(&["session", "usage", prefix, "--json"])
                     .unwrap();
-                evidence.record_command("exact or unique usage prefix", &out);
+                evidence.record_command("按精确标识或唯一前缀查询会话用量", &out);
                 assert!(out.is_clean_exit(0), "{}", out.summary());
                 let usage: Value = serde_json::from_slice(&out.stdout).unwrap();
                 assert_eq!(usage["session_id"], sid);
@@ -296,7 +296,7 @@ fn usage_resolves_exact_identity_and_rejects_ambiguous_prefixes() {
             let out = send
                 .run_command(&["--json", "session", "usage", prefix])
                 .unwrap();
-            evidence.record_command("invalid usage prefix", &out);
+            evidence.record_command("拒绝无效或歧义的会话用量前缀", &out);
             assert!(out.is_clean_exit(2), "{}", out.summary());
             let error: Value = serde_json::from_slice(&out.stdout).unwrap();
             assert_eq!(error["kind"], kind);
@@ -461,7 +461,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                     args.extend(["--effort", "off"]);
                 }
                 let out = cli(&world, &spec, &args);
-                evidence.record_command(args.join(" "), &out);
+                evidence.record_command(format!("校验错误配置拒绝（{}）", args.join(" ")), &out);
                 assert!(out.is_clean_exit(2), "{}", out.summary());
                 assert_no_secret(&out, SENTINEL).unwrap();
                 assert_no_secret(&out, FAKE_API_KEY).unwrap();
@@ -470,27 +470,27 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                 assert_no_secret(&out, LONG_FRAGMENT).unwrap();
                 let sent = parse_send_stdout(&out.stdout, out.exit_code());
                 let error = sent.rejection().unwrap_or_else(|| {
-                    panic!("rejected receipt expected: {:?}", sent.type_sequence())
+                    panic!("预期收到拒绝回执，实际序列：{:?}", sent.type_sequence())
                 });
                 assert_eq!(error.kind, "bad_request");
                 let message = error.message.as_str();
                 assert!(
                     message.contains(expected),
-                    "{case}: missing expected rejection reason in `{message}`"
+                    "{case}：拒绝原因未包含预期内容：`{message}`"
                 );
                 if case == "model-typo" {
                     let canonical_profile = path.canonicalize().unwrap();
                     assert!(
                         message.contains(&canonical_profile.display().to_string()),
-                        "{case}: missing profile path in {message}"
+                        "{case}：拒绝信息缺少配置文件路径：{message}"
                     );
                     assert!(
                         message.contains("for `model` in [agent]"),
-                        "{case}: missing [agent].model location in {message}"
+                        "{case}：拒绝信息缺少 `[agent].model` 位置说明：{message}"
                     );
                 }
                 if case == "agent-name" {
-                    // 后台按已知凭据值和密钥形状脱敏，前端不读取 key。
+                    // 后台按已知凭据值和密钥形状脱敏，前端不读取密钥。
                     assert!(
                         message.contains(
                             "invalid value `[REDACTED]:[REDACTED]` for `name` in [agent]"
@@ -518,9 +518,9 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             assert!(messages.windows(2).all(|pair| pair[0] == pair[1]));
             if matches!(case, "toml" | "known-key") {
-                // `lattice tui --agent` 在启动时执行 `configure(New)`，profile 错误在进入主屏幕前退出。
+                // `lattice tui --agent` 在启动时执行 `configure(New)`，配置文件错误在进入主屏幕前即退出。
                 let out = cli(&world, &spec, &["tui", "--agent", agent]);
-                evidence.record_command("tui startup configuration rejection", &out);
+                evidence.record_command("TUI 启动阶段拒绝错误配置", &out);
                 assert!(out.is_clean_exit(2), "{}", out.summary());
                 assert_no_secret(&out, SENTINEL).unwrap();
                 assert_no_secret(&out, FAKE_API_KEY).unwrap();
@@ -564,7 +564,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                     ] {
                         assert!(
                             !compact(&frame).contains(&compact(secret)),
-                            "{case}: unredacted credential"
+                            "{case}：终端帧包含未脱敏的凭据"
                         );
                     }
                     // 关闭错误消息后编辑归还的输入，避免把提交记录误认为输入仍在。
@@ -595,7 +595,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
                     &spec,
                     &["session", "send", "hello", "--agent", agent],
                 );
-                evidence.record_command("configuration rejection text", &out);
+                evidence.record_command("配置拒绝的文本模式输出", &out);
                 assert!(out.is_clean_exit(2));
                 assert_no_secret(&out, ORDINARY_KEY).unwrap();
                 assert_no_secret(&out, &long_key).unwrap();
@@ -604,7 +604,7 @@ fn configuration_rejection_reasons_are_safe_and_precede_provider_dispatch() {
             }
             if world.session_store_dir().join("lattice.redb").exists() {
                 let sessions = cli(&world, &spec, &["--json", "session", "list"]);
-                evidence.record_command("session state after rejection", &sessions);
+                evidence.record_command("拒绝后检查会话列表状态", &sessions);
                 assert!(sessions.is_clean_exit(0));
                 let sessions: serde_json::Value = serde_json::from_slice(&sessions.stdout).unwrap();
                 if matches!(case, "missing-key" | "invalid-auth" | "oauth-chatgpt") {
@@ -693,10 +693,10 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
                 out
             };
 
-        // 在含 0xff 字节的项目目录中新建会话并完成首轮发送。
+        // 在含 `0xff` 字节的项目目录中新建会话并完成首轮发送。
         let first = run_in(
             &non_utf8_dir,
-            "non-utf8 first send",
+            "非 UTF-8 目录首轮发送",
             &[
                 "--json",
                 "session",
@@ -716,7 +716,7 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
         // `session list` 文本输出以替换字符显示路径；`--json` 保留与规范路径完全一致的原始字节数组。
         let list_text_out = run_in(
             &non_utf8_dir,
-            "non-utf8 text list",
+            "非 UTF-8 目录文本会话列表",
             &["session", "list"],
             &mut evidence,
         );
@@ -734,7 +734,7 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
 
         let list_json_out = run_in(
             &non_utf8_dir,
-            "non-utf8 json list",
+            "非 UTF-8 目录 JSON 会话列表",
             &["--json", "session", "list"],
             &mut evidence,
         );
@@ -754,7 +754,7 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
         // 在同一非 UTF-8 目录继续 `--session S` 发送成功。
         let second = run_in(
             &non_utf8_dir,
-            "non-utf8 second send",
+            "非 UTF-8 目录续发第二轮",
             &[
                 "--json",
                 "session",
@@ -774,7 +774,7 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
         // 切到另一个目录对同一会话发送：返回项目绑定不一致冲突，退出码 2，且不写新节点。
         let mismatch = run_in(
             world.project_dir(),
-            "other-dir send mismatch",
+            "其他目录发送触发绑定冲突",
             &[
                 "--json",
                 "session",
@@ -801,7 +801,7 @@ fn non_utf8_project_path_round_trips_bytes_and_enforces_binding() {
 
         let log_out = run_in(
             &non_utf8_dir,
-            "non-utf8 json log",
+            "非 UTF-8 目录 JSON 会话日志",
             &["--json", "session", "log", &sid],
             &mut evidence,
         );

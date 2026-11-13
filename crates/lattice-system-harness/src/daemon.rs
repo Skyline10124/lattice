@@ -805,7 +805,7 @@ enum SocketOwner {
 
 fn unix_sockaddr(path: &Path) -> std::io::Result<(libc::sockaddr_un, libc::socklen_t)> {
     let bytes = path.as_os_str().as_bytes();
-    // SAFETY: `sockaddr_un` 为纯数据结构体，全零初始化保证末尾 NUL 终止字节有效。
+    // SAFETY: `sockaddr_un` 为纯数据结构体，全零初始化保证末尾 `NUL` 终止字节有效。
     let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
     if bytes.is_empty() || bytes.contains(&0) || bytes.len() >= addr.sun_path.len() {
         return Err(std::io::Error::new(
@@ -1599,7 +1599,7 @@ impl ScenarioDaemon {
                     .collect();
                 if !residuals.is_empty() {
                     errors.push(format!(
-                        "发现不属于 harness 的残留后台进程（场景可能漏掉显式启动而由前端自动拉起了后台）: pids={residuals:?}"
+                        "发现不属于测试套件的残留后台进程（场景可能漏掉显式启动而由前端自动拉起了后台）: pids={residuals:?}"
                     ));
                 }
             }
@@ -2251,7 +2251,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|error| error.contains("不属于 harness 的残留后台进程")),
+                .any(|error| error.contains("不属于测试套件的残留后台进程")),
             "{errors:?}"
         );
         assert!(
@@ -2424,7 +2424,7 @@ mod tests {
     const SOCKET_HELPER_STOP_ENV: &str = "LATTICE_TEST_STOP_PATH";
 
     #[test]
-    #[ignore = "re-exec helper"]
+    #[ignore = "供套接字测试自执行复用的辅助入口"]
     fn socket_listener_helper() {
         let Some(sock_path) = std::env::var_os(SOCKET_HELPER_SOCK_ENV).map(PathBuf::from) else {
             return;
@@ -2889,7 +2889,7 @@ mod tests {
         let pids = processes_in_pgid(pgid).expect("初始读取假后台进程组");
         assert!(pids.len() >= 2, "假后台应包含组首领与同组子进程: {pids:?}");
         let members = capture_members(pgid, &pids).expect("捕获已确认成员 pidfd");
-        // 只读观察句柄：本测试不安装任何 Drop 兜底 kill，完全依靠 ScenarioDaemon 自身完成清理。
+        // 只读观察句柄：本测试不安装任何 `Drop` 兜底 `kill`，完全依靠 `ScenarioDaemon` 自身完成清理。
         let observers = capture_members(pgid, &pids).expect("打开只读观察 pidfd");
 
         let daemon = ScenarioDaemon::new(state_root);
@@ -2901,7 +2901,7 @@ mod tests {
             members,
         });
 
-        // 先让组首领退出并经正式 wait 回收，使状态进入“组首领已回收但组内仍有残留”。
+        // 先让组首领退出并经正式 `wait` 回收，使状态进入“组首领已回收但组内仍有残留”。
         std::fs::write(&trigger, b"exit").expect("触发组首领退出");
         let outcome = daemon
             .wait(Some(Duration::from_secs(2)))
@@ -3081,7 +3081,7 @@ mod tests {
         let state_root = dir.path().join("state");
         std::fs::create_dir_all(&state_root).expect("创建状态根");
 
-        // 用真实但非 pidfd 的本地流套接字端构造 `OwnedProcess`：
+        // 用真实但非 `pidfd` 的本地流套接字端构造 `OwnedProcess`：
         // 对端仍存活故 `poll(POLLIN, 0)` 返回未退出，而 `pidfd_send_signal` 确定返回 `EBADF`，且 `Drop` 关闭安全。
         let (non_pidfd_kill, _keep_peer_open) =
             std::os::unix::net::UnixStream::pair().expect("创建测试流对");

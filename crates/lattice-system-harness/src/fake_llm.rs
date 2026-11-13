@@ -1,15 +1,15 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 供 harness 场景使用的本地 fake LLM。
+//! 供测试框架场景使用的本地假模型服务。
 //!
 //! 场景经 [`ScenarioWorld::wire_provider`](crate::ScenarioWorld::wire_provider)
-//! 把模型与凭据接到 fake server。请求路由选择已实现协议的响应格式。
+//! 把模型与凭据接到假服务端，由请求路由选择已实现协议的响应格式。
 //!
 //! 传输与官方 provider 一致：TLS + HTTP/2，ALPN 只提供 `h2`，证书来自
 //! [`TlsIdentity`]，场景经 `SSL_CERT_FILE` 信任它（见 `ScenarioWorld`）。
 //! [`FakeLlmServer::start_plain_http1`] 另起明文 HTTP/1.1，只服务本地 provider
-//! （Ollama 一类）场景，只支持完整响应，空闲连接五秒后关闭。传输层故障在 HTTP/2 上构造：
+//! （如 Ollama）场景，只支持完整响应，空闲连接五秒后关闭。传输层故障在 HTTP/2 上构造：
 //! 流在结束事件前正常结束、`RST_STREAM(INTERNAL_ERROR)`、响应事件之后的 `GOAWAY(NO_ERROR)`、
 //! 最后流号小于在途请求的 `GOAWAY`，以及 `REFUSED_STREAM`。
 //!
@@ -19,17 +19,17 @@
 //! 2. 按场景选定的脚本回复：正文、工具调用、HTTP 错误或传输故障。SSE 正文与真实流一致：
 //!    每个分片一条 `data: {chunk}\n\n`，OpenAI 协议以 `data: [DONE]\n\n` 结束。
 //!
-//! 唯一的客户端是被测产品，所以服务端只做取出路由、凭据与 body 所需的最少解析。它对场景保证：
+//! 唯一的客户端是被测产品，所以服务端只做提取路由、凭据与请求体所需的最少解析。它对场景保证：
 //!
-//! 1. 计数准确：只有发往五种协议模型端点的请求进入捕获；其他请求得到错误响应，记为 fixture
-//!    failure。工具定义按 `tool_schema_rejection` 的规则核对，违反时返回 400，记为 fixture
-//!    failure，该请求不进入捕获。非 JSON 的 body 保留为诊断。对端放弃流或连接、客户端在 TLS
-//!    握手中拒绝证书属于对端行为，握手被拒的次数由 [`FakeLlmServer::rejected_handshakes`] 给出。
-//! 2. 回复确定：捕获、Sequence 的选择与推进、到达通知在同一临界区内发生；gate 只控制交付时机。
-//!    请求数超过 Sequence 长度时重复最后一项；空 Sequence 产生 `IllegalResponse`。
-//! 3. 失败有界：request、stall、release 与 shutdown 都是有界握手。shutdown 发出停止信号，同时
-//!    中止停在握手或读请求中的连接任务，并取消 gate，等在途任务结束后再 join 服务线程；超时返回
-//!    错误并保留线程，再次调用或 Drop 时继续有界等待。保留第一个 fixture failure，shutdown 在
+//! 1. 计数准确：只有发往五种协议模型端点的请求进入捕获；其他请求得到错误响应，记为夹具失败。
+//!    工具定义按 `tool_schema_rejection` 的规则核对，违反时返回 400 并记为夹具失败，该请求
+//!    不进入捕获。非 JSON 的请求体保留为诊断。对端放弃流或连接、客户端在 TLS 握手中拒绝
+//!    证书属于对端行为，握手被拒的次数由 [`FakeLlmServer::rejected_handshakes`] 给出。
+//! 2. 回复确定：捕获、`Sequence` 的选择与推进、到达通知在同一临界区内发生；门闩只控制交付时机。
+//!    请求数超过 `Sequence` 长度时重复最后一项；空 `Sequence` 产生 `IllegalResponse`。
+//! 3. 失败有界：请求等待、门闩阻塞、放行与 `shutdown` 都是有界握手。`shutdown` 发出停止信号，同时
+//!    中止停在握手或读请求中的连接任务，并取消门闩，等在途任务结束后再汇合服务线程；超时返回
+//!    错误并保留线程，再次调用或 `Drop` 时继续有界等待。保留第一个夹具失败，`shutdown` 在
 //!    有界清理后返回它。
 
 use std::collections::BTreeMap;
@@ -58,25 +58,23 @@ use tokio_rustls::TlsAcceptor;
 
 use crate::tls::TlsIdentity;
 
-/// 默认场景 API key，由 provider 接线入口录入，也作为产物脱敏扫描的已知秘密。
+/// 默认场景 API 密钥，由 provider 接线入口录入，也作为产物脱敏扫描的已知秘密。
 pub const FAKE_API_KEY: &str = "harness-fake-key-do-not-ship";
 
 /// 按协议捕获模型请求，原生 JSON 留给场景核对。
 ///
-/// Only the fields the harness asserts on are typed; the rest stay in the
-/// generic `raw` JSON value so unknown provider extensions do not break
-/// parsing.
+/// 仅把测试框架需要断言的字段做成强类型；其余字段保留在通用的 `raw` JSON 值中，
+/// 以免未知的 provider 扩展字段破坏解析。
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CapturedRequest {
     pub model: String,
-    /// `role` → count of messages with that role, in arrival order.
+    /// 按消息到达顺序提取的 `role` 序列。
     pub message_roles: Vec<String>,
     /// 原样捕获请求体中的线上工具名。
     pub tool_names: Vec<String>,
     /// 请求协议：`openai`、`responses`、`interactions`、`anthropic` 或 `gemini`。
     pub provider: String,
-    /// The full decoded JSON body, for assertions on fields this struct does
-    /// not surface (e.g. `temperature`, `max_tokens`).
+    /// 完整解码后的请求体 JSON，供未单独提取的字段（如 `temperature`、`max_tokens`）做断言。
     pub raw: Value,
     /// 标识客户端的请求头（`user-agent`、`accept`、`x-client-request-id`），名称小写。
     pub headers: BTreeMap<String, String>,
@@ -86,7 +84,7 @@ pub struct CapturedRequest {
     pub received_ms: u64,
 }
 
-/// 场景指定 provider 原生分项；Messages 的开始与末尾报告分别编排。
+/// 场景指定的 provider 原生用量分项；Messages 协议的开始与末尾报告分别编排。
 #[derive(Debug, Clone)]
 pub enum NativeUsage {
     ChatCompletions(Value),
@@ -96,44 +94,41 @@ pub enum NativeUsage {
     GenerateContent(Value),
 }
 
-/// The kind of SSE script the fake server returns for a request.
+/// 假服务端针对请求返回的 SSE 或错误脚本类型。
 #[derive(Debug, Clone)]
 pub enum SseScript {
-    /// 保留内层文本或工具脚本，只替换对应协议原生的 usage 事件。
+    /// 保留内层文本或工具脚本，只替换对应协议原生的 `usage` 事件。
     WithUsage {
         script: Box<SseScript>,
         usage: NativeUsage,
     },
-    /// 手工编排的合法 OpenAI chunks，保持跨类型到达顺序；结尾自动添加 DONE。
+    /// 手工编排的合法 OpenAI 分片，保持跨类型到达顺序；结尾自动追加 `[DONE]`。
     Chunks { chunks: Vec<Value> },
     /// 原生 SSE 事件按序交付；不自动追加任何终止标记。
     NativeEvents {
         events: Vec<(Option<String>, Value)>,
     },
-    /// Plain assistant text. Emits one or more `delta.content` chunks then a
-    /// terminal chunk with `finish_reason: "stop"` and `usage`, then
-    /// `data: [DONE]`.
+    /// 纯助手文本：发出一或多个 `delta.content` 分片，随后发出带
+    /// `finish_reason: "stop"` 与 `usage` 的终态分片及 `data: [DONE]`。
     PlainText {
         chunks: Vec<String>,
         finish_reason: String,
     },
-    /// A single tool call. Emits a `tool_calls` start chunk (id + name), an
-    /// arguments delta, then a terminal chunk with
-    /// `finish_reason: "tool_calls"`.
+    /// 单次工具调用：发出 `tool_calls` 起始分片（调用编号与名称）、参数增量分片，
+    /// 随后发出带 `finish_reason: "tool_calls"` 的终态分片。
     ToolCall {
         call_id: String,
         tool_name: String,
         arguments_json: String,
     },
-    /// Multiple ToolCalls in one assistant message, preserving binding order.
+    /// 同一条助手消息中的多个工具调用，保持绑定顺序。
     ToolCalls {
         calls: Vec<(String, String, String)>,
     },
-    /// Return a non-SSE HTTP response with a non-2xx status and a JSON error
-    /// body (no `text/event-stream`). Simulates a provider startup failure
-    /// (e.g. 429/500) so the product's retry/error path runs.
+    /// 返回非 2xx 状态码与 JSON 错误正文的非 SSE 响应（不含 `text/event-stream`），
+    /// 模拟 provider 起始错误（如 429/500），触发产品的重试或错误路径。
     HttpError { status: u16, body: String },
-    /// 带指定 Content-Type 与额外响应头的非 2xx 响应，用于 `retry-after`、HTML 网关错误页等形状。
+    /// 带指定 `Content-Type` 与额外响应头的非 2xx 响应，用于 `retry-after`、HTML 网关错误页等形状。
     HttpResponse {
         status: u16,
         content_type: String,
@@ -143,37 +138,32 @@ pub enum SseScript {
     /// 交付内层脚本的事件后先发 `GOAWAY(NO_ERROR)` 优雅关闭连接，再结束流，模拟 provider
     /// 回收连接。只用于 HTTP/2。
     CloseAfter { script: Box<SseScript> },
-    /// 发出 `chunks_before_drop` 后正常结束流（END_STREAM），没有终止 chunk 与 `[DONE]`：
+    /// 发出 `chunks_before_drop` 后正常结束流（`END_STREAM`），不含终态分片与 `[DONE]`：
     /// 产品看到的是流在结束事件之前结束。只用于 HTTP/2。
     Disconnect { chunks_before_drop: Vec<String> },
     /// 与 `Disconnect` 相同，但以 `RST_STREAM(INTERNAL_ERROR)` 结束：HTTP 层看到的是
     /// 响应体读到一半出错，而不是正常结束。只用于 HTTP/2。
     Truncated { chunks_before_drop: Vec<String> },
-    /// 收到请求后发 `GOAWAY(NO_ERROR)` 并关闭连接，GOAWAY 的最后流号小于本请求：
+    /// 收到请求后发 `GOAWAY(NO_ERROR)` 并关闭连接，`GOAWAY` 的最后流号小于本请求：
     /// 按 RFC 9113 §6.8，客户端可确知本请求未被处理。只用于 HTTP/2。
     GoawayUnprocessed,
     /// 以 `RST_STREAM(REFUSED_STREAM)` 拒绝本请求（RFC 9113 §8.7：未被处理）。只用于 HTTP/2。
     RefusedStream,
-    /// Return a non-SSE HTTP 200 body that is not valid JSON per the OpenAI
-    /// chunk schema (e.g. a plain string), exercising the parser's error
-    /// path. The body still uses `text/event-stream` so the framer runs.
+    /// 返回 HTTP 200 且仍带 `text/event-stream` 以走通分帧器，但数据不符合 OpenAI
+    /// 分片 JSON 结构（如纯字符串），用于验证解析器的错误路径。
     IllegalResponse { body: String },
-    /// Serve each inner script to exactly one request, in order. Requests
-    /// beyond the sequence length repeat the last script. This is the
-    /// multi-round foundation for Direct-Local tool scenarios (skeletons in
-    /// #62 (Codeberg #40), expanded in #46 (Codeberg #24)): first request ->
-    /// tool call, second
-    /// request -> plain text, so a turn that uses a Tool still terminates
-    /// cleanly.
+    /// 按顺序将每个内层脚本依次交付给单次请求；超出序列长度的请求重复最后一个脚本。
+    /// 这是本地直连多轮工具场景的基础（骨架见 #62 / Codeberg #40，扩展见 #46 / Codeberg #24）：
+    /// 首次请求返回工具调用，二次请求返回纯文本，使调用工具的轮次仍能干净收尾。
     Sequence { scripts: Vec<SseScript> },
     /// 按请求轮转内层脚本，走完最后一个后回到第一个。`Sequence` 会
     /// 收敛到最后一个脚本，`Cycle` 则对后续每个请求重复整套模式，因此
-    /// 同一个 TUI 会话里的每一轮 turn 都能重演相同的失败/成功形状。
+    /// 同一个 TUI 会话里的每一轮次都能重演相同的失败或成功形状。
     Cycle { scripts: Vec<SseScript> },
 }
 
 impl SseScript {
-    /// Convenience: a single-token plain-text turn that finishes with `stop`.
+    /// 便捷构造：以 `stop` 结束的单分片纯文本轮次。
     pub fn plain(text: impl Into<String>) -> Self {
         SseScript::PlainText {
             chunks: vec![text.into()],
@@ -182,25 +172,25 @@ impl SseScript {
     }
 }
 
-/// A bounded fake-provider protocol or lifecycle failure.
+/// 有界的假 provider 协议或生命周期失败。
 #[derive(Debug, Error)]
 pub enum ServeError {
-    #[error("io: {0}")]
+    #[error("I/O 错误：{0}")]
     Io(#[from] std::io::Error),
-    #[error("timed out after {timeout:?} waiting for {operation}")]
+    #[error("等待{operation}超时（上限 {timeout:?}）")]
     Timeout {
         operation: &'static str,
         timeout: Duration,
     },
-    #[error("not a model request: {0}")]
+    #[error("非模型请求：{0}")]
     UnexpectedRequest(String),
-    #[error("provider would reject the tool definitions: {0}")]
+    #[error("provider 会拒绝工具定义：{0}")]
     RejectedToolSchema(String),
-    #[error("provider would reject the assistant content: {0}")]
+    #[error("provider 会拒绝助手正文：{0}")]
     RejectedAssistantContent(String),
-    #[error("script cannot be rendered in the {0} protocol")]
+    #[error("脚本无法在 `{0}` 协议下渲染")]
     UnsupportedScript(&'static str),
-    #[error("fake-provider server thread failed: {0}")]
+    #[error("假 provider 服务线程失败：{0}")]
     ThreadFailure(String),
 }
 
@@ -211,15 +201,11 @@ fn timeout_error(operation: &'static str, duration: Duration) -> ServeError {
     }
 }
 
-/// A running fake LLM server bound to a scenario-local port.
-///
-/// Explicit shutdown reports server failures and waits only to its deadline.
-/// `Drop` uses a fixed bounded fallback, cancels any response gate, and closes
-/// the listener. Captures remain readable until drop.
+/// 控制假 provider 何时放行整份响应或下一帧 SSE 的同步门闩。
 #[derive(Clone)]
 pub struct ResponseGate {
     state: Arc<(Mutex<GateState>, Condvar)>,
-    /// 分段交付共用一个场景期限；普通整份响应 gate 保持原生命周期。
+    /// 分段交付共用一个场景期限；普通整份响应门闩保持原生命周期。
     segment_deadline: Option<Instant>,
 }
 
@@ -239,17 +225,17 @@ impl ResponseGate {
         while state.stalled < count {
             if state.cancelled {
                 return Err(ServeError::ThreadFailure(
-                    "response gate was cancelled before the requested stall".into(),
+                    "响应门闩在达到预期阻塞数量前已被取消".into(),
                 ));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(timeout_error("fake-provider response stall", timeout));
+                return Err(timeout_error("假 provider 响应阻塞就位", timeout));
             }
             let (next, result) = wake.wait_timeout(state, remaining).unwrap();
             state = next;
             if result.timed_out() && state.stalled < count {
-                return Err(timeout_error("fake-provider response stall", timeout));
+                return Err(timeout_error("假 provider 响应阻塞就位", timeout));
             }
         }
         Ok(())
@@ -259,7 +245,7 @@ impl ResponseGate {
         self.release_through(true, timeout)
     }
 
-    /// 只放行下一帧 SSE，并等待处理线程越过该 gate；不会顺带放行终态。
+    /// 只放行下一帧 SSE，并等待处理线程越过该门闩；不会顺带放行终态。
     pub fn release_next(&self, timeout: Duration) -> Result<(), ServeError> {
         self.release_through(false, timeout)
     }
@@ -277,16 +263,16 @@ impl ResponseGate {
         wake.notify_all();
         while state.departed < target {
             if state.cancelled {
-                return Err(ServeError::ThreadFailure("response gate cancelled".into()));
+                return Err(ServeError::ThreadFailure("响应门闩已取消".into()));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(timeout_error("fake-provider response release", timeout));
+                return Err(timeout_error("假 provider 响应放行", timeout));
             }
             let (next, result) = wake.wait_timeout(state, remaining).unwrap();
             state = next;
             if result.timed_out() && state.departed < target {
-                return Err(timeout_error("fake-provider response release", timeout));
+                return Err(timeout_error("假 provider 响应放行", timeout));
             }
         }
         Ok(())
@@ -311,7 +297,7 @@ impl ResponseGate {
                     state.cancelled = true;
                     wake.notify_all();
                     return Err(ServeError::ThreadFailure(
-                        "fake-provider segment delivery deadline elapsed".into(),
+                        "假 provider 分段交付已超过截止期限".into(),
                     ));
                 }
                 wake.wait_timeout(state, remaining).unwrap().0
@@ -325,12 +311,12 @@ impl ResponseGate {
         Ok(released)
     }
 
-    /// 在阻塞线程上等待 gate，不占用异步运行时的工作线程。
+    /// 在阻塞线程上等待门闩，不占用异步运行时的工作线程。
     async fn pass(&self) -> Result<bool, ServeError> {
         let gate = self.clone();
         tokio::task::spawn_blocking(move || gate.wait())
             .await
-            .map_err(|_| ServeError::ThreadFailure("gate wait task failed".into()))?
+            .map_err(|_| ServeError::ThreadFailure("门闩等待任务失败".into()))?
     }
 }
 
@@ -374,7 +360,7 @@ impl Shared {
             .is_some_and(|gate| gate.segment_deadline.is_some())
     }
 
-    /// 整份响应 gate：返回 `false` 表示 gate 已取消，不再响应。
+    /// 整份响应门闩：返回 `false` 表示门闩已取消，不再响应。
     async fn pass_whole_response(&self) -> Result<bool, ServeError> {
         match &self.gate {
             Some(gate) if !self.segmented() => gate.pass().await,
@@ -382,7 +368,7 @@ impl Shared {
         }
     }
 
-    /// 分段 gate：每帧 SSE 前等待一次。
+    /// 分段门闩：每帧 SSE 前等待一次。
     async fn pass_frame(&self) -> Result<bool, ServeError> {
         match &self.gate {
             Some(gate) if self.segmented() => gate.pass().await,
@@ -391,6 +377,10 @@ impl Shared {
     }
 }
 
+/// 绑定在场景本地端口上运行的假模型服务端。
+///
+/// 显式 `shutdown` 会报告服务端失败且只等待到截止期限；`Drop` 使用固定的有界兜底等待，
+/// 取消所有响应门闩并关闭监听器。在 `Drop` 前已捕获的请求始终可读。
 pub struct FakeLlmServer {
     addr: SocketAddr,
     plain_http1: bool,
@@ -401,8 +391,8 @@ pub struct FakeLlmServer {
 }
 
 impl FakeLlmServer {
-    /// Bind a new TLS + HTTP/2 server to `127.0.0.1:0` (OS-assigned port) and
-    /// start serving `script` with the shared harness [`TlsIdentity`].
+    /// 在 `127.0.0.1:0`（操作系统分配端口）上绑定 TLS + HTTP/2 服务端，
+    /// 使用测试框架共享的 [`TlsIdentity`] 按 `script` 提供响应。
     pub fn start(script: SseScript) -> Result<Self, ServeError> {
         Self::start_inner(script, None, None, Some(TlsIdentity::shared()?))
     }
@@ -412,7 +402,7 @@ impl FakeLlmServer {
         Self::start_inner(script, None, None, None)
     }
 
-    /// Start with a crash-surviving append-only request counter.
+    /// 启动服务端并将每次请求追加写入跨崩溃保留的计数文件。
     pub fn start_logged(script: SseScript, path: &Path) -> Result<Self, ServeError> {
         Self::start_inner(
             script,
@@ -426,7 +416,7 @@ impl FakeLlmServer {
         Self::start_controlled(script, None, TlsIdentity::shared()?)
     }
 
-    /// 用指定的 TLS 身份启动带 gate 的服务端，供需要不同信任根的场景使用。
+    /// 用指定的 TLS 身份启动带门闩的服务端，供需要不同信任根的场景使用。
     pub fn start_gated_with(
         script: SseScript,
         identity: &TlsIdentity,
@@ -434,7 +424,7 @@ impl FakeLlmServer {
         Self::start_controlled(script, None, identity)
     }
 
-    /// 每帧 SSE 单独放行；全部交付受同一绝对期限约束，shutdown/Drop 仍取消 gate。
+    /// 每帧 SSE 单独放行；全部交付受同一绝对期限约束，`shutdown`/`Drop` 仍会取消门闩。
     pub fn start_segmented(
         script: SseScript,
         timeout: Duration,
@@ -507,7 +497,7 @@ impl FakeLlmServer {
                 match result {
                     Ok(Ok(())) => {}
                     Ok(Err(error)) => state.record_failure(error.to_string()),
-                    Err(_) => state.record_failure("serve thread panicked"),
+                    Err(_) => state.record_failure("服务线程发生 panic"),
                 }
                 state.serve_exited = true;
                 wake.notify_all();
@@ -522,7 +512,7 @@ impl FakeLlmServer {
         })
     }
 
-    /// The base URL the product should connect to, without a trailing slash.
+    /// 产品应连接的基础地址（不含末尾斜杠）。
     /// HTTP/2 用 `https://127.0.0.1`（证书含该 IP）；明文 HTTP/1.1 用本地 provider
     /// 常见的 `http://localhost`。
     pub fn base_url(&self) -> String {
@@ -533,14 +523,14 @@ impl FakeLlmServer {
         }
     }
 
-    /// 仅在首个请求前设置测试凭据；只比较内存字节，不写 capture 或错误正文。
+    /// 仅在首个请求前设置预期测试凭据；只比较内存字节，不写入请求捕获或错误正文。
     pub fn expect_api_key(&self, key: &str) {
         let mut state = self.state.0.lock().unwrap();
         assert!(state.requests.is_empty() && state.active_handlers == 0);
         state.expected_api_key = Some(key.to_string());
     }
 
-    /// A snapshot of every request captured so far, in arrival order.
+    /// 按到达顺序返回目前已捕获请求的快照。
     pub fn captured_requests(&self) -> Vec<CapturedRequest> {
         self.state.0.lock().unwrap().requests.clone()
     }
@@ -560,24 +550,24 @@ impl FakeLlmServer {
             }
             if state.serve_exited {
                 return Err(ServeError::ThreadFailure(
-                    "serve thread exited before the requested capture".into(),
+                    "服务线程在捕获到预期数量的请求前已退出".into(),
                 ));
             }
             let remaining = deadline.saturating_duration_since(Instant::now());
             if remaining.is_zero() {
-                return Err(timeout_error("fake-provider request", timeout));
+                return Err(timeout_error("假 provider 收到请求", timeout));
             }
             let (next, result) = wake.wait_timeout(state, remaining).unwrap();
             state = next;
             if result.timed_out() && state.requests.len() < count {
-                return Err(timeout_error("fake-provider request", timeout));
+                return Err(timeout_error("假 provider 收到请求", timeout));
             }
         }
         Ok(())
     }
 
     /// 发出停止信号并有界等待服务线程收尾。超时返回错误但保留线程句柄，
-    /// 再次调用（或 Drop）会继续等待，直到线程真正 join。
+    /// 再次调用（或 `Drop`）会继续等待，直到线程真正汇合。
     pub fn shutdown(&mut self, timeout: Duration) -> Result<(), ServeError> {
         if self.serve_handle.is_none() {
             return match self.state.0.lock().unwrap().first_failure.clone() {
@@ -602,12 +592,12 @@ impl FakeLlmServer {
             while !state.serve_exited || state.active_handlers != 0 {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
-                    return Err(timeout_error("fake-provider shutdown", timeout));
+                    return Err(timeout_error("假 provider 关停", timeout));
                 }
                 let (next, result) = wake.wait_timeout(state, remaining).unwrap();
                 state = next;
                 if result.timed_out() && (!state.serve_exited || state.active_handlers != 0) {
-                    return Err(timeout_error("fake-provider shutdown", timeout));
+                    return Err(timeout_error("假 provider 关停", timeout));
                 }
             }
         }
@@ -619,7 +609,7 @@ impl FakeLlmServer {
                 .0
                 .lock()
                 .unwrap()
-                .record_failure("serve thread join failed");
+                .record_failure("服务线程汇合失败");
         }
         match self.state.0.lock().unwrap().first_failure.clone() {
             Some(failure) => Err(ServeError::ThreadFailure(failure)),
@@ -635,8 +625,8 @@ impl FakeLlmServer {
 
 impl Drop for FakeLlmServer {
     fn drop(&mut self) {
-        // Drop cannot return lifecycle errors. Explicit `shutdown` retains the
-        // first fixture failure; this fallback only guarantees a bounded wait.
+        // `Drop` 无法返回生命周期错误。显式调用 `shutdown` 会保留首个夹具失败；
+        // 这里的兜底逻辑只保证等待时间有界。
         let _ = self.shutdown(Duration::from_secs(3));
     }
 }
@@ -652,7 +642,7 @@ fn run_server(
         .enable_all()
         .build()?;
     let result = runtime.block_on(accept_loop(listener, acceptor, Arc::clone(&shared)));
-    // 被 gate 卡住的任务已由 shutdown 取消 gate 放行，其余任务观察到 stop 后退出。
+    // 被门闩卡住的任务已由 `shutdown` 取消门闩放行，其余任务观察到 `stop` 后退出。
     let (lock, wake) = &*shared.state;
     let deadline = Instant::now() + Duration::from_secs(5);
     let mut state = lock.lock().unwrap();
@@ -666,7 +656,7 @@ fn run_server(
     runtime.shutdown_timeout(Duration::from_secs(1));
     let mut state = lock.lock().unwrap();
     if state.active_handlers != 0 {
-        state.record_failure("handler task did not finish before shutdown");
+        state.record_failure("连接处理任务在关停前未结束");
         state.active_handlers = 0;
     }
     result
@@ -702,7 +692,7 @@ async fn accept_loop(
     }
 }
 
-/// 计入在途任务；任务失败或 panic 记为夹具失败。shutdown 发出停止信号时中止任务，
+/// 计入在途任务；任务失败或 panic 记为夹具失败。`shutdown` 发出停止信号时中止任务，
 /// 所以 TLS 握手、读请求等对端驱动的等待都不会拖住关停。
 fn spawn_tracked<F>(shared: &Arc<Shared>, task: F)
 where
@@ -725,7 +715,7 @@ where
         match outcome {
             Ok(Ok(())) => {}
             Ok(Err(error)) => state.record_failure(error.to_string()),
-            Err(error) if error.is_panic() => state.record_failure("handler task panicked"),
+            Err(error) if error.is_panic() => state.record_failure("连接处理任务发生 panic"),
             Err(_) => {}
         }
         state.active_handlers -= 1;
@@ -733,7 +723,7 @@ where
     });
 }
 
-/// 等到 shutdown 发出停止信号。包一层是为了不把 watch 的读锁守卫留在 `select!` 的输出里。
+/// 等到 `shutdown` 发出停止信号。单独封装是为了避免把 `watch` 的读锁守卫留在 `select!` 的输出里。
 async fn stopped(stop: &mut watch::Receiver<bool>) {
     let _ = stop.wait_for(|stop| *stop).await;
 }
@@ -747,13 +737,12 @@ fn append_fsynced(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     Ok(())
 }
 
-/// One request from the product under test. The product is the fake provider's
-/// only client, so parsing extracts just the route, credential, identifying
-/// headers and body; it does not defend against malformed or hostile HTTP.
+/// 来自被测产品的一条请求。产品是假 provider 的唯一客户端，因此解析器只提取路由、凭据、
+/// 客户端识别头与正文，不对畸形或恶意的 HTTP 报文做额外防御。
 struct HttpRequest {
     method: String,
     path: String,
-    /// `authorization`, `x-api-key` and `x-goog-api-key`, names lowercased.
+    /// 小写名称的 `authorization`、`x-api-key` 与 `x-goog-api-key`。
     credentials: Vec<(String, String)>,
     /// [`CapturedRequest::headers`] 收录的请求头。
     headers: BTreeMap<String, String>,
@@ -787,7 +776,7 @@ impl HttpRequest {
     }
 }
 
-/// Streaming protocol of one model request, chosen by its route.
+/// 由请求路由决定的单次模型请求流式协议。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Protocol {
     OpenAi,
@@ -798,7 +787,7 @@ enum Protocol {
 }
 
 impl Protocol {
-    /// The protocol and the model named in the path, for a model route.
+    /// 若命中模型路由，返回协议及路径中携带的模型名称。
     fn route(method: &str, path: &str) -> Option<(Self, Option<String>)> {
         if method != "POST" {
             return None;
@@ -827,7 +816,7 @@ impl Protocol {
         }
     }
 
-    /// The API key in this protocol's credential header.
+    /// 提取该协议对应凭据请求头中的 API 密钥。
     fn api_key(self, request: &HttpRequest) -> Option<&str> {
         let (header, prefix) = match self {
             Self::OpenAi | Self::Responses => ("authorization", "Bearer "),
@@ -858,7 +847,7 @@ enum Reply {
     RefusedStream,
 }
 
-/// SSE 帧发完之后怎样结束。
+/// SSE 帧发完之后的流结束方式。
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SseEnd {
     /// 正常结束流。
@@ -882,8 +871,8 @@ impl Reply {
     }
 }
 
-/// 路由、核对凭据、登记 capture 并按脚本决定回应。第二项是回应之后要报告的夹具失败。
-/// 会写请求日志并 fsync，调用方放在阻塞线程上执行。
+/// 路由、核对凭据、登记捕获记录并按脚本决定回应。第二项是回应之后要报告的夹具失败。
+/// 会写请求日志并调用 `fsync`，由调用方放在阻塞线程上执行。
 fn decide(
     shared: &Shared,
     request: HttpRequest,
@@ -931,9 +920,8 @@ fn decide(
     let mut captured = parse_request_body(protocol, path_model, &request.body);
     captured.headers = request.headers;
     captured.connection = connection;
-    // Script assignment and capture publication are one transaction. Capture
-    // order is therefore the same order used to advance a Sequence, even if
-    // gated handlers resume in a different order.
+    // 脚本分配与请求捕获发布在同一个临界区内完成，因此即使受门闩阻塞的处理任务
+    // 以不同顺序恢复，捕获顺序也始终与 `Sequence` 推进顺序一致。
     let active = {
         let (lock, wake) = &*shared.state;
         let mut state = lock.lock().unwrap();
@@ -1021,19 +1009,19 @@ async fn decide_blocking(
     let shared = Arc::clone(shared);
     tokio::task::spawn_blocking(move || decide(&shared, request, connection))
         .await
-        .map_err(|_| ServeError::ThreadFailure("request decision task failed".into()))?
+        .map_err(|_| ServeError::ThreadFailure("请求决策任务失败".into()))?
 }
 
-/// h2 连接任务交给连接循环执行的动作；只有连接循环在驱动连接，帧的顺序由它保证。
+/// `h2` 请求任务交给连接循环执行的动作；只有连接循环在驱动连接，帧的顺序由它保证。
 enum Control {
-    /// 发 `GOAWAY(NO_ERROR)` 优雅关闭，再结束该流。h2 每次轮询连接都先写出待发的 GOAWAY，
-    /// 再编码各流排队的帧，所以客户端先处理 GOAWAY、后读到流结束，此后不会在这条连接上
-    /// 开新流。若结束流在前，客户端可能在 GOAWAY 到达前就在这条连接上发出下一个请求。
+    /// 发 `GOAWAY(NO_ERROR)` 优雅关闭，再结束该流。`h2` 每次轮询连接都先写出待发的 `GOAWAY`，
+    /// 再编码各流排队的帧，所以客户端先处理 `GOAWAY`、后读到流结束，此后不会在这条连接上
+    /// 开新流。若结束流在前，客户端可能在 `GOAWAY` 到达前就在这条连接上发出下一个请求。
     GracefulThenEnd(h2::SendStream<Bytes>),
-    /// 先把已排队的帧交给传输，再以 `RST_STREAM(INTERNAL_ERROR)` 重置该流。h2 的重置会
-    /// 丢弃该流尚未编码的 HEADERS/DATA，直接重置就可能让客户端只看到请求被重置。
+    /// 先把已排队的帧交给传输，再以 `RST_STREAM(INTERNAL_ERROR)` 重置该流。`h2` 的重置会
+    /// 丢弃该流尚未编码的 `HEADERS`/`DATA`，直接重置就可能让客户端只看到请求被重置。
     ResetAfterFlush(h2::SendStream<Bytes>),
-    /// 在 h2 库发出任何别的帧之前，插入最后流号小于该请求的 GOAWAY，然后断开连接。
+    /// 在 `h2` 库发出任何别的帧之前，插入最后流号小于该请求的 `GOAWAY`，然后断开连接。
     GoawayUnprocessed {
         last_stream_id: u32,
         respond: SendResponse<Bytes>,
@@ -1052,7 +1040,7 @@ async fn serve_h2(
     };
     if tls.get_ref().1.alpn_protocol() != Some(b"h2") {
         return Err(ServeError::ThreadFailure(
-            "client did not negotiate h2 over ALPN".into(),
+            "客户端未通过 ALPN 协商出 h2".into(),
         ));
     }
     let tap = Tap::new(tls);
@@ -1088,7 +1076,7 @@ async fn serve_h2(
                     let _ = send.send_data(Bytes::new(), true);
                 }
                 Control::ResetAfterFlush(mut send) => {
-                    // 只有本任务驱动连接：轮询一次，让 h2 把该流已排队的帧编码进传输
+                    // 只有本任务驱动连接：轮询一次，让 `h2` 把该流已排队的帧编码进传输
                     // （`Tap` 总是整块接收），之后的重置只能作用于流本身。
                     let next = std::future::poll_fn(|cx| match h2.poll_accept(cx) {
                         Poll::Pending => Poll::Ready(None),
@@ -1113,11 +1101,11 @@ async fn serve_h2(
     }
 }
 
-/// `GOAWAY(last_stream_id, NO_ERROR)`，RFC 9113 §6.8。
+/// 发送 `GOAWAY(last_stream_id, NO_ERROR)` 帧（参见 RFC 9113 §6.8）。
 fn goaway_frame(last_stream_id: u32) -> [u8; 17] {
     let mut frame = [0u8; 17];
     frame[2] = 8; // 负载长度
-    frame[3] = 0x7; // GOAWAY
+    frame[3] = 0x7; // `GOAWAY` 帧类型
     frame[9..13].copy_from_slice(&(last_stream_id & 0x7fff_ffff).to_be_bytes());
     frame
 }
@@ -1172,7 +1160,7 @@ async fn h2_request(
             for (name, value) in headers {
                 response = response.header(name, value);
             }
-            let response = response.body(()).expect("valid fixture response");
+            let response = response.body(()).expect("夹具响应头必须合法");
             if let Ok(mut send) = respond.send_response(response, body.is_empty())
                 && !body.is_empty()
             {
@@ -1185,7 +1173,7 @@ async fn h2_request(
                 .header("content-type", "text/event-stream")
                 .header("cache-control", "no-cache")
                 .body(())
-                .expect("valid fixture response");
+                .expect("夹具响应头必须合法");
             let Ok(mut send) = respond.send_response(response, false) else {
                 return Ok(());
             };
@@ -1222,8 +1210,8 @@ async fn h2_request(
     failure.map_or(Ok(()), Err)
 }
 
-/// h2 连接的传输。写入先进本地缓冲、flush 时才发出，所以缓冲里总是 h2 库写完的整帧；
-/// [`Tap::inject`] 借此在帧之间插入 h2 库不会发的帧（最后流号小于在途请求的 GOAWAY）。
+/// `h2` 连接的传输层包装。写入先进本地缓冲、刷新时才发出，所以缓冲里总是 `h2` 库写完的整帧；
+/// [`Tap::inject`] 借此在帧之间插入 `h2` 库不会发的帧（最后流号小于在途请求的 `GOAWAY`）。
 #[derive(Clone)]
 struct Tap(Arc<Mutex<TapInner>>);
 
@@ -1240,7 +1228,7 @@ impl Tap {
         })))
     }
 
-    /// 只能由驱动 h2 连接的任务调用，此时 h2 库不在写帧。
+    /// 只能由驱动 `h2` 连接的任务调用，此时 `h2` 库不在写帧。
     async fn inject(&self, frame: &[u8]) -> std::io::Result<()> {
         self.0.lock().unwrap().pending.extend_from_slice(frame);
         self.clone().flush().await
@@ -1362,7 +1350,7 @@ async fn serve_h1(
     }
 }
 
-/// 写出并 flush；失败只说明对端已关闭连接。
+/// 写出并调用 `flush`；失败只说明对端已关闭连接。
 async fn write_h1(stream: &mut BufReader<TcpStream>, parts: &[String]) -> bool {
     for part in parts {
         if stream.get_mut().write_all(part.as_bytes()).await.is_err() {
@@ -1407,10 +1395,8 @@ async fn read_h1_request(
     )))
 }
 
-/// Decode a model request body into a [`CapturedRequest`]. A malformed body
-/// still records a capture with empty fields and the raw string stored under
-/// `raw["__raw_body"]` so a scenario can see what the product sent even if it
-/// was not valid JSON.
+/// 将模型请求体解码为 [`CapturedRequest`]。若请求体不是合法 JSON，仍会记录一条字段为空的
+/// 捕获记录，并把原始字符串存入 `raw["__raw_body"]`，以便场景检查产品实际发出的内容。
 fn parse_request_body(
     protocol: Protocol,
     path_model: Option<String>,
@@ -1490,14 +1476,14 @@ fn parse_request_body(
     }
 }
 
-/// 按真实 provider 的工具定义校验拒绝请求；违反者返回 400，整个 Turn 无法开始。
+/// 按真实 provider 的工具定义校验规则拒绝违规请求；违反者返回 400，整轮 Turn 无法开始。
 ///
-/// - Chat Completions、Responses、Anthropic：参数 schema 顶层必须是 `type: object`，且不能出现
+/// - Chat Completions、Responses、Anthropic：参数结构顶层必须是 `type: object`，且不能出现
 ///   `oneOf`、`anyOf`、`allOf`、`enum`、`not`。
 /// - Gemini：`functionDeclarations[].parameters` 只接受 OpenAPI 子集，任意层级出现
 ///   `additionalProperties`、`const`、`contains`、`minContains` 都会被拒（2026-10-05 对
 ///   AI Studio 与 Vertex 实测）；完整 JSON Schema 须放在 `parametersJsonSchema`。
-/// - Interactions：parameters 提供时须为 JSON 对象；不把忽略的关键字模拟成拒绝条件。
+/// - Interactions：提供 `parameters` 时须为 JSON 对象；不把上游忽略的关键字模拟成拒绝条件。
 fn tool_schema_rejection(protocol: Protocol, body: &str) -> Option<String> {
     let raw: Value = serde_json::from_str(body).ok()?;
     let tools = raw["tools"].as_array().into_iter().flatten();
@@ -1555,7 +1541,7 @@ fn has_key_anywhere(value: &Value, key: &str) -> bool {
     }
 }
 
-/// Responses 的 assistant 正文只接受输出文本或拒绝，用户输入块不能作为历史回复。
+/// Responses 的 `assistant` 正文只接受输出文本或拒绝块，用户输入块不能作为历史回复。
 fn responses_assistant_content_rejection(protocol: Protocol, body: &str) -> Option<String> {
     if protocol != Protocol::Responses {
         return None;
@@ -1577,7 +1563,7 @@ fn responses_assistant_content_rejection(protocol: Protocol, body: &str) -> Opti
         })
 }
 
-/// `(call id, Tool name, arguments JSON)` of one scripted Tool call.
+/// 单次脚本化工具调用的三元组：`(调用编号, 工具名, 参数 JSON)`。
 type ScriptedCall = (String, String, String);
 
 /// 按协议渲染文本、工具与原生用量，保留脚本控制的事件顺序。
@@ -1676,7 +1662,7 @@ fn render(protocol: Protocol, script: &SseScript) -> Option<String> {
     })
 }
 
-/// 普通脚本也走原生 step 生命周期，工具轮以 requires_action 结束。
+/// 普通脚本也走原生 `step` 生命周期，工具轮以 `requires_action` 结束。
 fn render_interactions(texts: &[String], calls: &[ScriptedCall]) -> String {
     use serde_json::json;
     let mut events = vec![
@@ -1711,7 +1697,7 @@ fn render_interactions(texts: &[String], calls: &[ScriptedCall]) -> String {
     out
 }
 
-/// Responses 使用 item 生命周期与完整终态，普通脚本也不依赖 Chat 的 DONE 标记。
+/// Responses 使用 `item` 生命周期与完整终态，普通脚本也不依赖 Chat Completions 的 `[DONE]` 标记。
 fn render_responses(texts: &[String], calls: &[ScriptedCall]) -> String {
     use serde_json::json;
     let mut out = String::new();
@@ -1759,8 +1745,8 @@ fn render_responses(texts: &[String], calls: &[ScriptedCall]) -> String {
     out
 }
 
-/// Anthropic Messages stream: `message_start`, one text block, one
-/// `tool_use` block per call, `message_delta` with the stop reason.
+/// Anthropic Messages 流式响应：`message_start`、一个文本块、每次调用一个
+/// `tool_use` 块，以及带停止原因的 `message_delta`。
 fn render_anthropic(texts: &[String], calls: &[ScriptedCall], finish: &str) -> String {
     fn event(out: &mut String, name: &str, data: Value) {
         out.push_str(&format!("event: {name}\ndata: {data}\n\n"));
@@ -1834,8 +1820,8 @@ fn render_anthropic(texts: &[String], calls: &[ScriptedCall], finish: &str) -> S
     out
 }
 
-/// Gemini `streamGenerateContent?alt=sse`: one chunk per text part or
-/// `functionCall`, then a final chunk with `finishReason` and usage.
+/// Gemini `streamGenerateContent?alt=sse`：每个文本片段或 `functionCall`
+/// 各发一个分片，最后发出带 `finishReason` 与用量的终态分片。
 fn render_gemini(texts: &[String], calls: &[ScriptedCall], finish: &str) -> String {
     let chunk = |parts: Value| serde_json::json!({"candidates": [{"content": {"role": "model", "parts": parts}}]});
     let mut out = String::new();
@@ -1867,18 +1853,16 @@ fn render_gemini(texts: &[String], calls: &[ScriptedCall], finish: &str) -> Stri
     out
 }
 
-/// Render an [`SseScript`] into the raw SSE text the server writes after the
-/// HTTP headers. Each chunk is `data: {json}\n\n`; the stream ends with
-/// `data: [DONE]\n\n` for the in-band terminal cases. The chunk JSON mirrors
-/// the OpenAI Chat Completions streaming shape the product's
-/// `OpenAiSseParser` expects (`choices[0].delta.content`,
-/// `choices[0].delta.tool_calls`, `choices[0].finish_reason`, `usage`).
+/// 将 [`SseScript`] 渲染为服务端在 HTTP 响应头之后写出的原始 SSE 文本。
+/// 每个分片格式为 `data: {json}\n\n`；带内正常结束的流以 `data: [DONE]\n\n` 收尾。
+/// 分片 JSON 与产品 `OpenAiSseParser` 预期的 OpenAI Chat Completions 流式结构一致
+///（`choices[0].delta.content`、`choices[0].delta.tool_calls`、`choices[0].finish_reason`、`usage`）。
 fn render_script(script: &SseScript) -> String {
     let mut out = String::new();
     match script {
         SseScript::WithUsage { .. } | SseScript::NativeEvents { .. } => {
             return render(Protocol::OpenAi, script)
-                .expect("HTTP/1 scripts use Chat Completions usage");
+                .expect("OpenAI 渲染路径下的脚本必须使用 Chat Completions 用量格式");
         }
         SseScript::Chunks { chunks } => {
             for chunk in chunks {
@@ -2043,13 +2027,12 @@ fn render_script(script: &SseScript) -> String {
                 });
                 push_data(&mut out, &chunk);
             }
-            // No terminal chunk, no [DONE] — the stream simply ends
-            // after the in-flight chunks. The product should treat this as a
-            // truncated stream.
+            // 不发终态分片与 `[DONE]`——流在在途分片之后直接结束，
+            // 产品应将其视为截断的流。
         }
         SseScript::IllegalResponse { body } => {
-            // `data: <body>\n\n` — the framer accepts it as one data event,
-            // and the chunk parser rejects it as malformed JSON.
+            // `data: <body>\n\n`——分帧器会将其作为一条数据事件接收，
+            // 随后分片解析器会将其作为畸形 JSON 拒绝。
             out.push_str("data: ");
             out.push_str(body);
             out.push_str("\n\n");
@@ -2061,21 +2044,19 @@ fn render_script(script: &SseScript) -> String {
         | SseScript::Truncated { .. }
         | SseScript::GoawayUnprocessed
         | SseScript::RefusedStream => {
-            // 这些脚本都在 `decide` 中先行处理；
-            // reaching this arm is a harness bug.
+            // 这些脚本都在 `decide` 中先行处理；走到该分支说明测试框架有缺陷。
             out.push_str("data: fake_llm: unresolved HttpError script\n\n");
             out.push_str("data: [DONE]\n\n");
         }
         SseScript::Sequence { .. } => {
-            // rendering; reaching this arm is a harness bug. Emit a malformed
-            // payload so the turn fails loudly instead of silently passing.
+            // `Sequence` 会在渲染前由 `decide` 按请求展开；走到该分支说明测试框架有缺陷。
+            // 发出畸形载荷，使轮次明确报错而不是静默通过。
             out.push_str("data: fake_llm: unresolved Sequence script\n\n");
             out.push_str("data: [DONE]\n\n");
         }
         SseScript::Cycle { .. } => {
-            // Cycle 与 Sequence 一样在 `decide` 里按请求解析；
-            // 走到这里说明 harness 有 bug。发出畸形载荷，让 turn 大声
-            // 失败而不是悄悄通过。
+            // `Cycle` 与 `Sequence` 一样在 `decide` 里按请求展开；走到该分支说明测试框架有缺陷。
+            // 发出畸形载荷，使轮次明确报错而不是静默通过。
             out.push_str("data: fake_llm: unresolved Cycle script\n\n");
             out.push_str("data: [DONE]\n\n");
         }
@@ -2110,8 +2091,7 @@ mod tests {
                 &["[DONE]", "response.completed"],
                 Some("\n\n"),
             ),
-            // The product framer expects content chunks, finish_reason and usage,
-            // then the [DONE] marker for a plain-text response.
+            // 产品分帧器对纯文本响应预期收到正文分片、`finish_reason`、`usage` 以及最后的 `[DONE]` 标记。
             (
                 "plain_text",
                 SseScript::PlainText {
@@ -2127,7 +2107,7 @@ mod tests {
                 &[],
                 Some("data: [DONE]\n\n"),
             ),
-            // Tool calls emit id + name, an arguments delta, then tool_calls finish.
+            // 工具调用依次发出调用编号与名称、参数增量，随后以 `tool_calls` 结束。
             (
                 "tool_call",
                 SseScript::ToolCall {
@@ -2146,7 +2126,7 @@ mod tests {
                 &[],
                 Some("data: [DONE]\n\n"),
             ),
-            // Disconnect truncates the stream without a terminal chunk or [DONE].
+            // `Disconnect` 直接截断流，不含终态分片或 `[DONE]`。
             (
                 "disconnect",
                 SseScript::Disconnect {
@@ -2156,7 +2136,7 @@ mod tests {
                 &["\"finish_reason\":\"", "[DONE]"],
                 None,
             ),
-            // The non-JSON data payload exercises the product chunk parser's error path.
+            // 非 JSON 数据载荷用于覆盖产品分片解析器的错误路径。
             (
                 "illegal_response",
                 SseScript::IllegalResponse {
@@ -2170,19 +2150,24 @@ mod tests {
         for (name, script, required_substrings, forbidden_substrings, required_suffix) in rows {
             let sse = render_script(&script);
             for substring in required_substrings {
-                assert!(sse.contains(substring), "{name}: missing {substring:?}");
+                assert!(
+                    sse.contains(substring),
+                    "{name}：缺少预期子串 {substring:?}"
+                );
             }
             for substring in forbidden_substrings {
-                assert!(!sse.contains(substring), "{name}: unexpected {substring:?}");
+                assert!(
+                    !sse.contains(substring),
+                    "{name}：出现不应包含的子串 {substring:?}"
+                );
             }
             if let Some(suffix) = required_suffix {
-                assert!(sse.ends_with(suffix), "{name}: missing suffix {suffix:?}");
+                assert!(sse.ends_with(suffix), "{name}：缺少预期后缀 {suffix:?}");
             }
         }
     }
 
-    /// Decoding a Chat Completions body surfaces model, message roles (in
-    /// arrival order), and wire tool names.
+    /// 解码 Chat Completions 请求体应提取出模型名、按到达顺序排列的消息角色以及线上工具名。
     #[test]
     fn parse_body_surfaces_model_roles_and_tool_names() {
         let body = serde_json::json!({
@@ -2383,8 +2368,8 @@ mod tests {
             assert!(server.captured_requests().is_empty());
             let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
             assert!(
-                matches!(error, ServeError::ThreadFailure(ref failure) if failure == "provider would reject the tool definitions: Interactions function parameters must be a JSON object"),
-                "unexpected shutdown error: {error}"
+                matches!(error, ServeError::ThreadFailure(ref failure) if failure == "provider 会拒绝工具定义：Interactions function parameters must be a JSON object"),
+                "关停返回了预期之外的错误：{error}"
             );
         }
     }
@@ -2393,7 +2378,7 @@ mod tests {
     async fn bounded<T>(future: impl Future<Output = T>) -> T {
         tokio::time::timeout(Duration::from_secs(5), future)
             .await
-            .expect("fake provider did not respond within the fixture bound")
+            .expect("假 provider 未在夹具时限内响应")
     }
     fn runtime() -> tokio::runtime::Runtime {
         tokio::runtime::Builder::new_multi_thread()
@@ -2403,7 +2388,7 @@ mod tests {
             .unwrap()
     }
 
-    /// 像产品一样经 TLS + ALPN `h2` 连接，只信任 harness CA。
+    /// 像产品一样经 TLS + ALPN `h2` 连接，只信任测试框架 CA。
     async fn connect(addr: SocketAddr) -> h2::client::SendRequest<Bytes> {
         use tokio_rustls::rustls;
         let mut roots = rustls::RootCertStore::empty();
@@ -2478,13 +2463,12 @@ mod tests {
         Ok((status, read_all(response).await?))
     }
 
-    /// The fake server accepts a real HTTP/2 Chat Completions request,
-    /// captures it, and returns the script's SSE. This is the server tracer
-    /// bullet: it proves the bind/TLS/h2/parse/serve path works and that the
-    /// product's framer-compatible framing is on the wire.
+    /// 假服务端接受真实的 HTTP/2 Chat Completions 请求，记录捕获并返回脚本的 SSE。
+    /// 这是服务端的曳光弹自测：验证端口绑定、TLS、`h2`、请求解析与响应写出整条链路通畅，
+    /// 且线上报文与产品分帧器兼容。
     #[test]
     fn server_captures_request_and_returns_plain_text_sse() {
-        let mut server = FakeLlmServer::start(SseScript::plain("hi")).expect("start server");
+        let mut server = FakeLlmServer::start(SseScript::plain("hi")).expect("启动假模型服务失败");
         let body = serde_json::json!({
             "model": "compat:test",
             "messages": [{"role": "user", "content": "ping"}],
@@ -2541,7 +2525,7 @@ mod tests {
             .map(|index| SseScript::plain(format!("sequence-{index}")))
             .collect();
         let (server, gate) = FakeLlmServer::start_gated(SseScript::Sequence { scripts })
-            .expect("gated sequence server");
+            .expect("启动带门闩的序列假服务端失败");
         let runtime = runtime();
         let mut clients = Vec::new();
         for index in 0..REQUESTS {
@@ -2554,26 +2538,26 @@ mod tests {
             }));
             server
                 .wait_for_requests(index + 1, Duration::from_secs(2))
-                .expect("capture in launch order");
+                .expect("未能按发起顺序捕获请求");
         }
 
         let capture_order = server.captured_requests();
         gate.release(Duration::from_secs(2))
-            .expect("bounded concurrent release");
+            .expect("并发放行应在时限内完成");
         let responses: HashMap<_, _> = runtime.block_on(async {
             let mut responses = HashMap::new();
             for client in clients {
-                let (model, text) = bounded(client).await.expect("client task");
+                let (model, text) = bounded(client).await.expect("客户端任务执行失败");
                 responses.insert(model, text);
             }
             responses
         });
         for (sequence_index, captured) in capture_order.iter().enumerate() {
-            let response = responses.get(&captured.model).expect("response by model");
+            let response = responses.get(&captured.model).expect("缺少对应模型的响应");
             let expected = format!(r#""content":"sequence-{sequence_index}""#);
             assert!(
                 response.contains(&expected),
-                "capture position {sequence_index} ({}) received the wrong Sequence script",
+                "第 {sequence_index} 个捕获位置（{}）收到了错误的 Sequence 脚本",
                 captured.model
             );
         }
@@ -2582,26 +2566,27 @@ mod tests {
     #[test]
     fn gated_response_waits_for_release_and_shutdown_joins_handlers() {
         let runtime = runtime();
-        let (server, gate) = FakeLlmServer::start_gated(SseScript::plain("gated")).expect("server");
+        let (server, gate) =
+            FakeLlmServer::start_gated(SseScript::plain("gated")).expect("启动假服务端失败");
         let addr = server.local_addr();
         let response = runtime.spawn(async move { exchange(addr, &[], "{}").await });
         server
             .wait_for_requests(1, Duration::from_secs(2))
-            .expect("captured request");
+            .expect("未能捕获请求");
         gate.wait_until_stalled(1, Duration::from_secs(2))
-            .expect("handler reached gate");
+            .expect("处理任务未到达门闩");
         assert!(!response.is_finished());
         gate.release(Duration::from_secs(2))
-            .expect("bounded release acknowledgement");
+            .expect("门闩放行确认超时");
         let (_, text) = runtime
             .block_on(async { tokio::time::timeout(Duration::from_secs(2), response).await })
-            .expect("bounded response")
+            .expect("等待响应超时")
             .unwrap()
-            .expect("response");
+            .expect("读取响应失败");
         assert!(text.contains("gated"));
 
         let (mut server, gate) =
-            FakeLlmServer::start_gated(SseScript::plain("cancelled")).expect("server");
+            FakeLlmServer::start_gated(SseScript::plain("cancelled")).expect("启动假服务端失败");
         let addr = server.local_addr();
         let response = runtime.spawn(async move {
             let client = connect(addr).await;
@@ -2609,28 +2594,25 @@ mod tests {
         });
         server
             .wait_for_requests(1, Duration::from_secs(2))
-            .expect("captured request");
+            .expect("未能捕获请求");
         gate.wait_until_stalled(1, Duration::from_secs(2))
-            .expect("handler reached cancellable gate");
+            .expect("处理任务未到达可取消门闩");
         server
             .shutdown(Duration::from_secs(2))
-            .expect("bounded shutdown");
+            .expect("有界关停失败");
         let outcome = runtime
             .block_on(async { tokio::time::timeout(Duration::from_secs(2), response).await })
-            .expect("cancelled handler joined")
+            .expect("被取消的处理任务未及时收尾")
             .unwrap();
-        assert!(outcome.is_err(), "cancelled response must not be answered");
+        assert!(outcome.is_err(), "被取消的响应不应返回正常应答");
 
-        assert!(
-            server.serve_handle.is_none(),
-            "serve thread handle was not joined"
-        );
+        assert!(server.serve_handle.is_none(), "服务线程句柄尚未汇合");
         let state = server.state.0.lock().unwrap();
-        assert!(state.serve_exited, "serve thread did not publish exit");
-        assert_eq!(state.active_handlers, 0, "handler remained active");
+        assert!(state.serve_exited, "服务线程未标记已退出");
+        assert_eq!(state.active_handlers, 0, "仍有在途处理任务未收尾");
         assert!(
             state.first_failure.is_none(),
-            "shutdown stored a thread failure: {:?}",
+            "关停记录了意外的线程失败：{:?}",
             state.first_failure
         );
     }
@@ -2658,7 +2640,7 @@ mod tests {
                 let early = runtime.block_on(async {
                     tokio::time::timeout(Duration::from_millis(100), body.data()).await
                 });
-                assert!(early.is_err(), "frame {index} arrived before its release");
+                assert!(early.is_err(), "第 {index} 帧在放行前提前到达");
                 gate.release_next(Duration::from_secs(2)).unwrap();
                 let frame = runtime.block_on(bounded(body.data())).unwrap().unwrap();
                 let frame = String::from_utf8(frame.to_vec()).unwrap();
@@ -2684,12 +2666,9 @@ mod tests {
                     None => break,
                 }
             }
-            assert_eq!(cut.is_some(), cancel, "terminal read ended with {cut:?}");
+            assert_eq!(cut.is_some(), cancel, "终态读取结束结果不符合预期：{cut:?}");
             if cancel {
-                assert!(
-                    terminal.is_empty(),
-                    "shutdown must not deliver terminal frames"
-                );
+                assert!(terminal.is_empty(), "关停取消后不得继续交付终态帧");
             } else {
                 assert!(
                     terminal.contains("\"finish_reason\":\"stop\"")
@@ -2710,11 +2689,11 @@ mod tests {
         assert!(!matches!(outcome, Ok((_, ref text)) if text.contains("withheld")));
         assert!(gate.release_next(Duration::from_secs(2)).is_err());
         let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
-        assert!(error.to_string().contains("segment"));
+        assert!(error.to_string().contains("分段交付"));
         assert_eq!(server.state.0.lock().unwrap().active_handlers, 0);
     }
 
-    /// 只有模型请求进入 capture；其他请求不能被静默接受，必须成为夹具失败。
+    /// 只有模型请求进入捕获记录；其他请求不能被静默接受，必须成为夹具失败。
     #[test]
     fn non_model_request_is_a_fixture_failure_and_not_captured() {
         let mut server = FakeLlmServer::start(SseScript::plain("unused")).unwrap();
@@ -2729,20 +2708,20 @@ mod tests {
         assert!(server.captured_requests().is_empty());
         let error = server.shutdown(Duration::from_secs(2)).unwrap_err();
         assert!(
-            matches!(error, ServeError::ThreadFailure(ref failure) if failure == "not a model request: GET /models"),
-            "unexpected shutdown error: {error}"
+            matches!(error, ServeError::ThreadFailure(ref failure) if failure == "非模型请求：GET /models"),
+            "关停返回了预期之外的错误：{error}"
         );
     }
 
-    /// 客户端停在 TLS 握手中途时 shutdown 仍能及时结束；第一次 shutdown 超时后，
-    /// 再次调用会继续等待并 join 服务线程，而不是直接报告成功。
+    /// 客户端停在 TLS 握手中途时 `shutdown` 仍能及时结束；第一次 `shutdown` 超时后，
+    /// 再次调用会继续等待并汇合服务线程，而不是直接报告成功。
     #[test]
     fn shutdown_retries_after_timeout_and_cancels_stalled_handshakes() {
         let mut server = FakeLlmServer::start(SseScript::plain("unused")).unwrap();
         let stalled = std::net::TcpStream::connect(server.local_addr()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
         while server.state.0.lock().unwrap().active_handlers == 0 {
-            assert!(Instant::now() < deadline, "handshake task never started");
+            assert!(Instant::now() < deadline, "握手处理任务始终未启动");
             thread::sleep(Duration::from_millis(5));
         }
         assert!(matches!(
@@ -2751,33 +2730,30 @@ mod tests {
         ));
         assert!(
             server.serve_handle.is_some(),
-            "timed-out shutdown kept the thread"
+            "超时的关停应保留服务线程句柄"
         );
         let started = Instant::now();
         server.shutdown(Duration::from_secs(2)).unwrap();
         assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(
-            server.serve_handle.is_none(),
-            "retry joined the serve thread"
-        );
+        assert!(server.serve_handle.is_none(), "重试关停应完成服务线程汇合");
         assert_eq!(server.state.0.lock().unwrap().active_handlers, 0);
         drop(stalled);
     }
     #[test]
     fn shutdown_returns_fixture_failure() {
-        let log_directory = tempfile::tempdir().expect("log directory");
+        let log_directory = tempfile::tempdir().expect("创建临时目录失败");
         let mut server =
             FakeLlmServer::start_logged(SseScript::plain("unused"), log_directory.path())
-                .expect("server");
+                .expect("启动假服务端失败");
         let outcome = runtime().block_on(exchange(server.local_addr(), &[], "{}"));
-        assert!(outcome.is_err(), "failed handler must not send a response");
+        assert!(outcome.is_err(), "失败的处理任务不得发送正常响应");
 
         let error = server
             .shutdown(Duration::from_secs(2))
-            .expect_err("shutdown must return the fixture failure");
+            .expect_err("关停必须返回已记录的夹具失败");
         assert!(
-            matches!(error, ServeError::ThreadFailure(ref failure) if failure.starts_with("io:")),
-            "unexpected shutdown error: {error}"
+            matches!(error, ServeError::ThreadFailure(ref failure) if failure.starts_with("I/O 错误：")),
+            "关停返回了预期之外的错误：{error}"
         );
     }
 }

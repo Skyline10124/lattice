@@ -6,7 +6,7 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 重导出场景世界、进程驱动、fake 服务、预算与断言辅助接口 |
+| `src/lib.rs` | 重导出场景世界、进程驱动、假 provider 服务、预算与断言辅助接口 |
 | `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离、环境变量白名单与后台环境快照、直接子进程后台的显式启动与限时就绪轮询、显式重启、有序 `stop`、自有进程组回收及状态根残留后台检查 |
 | `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 路径解析、独立进程组命令执行、`terminate`（`SIGTERM`）与超时终止、`CommandOutcome` 采集及快速 CLI 辅助 |
 | `src/scenario.rs` | 场景分层与单命令、整场景时长预算计算 |
@@ -14,7 +14,7 @@
 | `src/session_send.rs` | `lattice --json session send` JSONL 解析（含 `configure`、`submit` 等公开记录，保留未知有效记录为 `Unknown` 并单独记录畸形行）与 `0`/`1`/`2` 退出码核验 |
 | `src/pty_tui.rs` | 基于 `portable-pty` 的真实 TUI 终端冒烟驱动 |
 | `src/artifacts.rs`、`src/assert.rs` | 失败产物目录独占锁占用、秘密字面脱敏、工作区快照对比与 `FailureReport` 生成 |
-| `src/tui_mock.rs`、`src/bin/tui_mock.rs` | 准备后台环境并显式启动自有后台、录入本地确定性 fake provider 凭据后拉起真实 TUI 的人工调试入口 |
+| `src/tui_mock.rs`、`src/bin/tui_mock.rs` | 准备后台环境并显式启动自有后台、录入本地确定性 假 provider 凭据后拉起真实 TUI 的人工调试入口 |
 
 ## 先读
 

@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Reusable fake-provider scenarios for interactive TUI debugging.
+//! 供交互式 TUI 调试复用的假 provider 场景。
 
 use std::fmt;
 use std::process::ExitStatus;
@@ -53,7 +53,7 @@ impl TuiMockScenario {
             Self::ToolCall => "session__todo_write 工具生命周期",
             Self::Disconnect => "输出部分文本后断开连接",
             Self::Slow => "响应保持停滞，等待 Ctrl+C 取消",
-            Self::Error => "稳定返回提供方 HTTP 500",
+            Self::Error => "稳定返回 provider HTTP 500",
             Self::Flaky => "首次请求返回 HTTP 500，重试后成功",
         }
     }
@@ -88,10 +88,10 @@ impl TuiMockScenario {
                 status: 500,
                 body: r#"{"error":{"message":"mock provider failure"}}"#.into(),
             },
-            // Cycle 按请求轮转、永不收敛到最后一个脚本，所以同一 TUI
-            // 会话里每一次 prompt 都重演「第一次 500、重试成功」；用于
-            // 真机验证 WARN Dock 在 turn 成功后不自动消失（§14.3 无自
-            // 动恢复），直到 Space 释放。
+            // `Cycle` 按请求轮转、永不收敛到最后一个脚本，因此同一 TUI
+            // 会话里的每一次提示词都会重演“首次返回 500、重试后成功”；用于
+            // 真机验证告警 Dock 在轮次成功后不会自动消失（§14.3 无自动恢复），
+            // 直到按 Space 释放。
             Self::Flaky => SseScript::Cycle {
                 scripts: vec![
                     SseScript::HttpError {
@@ -175,8 +175,8 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
     world.write_project_file(&format!(".lattice/agents/{AGENT}/agent.toml"), &profile)?;
     world.init_git_project()?;
 
-    // ScenarioWorld::command() 有意清空子进程环境以保证 harness 隔离；
-    // 交互式调试保留宿主的终端与 locale 环境；TUI 固定使用 RGB 和 Unicode，
+    // `ScenarioWorld::command()` 有意清空子进程环境以保证场景隔离；
+    // 交互式调试保留宿主的终端与区域设置环境变量；TUI 固定使用 RGB 与 Unicode，
     // 不依赖这些变量选择颜色或符号。
     for key in ["TERM", "COLORTERM", "LANG", "LC_ALL"] {
         if let Ok(value) = std::env::var(key) {
@@ -185,10 +185,10 @@ pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockErro
     }
 
     eprintln!(
-        "TUI mock scenario: {scenario} ({})\nSubmit any prompt to run it.{}",
+        "TUI 模拟场景: {scenario}（{}）\n提交任意提示词即可运行。{}",
         scenario.description(),
         if scenario == TuiMockScenario::Slow {
-            " Press Ctrl+C after submission to exercise cancellation."
+            " 提交后按 Ctrl+C 可验证取消流程。"
         } else {
             ""
         }

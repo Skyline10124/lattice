@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 fn query(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, args: &[&str]) -> Value {
     let out = send.run_command(args).unwrap();
-    evidence.record_command(args.join(" "), &out);
+    evidence.record_command(format!("执行查询命令（{}）", args.join(" ")), &out);
     assert!(out.is_clean_exit(0), "{}", out.summary());
     serde_json::from_slice(&out.stdout).unwrap()
 }
@@ -61,14 +61,17 @@ fn assert_summary(actual: &Value, expected: &Value) {
 
 fn assert_cost(actual: &Value, usd: f64, exact: bool) {
     assert_eq!(actual["exact"], exact, "{actual}");
-    let amount = actual["usd"].as_f64().expect("known USD amount");
-    assert!((amount - usd).abs() < 1e-12, "{actual}: expected USD {usd}");
+    let amount = actual["usd"].as_f64().expect("应有已知美元金额");
+    assert!(
+        (amount - usd).abs() < 1e-12,
+        "{actual}：期望美元金额为 {usd}"
+    );
 }
 
 fn assert_text(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, snapshot: &Value) {
     let sid = snapshot["session_id"].as_str().unwrap();
     let out = send.run_command(&["session", "usage", sid]).unwrap();
-    evidence.record_command("text usage", &out);
+    evidence.record_command("查询文本用量报表", &out);
     assert!(out.is_clean_exit(0), "{}", out.summary());
     let text = String::from_utf8(out.stdout).unwrap();
     assert!(text.split_whitespace().any(|word| word == sid), "{text}");
@@ -90,7 +93,7 @@ fn assert_text(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, sn
         let row = lines
             .iter()
             .find(|row| row.get(1) == Some(&id))
-            .expect("text Turn row");
+            .expect("文本报表中应包含对应轮次行");
         assert_eq!(row[0].parse::<u64>().unwrap(), turn["ordinal"]);
         assert_eq!(
             row[2],
@@ -129,7 +132,7 @@ fn assert_text_metrics(words: &[&str], summary: &Value) {
         let metric = &summary[field];
         let text = words.next().unwrap();
         if metric["known"].is_null() {
-            assert_eq!(text, "-", "unknown {field}");
+            assert_eq!(text, "-", "未知指标 {field} 应显示为连字符");
             continue;
         }
         if field == "cost" {
@@ -139,14 +142,14 @@ fn assert_text_metrics(words: &[&str], summary: &Value) {
                 "≈"
             };
             let usd = metric["known"]["usd"].as_f64().unwrap();
-            let amount = text.strip_prefix(prefix).expect("USD certainty marker");
+            let amount = text.strip_prefix(prefix).expect("美元确定性前缀不匹配");
             if usd > 0.0 && usd < 0.01 {
-                assert_eq!(amount, "<$0.01", "positive sub-cent cost");
+                assert_eq!(amount, "<$0.01", "低于一美分的正费用应显示为 <$0.01");
             } else {
-                let amount = amount.strip_prefix('$').expect("USD currency marker");
-                let (whole, cents) = amount.split_once('.').expect("USD decimal point");
+                let amount = amount.strip_prefix('$').expect("应包含美元货币符号");
+                let (whole, cents) = amount.split_once('.').expect("美元金额应包含小数点");
                 assert!(!whole.is_empty() && whole.bytes().all(|b| b.is_ascii_digit()));
-                assert_eq!(cents.len(), 2, "USD uses two decimal places: {text}");
+                assert_eq!(cents.len(), 2, "美元金额应保留两位小数：{text}");
                 assert!(cents.bytes().all(|b| b.is_ascii_digit()));
                 assert_eq!(
                     amount.parse::<f64>().unwrap(),
@@ -157,10 +160,14 @@ fn assert_text_metrics(words: &[&str], summary: &Value) {
             assert_eq!(text.parse::<u64>().unwrap(), metric["known"], "{field}");
         }
         if metric["overflowed"].as_bool().unwrap() {
-            assert_eq!(words.next(), Some("(overflow)"), "overflow {field}");
+            assert_eq!(
+                words.next(),
+                Some("(overflow)"),
+                "溢出指标 {field} 应带溢出标记"
+            );
         }
     }
-    assert_eq!(words.next(), None, "unexpected metric or marker");
+    assert_eq!(words.next(), None, "行尾不应有多余指标或标记");
 }
 
 fn with_usage(script: SseScript, usage: Value) -> SseScript {
@@ -268,7 +275,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let original = send.wait_spawned(running).unwrap();
-        evidence.record_command("original multi-step turn", &original.command);
+        evidence.record_command("初始多步轮次发送", &original.command);
         assert!(
             original.command.is_clean_exit(0),
             "{}",
@@ -334,7 +341,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let second = running.wait(None).unwrap();
-        evidence.record_command("unpriced second turn", &second);
+        evidence.record_command("未定价模型的第二轮发送", &second);
         assert!(second.is_clean_exit(0), "{}", second.summary());
         let b = support::parse_send_stdout(&second.stdout, second.exit_code())
             .accepted_turn_id()
@@ -372,7 +379,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let outcome = other.wait_spawned(running).unwrap();
-        evidence.record_command("other session", &outcome.command);
+        evidence.record_command("独立会话发送", &outcome.command);
         assert!(outcome.command.is_clean_exit(0));
         assert_ne!(other.session_id().unwrap(), sid);
         assert_eq!(usage(&send, &mut evidence, &sid), full);
@@ -418,7 +425,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let branch = running.wait(None).unwrap();
-        evidence.record_command("new branch", &branch);
+        evidence.record_command("分叉零用量轮次发送", &branch);
         assert!(branch.is_clean_exit(0), "{}", branch.summary());
         let c = support::parse_send_stdout(&branch.stdout, branch.exit_code())
             .accepted_turn_id()
@@ -448,7 +455,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         gate.release_next(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let priced_branch = send.wait_spawned(running).unwrap();
-        evidence.record_command("nonzero branch", &priced_branch.command);
+        evidence.record_command("分叉计费轮次发送", &priced_branch.command);
         assert!(priced_branch.command.is_clean_exit(0));
         let fork = usage(&send, &mut evidence, &sid);
         assert_eq!(fork["position"], 9);
@@ -492,7 +499,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         std::fs::remove_dir_all(world.project_dir().join(".lattice/agents")).unwrap();
         let epoch = query(&send, &mut evidence, &["--json", "daemon", "status"])["epoch"].clone();
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
-        evidence.record_command("stop before read-only reopening", &stopped);
+        evidence.record_command("只读重开前停止后台", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.daemon_departed().unwrap();
         world

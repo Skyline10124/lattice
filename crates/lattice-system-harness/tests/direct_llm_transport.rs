@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 模型请求传输层（#265）的真实二进制场景：请求头、Retry-After、错误诊断、
-//! 断流重试、Turn 内连接复用、HTTP/2 对未处理请求的重发，以及明文 HTTP/1.1 的本地 provider。断言落在
-//! fake provider 收到的请求与持久 Turn 记录上。
+//! 模型请求传输层（#265）的真实二进制场景：请求头、`Retry-After`、错误诊断、
+//! 断流重试、轮次内连接复用、HTTP/2 对未处理请求的重发，以及明文 HTTP/1.1 的本地 provider。断言落在
+//! 假 provider 收到的请求与持久轮次记录上。
 
 mod support;
 
@@ -24,7 +24,7 @@ fn final_turn(outcome: &SendExecution) -> Value {
     live_turn(outcome)
 }
 
-/// 第 `step` 个 Step 的全部尝试记录。
+/// 第 `step` 个步骤的全部尝试记录。
 fn attempts(turn: &Value, step: usize) -> Vec<Value> {
     turn["steps"][step]["attempts"]
         .as_array()
@@ -52,19 +52,19 @@ fn http(status: u16, content_type: &str, headers: &[(&str, &str)], body: &str) -
     }
 }
 
-/// 请求按冻结配置标识 LATTICE 与本 Session，并声明可接受 SSE 与 JSON 错误正文。
+/// 请求按冻结配置标识 LATTICE 与本会话，并声明可接受 SSE 与 JSON 错误正文。
 #[cfg(feature = "fake-tools")]
 fn assert_identity(captures: &[CapturedRequest], session: &str) -> Result<(), AssertError> {
     for (index, capture) in captures.iter().enumerate() {
         let agent = capture.headers.get("user-agent").map(String::as_str);
         require(
             agent.is_some_and(|ua| ua.starts_with("lattice/") && ua.contains("(linux ")),
-            format!("request {index} User-Agent identifies LATTICE: {agent:?}"),
+            format!("第 {index} 次请求的 User-Agent 应标识 LATTICE：{agent:?}"),
         )?;
         require(
             capture.headers.get("accept").map(String::as_str) == Some(ACCEPT),
             format!(
-                "request {index} Accept: {:?}",
+                "第 {index} 次请求的 Accept 头不匹配：{:?}",
                 capture.headers.get("accept")
             ),
         )?;
@@ -75,7 +75,7 @@ fn assert_identity(captures: &[CapturedRequest], session: &str) -> Result<(), As
                 .map(String::as_str)
                 == Some(session),
             format!(
-                "request {index} x-client-request-id is the SessionId {session}: {:?}",
+                "第 {index} 次请求的 x-client-request-id 应为会话标识 {session}：{:?}",
                 capture.headers.get("x-client-request-id")
             ),
         )?;
@@ -94,7 +94,7 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
     let server = wire_fake_llm(
         &world,
         "transport",
-        // 第一个 Step 正常执行工具；限流落在第二个 Step。
+        // 第一步正常执行工具；限流落在第二步。
         sequence(vec![
             tool_call("call-1", "read_note", r#"{"action":"read"}"#),
             http(
@@ -112,23 +112,23 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
     let captures = server.captured_requests();
     let result = (|| {
         assert_clean_send(&outcome)?;
-        require(outcome.has_completed(), "turn completes after one retry")?;
+        require(outcome.has_completed(), "一次重试后轮次应正常完成")?;
         require(
             captures.len() == 3,
-            format!("3 model requests, got {}", captures.len()),
+            format!("预期 3 次模型请求，实际为 {}", captures.len()),
         )?;
         let waited = captures[2].received_ms - captures[1].received_ms;
         require(
             waited >= 1_900,
             format!(
-                "retry waits for provider retry-after (2s) over 1ms backoff, waited {waited}ms"
+                "重试应遵守 provider 给出的 2 秒 retry-after 而非 1 毫秒退避，实际等待 {waited} 毫秒"
             ),
         )?;
         assert_identity(&captures, send.session_id().unwrap())?;
         require(
             captures[0].connection == captures[1].connection,
             format!(
-                "the second Step reuses the first Step's connection: {} vs {}",
+                "第二步应复用第一步的连接：{} 与 {}",
                 captures[0].connection, captures[1].connection
             ),
         )?;
@@ -136,17 +136,17 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
         let second = attempts(&turn, 1);
         require(
             second.len() == 2,
-            format!("step 1 has 2 attempts: {second:?}"),
+            format!("第 1 步应包含 2 次尝试：{second:?}"),
         )?;
         let line = diagnostic(&second[0]);
         require(
             line == "HTTP 429 rate_limit_exceeded: Rate limit reached for requests (retry after 2s)",
-            format!("parsed rate-limit diagnostic: {line:?}"),
+            format!("解析后的限流诊断不匹配：{line:?}"),
         )
     })();
     finish_scenario(
         evidence,
-        &[("retry-after turn", &outcome.command)],
+        &[("遵循 retry-after 的轮次发送", &outcome.command)],
         captures,
         result,
     );
@@ -156,10 +156,15 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
 #[test]
 fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
     let driver = driver();
-    // 超过 60 秒上限；或在上限内但超过 Turn 剩余时间。两种都应立即以 provider 原因结束。
-    for (case, retry_after, limits) in [
-        ("over-cap", "120", ""),
-        ("over-deadline", "30", "[llm]\ntimeout_secs = 10\n"),
+    // 超过 60 秒上限，或在上限内但超过轮次剩余时间；两种情况都应立即以 provider 错误收束。
+    for (case, label, retry_after, limits) in [
+        ("over-cap", "超出上限的 retry-after 轮次发送", "120", ""),
+        (
+            "over-deadline",
+            "超出轮次截止时间的 retry-after 轮次发送",
+            "30",
+            "[llm]\ntimeout_secs = 10\n",
+        ),
     ] {
         let (world, spec) = direct_world(
             &format!("direct-transport-long-retry-{case}"),
@@ -169,7 +174,7 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
         world.set_env("LATTICE_TEST_TOOLS", "read_note");
         world.budget(&spec);
         world.start_daemon().expect("显式启动带测试工具的后台");
-        // 第一个 Step 正常执行工具，限流落在第二个 Step。
+        // 第一步正常执行工具，限流落在第二步。
         let server = wire_fake_llm(
             &world,
             "transport",
@@ -198,18 +203,18 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
                 outcome.command.is_clean_exit(1)
                     && turn["summary"]["outcome"] == "failed"
                     && end["cause"]["cause"] == "provider_error",
-                format!("{case}: second Step fails with provider_error, not deadline: {end}"),
+                format!("{case}：第二步应以 provider_error 而非截止时间超时失败：{end}"),
             )?;
             require(
                 captures.len() == 2,
                 format!(
-                    "{case}: the rate-limited request is not retried, got {} requests",
+                    "{case}：超限的限流请求不得重试，实际收到 {} 次请求",
                     captures.len()
                 ),
             )?;
             require(
                 elapsed < Duration::from_secs(8),
-                format!("{case}: closes at once instead of waiting, took {elapsed:?}"),
+                format!("{case}：应当立即收束而非等待，实际耗时 {elapsed:?}"),
             )?;
             let notice = turn["summary"]["notice"]["text"]
                 .as_str()
@@ -217,10 +222,10 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
             require(
                 notice.starts_with("HTTP 429 rate_limit_exceeded: You exceeded your current quota")
                     && notice.contains(&format!("retry after {retry_after}s")),
-                format!("{case}: notice keeps the provider reason: {notice:?}"),
+                format!("{case}：终态提示应保留 provider 错误原因：{notice:?}"),
             )
         })();
-        finish_scenario(evidence, &[(case, &outcome.command)], captures, result);
+        finish_scenario(evidence, &[(label, &outcome.command)], captures, result);
     }
 }
 
@@ -229,7 +234,7 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
 fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     let driver = driver();
     let spec = lattice_system_harness::ScenarioSpec::direct_local("direct-transport-overload");
-    let world = lattice_system_harness::ScenarioWorld::new(&spec.name).expect("world");
+    let world = lattice_system_harness::ScenarioWorld::new(&spec.name).expect("创建场景世界");
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
     world.budget(&spec);
     world.start_daemon().expect("显式启动带测试工具的后台");
@@ -254,7 +259,7 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
         "<html>\r\n<head><title>502 Bad Gateway</title></head>\r\n<body>{}</body></html>",
         "x".repeat(5_000)
     );
-    // 第一个 Step 正常执行工具；第二个 Step 先 529 再 502，用尽一次重试后以 502 结束 Turn。
+    // 第一步正常执行工具；第二步先遇 529 再遇 502，用尽一次重试后以 502 结束轮次。
     let server = FakeLlmServer::start(sequence(vec![
         tool_call("call-1", "read_note", r#"{"action":"read"}"#),
         http(
@@ -280,28 +285,25 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
         assert_accepted_and_closed(&outcome)?;
         require(
             captures.len() == 3,
-            format!("3 model requests, got {}", captures.len()),
+            format!("预期 3 次模型请求，实际为 {}", captures.len()),
         )?;
         let turn = final_turn(&outcome);
         require(
             outcome.command.is_clean_exit(1) && turn["summary"]["outcome"] == "failed",
-            format!("turn fails once the retry is spent: {}", turn["summary"]),
+            format!("用尽重试后轮次应失败：{}", turn["summary"]),
         )?;
         let step = attempts(&turn, 1);
-        require(
-            step.len() == 2,
-            format!("2 attempts in the second Step: {step:?}"),
-        )?;
+        require(step.len() == 2, format!("第二步应有 2 次尝试：{step:?}"))?;
         let overloaded = diagnostic(&step[0]);
         require(
             overloaded == "HTTP 529 overloaded_error: Overloaded",
-            format!("Anthropic error envelope parsed, request id kept out: {overloaded:?}"),
+            format!("应解析 Anthropic 错误包络并排除请求标识：{overloaded:?}"),
         )?;
         require(
             step[1]["end"]["cause"]
                 == serde_json::json!({"cause":"provider_error","retryable":true}),
             format!(
-                "502 is retryable; only the budget ends the turn: {}",
+                "502 应标为可重试，仅因重试预算耗尽而结束轮次：{}",
                 step[1]["end"]
             ),
         )?;
@@ -310,17 +312,17 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
             gateway.starts_with("HTTP 502: <html> <head><title>502 Bad Gateway</title></head>")
                 && gateway.chars().count() == 256
                 && gateway.ends_with('…'),
-            format!("non-JSON body is a bounded single-line excerpt: {gateway:?}"),
+            format!("非 JSON 响应体应截断为有界的单行摘要：{gateway:?}"),
         )?;
         let notice = &turn["summary"]["notice"];
         require(
             notice["level"] == "error" && notice["text"] == gateway.as_str(),
-            format!("the failed turn's notice is the last attempt's diagnostic: {notice}"),
+            format!("失败轮次的提示应等于最后一次尝试的诊断：{notice}"),
         )
     })();
     finish_scenario(
         evidence,
-        &[("overload turn", &outcome.command)],
+        &[("过载与网关错误轮次发送", &outcome.command)],
         captures,
         result,
     );
@@ -346,18 +348,15 @@ fn unauthorized_request_fails_without_retry_notice() {
     let captures = server.captured_requests();
     let result = (|| {
         assert_clean_send(&outcome)?;
-        require(
-            outcome.command.is_clean_exit(1),
-            "unauthorized Turn exits 1",
-        )?;
-        require(captures.len() == 1, "401 must not be retried")?;
+        require(outcome.command.is_clean_exit(1), "未授权轮次的退出码应为 1")?;
+        require(captures.len() == 1, "401 错误绝不能重试")?;
         require(
             outcome
                 .entries()
                 .iter()
                 .filter_map(|entry| entry.step())
                 .all(|step| step.retries.is_empty()),
-            "401 must not carry a retry notice",
+            "401 错误不得附带重试提示",
         )?;
         let turn = final_turn(&outcome);
         let attempts = attempts(&turn, 0);
@@ -367,12 +366,12 @@ fn unauthorized_request_fails_without_retry_notice() {
                 && notice["level"] == "error"
                 && notice["text"] == diagnostic(&attempts[0])
                 && diagnostic(&attempts[0]).starts_with("HTTP 401"),
-            "terminal error notice must preserve the 401 diagnostic",
+            "终态错误提示必须保留 401 诊断信息",
         )
     })();
     finish_scenario(
         evidence,
-        &[("unauthorized turn", &outcome.command)],
+        &[("未授权请求轮次发送", &outcome.command)],
         captures,
         result,
     );
@@ -386,7 +385,7 @@ fn stream_cut_before_completion_is_retried() {
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
     world.budget(&spec);
     world.start_daemon().expect("显式启动带测试工具的后台");
-    // 第二个 Step 先遇到正常结束却没有结束事件的流，再遇到读到一半被
+    // 第二步先遇到正常结束却缺少结束事件的流，再遇到读到一半被
     // `RST_STREAM(INTERNAL_ERROR)` 重置的流，第三次成功。
     let server = wire_fake_llm(
         &world,
@@ -408,20 +407,17 @@ fn stream_cut_before_completion_is_retried() {
     let captures = server.captured_requests();
     let result = (|| {
         assert_clean_send(&outcome)?;
-        require(
-            outcome.has_completed(),
-            "cut stream is retried to completion",
-        )?;
+        require(outcome.has_completed(), "中途断流应在重试后顺利完成")?;
         require(
             captures.len() == 4,
-            format!("4 model requests, got {}", captures.len()),
+            format!("预期 4 次模型请求，实际为 {}", captures.len()),
         )?;
         // 两次断流都发生在响应体中途，两次重试提示都在这一步的条目中。
         let entries = outcome.entries();
         let cut = entries
             .iter()
             .find(|entry| entry.step().is_some_and(|step| step.ordinal == 1))
-            .expect("second Step entry");
+            .expect("应存在第二步条目");
         let retried: Vec<u64> = cut
             .step()
             .unwrap()
@@ -431,7 +427,7 @@ fn stream_cut_before_completion_is_retried() {
             .collect();
         require(
             retried == [0, 1],
-            format!("both stopped attempts have retry notices: {retried:?}"),
+            format!("两次中止的尝试都应附带重试提示：{retried:?}"),
         )?;
         let turn = final_turn(&outcome);
         let step = attempts(&turn, 1);
@@ -440,12 +436,12 @@ fn stream_cut_before_completion_is_retried() {
             step.len() == 3
                 && step[0]["end"]["cause"] == retryable
                 && step[1]["end"]["cause"] == retryable,
-            format!("both cuts are retryable provider errors: {step:?}"),
+            format!("两次断流都应记录为可重试的 provider 错误：{step:?}"),
         )
     })();
     finish_scenario(
         evidence,
-        &[("cut turn", &outcome.command)],
+        &[("断流重试轮次发送", &outcome.command)],
         captures,
         result,
     );
@@ -484,39 +480,39 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
     let captures = server.captured_requests();
     let result = (|| {
         assert_clean_send(&outcome)?;
-        require(outcome.has_completed(), "three-step turn completes")?;
+        require(outcome.has_completed(), "三步轮次应正常完成")?;
         require(
             captures.len() == 3,
-            format!("3 model requests, got {}", captures.len()),
+            format!("预期 3 次模型请求，实际为 {}", captures.len()),
         )?;
         let connections: Vec<_> = captures.iter().map(|c| c.connection).collect();
         require(
             connections[0] == connections[1],
-            format!("steps 0 and 1 reuse one connection: {connections:?}"),
+            format!("第 0 步与第 1 步应复用同一条连接：{connections:?}"),
         )?;
         require(
             connections[2] != connections[1],
-            format!("after the server's GOAWAY, step 2 opens a new one: {connections:?}"),
+            format!("服务端发送 GOAWAY 后，第 2 步应建立新连接：{connections:?}"),
         )?;
         let turn = final_turn(&outcome);
         for step in 0..3 {
             let records = attempts(&turn, step);
             require(
                 records.len() == 1,
-                format!("step {step} has exactly one attempt: {records:?}"),
+                format!("第 {step} 步应当恰好只有一次尝试：{records:?}"),
             )?;
         }
         Ok(())
     })();
     finish_scenario(
         evidence,
-        &[("reuse turn", &outcome.command)],
+        &[("连接复用轮次发送", &outcome.command)],
         captures,
         result,
     );
 }
 
-/// HTTP/2 下 provider 明确未处理的请求（GOAWAY 的最后流号小于它，或 `REFUSED_STREAM`）
+/// HTTP/2 下 provider 明确未处理的请求（`GOAWAY` 的最后流号小于它，或 `REFUSED_STREAM`）
 /// 由传输层重发，归在同一次尝试里：provider 收到两次，持久记录只有一条尝试。
 #[cfg(feature = "fake-tools")]
 #[test]
@@ -526,7 +522,7 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
         ("refused", SseScript::RefusedStream),
     ] {
         let driver = driver();
-        // 本地重试预算为 0：若重发没有发生在传输层，第二个 Step 只能失败。
+        // 本地重试预算为 0：若重发没有发生在传输层，第二步只能失败。
         let (world, spec) = direct_world(
             &format!("direct-transport-unprocessed-{case}"),
             "transport",
@@ -535,7 +531,7 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
         world.set_env("LATTICE_TEST_TOOLS", "read_note");
         world.budget(&spec);
         world.start_daemon().expect("显式启动带测试工具的后台");
-        // 第一个 Step 正常执行工具；第二个 Step 的请求先被拒绝，紧接着的重发得到回答。
+        // 第一步正常执行工具；第二步的请求先被拒绝，紧接着的重发得到回答。
         let server = wire_fake_llm(
             &world,
             "transport",
@@ -551,30 +547,27 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
         let captures = server.captured_requests();
         let result = (|| {
             assert_clean_send(&outcome)?;
-            require(
-                outcome.has_completed(),
-                format!("{case}: the turn completes"),
-            )?;
+            require(outcome.has_completed(), format!("{case}：轮次应正常完成"))?;
             require(
                 captures.len() == 3,
                 format!(
-                    "{case}: 3 requests reach the provider, got {}",
+                    "{case}：应当有 3 次请求到达 provider，实际为 {}",
                     captures.len()
                 ),
             )?;
             require(
                 captures[1].raw == captures[2].raw,
-                format!("{case}: the resend carries the same request body"),
+                format!("{case}：重发请求应携带相同的请求体"),
             )?;
             let connections: Vec<_> = captures.iter().map(|c| c.connection).collect();
             require(
                 connections[0] == connections[1],
-                format!("{case}: the refused request rode the Step 0 connection: {connections:?}"),
+                format!("{case}：被拒请求应沿用第 0 步的连接：{connections:?}"),
             )?;
             if case == "goaway" {
                 require(
                     connections[2] != connections[1],
-                    format!("goaway: the resend opens a new connection: {connections:?}"),
+                    format!("goaway：重发请求应建立新连接：{connections:?}"),
                 )?;
             }
             let turn = final_turn(&outcome);
@@ -582,22 +575,22 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
                 let records = attempts(&turn, step);
                 require(
                     records.len() == 1,
-                    format!("{case}: step {step} has exactly one attempt: {records:?}"),
+                    format!("{case}：第 {step} 步应当恰好只有一次尝试：{records:?}"),
                 )?;
             }
             Ok(())
         })();
         finish_scenario(
             evidence,
-            &[("unprocessed turn", &outcome.command)],
+            &[("未处理请求重发轮次发送", &outcome.command)],
             captures,
             result,
         );
     }
 }
 
-/// 本地 provider（Ollama 一类）走明文 HTTP/1.1：多 Step 的 Turn 完成，服务忙的 503 按可重试处理，
-/// 请求头与 HTTPS provider 相同。分块响应的结尾晚于结束事件到达，整个 Turn 仍只用一条连接：
+/// 本地 provider（如 Ollama）走明文 HTTP/1.1：多步轮次完成，服务繁忙的 503 按可重试处理，
+/// 请求头与 HTTPS provider 相同。分块响应的结尾晚于结束事件到达，整个轮次仍只用一条连接：
 /// 产品交付结束事件前读完了响应体，连接才能回到连接池。
 #[cfg(feature = "fake-tools")]
 #[test]
@@ -640,19 +633,19 @@ fn plaintext_local_provider_over_http1() {
     let result = (|| {
         require(
             base_url.starts_with("http://localhost:"),
-            format!("plaintext loopback base URL: {base_url}"),
+            format!("本地明文回环基础地址不匹配：{base_url}"),
         )?;
         assert_clean_send(&outcome)?;
-        require(outcome.has_completed(), "local turn completes")?;
+        require(outcome.has_completed(), "本地明文轮次应正常完成")?;
         require(
             captures.len() == 4,
-            format!("4 model requests, got {}", captures.len()),
+            format!("预期 4 次模型请求，实际为 {}", captures.len()),
         )?;
         assert_identity(&captures, send.session_id().unwrap())?;
         let connections: Vec<_> = captures.iter().map(|c| c.connection).collect();
         require(
             connections == [0, 0, 0, 0],
-            format!("every request of the turn reuses one connection: {connections:?}"),
+            format!("本轮所有请求都应复用同一条连接：{connections:?}"),
         )?;
         let turn = final_turn(&outcome);
         let second = attempts(&turn, 1);
@@ -660,17 +653,17 @@ fn plaintext_local_provider_over_http1() {
             second.len() == 2
                 && second[0]["end"]["cause"]
                     == serde_json::json!({"cause":"provider_error","retryable":true}),
-            format!("the 503 is one retryable attempt before success: {second:?}"),
+            format!("503 应记录为成功前的一次可重试尝试：{second:?}"),
         )?;
         let line = diagnostic(&second[0]);
         require(
             line == "HTTP 503: server busy, please try again",
-            format!("503 diagnostic: {line:?}"),
+            format!("503 诊断信息不匹配：{line:?}"),
         )
     })();
     finish_scenario(
         evidence,
-        &[("local http1 turn", &outcome.command)],
+        &[("本地 HTTP/1.1 明文轮次发送", &outcome.command)],
         captures,
         result,
     );

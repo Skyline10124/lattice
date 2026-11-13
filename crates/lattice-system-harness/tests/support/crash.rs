@@ -40,7 +40,7 @@ pub(crate) fn kill(
     assert_ne!(daemon_pgid, frontend.pgid());
     kill_backend(world, daemon_pgid, evidence, budget);
     let disconnected = frontend.wait(None).unwrap();
-    evidence.record_command("frontend observes backend crash", &disconnected);
+    evidence.record_command("前端观察到后台崩溃", &disconnected);
     assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
 }
 
@@ -75,7 +75,7 @@ pub(crate) fn kill_backend(
         std::thread::sleep(Duration::from_millis(5));
     }
     let killed = world.kill_daemon().expect("强制终止停在屏障的自有后台");
-    evidence.record_command("SIGKILL acknowledged backend barrier", &killed);
+    evidence.record_command("向已确认屏障的后台发送 SIGKILL", &killed);
     super::assert_forced_kill(&killed);
     assert!(world.daemon_pids().unwrap().is_empty());
 }
