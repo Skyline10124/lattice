@@ -5,9 +5,9 @@
 //! 取消与 stop 的真实二进制场景。提交与视图边界经公开 Local IPC，会话事实经公开 CLI 读取。
 mod support;
 use lattice_system_harness::{
-    CancelRecord, CancelStatus, CommandOutcome, FAKE_API_KEY, LatticeCommand, RunningCommand,
-    ScenarioBudget, ScenarioEvidence, ScenarioWorld, SendOutcome, SendRecord, SessionSendDriver,
-    SseScript, StepProgress, merge_segments,
+    CancelRecord, CancelStatus, CommandOutcome, DaemonOptions, FAKE_API_KEY, LatticeCommand,
+    RunningCommand, ScenarioBudget, ScenarioEvidence, ScenarioWorld, SendOutcome, SendRecord,
+    SessionSendDriver, SseScript, StepProgress, merge_segments,
 };
 use serde_json::{Value, json};
 #[cfg(feature = "fake-tools")]
@@ -178,11 +178,12 @@ fn finish(evidence: ScenarioEvidence, result: std::thread::Result<()>) {
     evidence.finish_report(primary).unwrap();
 }
 #[test]
-fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
+fn cli_killed_after_accept_completes_turn_for_later_follow() {
     let (world, spec) = direct_world("background-cli-detach", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let (server, gate) = wire_gated_fake_llm(
             &world,
             "background",
@@ -235,7 +236,17 @@ fn detached_cli_finishes_and_world_owns_daemon_cleanup() {
         assert_eq!(server.captured_requests().len(), 1);
         evidence.record_captures(server.captured_requests());
         archive_state(&world, &budget, &mut evidence, &[&tid]);
-        evidence.record_json("parameters", &json!({"turn":tid,"script":"gated plain detached durable answer","frontend":"SIGKILL after acceptance","backend_pids":owners})).unwrap();
+        evidence
+            .record_json(
+                "parameters",
+                &json!({
+                    "turn": tid,
+                    "script": "gated plain detached durable answer",
+                    "frontend": "SIGKILL after acceptance",
+                    "backend_pids": owners,
+                }),
+            )
+            .unwrap();
         world.stop_daemon().unwrap();
         for pid in owners {
             assert!(
@@ -259,6 +270,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
             let budget = world.budget(&spec);
             let mut evidence = support::evidence(&world, &spec);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                world.start_daemon().expect("显式启动后台");
                 let existing = existing_session.then(|| {
                     let mut seed =
                         wire_fake_llm(&world, "background", SseScript::plain("seed reply"));
@@ -289,7 +301,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                 assert!(bootstrap.is_clean_exit(if existing_session { 0 } else { 1 }));
                 let sid = existing.clone().unwrap_or_else(|| NEW_SESSION.into());
                 // 先用只读的 `status` 确认后台说同一协议，再进入未读回执窗口；
-                // 协议不符时在这里直接失败，而不是表现为 provider 一直等不到请求。
+                // 协议不符时在这里直接失败，而不是表现为提供方一直等不到请求。
                 let status = ipc(&world, wait(&budget), json!({"operation":"status"}));
                 assert_eq!(status["response"], "status", "{status}");
                 if !existing_session {
@@ -309,7 +321,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                 let request = submit_request(&world, FIRST, &sid, "identical input");
                 let unread = Wire::connect(&world, wait(&budget), &request);
                 gate.wait_until_stalled(1, wait(&budget)).unwrap();
-                // 此连接只写请求，从未读取回执；按 TurnId 查询得到已接受。
+                // 此连接只写请求，从未读取回执；按 `TurnId` 查询得到已接受。
                 let found = turn_lookup(&world, wait(&budget), FIRST);
                 assert_eq!(found["value"]["status"], "accepted", "{found}");
                 assert_eq!(found["value"]["turn"]["session_id"], sid);
@@ -324,7 +336,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                     "restart":restart,"pending":pending,"lookup":found,"epoch":epoch,"request_id":FIRST,
                     "input":"identical input","receipt_read":false,"provider_arrivals":1})).unwrap();
                 if !restart {
-                    // Owner 仍在执行时以同一身份重新提交：TurnId 已被使用，不再兼做找回。
+                    // `owner` 仍在执行时以同一身份重新提交：`TurnId` 已被使用，不再兼做找回。
                     let retry = ipc(&world, wait(&budget), request.clone());
                     assert_eq!(conflict(&retry), Some("turn_id_used"), "{retry}");
                     evidence.record_json("running-retry", &retry).unwrap();
@@ -332,9 +344,9 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                 gate.release(wait(&budget)).unwrap();
                 let original = closed(&world, &budget, &mut evidence, FIRST);
                 if restart {
-                    world.stop_daemon().unwrap();
+                    world.restart_daemon().expect("显式重启后台");
                 }
-                // 后台持续运行或重启后，同一 TurnId 都查到同一个已关闭的 Turn。
+                // 后台持续运行或重启后，同一 `TurnId` 都查到同一个已关闭的轮次。
                 assert_eq!(detail(&world, &budget, &mut evidence, FIRST), original);
                 let reread = turn_lookup(&world, wait(&budget), FIRST);
                 assert_eq!(reread["value"]["status"], "accepted", "{reread}");
@@ -343,7 +355,7 @@ fn unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts() {
                     ipc(&world, wait(&budget), json!({"operation":"status"}))["value"]["epoch"]
                         .clone();
                 assert_eq!(epoch != current_epoch, restart);
-                // 新建会话时 TurnId 先于会话核对，得到的是 TurnId 冲突而不是会话已存在。
+                // 新建会话时 `TurnId` 先于会话核对，得到的是 `TurnId` 冲突而不是会话已存在。
                 let repeat = ipc(&world, wait(&budget), request.clone());
                 assert_eq!(conflict(&repeat), Some("turn_id_used"), "{repeat}");
                 assert_eq!(server.captured_requests().len(), 1);
@@ -389,6 +401,8 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
+        let initial_pgid = world.daemon_pgid().expect("自有后台进程组");
         let (server, gate) =
             wire_gated_fake_llm(&world, "background", SseScript::plain("parallel answer"));
         let first = command(
@@ -408,7 +422,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         let (b, second_turn) = running_turns(&world, &budget, &mut evidence)
             .into_iter()
             .find(|(sid, _)| *sid != a)
-            .expect("second Session");
+            .expect("第二个会话应存在正在运行的轮次");
         let busy = ipc(
             &world,
             wait(&budget),
@@ -424,12 +438,12 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             "backend":world.daemon_pids().unwrap(),"gate_released":false}),
             )
             .unwrap();
-        // 先结束提交这一轮的前端：gate 未放行，这一轮仍在执行，强制结束的是仍在观察的进程。
-        // 放在取消之后会与后台关闭这一轮竞争：前端可能先看到 Cancelled 而自行以 2 退出。
+        // 先结束提交这一轮的前端：门控未放行，这一轮仍在执行，强制结束的是仍在观察的进程。
+        // 放在取消之后会与后台关闭这一轮竞争：前端可能先看到取消结果而自行以退出码 2 退出。
         let detached = first.kill_and_wait().unwrap();
         evidence.record_command("detach before cancel", &detached);
         assert_forced_kill(&detached);
-        // 另一个终端按会话取消：CLI 从会话头查出正在执行的那一轮再按 TurnId 取消。
+        // 另一个终端按会话取消：前端从会话头查出正在执行的那一轮再按 `TurnId` 取消。
         let cancel = run(
             &world,
             &budget,
@@ -452,7 +466,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             closed(&world, &budget, &mut evidence, &first_turn)["summary"]["outcome"],
             "cancelled"
         );
-        // 持久关闭先于监督者移除 Owner；无可取消的断言必须等到后台完成收尾。
+        // 持久关闭先于监督者移除 `owner`；无可取消的断言必须等到后台完成收尾。
         let deadline = Instant::now() + wait(&budget);
         let mut watcher = Watcher::open(&world, wait(&budget), &a);
         watcher.until(
@@ -504,10 +518,10 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
             detail(&world, &budget, &mut evidence, &second_turn)["summary"]["progress"]["progress"],
             "closed"
         );
-        // stop 必须等待被 gate 挡住的在途 Turn，不能在释放前就返回。
+        // `stop` 必须等待被门控挡住的在途轮次，不能在释放前就返回。
         assert!(
             !stop.has_exited().unwrap(),
-            "daemon stop returned while taken work was still in flight"
+            "在途工作尚未收尾时 `daemon stop` 不得提前返回"
         );
         gate.release(wait(&budget)).unwrap();
         let done = second.wait(None).unwrap();
@@ -526,7 +540,16 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
         assert!(drained.is_clean_exit(0));
         assert_eq!(lines(&drained)[0]["owners"], 0);
         world.daemon_departed().unwrap();
-        world.stop_daemon().unwrap();
+        assert!(
+            lattice_system_harness::processes_in_pgid(initial_pgid)
+                .unwrap()
+                .is_empty(),
+            "后台排空退出后原进程组内不应残留任何进程"
+        );
+        world.stop_daemon().expect("排空停止后不应存在残留后台");
+        world
+            .start_daemon()
+            .expect("排空退出后显式启动后台以核对持久结果");
         assert_eq!(
             detail(&world, &budget, &mut evidence, &second_turn)["summary"]["outcome"],
             "completed"
@@ -540,12 +563,24 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
     support::finish_recorded(evidence, result);
 }
 #[test]
-fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
+fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
+    struct CandidateGuard(Vec<RunningCommand>);
+    impl Drop for CandidateGuard {
+        fn drop(&mut self) {
+            for candidate in self.0.drain(..) {
+                let _ = candidate.kill_and_wait();
+            }
+        }
+    }
+
     let (world, spec) = direct_world("background-start-watch", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let large = "大".repeat(24000);
+        world
+            .start_daemon()
+            .expect("先显式启动后台以录入提供方凭据");
         let (server, gate) = wire_gated_fake_llm(
             &world,
             "background",
@@ -555,11 +590,104 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
                 SseScript::plain("after"),
             ]),
         );
-        world.stop_daemon().unwrap();
+        world.stop_daemon().expect("并发启动前先停止已有后台");
         assert!(
             world.daemon_pids().unwrap().is_empty(),
-            "concurrent autostart requires no running daemon"
+            "并发启动前不应存在运行中的自有后台"
         );
+        let root = world
+            .session_store_dir()
+            .parent()
+            .unwrap()
+            .display()
+            .to_string();
+        const CONCURRENCY: usize = 4;
+        let barrier = std::sync::Barrier::new(CONCURRENCY);
+        let spawned = std::thread::scope(|scope| {
+            let handles: Vec<_> = (0..CONCURRENCY)
+                .map(|_| {
+                    let world = &world;
+                    let budget = &budget;
+                    let barrier = &barrier;
+                    let root = &root;
+                    scope.spawn(move || {
+                        barrier.wait();
+                        command(world, budget, &["daemon", "serve", "--state-root", root])
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let mut guard = CandidateGuard(spawned);
+        let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(5));
+        loop {
+            let mut alive = 0;
+            for proc in &mut guard.0 {
+                if !proc.has_exited().unwrap() {
+                    alive += 1;
+                }
+            }
+            if alive == 1 {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if !remaining.is_zero() {
+                    let probe = driver()
+                        .start(
+                            &world,
+                            &LatticeCommand {
+                                args: vec!["--json".into(), "daemon".into(), "status".into()],
+                                timeout: Some(remaining),
+                            },
+                        )
+                        .unwrap()
+                        .wait(None)
+                        .unwrap();
+                    evidence.record_command("--json daemon status", &probe);
+                    if probe.is_clean_exit(0)
+                        && serde_json::from_slice::<Value>(&probe.stdout)
+                            .is_ok_and(|status| status["stopping"] == Value::Bool(false))
+                    {
+                        break;
+                    }
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "并发 `daemon serve` 未在就绪截止时间内收敛为唯一就绪持有者，当前存活数：{alive}"
+            );
+            std::thread::sleep(
+                Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
+            );
+        }
+
+        let mut winners = Vec::new();
+        let mut loser_codes = Vec::new();
+        for mut candidate in guard.0.drain(..) {
+            if candidate.has_exited().unwrap() {
+                let out = candidate.wait(Some(wait(&budget))).unwrap();
+                evidence.record_command("concurrent daemon serve loser", &out);
+                assert_eq!(
+                    out.exit_code(),
+                    Some(1),
+                    "争抢状态根失败的 `daemon serve` 必须以退出码 1 退出：{}",
+                    out.summary()
+                );
+                let stderr = String::from_utf8_lossy(&out.stderr);
+                assert!(
+                    stderr.contains("already owns"),
+                    "争抢失败的标准错误应报告状态根已被持有：{stderr}"
+                );
+                loser_codes.push(out.exit_code().unwrap());
+            } else {
+                winners.push(candidate);
+            }
+        }
+        assert_eq!(winners.len(), 1, "同一状态根上只能有一个持有者存活");
+        assert_eq!(loser_codes, vec![1; CONCURRENCY - 1]);
+        guard.0 = winners;
+
         let a = command(
             &world,
             &budget,
@@ -571,11 +699,10 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
             &["--json", "run", "large b", "--agent", "background"],
         );
         gate.wait_until_stalled(2, wait(&budget)).unwrap();
-        assert_eq!(world.daemon_pids().unwrap().len(), 1);
         let running = running_turns(&world, &budget, &mut evidence);
         assert_eq!(running.len(), 2);
         let (sid, tid) = running[0].clone();
-        // 中途开始的观察：会话头说明当前位置那一轮有 Owner，随后是这一轮的条目。
+        // 中途开始的观察：会话头说明当前位置那一轮有 `owner`，随后是这一轮的条目。
         let mut watcher = Watcher::open(&world, wait(&budget), &sid);
         let view = watcher.initial();
         let head = view.head.clone().unwrap();
@@ -619,10 +746,26 @@ fn concurrent_autostart_has_one_owner_and_midway_watch_matches_history() {
             .record_json(
                 "parameters",
                 &json!({"script":"gated 24000 Chinese characters","turns":running,
-            "midway":midway,"held":held,"history":reread}),
+            "loser_exit_codes":loser_codes,"midway":midway,"held":held,"history":reread}),
             )
             .unwrap();
         evidence.record_captures(server.captured_requests());
+
+        let stopped = run(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "daemon", "stop"],
+        );
+        assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
+        let winner = guard.0.pop().expect("存活的唯一持有者");
+        let winner_out = winner.wait(Some(wait(&budget))).unwrap();
+        evidence.record_command("concurrent daemon serve winner exit", &winner_out);
+        assert!(
+            winner_out.is_clean_exit(0),
+            "唯一持有者正常停机应以退出码 0 退出：{}",
+            winner_out.summary()
+        );
     }));
     support::finish_recorded(evidence, result);
 }
@@ -632,6 +775,7 @@ fn slow_watcher_cannot_block_execution_and_converges_to_history() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let chunk = "slow-reader-".repeat(100);
         let text = chunk.repeat(1600);
         let (server, gate) = wire_gated_fake_llm(
@@ -714,6 +858,7 @@ fn shared_daemon_uses_registered_providers_and_freezes_profiles() {
     let mut evidence =
         ScenarioEvidence::new(&world, &spec.name, [key_a.into(), key_b.into()]).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动带测试工具环境的后台");
         let script = SseScript::Sequence {
             scripts: vec![
                 tool_call("note", "record_note", r#"{"action":"read"}"#),
@@ -847,44 +992,40 @@ fn later_session_driver_keeps_the_scenario_budget_origin() {
 #[test]
 fn exhausted_budget_records_normal_stop_failure_without_fixed_wait() {
     let (world, mut spec) = direct_world("background-budget-exhausted", "background", "");
+    world
+        .start_daemon()
+        .expect("预算耗尽前显式启动自有直接子进程后台");
+    let pgid = world.daemon_pgid().expect("自有后台进程组");
+    assert_eq!(world.daemon_pids().unwrap(), vec![pgid]);
     spec.total_timeout_secs = Some(0);
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         assert_eq!(budget.remaining(), Some(Duration::ZERO));
-        let root = world
-            .session_store_dir()
-            .parent()
-            .unwrap()
-            .display()
-            .to_string();
-        let daemon = driver()
-            .start(
-                &world,
-                &LatticeCommand {
-                    args: ["daemon", "serve", "--state-root", &root]
-                        .iter()
-                        .map(|s| (*s).into())
-                        .collect(),
-                    timeout: Some(spec.step_timeout()),
-                },
-            )
-            .unwrap();
-        let deadline = Instant::now() + spec.step_timeout();
-        while world.daemon_pids().unwrap() != vec![daemon.pgid()] {
-            assert!(Instant::now() < deadline);
-            std::thread::yield_now();
-        }
         let start = Instant::now();
         let errors = world
             .stop_daemon()
-            .expect_err("normal stop must exhaust budget");
-        assert!(errors.iter().any(|s| s.contains("budget")));
+            .expect_err("场景预算已耗尽时正常停止必须记录失败");
+        assert!(
+            errors.iter().any(|s| s.contains("场景预算")),
+            "错误信息应包含场景预算耗尽说明：{errors:?}"
+        );
         assert!(start.elapsed() < Duration::from_secs(10));
         assert!(world.daemon_pids().unwrap().is_empty());
-        let killed = daemon.wait(None).unwrap();
+        assert!(
+            lattice_system_harness::processes_in_pgid(pgid)
+                .unwrap()
+                .is_empty(),
+            "强制清理后自有后台进程组不得残留任何进程"
+        );
+        let killed = world
+            .take_daemon_outcome()
+            .expect("回收强制终止的直接子进程退出结果");
         evidence.record_command("exhausted budget cleanup", &killed);
         assert!(killed.cleanup.surviving_pids.is_empty());
+        world
+            .stop_daemon()
+            .expect("强制清理后再次检查状态根不得存在残留后台");
     }));
     finish(evidence, result);
 }
@@ -896,6 +1037,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动带测试工具环境的后台");
         let marker_path = world.root().join("restart-tool.marker");
         let server = wire_fake_llm(
             &world,
@@ -927,7 +1069,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         let original = detail(&world, &budget, &mut evidence, tid);
         assert_eq!(original["steps"][0]["slots"][0]["outcome"], "succeeded");
         assert_eq!(marker_lines(&marker_path), vec!["durable"]);
-        // 同项目另建无 Tool 会话，保留空槽位列表和单 Step 条目的独立信号。
+        // 同项目另建无工具会话，保留空槽位列表和单步骤条目的独立信号。
         let plain = run(
             &world,
             &budget,
@@ -946,7 +1088,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
         let plain_before = detail(&world, &budget, &mut evidence, &plain_turn);
         assert_eq!(plain_before["steps"][0]["slots"], json!([]));
         let sid = plain_before["session_id"].as_str().unwrap();
-        world.stop_daemon().unwrap();
+        world.restart_daemon().expect("显式重启后台");
         world
             .register_key(
                 lattice_system_harness::ProviderFixture::chat_completions("background"),
@@ -954,7 +1096,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
             )
             .unwrap();
         assert_eq!(detail(&world, &budget, &mut evidence, tid), original);
-        // 重启后重新打开会话：会话头说明没有 Owner，条目给出这一轮的全部节点。
+        // 重启后重新打开会话：会话头说明没有 `owner`，条目给出这一轮的全部节点。
         let mut observer = Watcher::open(&world, wait(&budget), tool_session);
         let view = observer.initial();
         let head = view.head.clone().unwrap();
@@ -998,7 +1140,7 @@ fn daemon_restart_reads_closed_result_without_resubmitting() {
                 .iter()
                 .any(|part| part["semantic"]["text"]["text"] == "answer 中")
         );
-        // 历史查询只取 `before` 之前的轮：第 1 轮之前没有条目，`before` 不是 UserMessage 时拒绝。
+        // 历史查询只取 `before` 之前的轮：第 1 轮之前没有条目，`before` 不是用户消息节点时拒绝。
         assert_eq!(history(&world, wait(&budget), sid, 1, 10), Ok(Vec::new()));
         let not_user = history(&world, wait(&budget), sid, 2, 10).unwrap_err();
         assert_eq!(not_user["value"]["kind"], "bad_request", "{not_user}");
@@ -1075,6 +1217,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("answer"));
         let driver = driver();
         let send = SessionSendDriver::new(&driver, &world, &spec, "background");
@@ -1087,8 +1230,8 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         assert!(first.has_completed());
         let tid = first.accepted_turn_id().unwrap();
         let old = detail(&world, &budget, &mut evidence, tid);
-        // 重启清除旧 Turn 的 Owner，随后四个新身份共同争抢空闲 Session。
-        world.stop_daemon().unwrap();
+        // 重启清除旧轮次的 `owner`，随后四个新身份共同争抢空闲会话。
+        world.restart_daemon().expect("显式重启后台");
         detail(&world, &budget, &mut evidence, tid);
         let sid = old["session_id"].as_str().unwrap();
         let candidates = [
@@ -1144,7 +1287,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             "target":0,"workspace":support::path_bytes(world.project_dir())}),
         );
         assert_eq!(blocked["value"]["kind"], "busy", "{blocked}");
-        // 已用的 TurnId 先于 Busy 核对：同一身份重新提交得到 Conflict，不是找回。
+        // 已用的 `TurnId` 先于 `busy` 核对：同一身份重新提交得到冲突，不是找回。
         let reused = ipc(
             &world,
             wait(&budget),
@@ -1157,7 +1300,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
                 &json!({"rewind":blocked,"resubmit":reused}),
             )
             .unwrap();
-        // 会话头直接说明当前位置那一轮（新一轮）有 Owner；旧一轮按 TurnId 查到已关闭。
+        // 会话头直接说明当前位置那一轮（新一轮）有 `owner`；旧一轮按 `TurnId` 查到已关闭。
         let mut watcher = Watcher::open(&world, wait(&budget), sid);
         let head = watcher.initial().head.clone().unwrap();
         assert_eq!(head.turn_id.as_deref(), Some(winners[0]));
@@ -1192,7 +1335,7 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
             "head_during_live":format!("{head:?}"),"followed":lines(&observed)}),
             )
             .unwrap();
-        world.stop_daemon().unwrap();
+        world.restart_daemon().expect("显式重启后台");
         assert_eq!(detail(&world, &budget, &mut evidence, winners[0]), second);
         let tree = read(
             &world,
@@ -1227,6 +1370,9 @@ fn backend_tls_roots_are_fixed_until_restart() {
         std::fs::write(&root, certificates).unwrap();
         std::fs::write(&foreign_root, foreign.ca_pem()).unwrap();
         world.set_env("SSL_CERT_FILE", root.display().to_string());
+        world
+            .start_daemon()
+            .expect("显式启动带初始根证书环境的后台");
         let (server, gate) = FakeLlmServer::start_gated_with(
             support::sequence(vec![
                 SseScript::plain("trusted startup roots"),
@@ -1262,7 +1408,7 @@ fn backend_tls_roots_are_fixed_until_restart() {
             &["--json", "run", "TLS", "--agent", "background"],
         );
         gate.wait_until_stalled(1, wait(&budget)).unwrap();
-        // 后台已持有 DER；原文件改写与后续前端环境变量切换都不替换运行中后台的信任根。
+        // 后台启动时已取得环境快照并持有证书数据；原文件改写与后续前端环境变量切换都不替换运行中后台的信任根。
         std::fs::write(&root, foreign.ca_pem()).unwrap();
         world.set_env("SSL_CERT_FILE", foreign_root.display().to_string());
         gate.release(wait(&budget)).unwrap();
@@ -1301,7 +1447,7 @@ fn backend_tls_roots_are_fixed_until_restart() {
         assert!(next.is_clean_exit(0), "{}", next.summary());
         assert_eq!(records(&next).reply_text(), "still trusted");
         assert_eq!(server.captured_requests().len(), 2);
-        world.stop_daemon().unwrap();
+        world.restart_daemon().expect("显式用新根证书环境重启后台");
         let changed = run(
             &world,
             &budget,
@@ -1339,7 +1485,7 @@ fn backend_tls_roots_are_fixed_until_restart() {
     support::finish_recorded(evidence, result);
 }
 
-/// 把任意字节编成 PEM 证书块；只用于构造超过 64 KiB 的“证书”，大小检查先于解析。
+/// 把任意字节编成证书块；只用于构造超过 65536 字节的“证书”，大小检查先于解析。
 fn pem_certificate(der: &[u8]) -> String {
     const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut encoded = String::new();
@@ -1367,8 +1513,8 @@ fn pem_certificate(der: &[u8]) -> String {
     pem
 }
 
-/// 启动时的根证书全都超过 64 KiB：后台照常启动，https provider 的 `session send`
-/// 在接受前按配置错误拒绝且不发请求；同一后台换成 http provider 照常接受并完成。
+/// 启动时的根证书全都超过上限：后台照常启动，`https` 提供方的 `session send`
+/// 在接受前按配置错误拒绝且不发请求；同一后台换成 `http` 提供方照常接受并完成。
 #[test]
 fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
     use lattice_system_harness::{FakeLlmServer, ProviderFixture};
@@ -1384,6 +1530,9 @@ fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
         let oversized = pem_certificate(&[0x30; 65_537]);
         std::fs::write(&root, format!("{oversized}{oversized}")).unwrap();
         world.set_env("SSL_CERT_FILE", root.display().to_string());
+        world
+            .start_daemon()
+            .expect("显式启动带超大根证书文件的后台");
 
         let https = FakeLlmServer::start(SseScript::plain("must not be requested")).unwrap();
         world
@@ -1408,28 +1557,28 @@ fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
         );
         assert!(
             rejected.is_clean_exit(2),
-            "https provider without usable roots must be rejected at submit: {}",
+            "无可用根证书时 `https` 提供方必须在提交阶段被拒绝：{}",
             rejected.summary()
         );
         let outcome = records(&rejected);
         assert_eq!(
             support::rejected_kind(&outcome),
             Some("bad_request"),
-            "rejection must carry the configuration-error kind"
+            "拒绝结果必须携带 `bad_request` 类别"
         );
         assert!(
             outcome.accepted_turn_id().is_none(),
-            "rejected submit must not accept a Turn"
+            "提交被拒绝时不得接受轮次"
         );
         let stdout = String::from_utf8_lossy(&rejected.stdout);
         assert!(
             stdout.contains("configuration error")
                 && stdout.contains("no usable TLS root certificates"),
-            "rejection must explain the missing roots: {stdout}"
+            "拒绝信息必须说明缺少可用根证书：{stdout}"
         );
         assert!(
             https.captured_requests().is_empty(),
-            "https provider must not receive a request"
+            "`https` 提供方不得收到请求"
         );
 
         let http = FakeLlmServer::start_plain_http1(SseScript::plain("plain http answer")).unwrap();
@@ -1448,21 +1597,21 @@ fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
         );
         assert!(
             served.is_clean_exit(0),
-            "http provider must be served without usable roots: {}",
+            "无可用根证书时 `http` 提供方仍应正常服务：{}",
             served.summary()
         );
         assert!(
             records(&served).accepted_turn_id().is_some(),
-            "http submit must be accepted"
+            "`http` 提交必须被接受"
         );
         assert_eq!(
             http.captured_requests().len(),
             1,
-            "http provider received exactly one request"
+            "`http` 提供方应恰好收到一次请求"
         );
         assert!(
             https.captured_requests().is_empty(),
-            "https provider still untouched"
+            "`https` 提供方仍不得收到请求"
         );
         evidence.record_captures(http.captured_requests());
     }));
@@ -1470,8 +1619,8 @@ fn oversized_startup_roots_reject_https_provider_at_submit_and_serve_http() {
 }
 
 #[test]
-/// 启动时的 `SSL_CERT_FILE` 里没有一张证书：没有可用的根证书，https provider 的提交在接受前
-/// 按配置错误拒绝（http 端点照常放行，见 `oversized_startup_roots_reject_https_provider_at_submit_and_serve_http`）。
+/// 启动时的 `SSL_CERT_FILE` 里没有一张证书：没有可用的根证书，`https` 提供方的提交在接受前
+/// 按配置错误拒绝（`http` 端点照常放行，见 `oversized_startup_roots_reject_https_provider_at_submit_and_serve_http`）。
 fn no_usable_startup_tls_root_rejects_https_submissions_before_acceptance() {
     let (world, spec) = direct_world("background-no-tls-root", "background", "");
     let budget = world.budget(&spec);
@@ -1483,6 +1632,9 @@ fn no_usable_startup_tls_root_rejects_https_submissions_before_acceptance() {
         let directory = world.home().join(".lattice");
         std::fs::create_dir_all(&directory).unwrap();
         std::fs::write(directory.join("providers.toml"), "[metadata]\nauto_refresh=false\n[providers.local]\nprotocol='chat-completions'\nbase_url='https://localhost:9/v1'\nauth='none'\n").unwrap();
+        world
+            .start_daemon()
+            .expect("显式启动无可用根证书环境的后台");
         let out = run(
             &world,
             &budget,
@@ -1491,18 +1643,18 @@ fn no_usable_startup_tls_root_rejects_https_submissions_before_acceptance() {
         );
         assert!(
             out.is_clean_exit(2),
-            "https provider without usable roots exits 2"
+            "无可用根证书时 `https` 提供方提交应以退出码 2 退出"
         );
         let sent = records(&out);
         let error = sent.rejection().unwrap();
         assert_eq!(
             error.kind, "bad_request",
-            "rejected as a configuration error"
+            "应作为配置错误返回 `bad_request`"
         );
         assert!(
             error.message.contains("configuration error")
                 && error.message.contains("no usable TLS root"),
-            "rejection names the missing roots: {}",
+            "拒绝信息必须说明缺少可用根证书：{}",
             error.message
         );
         assert!(sent.accepted_turn_id().is_none());
@@ -1527,6 +1679,7 @@ fn invalidated_provider_configuration_records_last_resolved_origin_without_sendi
         let budget = world.budget(&spec);
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.start_daemon().expect("显式启动带测试工具环境的后台");
             let (server, gate) = wire_gated_fake_llm(
                 &world,
                 "background",
@@ -1593,6 +1746,7 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let server = wire_fake_llm(&world, "background", SseScript::plain("turn reply"));
         let driver = driver();
         let send = SessionSendDriver::new(&driver, &world, &spec, "background");
@@ -1723,28 +1877,10 @@ fn vanished_owner_is_reported_by_the_session_head() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("next"));
-        world.stop_daemon().unwrap();
-        let root = world
-            .session_store_dir()
-            .parent()
-            .unwrap()
-            .display()
-            .to_string();
-        let daemon = command(&world, &budget, &["daemon", "serve", "--state-root", &root]);
-        let deadline = Instant::now() + wait(&budget);
-        while !run(
-            &world,
-            &budget,
-            &mut evidence,
-            &["--json", "daemon", "status"],
-        )
-        .is_clean_exit(0)
-        {
-            assert!(Instant::now() < deadline, "explicit daemon did not start");
-            std::thread::yield_now();
-        }
-        assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
+        let pgid = world.daemon_pgid().expect("自有后台进程组");
+        assert_eq!(world.daemon_pids().unwrap(), vec![pgid]);
         let front = command(
             &world,
             &budget,
@@ -1752,15 +1888,18 @@ fn vanished_owner_is_reported_by_the_session_head() {
         );
         gate.wait_until_stalled(1, wait(&budget)).unwrap();
         let (sid, tid) = running_turns(&world, &budget, &mut evidence)[0].clone();
-        let killed = daemon.kill_and_wait().unwrap();
+        let killed = world.kill_daemon().expect("请求期间强制终止自有后台");
         evidence.record_command("SIGKILL backend during the request", &killed);
         assert_forced_kill(&killed);
         let lost = front.wait(None).unwrap();
         evidence.record_command("frontend loses the backend", &lost);
         assert!(lost.is_clean_exit(1), "{}", lost.summary());
+        world
+            .start_daemon()
+            .expect("自有后台被强制终止后显式重启后台");
         let stopped = detail(&world, &budget, &mut evidence, &tid);
         assert_ne!(stopped["summary"]["progress"]["progress"], "closed");
-        // 重新打开会话：会话头直接说明当前位置那一轮没有 Owner，不必先观察那一轮。
+        // 重新打开会话：会话头直接说明当前位置那一轮没有 `owner`，不必先观察那一轮。
         let mut watcher = Watcher::open(&world, wait(&budget), &sid);
         let head = watcher.initial().head.clone().unwrap();
         assert_eq!(head.turn_id.as_deref(), Some(tid.as_str()));
@@ -1779,7 +1918,7 @@ fn vanished_owner_is_reported_by_the_session_head() {
         );
         let last = followed.entries().into_iter().last().unwrap();
         assert_eq!(last.step().unwrap().progress, StepProgress::Requesting);
-        // 用户直接做下一件事：新一轮被接受并执行，旧 Turn 的节点保持原样。
+        // 用户直接做下一件事：新一轮被接受并执行，旧轮次的节点保持原样。
         gate.release(wait(&budget)).unwrap();
         let next = run(
             &world,
@@ -1810,6 +1949,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动带测试工具环境的后台");
         let marker_path = world.root().join("identity-tool.marker");
         let server = wire_fake_llm(
             &world,
@@ -1856,7 +1996,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
                 submit_request(&world, turn, session_id, "alpha"),
             )
         };
-        // 请求身份表自上而下核对，先符合的一行决定结果：TurnId 先于会话存在性。
+        // 请求身份表自上而下核对，先符合的一行决定结果：`TurnId` 先于会话存在性。
         let used_elsewhere = submit(&first_turn, b_sid);
         assert_eq!(
             conflict(&used_elsewhere),
@@ -1891,7 +2031,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
             json!(support::path_bytes(&project.canonicalize().unwrap()));
         let binding = ipc(&world, wait(&budget), elsewhere);
         assert_eq!(conflict(&binding), Some("binding_mismatch"), "{binding}");
-        // 被拒绝的请求都没有建立 Turn：THIRD 仍查不到，会话数不变。
+        // 被拒绝的请求都没有建立轮次：`THIRD` 仍查不到，会话数不变。
         assert_eq!(
             turn_lookup(&world, wait(&budget), THIRD)["value"]["kind"],
             "not_found"
@@ -1929,7 +2069,7 @@ fn turn_and_session_identity_conflicts_are_rejected_without_dispatch() {
     support::finish_recorded(evidence, result);
 }
 
-// 后续提交与静态 head 对比都等待本轮关闭且后台交出执行权。
+// 后续提交与静态 `head` 对比都等待本轮关闭且后台交出执行权。
 fn closed_without_owner(
     world: &ScenarioWorld,
     budget: &ScenarioBudget,
@@ -1954,6 +2094,7 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let server = wire_fake_llm(&world, "background", SseScript::plain("chosen reply"));
         let other = ProviderFixture {
             target: ProviderTarget::Custom("other"),
@@ -2381,6 +2522,7 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
             target: ProviderTarget::Custom("openai-chat"),
             ..ProviderFixture::chat_completions("gpt-6-luna")
         };
+        world.start_daemon().expect("显式启动带测试工具环境的后台");
         world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
         let configuration = world.home().join(".lattice/providers.toml");
         let mut providers: toml::Table =
@@ -2426,7 +2568,7 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
         );
         assert_eq!(first_turn["steps"][0]["slots"][0]["outcome"], "succeeded");
         assert_eq!(server.captured_requests().len(), 3);
-        world.stop_daemon().unwrap();
+        world.restart_daemon().expect("显式重启后台");
         let inherited = run(
             &world,
             &budget,
@@ -2549,7 +2691,7 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
             json!({"operation":"head", "session_id":sid}),
         );
         assert_eq!(failed_off_head["value"]["effort"], "off");
-        world.stop_daemon().unwrap();
+        world.restart_daemon().expect("显式重启后台");
         let continued = run(
             &world,
             &budget,
@@ -2604,6 +2746,7 @@ fn session_settings_survive_sources_and_explicit_same_agent_refreshes_profile() 
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let first = wire_fake_llm(&world, "background", SseScript::plain("profile reply"));
         world
             .write_project_file(
@@ -2748,6 +2891,7 @@ fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动带测试工具环境的后台");
         let script = SseScript::Sequence {
             scripts: vec![
                 SseScript::HttpError {
@@ -2857,8 +3001,9 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let server = wire_fake_llm(&world, "background", SseScript::plain("draft model reply"));
-        // 改写 agent 配置使其不含 `[agent].model`，经原始 IPC 创建无模型的草稿会话。
+        // 改写 `agent` 配置使其不含 `[agent].model`，经原始进程间通信创建无模型的草稿会话。
         world
             .write_project_file(
                 ".lattice/agents/background/agent.toml",
@@ -2894,8 +3039,8 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
             .unwrap()
             .to_owned();
 
-        // 停止并重新启动后台：草稿仍在列表中（节点数为 1），会话头照常可读。
-        world.stop_daemon().unwrap();
+        // 显式重启后台：草稿仍在列表中（节点数为 1），会话头照常可读。
+        world.restart_daemon().expect("显式重启后台");
         let listed = read(
             &world,
             &budget,
@@ -3050,36 +3195,6 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
     support::finish_recorded(evidence, result);
 }
 
-fn spawn_explicit_daemon(
-    world: &ScenarioWorld,
-    budget: &ScenarioBudget,
-    evidence: &mut ScenarioEvidence,
-    drain_timeout: Option<&str>,
-) -> RunningCommand {
-    let root = world
-        .session_store_dir()
-        .parent()
-        .unwrap()
-        .display()
-        .to_string();
-    let mut args = vec!["daemon", "serve", "--state-root", &root];
-    if let Some(limit) = drain_timeout {
-        args.extend(["--drain-timeout", limit]);
-    }
-    let daemon = command(world, budget, &args);
-    let deadline = Instant::now() + wait(budget);
-    while !run(world, budget, evidence, &["--json", "daemon", "status"]).is_clean_exit(0) {
-        assert!(Instant::now() < deadline, "显式启动的后台未在预算内就绪");
-        std::thread::yield_now();
-    }
-    assert_eq!(
-        world.daemon_pids().unwrap(),
-        vec![daemon.pgid()],
-        "后台归属识别应命中显式启动的进程组"
-    );
-    daemon
-}
-
 fn poll_daemon_status(
     world: &ScenarioWorld,
     budget: &ScenarioBudget,
@@ -3107,10 +3222,9 @@ fn sigterm_drains_inflight_turn_and_exits_zero() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let (server, gate) =
             wire_gated_fake_llm(&world, "background", SseScript::plain("drained reply"));
-        world.stop_daemon().unwrap();
-        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, None);
         let front = command(
             &world,
             &budget,
@@ -3122,27 +3236,27 @@ fn sigterm_drains_inflight_turn_and_exits_zero() {
             &budget,
             &mut evidence,
             |status| status["owners"] == 1,
-            "后台 owners 未变为 1",
+            "后台 `owners` 未变为 1",
         );
         let (sid, tid) = running_turns(&world, &budget, &mut evidence)[0].clone();
 
-        daemon.terminate().unwrap();
+        world.terminate_daemon().expect("向自有后台发送 `SIGTERM`");
         poll_daemon_status(
             &world,
             &budget,
             &mut evidence,
             |status| status["stopping"] == true,
-            "收到 SIGTERM 后后台未进入 stopping",
+            "收到 `SIGTERM` 后后台未进入 `stopping`",
         );
         assert!(
-            !daemon.has_exited().unwrap(),
+            !world.daemon_has_exited().unwrap(),
             "排空期间在途轮次尚未收尾，后台不应提前退出"
         );
 
         gate.release(wait(&budget)).unwrap();
         let front_done = front.wait(None).unwrap();
         evidence.record_command("frontend during sigterm drain", &front_done);
-        let exited = daemon.wait(Some(wait(&budget))).unwrap();
+        let exited = world.wait_daemon(Some(wait(&budget))).unwrap();
         evidence.record_command("daemon serve sigterm drain exit", &exited);
         assert_eq!(
             exited.exit_code(),
@@ -3157,10 +3271,13 @@ fn sigterm_drains_inflight_turn_and_exits_zero() {
         );
         world.daemon_departed().unwrap();
 
+        world
+            .start_daemon()
+            .expect("排空退出后显式重启后台以读取持久结果");
         let completed = detail(&world, &budget, &mut evidence, &tid);
         assert_eq!(
             completed["summary"]["outcome"], "completed",
-            "排空完成后该轮持久结局应为 completed：{completed}"
+            "排空完成后该轮持久结局应为 `completed`：{completed}"
         );
         archive_state(&world, &budget, &mut evidence, &[&tid]);
         evidence
@@ -3177,16 +3294,15 @@ fn sigint_right_after_ready_exits_zero_and_releases_resources() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let (_server, _gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("idle"));
-        world.stop_daemon().unwrap();
-        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, None);
-        daemon.interrupt().unwrap();
-        let exited = daemon.wait(Some(wait(&budget))).unwrap();
+        // 就绪后立即发信号，中间不插入提供方准备或其他 IPC 请求。
+        world.start_daemon().expect("显式启动后台");
+        world.interrupt_daemon().expect("向自有后台发送 `SIGINT`");
+        let exited = world.wait_daemon(Some(wait(&budget))).unwrap();
         evidence.record_command("daemon serve sigint exit", &exited);
         assert_eq!(
             exited.exit_code(),
             Some(0),
-            "无在途工作时 SIGINT 停机应以 0 退出：{}",
+            "无在途工作时 `SIGINT` 停机应以 0 退出：{}",
             exited.summary()
         );
         assert!(
@@ -3205,9 +3321,10 @@ fn sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world
+            .start_daemon_with(&DaemonOptions::new().drain_timeout("300ms"))
+            .expect("显式启动带排空超时的后台");
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("next"));
-        world.stop_daemon().unwrap();
-        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, Some("300ms"));
         let front = command(
             &world,
             &budget,
@@ -3223,13 +3340,15 @@ fn sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn() {
         let (sid, tid) = running_turns(&world, &budget, &mut evidence)[0].clone();
 
         let stop_started = Instant::now();
-        daemon.terminate().unwrap();
-        let exited = daemon.wait(Some(Duration::from_millis(20_300))).unwrap();
+        world.terminate_daemon().expect("向自有后台发送 `SIGTERM`");
+        let exited = world
+            .wait_daemon(Some(Duration::from_millis(20_300)))
+            .unwrap();
         let stop_elapsed = stop_started.elapsed();
         evidence.record_command("daemon serve drain timeout exit", &exited);
         assert!(
             stop_elapsed <= Duration::from_millis(20_300),
-            "排空超时停机应在 20.3s 内退出，实际耗时 {:?}",
+            "排空超时停机应在 20.3 秒内退出，实际耗时 {:?}",
             stop_elapsed
         );
         assert_eq!(
@@ -3249,12 +3368,16 @@ fn sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn() {
         evidence.record_command("frontend loses backend after drain timeout", &lost);
         assert!(lost.is_clean_exit(1), "{}", lost.summary());
 
+        world.start_daemon().expect("排空超时退出后显式启动新后台");
         let stopped = detail(&world, &budget, &mut evidence, &tid);
         assert_ne!(stopped["summary"]["progress"]["progress"], "closed");
         let mut watcher = Watcher::open(&world, wait(&budget), &sid);
         let head = watcher.initial().head.clone().unwrap();
         assert_eq!(head.turn_id.as_deref(), Some(tid.as_str()));
-        assert!(!head.owner, "重启后台后会话头 owner 应为 false：{head:?}");
+        assert!(
+            !head.owner,
+            "重启后台后会话头 `owner` 应为 `false`：{head:?}"
+        );
         let followed = run(
             &world,
             &budget,
@@ -3292,9 +3415,10 @@ fn ipc_daemon_stop_drain_timeout_reports_unconfirmed_and_daemon_exits_four() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world
+            .start_daemon_with(&DaemonOptions::new().drain_timeout("300ms"))
+            .expect("显式启动带排空超时的后台");
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("stalled"));
-        world.stop_daemon().unwrap();
-        let daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, Some("300ms"));
         let front = command(
             &world,
             &budget,
@@ -3316,27 +3440,27 @@ fn ipc_daemon_stop_drain_timeout_reports_unconfirmed_and_daemon_exits_four() {
         evidence.record_command("--json daemon stop timeout", &stopped);
         assert!(
             stop_elapsed <= Duration::from_millis(20_300),
-            "daemon stop 应在 20.3s 内返回，实际耗时 {:?}",
+            "`daemon stop` 应在 20.3 秒内返回，实际耗时 {:?}",
             stop_elapsed
         );
         world.daemon_departed().unwrap();
         assert!(
             stopped.is_clean_exit(1),
-            "排空超时时 daemon stop 应以 1 退出：{}",
+            "排空超时时 `daemon stop` 应以 1 退出：{}",
             stopped.summary()
         );
         let status: Value = serde_json::from_slice(&stopped.stdout).unwrap();
         assert!(
             status["unconfirmed_operations"].as_u64().unwrap_or(0) >= 1,
-            "unconfirmed_operations 应不小于 1：{status}"
+            "`unconfirmed_operations` 应不小于 1：{status}"
         );
         let stderr = String::from_utf8_lossy(&stopped.stderr);
         assert!(
             stderr.contains("没有确认收尾") && stderr.contains("执行者消失"),
-            "daemon stop 标准错误应含提示，实际：{stderr:?}"
+            "`daemon stop` 标准错误应含提示，实际：{stderr:?}"
         );
 
-        let daemon_out = daemon.wait(Some(wait(&budget))).unwrap();
+        let daemon_out = world.wait_daemon(Some(wait(&budget))).unwrap();
         evidence.record_command("daemon serve exit after ipc stop timeout", &daemon_out);
         assert!(
             daemon_out.is_clean_exit(4),
@@ -3357,9 +3481,10 @@ fn second_sigterm_during_drain_triggers_immediate_timeout_exit_four() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world
+            .start_daemon_with(&DaemonOptions::new().drain_timeout("60s"))
+            .expect("显式启动长排空期后台");
         let (server, gate) = wire_gated_fake_llm(&world, "background", SseScript::plain("stalled"));
-        world.stop_daemon().unwrap();
-        let mut daemon = spawn_explicit_daemon(&world, &budget, &mut evidence, Some("60s"));
         let front = command(
             &world,
             &budget,
@@ -3373,27 +3498,31 @@ fn second_sigterm_during_drain_triggers_immediate_timeout_exit_four() {
         );
         gate.wait_until_stalled(1, wait(&budget)).unwrap();
 
-        daemon.terminate().unwrap();
+        world
+            .terminate_daemon()
+            .expect("第一次向自有后台发送 `SIGTERM`");
         poll_daemon_status(
             &world,
             &budget,
             &mut evidence,
             |status| status["stopping"] == true,
-            "第一次 SIGTERM 后后台未进入 stopping",
+            "第一次 `SIGTERM` 后后台未进入 `stopping`",
         );
         assert!(
-            !daemon.has_exited().unwrap(),
-            "60s 排空期内后台在第二次信号前不应退出"
+            !world.daemon_has_exited().unwrap(),
+            "60 秒排空期内后台在第二次信号前不应退出"
         );
 
         let second_started = Instant::now();
-        daemon.terminate().unwrap();
-        let daemon_out = daemon.wait(Some(Duration::from_secs(20))).unwrap();
+        world
+            .terminate_daemon()
+            .expect("第二次向自有后台发送 `SIGTERM`");
+        let daemon_out = world.wait_daemon(Some(Duration::from_secs(20))).unwrap();
         let elapsed = second_started.elapsed();
         evidence.record_command("daemon serve after second sigterm", &daemon_out);
         assert!(
             elapsed <= Duration::from_secs(20),
-            "第二次 SIGTERM 起应在 20s 内退出，实际耗时 {:?}",
+            "第二次 `SIGTERM` 起应在 20 秒内退出，实际耗时 {:?}",
             elapsed
         );
         assert_eq!(
@@ -3415,4 +3544,104 @@ fn second_sigterm_during_drain_triggers_immediate_timeout_exit_four() {
         evidence.record_captures(server.captured_requests());
     }));
     support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn assertion_panic_unwinds_and_cleans_up_owned_daemon() {
+    use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
+
+    fn open_pidfd(pid: u32) -> OwnedFd {
+        // SAFETY: `pidfd_open` 不接收指针；成功时返回新文件描述符。
+        let fd = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+        assert!(
+            fd >= 0,
+            "打开后台成员 pid={pid} 的 pidfd 失败：{}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: 系统调用成功，返回的文件描述符由 `OwnedFd` 独占管理。
+        unsafe { OwnedFd::from_raw_fd(fd as i32) }
+    }
+
+    fn pidfd_exited(fd: &OwnedFd) -> bool {
+        let mut pfd = libc::pollfd {
+            fd: fd.as_raw_fd(),
+            events: libc::POLLIN,
+            revents: 0,
+        };
+        // SAFETY: `pfd` 指向有效栈结构，仅非阻塞查询该内核进程实例是否已退出。
+        let rc = unsafe { libc::poll(&mut pfd, 1, 0) };
+        assert!(
+            rc >= 0,
+            "轮询 pidfd 失败：{}",
+            std::io::Error::last_os_error()
+        );
+        rc > 0 && (pfd.revents & libc::POLLIN != 0)
+    }
+
+    let mut recorded_pgid = None;
+    let mut recorded_members: Vec<(u32, OwnedFd)> = Vec::new();
+    let mut recorded_state_root = None;
+
+    let unwind_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let (world, spec) = direct_world("background-assertion-panic-cleanup", "background", "");
+        let _budget = world.budget(&spec);
+        world.start_daemon().expect("显式启动后台");
+
+        let pgid = world.daemon_pgid().expect("自有后台进程组号");
+        let pids = lattice_system_harness::processes_in_pgid(pgid).expect("读取自有后台进程组成员");
+        assert!(
+            !pids.is_empty() && pids.contains(&pgid),
+            "断言前自有后台进程组应包含组首领：pgid={pgid} pids={pids:?}"
+        );
+        let state_root = world
+            .session_store_dir()
+            .parent()
+            .expect("场景状态根")
+            .to_path_buf();
+
+        recorded_pgid = Some(pgid);
+        recorded_members = pids.into_iter().map(|pid| (pid, open_pidfd(pid))).collect();
+        recorded_state_root = Some(state_root);
+
+        assert_eq!("实际值", "预期值", "受控触发的场景断言 panic");
+    }));
+
+    let panic_payload = unwind_result.expect_err("场景闭包应触发断言 panic");
+    let panic_message = panic_payload
+        .downcast_ref::<String>()
+        .cloned()
+        .or_else(|| {
+            panic_payload
+                .downcast_ref::<&str>()
+                .map(|s| (*s).to_owned())
+        })
+        .unwrap_or_default();
+    assert!(
+        panic_message.contains("受控触发的场景断言 panic"),
+        "展开后应保留原始断言消息，实际：{panic_message:?}"
+    );
+
+    let pgid = recorded_pgid.expect("已记录进程组号");
+    assert!(
+        !recorded_members.is_empty(),
+        "应已记录至少一个后台进程组成员"
+    );
+    assert!(
+        lattice_system_harness::processes_in_pgid(pgid)
+            .expect("展开后查询自有后台进程组")
+            .is_empty(),
+        "断言 panic 展开并丢弃 ScenarioWorld 后，后台进程组 pgid={pgid} 必须已退空"
+    );
+    for (pid, fd) in &recorded_members {
+        assert!(
+            pidfd_exited(fd),
+            "断言 panic 展开并丢弃 ScenarioWorld 后，原后台组成员 pid={pid} 必须已退出"
+        );
+    }
+    let state_root = recorded_state_root.expect("已记录状态根");
+    assert!(
+        !state_root.exists(),
+        "清理成功完成后，临时场景状态根 {} 应已一并移除",
+        state_root.display()
+    );
 }

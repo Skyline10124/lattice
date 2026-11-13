@@ -204,7 +204,7 @@ fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Va
         "binary":driver.binary_path(),"binary_blake3":blake3::hash(&bytes).to_hex().to_string(),
         "features":"lattice-server/test-fake-tools,lattice-server/test-crash-barriers","harness_features":"fake-tools,crash-barriers","profile":"debug",
         "state_root":world.session_store_dir().parent(),"script":script,
-        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers && LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
+        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers && TMPDIR=/tmp LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
     })).unwrap();
 }
 fn stage(
@@ -328,9 +328,9 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 "sync": "fake tool block + ready_path for cancellation or SIGKILL",
             }),
         );
+        let mut daemon_pgid = Some(support::crash::start(&world, &spec, &budget));
         let mut provider = support::wire_fake_llm(&world, "operator", script);
         let driver = support::driver();
-        let mut daemon = Some(support::crash::start(&world, &spec, &budget));
         let send = SessionSendDriver::new(&driver, &world, &spec, "operator");
         let first = send.send("all determinate outcomes").unwrap();
         evidence.record_command("alpha determinate", &first.command);
@@ -495,27 +495,28 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             assert_eq!(active["steps"][0]["slots"][1]["outcome"], "not_executed");
             let count = provider.captured_requests().len();
             if crash {
-                let owned = daemon.take().unwrap();
-                assert_eq!(world.daemon_pids().unwrap(), vec![owned.pgid()]);
+                let owned_pgid = daemon_pgid.take().unwrap();
+                assert_eq!(world.daemon_pids().unwrap(), vec![owned_pgid]);
                 evidence
                     .record_json(
                         "crash-processes",
                         &json!({
-                            "backend_pgid": owned.pgid(),
+                            "backend_pgid": owned_pgid,
                             "frontend_pgid": front.pgid(),
                             "cut": "fake block ready_path written, Started durable",
                             "state_root": world.session_store_dir().parent(),
                         }),
                     )
                     .unwrap();
-                assert_ne!(owned.pgid(), front.pgid());
-                let killed = owned.kill_and_wait().unwrap();
+                assert_ne!(owned_pgid, front.pgid());
+                let killed = world.kill_daemon().expect("强制终止活跃工具期间的自有后台");
                 evidence.record_command("SIGKILL backend during active tool", &killed);
                 support::assert_forced_kill(&killed);
                 assert!(world.daemon_pids().unwrap().is_empty());
                 let out = front.wait(None).unwrap();
                 evidence.record_command("frontend observes tool crash", &out);
                 assert!(out.is_clean_exit(1));
+                world.start_daemon().expect("崩溃后显式重启后台");
                 let orphan = stage(&world, &spec, &mut evidence, sid, &turn);
                 assert_eq!(orphan["summary"]["outcome"], "failed");
                 assert_eq!(
@@ -695,6 +696,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             budget.cap_timeout(spec.step_timeout()),
         )
         .unwrap();
+        world.start_daemon().expect("显式启动后台");
         world
             .wire_provider(
                 lattice_system_harness::ProviderFixture::chat_completions("vertical"),
@@ -705,7 +707,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         let ack = world.root().join("barrier.json");
         world.set_env(BARRIER, "invocation_started:1:72");
         world.set_env(ACK, ack.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
         let frontend = support::driver()
             .start(
                 &world,
@@ -758,7 +760,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         support::assert_forced_kill(&detached);
         assert!(detached.stdout_complete && detached.stderr_complete);
         evidence.record_command("kill frontend only; backend continues", &detached);
-        assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
+        assert_eq!(world.daemon_pids().unwrap(), vec![daemon_pgid]);
         for i in 6..=75 {
             gate.wait_until_stalled(i, budget.cap_timeout(spec.step_timeout()))
                 .unwrap();
@@ -877,10 +879,10 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert_eq!(marker["step"], 1);
         assert_eq!(marker["part"], 72);
         evidence.record_json("barrier", &marker).unwrap();
-        assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
+        assert_eq!(world.daemon_pids().unwrap(), vec![daemon_pgid]);
         let deadline = Instant::now() + Duration::from_secs(2);
         loop {
-            let stat = std::fs::read_to_string(format!("/proc/{}/stat", daemon.pgid())).unwrap();
+            let stat = std::fs::read_to_string(format!("/proc/{daemon_pgid}/stat")).unwrap();
             if stat
                 .rsplit_once(')')
                 .unwrap()
@@ -893,14 +895,15 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         }
-        evidence.record_json("daemon-identity",&json!({"pid":daemon.pgid(),"pgid":daemon.pgid(),"state_root":world.session_store_dir().parent(),"binary":support::driver().binary_path(),"stopped":true})).unwrap();
-        let killed = daemon.kill_and_wait().unwrap();
+        evidence.record_json("daemon-identity",&json!({"pid":daemon_pgid,"pgid":daemon_pgid,"state_root":world.session_store_dir().parent(),"binary":support::driver().binary_path(),"stopped":true})).unwrap();
+        let killed = world.kill_daemon().expect("强制终止屏障处的自有后台");
         support::assert_forced_kill(&killed);
         assert!(killed.stdout_complete && killed.stderr_complete);
         evidence.record_command("SIGKILL barrier backend", &killed);
         assert!(world.daemon_pids().unwrap().is_empty());
         world.unset_env(BARRIER);
         world.unset_env(ACK);
+        world.start_daemon().expect("崩溃后显式重启后台");
         let reopened = stage(&world, &spec, &mut evidence, &sid, &tid);
         assert_eq!(reopened["summary"]["outcome"], "failed");
         assert_eq!(reopened["steps"][0], first_done["steps"][0]);
@@ -1044,9 +1047,7 @@ fn crash_start_cannot_reset_an_expired_scenario_budget() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         support::crash::start(&world, &spec, &budget)
     }));
-    let panic = result
-        .err()
-        .expect("crash start must reject the expired scenario budget");
+    let panic = result.expect_err("崩溃屏障启动必须拒绝已过期的场景预算");
     let message = panic
         .downcast_ref::<String>()
         .map(String::as_str)
@@ -1167,12 +1168,13 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
                 "barrier":"turn_accepted", "recovery":"original CLI queries original TurnId after restart"
             }),
         );
+        world.start_daemon().expect("显式启动后台");
         let mut provider =
             support::wire_fake_llm(&world, "recover", SseScript::plain("must not run"));
         let ack = world.root().join("accepted.json");
         world.set_env(BARRIER, "turn_accepted");
         world.set_env(ACK, ack.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
         let frontend = support::driver()
             .start(
                 &world,
@@ -1201,7 +1203,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             .unwrap();
         // CLI 尚未收到回执；暂停它直到后台重启就绪，排除找回查询撞上重启空窗。
         let frontend_pgid = i32::try_from(frontend.pgid()).unwrap();
-        assert_ne!(frontend.pgid(), daemon.pgid());
+        assert_ne!(frontend.pgid(), daemon_pgid);
         // SAFETY: 驱动已核验这是场景自有前端的独立进程组。
         assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGSTOP) }, 0);
         let pause_deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));
@@ -1226,15 +1228,15 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             .record_json(
                 "recovery-window",
                 &json!({
-                    "frontend_pgid":frontend_pgid,"backend_pgid":daemon.pgid(),
+                    "frontend_pgid":frontend_pgid,"backend_pgid":daemon_pgid,
                     "frontend_state":"T","restart_before_frontend_continues":true
                 }),
             )
             .unwrap();
-        support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+        support::crash::kill_backend(&world, daemon_pgid, &mut evidence, &budget);
         world.unset_env(BARRIER);
         world.unset_env(ACK);
-        let restarted = support::crash::start(&world, &spec, &budget);
+        let _restarted_pgid = support::crash::start(&world, &spec, &budget);
         // SAFETY: 同一个场景自有前端仍由 RunningCommand 持有，尚未回收。
         assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGCONT) }, 0);
         let output = frontend.wait(None).unwrap();
@@ -1272,7 +1274,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             0,
         );
         world.daemon_departed().unwrap();
-        let stopped = restarted.wait(None).unwrap();
+        let stopped = world.wait_daemon(None).unwrap();
         evidence.record_command("restarted backend drains", &stopped);
         assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
         provider
@@ -1374,6 +1376,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 json!({"test":"redb_commit_windows_read_conclusions_without_writes_and_preserve_facts",
                 "case":name,"barrier":barrier,"script":format!("{script:?}")}),
             );
+            world.start_daemon().expect("显式启动后台");
             let mut provider = support::wire_fake_llm(&world, "matrix", script);
             let configuration = world.home().join(".lattice/providers.toml");
             let source = std::fs::read_to_string(&configuration).unwrap();
@@ -1384,7 +1387,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             let ack = world.root().join("marker.json");
             world.set_env(BARRIER, barrier);
             world.set_env(ACK, ack.display().to_string());
-            let daemon = support::crash::start(&world, &spec, &budget);
+            let daemon_pgid = support::crash::start(&world, &spec, &budget);
             let frontend = support::driver()
                 .start(
                     &world,
@@ -1414,9 +1417,10 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 assert_eq!(marker["part"], part.parse::<u32>().unwrap());
             }
             evidence.record_json("marker", &marker).unwrap();
-            support::crash::kill(&world, daemon, frontend, &mut evidence, &budget);
+            support::crash::kill(&world, daemon_pgid, frontend, &mut evidence, &budget);
             world.unset_env(BARRIER);
             world.unset_env(ACK);
+            world.start_daemon().expect("崩溃后显式重启后台");
             set_price(200, 1000);
             let sid = marker["session_id"].as_str().unwrap();
             let before = stage(&world, &spec, &mut evidence, sid, tid);
@@ -1720,6 +1724,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
         let kept_path = world.project_dir().join("kept.txt");
         let calls_log = world.root().join("calls.log");
         let first_calls = calls("first", &kept_path, &calls_log);
+        world.start_daemon().expect("显式启动后台");
         let (mut provider, gate) = support::wire_gated_fake_llm(
             &world,
             "cancelled",
@@ -1738,7 +1743,7 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
         let ack = world.root().join("marker.json");
         world.set_env(BARRIER, "attempt_stopped");
         world.set_env(ACK, ack.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
         let frontend = support::driver()
             .start(
                 &world,
@@ -1775,9 +1780,10 @@ fn persisted_cancel_after_mutation_survives_crash_without_replay() {
         assert_eq!(marker["step"], 1);
         assert_eq!(marker["turn_id"], tid);
         evidence.record_json("marker", &marker).unwrap();
-        support::crash::kill(&world, daemon, frontend, &mut evidence, &budget);
+        support::crash::kill(&world, daemon_pgid, frontend, &mut evidence, &budget);
         world.unset_env(BARRIER);
         world.unset_env(ACK);
+        world.start_daemon().expect("崩溃后显式重启后台");
         let closed = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(closed["summary"]["outcome"], "cancelled");
         assert_eq!(closed["summary"]["notice"]["level"], "info");
@@ -1847,11 +1853,12 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
                 &mut evidence,
                 json!({"test":"rewind_commit_survives_sigkill_and_keeps_both_branches","target":target,"script":format!("{script:?}")}),
             );
+            world.start_daemon().expect("显式启动后台");
             let mut provider = support::wire_fake_llm(&world, "rewind", script);
             let ack = world.root().join("rewind-marker.json");
             world.set_env(BARRIER, "rewind_committed");
             world.set_env(ACK, ack.display().to_string());
-            let daemon = support::crash::start(&world, &spec, &budget);
+            let daemon_pgid = support::crash::start(&world, &spec, &budget);
             let sent = cli(
                 &world,
                 &spec,
@@ -1885,9 +1892,10 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             assert_eq!(marker["session_id"], sid);
             assert_eq!(marker["current"], target);
             evidence.record_json("marker", &marker).unwrap();
-            support::crash::kill(&world, daemon, frontend, &mut evidence, &budget);
+            support::crash::kill(&world, daemon_pgid, frontend, &mut evidence, &budget);
             world.unset_env(BARRIER);
             world.unset_env(ACK);
+            world.start_daemon().expect("崩溃后显式重启后台");
             let reopened = stage(&world, &spec, &mut evidence, sid, tid);
             assert_eq!(reopened, original);
             let log = read_json(
@@ -2017,6 +2025,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             budget.cap_timeout(spec.step_timeout()),
         )
         .unwrap();
+        world.start_daemon().expect("显式启动后台");
         world
             .wire_provider(
                 lattice_system_harness::ProviderFixture::chat_completions("windows"),
@@ -2030,7 +2039,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             std::fs::write(schedule.join(format!("{name}.arm")), b"").unwrap();
         }
         world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
         let front = support::driver()
             .start(
                 &world,
@@ -2215,7 +2224,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         evidence
             .record_json(
                 "state-summary",
-                &json!({"turn":closed,"daemon":daemon.pgid(),"provider_requests":3}),
+                &json!({"turn":closed,"daemon":daemon_pgid,"provider_requests":3}),
             )
             .unwrap();
         let captures = provider.captured_requests();
@@ -2241,10 +2250,12 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             &["--json", "daemon", "stop"],
             0,
         );
-        let stopped = daemon.wait(None).unwrap();
+        world.daemon_departed().unwrap();
+        let stopped = world.wait_daemon(None).unwrap();
         evidence.record_command("scheduled backend shutdown", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
+        world.start_daemon().expect("停止后显式重启后台");
         // 重启后重新开始观察：条目与关闭时相同，重试提示与实时看到的一致，没有生成中的文字。
         let reopened = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(reopened, closed);
@@ -2322,6 +2333,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 &mut evidence,
                 json!({"test":"cancelled_slot_live_and_crash_share_ordered_closure","crash":crash,"first":first_calls,"chunks":chunks,"sync":"hold_call ready_path; block until cancellation"}),
             );
+            world.start_daemon().expect("显式启动后台");
             let mut provider = support::wire_fake_llm(
                 &world,
                 "slot",
@@ -2337,7 +2349,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 world.set_env(BARRIER, "invocation_finished:1:2");
                 world.set_env(ACK, ack.display().to_string());
             }
-            let daemon = support::crash::start(&world, &spec, &budget);
+            let daemon_pgid = support::crash::start(&world, &spec, &budget);
             let front = support::driver()
                 .start(
                     &world,
@@ -2375,9 +2387,10 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 assert_eq!(marker["part"], 2);
                 assert_eq!(marker["turn_id"], tid);
                 evidence.record_json("marker", &marker).unwrap();
-                support::crash::kill(&world, daemon, front, &mut evidence, &budget);
+                support::crash::kill(&world, daemon_pgid, front, &mut evidence, &budget);
                 world.unset_env(BARRIER);
                 world.unset_env(ACK);
+                world.start_daemon().expect("崩溃后显式重启后台");
                 let orphan = stage(&world, &spec, &mut evidence, sid, tid);
                 orphan_before = Some(orphan.clone());
                 assert_eq!(orphan["summary"]["outcome"], "cancelled");
@@ -2407,9 +2420,11 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                     &["--json", "daemon", "stop"],
                     0,
                 );
-                let stopped = daemon.wait(None).unwrap();
+                world.daemon_departed().unwrap();
+                let stopped = world.wait_daemon(None).unwrap();
                 evidence.record_command("live backend stop", &stopped);
                 assert!(stopped.is_clean_exit(0));
+                world.start_daemon().expect("停止后显式重启后台");
             }
             let closed = stage(&world, &spec, &mut evidence, sid, tid);
             if let Some(before) = orphan_before {
@@ -2488,6 +2503,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
             &mut evidence,
             json!({"test":"dispatch_deadline_tail_is_atomic_and_survives_crash","first":prefix_calls,"chunks":chunks,"timeout_secs":2,"pause_after":"calls_registered at step1","barrier":"step_closed:1"}),
         );
+        world.start_daemon().expect("显式启动后台");
         let (mut provider, gate) = support::wire_gated_fake_llm(
             &world,
             "deadline",
@@ -2504,7 +2520,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
         let ack = world.root().join("deadline.json");
         world.set_env(BARRIER, "step_closed:1");
         world.set_env(ACK, ack.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
         let front = support::driver()
             .start(
                 &world,
@@ -2564,10 +2580,11 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
                 &json!({"pause":paused,"before":before,"marker":marker}),
             )
             .unwrap();
-        support::crash::kill(&world, daemon, front, &mut evidence, &budget);
+        support::crash::kill(&world, daemon_pgid, front, &mut evidence, &budget);
         world.unset_env(BARRIER);
         world.unset_env(ACK);
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
+        world.start_daemon().expect("崩溃后显式重启后台");
         let closed = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(closed["summary"]["outcome"], "failed");
         assert_eq!(
@@ -2626,6 +2643,7 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
             json!({"test":"memory_only_cancel_crash_is_process_exit_and_next_send_runs_once",
             "pause":"request_started","cancel":"true before stopped attempt is durable","next":"new input"}),
         );
+        world.start_daemon().expect("显式启动后台");
         let mut provider = support::wire_fake_llm(&world, "cancel", SseScript::plain("new reply"));
         let schedule = world.root().join("schedule");
         std::fs::create_dir(&schedule).unwrap();
@@ -2634,7 +2652,7 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
         let ack = world.root().join("crash.json");
         world.set_env(BARRIER, "request_started");
         world.set_env(ACK, ack.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
         let front = support::driver()
             .start(
                 &world,
@@ -2677,10 +2695,11 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
                 &json!({"before":before,"pause":pause,"taken":taken,"marker":marker}),
             )
             .unwrap();
-        support::crash::kill(&world, daemon, front, &mut evidence, &budget);
+        support::crash::kill(&world, daemon_pgid, front, &mut evidence, &budget);
         world.unset_env(BARRIER);
         world.unset_env(ACK);
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
+        world.start_daemon().expect("崩溃后显式重启后台");
         let reopened = stage(&world, &spec, &mut evidence, sid, tid);
         assert_eq!(reopened, before);
         assert_eq!(reopened["summary"]["outcome"], "failed");
@@ -2759,13 +2778,14 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
             json!({"test":"admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted",
             "pause":"admission_registered","script":"plain admitted later"}),
         );
+        world.start_daemon().expect("显式启动后台");
         let mut provider =
             support::wire_fake_llm(&world, "admission", SseScript::plain("admitted later"));
         let schedule = world.root().join("schedule");
         std::fs::create_dir(&schedule).unwrap();
         std::fs::write(schedule.join("admission_registered.arm"), b"").unwrap();
         world.set_env("LATTICE_TEST_SCHEDULE_DIR", schedule.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let _daemon_pgid = support::crash::start(&world, &spec, &budget);
         // 先用只读的 `status` 确认后台说同一协议，再建立草稿会话。
         let status = ipc(
             &world,
@@ -2894,7 +2914,8 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
             &["--json", "daemon", "stop"],
             0,
         );
-        let stopped = daemon.wait(None).unwrap();
+        world.daemon_departed().unwrap();
+        let stopped = world.wait_daemon(None).unwrap();
         evidence.record_command("admission window backend stop", &stopped);
         assert!(stopped.is_clean_exit(0));
     }));
@@ -2916,6 +2937,7 @@ fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
         let budget = world.budget(&spec);
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.start_daemon().expect("显式启动后台");
             let provider =
                 support::wire_fake_llm(&world, "recover", SseScript::plain("copy restart reply"));
             if replacement {
@@ -2952,7 +2974,7 @@ fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
             let ack = world.root().join("copy-accepted.json");
             world.set_env(BARRIER, "turn_accepted");
             world.set_env(ACK, ack.display().to_string());
-            let daemon = support::crash::start(&world, &spec, &budget);
+            let daemon_pgid = support::crash::start(&world, &spec, &budget);
             let session = if replacement {
                 json!({"existing":SESSION})
             } else {
@@ -2972,11 +2994,11 @@ fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
             let marker = wait_for_ack(&ack, timeout(&world, &spec));
             assert_eq!(marker["turn_id"], OTHER);
             assert_eq!(provider.captured_requests().len(), usize::from(replacement));
-            support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+            support::crash::kill_backend(&world, daemon_pgid, &mut evidence, &budget);
             drop(wire);
             world.unset_env(BARRIER);
             world.unset_env(ACK);
-            let restarted = support::crash::start(&world, &spec, &budget);
+            let _restarted_pgid = support::crash::start(&world, &spec, &budget);
             let head = ipc(
                 &world,
                 timeout(&world, &spec),
@@ -3038,7 +3060,7 @@ fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
                 0,
             );
             world.daemon_departed().unwrap();
-            assert!(restarted.wait(None).unwrap().is_clean_exit(0));
+            assert!(world.wait_daemon(None).unwrap().is_clean_exit(0));
             evidence.record_captures(provider.captured_requests());
             evidence
                 .record_json("reopened-profile-head", &head)
@@ -3059,12 +3081,13 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
         let provider =
             support::wire_fake_llm(&world, "recover", SseScript::plain("after configure crash"));
         let ack = world.root().join("configure-committed.json");
         world.set_env(BARRIER, "configure_committed");
         world.set_env(ACK, ack.display().to_string());
-        let daemon = support::crash::start(&world, &spec, &budget);
+        let daemon_pgid = support::crash::start(&world, &spec, &budget);
 
         // CLI 对新会话先写明 submit(sending)，随后 configure(New) 在持久创建提交后、回复前停在屏障。
         let frontend = driver
@@ -3097,16 +3120,16 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
             .record_json(
                 "crash-processes",
                 &json!({
-                    "backend_pid": daemon.pgid(),
-                    "backend_pgid": daemon.pgid(),
+                    "backend_pid": daemon_pgid,
+                    "backend_pgid": daemon_pgid,
                     "frontend_pgid": frontend.pgid(),
                     "binary": driver.binary_path(),
                     "state_root": world.session_store_dir().parent(),
                 }),
             )
             .unwrap();
-        assert_ne!(daemon.pgid(), frontend.pgid());
-        support::crash::kill_backend(&world, daemon, &mut evidence, &budget);
+        assert_ne!(daemon_pgid, frontend.pgid());
+        support::crash::kill_backend(&world, daemon_pgid, &mut evidence, &budget);
         let disconnected = frontend.wait(None).unwrap();
         evidence.record_command("frontend observes configure crash", &disconnected);
         assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
@@ -3150,7 +3173,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
         // 重启后台后：状态根中只有这一个草稿会话 S，原 Turn 未写入，后续在同一会话发送只执行一轮。
         world.unset_env(BARRIER);
         world.unset_env(ACK);
-        let restarted = support::crash::start(&world, &spec, &budget);
+        let _restarted_pgid = support::crash::start(&world, &spec, &budget);
         let list = read_json(&world, &spec, &mut evidence, &["--json", "session", "list"]);
         assert_eq!(list.as_array().unwrap().len(), 1, "{list}");
         assert_eq!(list[0]["session_id"], sid);
@@ -3215,7 +3238,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
             0,
         );
         world.daemon_departed().unwrap();
-        assert!(restarted.wait(None).unwrap().is_clean_exit(0));
+        assert!(world.wait_daemon(None).unwrap().is_clean_exit(0));
     }));
     support::finish_recorded(evidence, result);
 }

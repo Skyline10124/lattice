@@ -7,8 +7,8 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 后台接受的任务在 CLI 或 TUI 退出后继续执行 |
-| 前提 | 在自有状态根用不带 `--session` 的 `session send` 创建 Session，保存请求身份；用 provider gate 控制接受后的执行进展 |
-| 相关测试 | `direct_background`：`detached_cli_finishes_and_world_owns_daemon_cleanup`；`pty_tui_smoke`：`pty_detach_reloads_pending_and_result_without_cancelling` |
+| 前提 | 显式启动自有后台后，在自有状态根用不带 `--session` 的前端入口创建会话并保存请求身份；用 `ResponseGate` 控制接受后的执行进展 |
+| 相关测试 | `direct_background`：`cli_killed_after_accept_completes_turn_for_later_follow`；`pty_tui_smoke`：`pty_detach_reloads_pending_and_result_without_cancelling` |
 
 ## 操作
 

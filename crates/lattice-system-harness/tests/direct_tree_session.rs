@@ -16,6 +16,8 @@ fn first_prompt_is_the_only_session_creation_and_request() {
         .write_agent_profile("reader", &fixture.model_ref().unwrap())
         .unwrap();
     world.init_git_project().unwrap();
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let mut provider = FakeLlmServer::start(SseScript::plain("answer")).unwrap();
     world
         .wire_provider(fixture, &provider, FAKE_API_KEY)
@@ -118,6 +120,8 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
     use serde_json::json;
     let (world, spec) = support::direct_world("tree-two-agents", "alpha", "");
     world.set_env("LATTICE_TEST_TOOLS", "write_marker");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let model = ProviderFixture::chat_completions("beta")
         .model_ref()
         .unwrap();
@@ -582,6 +586,8 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
         "projects/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/invocations.git";
     for relatives in [vec![session], vec![invocation], vec![session, invocation]] {
         let (world, spec) = support::direct_world("legacy-store-refusal", "reader", "");
+        world.budget(&spec);
+        world.start_daemon().expect("显式启动后台");
         let mut server =
             support::wire_fake_llm(&world, "reader", SseScript::plain("must not dispatch"));
         let mut legacies: Vec<_> = relatives

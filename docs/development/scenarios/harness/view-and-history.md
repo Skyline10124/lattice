@@ -7,16 +7,16 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 观察者最后持有的条目与关闭后用历史查询重读的一致；已保存的对话、生成中的文字、执行 outcome 与结局，各自的显示与失败边界互相独立 |
-| 前提 | 多步 Turn 脚本（需要工具步骤的用例开启 `fake-tools` feature，配 `test-fake-tools` 二进制与 `LATTICE_TEST_TOOLS`）：可区分的用户与模型消息、工具结果；模型流中正文与 reasoning 交错到达（含 OpenAI 兼容流）；包含一次可重试的尝试失败 |
-| 相关测试 | `direct_background`：`slow_watcher_cannot_block_execution_and_converges_to_history`、`concurrent_autostart_has_one_owner_and_midway_watch_matches_history`、`long_session_pages_by_turn_and_rewind_replaces_the_path`、`a_live_new_turn_does_not_block_old_closed_observation`、`daemon_restart_reads_closed_result_without_resubmitting`；`direct_crash_barriers`：`slow_window_and_closed_snapshot_deliver_exact_history`；`pty_tui_smoke`：`pty_tui_smoke_runs_turn_and_quits_cleanly`、`pty_mid_model_reconnect_shows_new_suffix_before_completion` |
+| 前提 | 显式启动自有后台（并发持有者用例在同一状态根并发启动多个 `daemon serve`）；多步 `Turn` 脚本（需要工具步骤的用例开启 `fake-tools` feature，配 `test-fake-tools` 二进制并在启动后台前设置 `LATTICE_TEST_TOOLS`）：可区分的用户与模型消息、工具结果；模型流中正文与推理内容交错到达（含 OpenAI 兼容流）；包含一次可重试的尝试失败 |
+| 相关测试 | `direct_background`：`slow_watcher_cannot_block_execution_and_converges_to_history`、`concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history`、`long_session_pages_by_turn_and_rewind_replaces_the_path`、`a_live_new_turn_does_not_block_old_closed_observation`、`daemon_restart_reads_closed_result_without_resubmitting`；`direct_crash_barriers`：`slow_window_and_closed_snapshot_deliver_exact_history`；`pty_tui_smoke`：`pty_tui_smoke_runs_turn_and_quits_cleanly`、`pty_mid_model_reconnect_shows_new_suffix_before_completion` |
 
 ## 操作
 
-1. 在 Step 中途、模型段中途，以及模型已输出说明文字而工具仍在执行时，分别开始观察或重连。
+1. 在 `Step` 中途、模型段中途，以及模型已输出说明文字而工具仍在执行时，分别开始观察或显式重启后台后重连；同一状态根并发启动多个 `daemon serve` 时确认恰好一个持有者就绪、其余以退出码 `1` 退出后再并发提交并中途观察。
 2. 放慢一个观察者后继续读。
-3. 用调度 gate 在关闭事务提交后、标记变化前开始推送。
-4. Turn 关闭后 `rewind` 到较早的节点。
-5. Turn 关闭后用新客户端以历史查询重读同一会话，并跨页取回更早的轮。
+3. 用调度门控在关闭事务提交后、标记变化前开始推送。
+4. `Turn` 关闭后 `rewind` 到较早的节点。
+5. `Turn` 关闭（含显式重启后台）后用新客户端以历史查询重读同一会话，并跨页取回更早的轮。
 
 ## 断言
 

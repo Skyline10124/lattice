@@ -83,6 +83,10 @@ pub struct CleanupError {
 
 impl CleanupError {
     fn new(operation: CleanupOperation, error: std::io::Error) -> Self {
+        Self::from_io(operation, &error)
+    }
+
+    pub(crate) fn from_io(operation: CleanupOperation, error: &std::io::Error) -> Self {
         Self {
             operation,
             kind: error.kind(),
@@ -204,14 +208,10 @@ pub struct LatticeCommand {
 /// would hit the test process itself, killing the whole `cargo test` run
 /// (#105). Every group signal additionally refuses to fire when the target
 /// group is this process's own group.
-struct DrainResult {
-    bytes: Vec<u8>,
-    reached_eof: bool,
-}
-
 struct DrainHandle {
+    bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
-    thread: JoinHandle<std::io::Result<DrainResult>>,
+    thread: JoinHandle<std::io::Result<bool>>,
 }
 
 pub struct RunningCommand {
@@ -234,7 +234,7 @@ impl RunningCommand {
         if Instant::now() >= deadline {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::TimedOut,
-                "command deadline exhausted before spawn",
+                "命令截止时间在启动前已耗尽",
             ));
         }
         let mut running = Self::spawn(command)?;
@@ -288,6 +288,22 @@ impl RunningCommand {
         self.pgid
     }
 
+    /// 读取当前已收集到的标准输出副本，不中断后台读取线程。
+    pub fn stdout_snapshot(&self) -> Vec<u8> {
+        self.stdout
+            .as_ref()
+            .map(|handle| handle.bytes.lock().expect("标准输出锁").clone())
+            .unwrap_or_default()
+    }
+
+    /// 读取当前已收集到的标准错误副本，不中断后台读取线程。
+    pub fn stderr_snapshot(&self) -> Vec<u8> {
+        self.stderr
+            .as_ref()
+            .map(|handle| handle.bytes.lock().expect("标准错误锁").clone())
+            .unwrap_or_default()
+    }
+
     /// Remaining command time, capped for one intermediate handshake.
     pub fn remaining_timeout(&self, cap: Duration) -> Duration {
         self.timeout
@@ -295,15 +311,31 @@ impl RunningCommand {
             .unwrap_or(cap)
     }
 
-    /// Non-blocking check whether the direct child has already exited.
-    /// The exit status stays cached for the later `wait`.
+    /// 非阻塞观察直接子进程是否已退出，不调用 `wait` 提前回收子进程。
+    /// 未被回收的组首领会继续占住数值 `pgid`，直到 `wait`、`kill_and_wait` 或 `Drop` 正式回收。
     pub fn has_exited(&mut self) -> std::io::Result<bool> {
-        Ok(self
-            .child
-            .as_mut()
-            .expect("running child")
-            .try_wait()?
-            .is_some())
+        let pid = self.child.as_ref().expect("running child").id();
+        loop {
+            // SAFETY: `info` 清零初始化；`WEXITED | WNOHANG | WNOWAIT` 只观察退出状态而不消费它。
+            let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+            let rc = unsafe {
+                libc::waitid(
+                    libc::P_PID,
+                    pid as libc::id_t,
+                    &mut info,
+                    libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+                )
+            };
+            if rc == 0 {
+                // SAFETY: `waitid` 带 `WNOHANG` 返回 0 时，目标尚未退出则 `si_pid` 保持为 0，已进入可回收态则写入子进程号。
+                return Ok(unsafe { info.si_pid() } != 0);
+            }
+            let error = std::io::Error::last_os_error();
+            if error.kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return Err(error);
+        }
     }
 
     /// Deliver a controlled interrupt to the whole process group.
@@ -323,7 +355,48 @@ impl RunningCommand {
     }
 
     /// SIGKILL the whole process group and retain bytes drained before death.
-    pub fn kill_and_wait(mut self) -> Result<CommandOutcome, DriverError> {
+    pub fn kill_and_wait(self) -> Result<CommandOutcome, DriverError> {
+        self.force_kill_and_finish()
+    }
+
+    /// Wait for completion while retaining all bytes drained before cleanup.
+    /// Timeout and interrupt are outcomes, not I/O errors.
+    pub fn wait(mut self, timeout: Option<Duration>) -> Result<CommandOutcome, DriverError> {
+        let limit = self.timeout.or(timeout);
+        loop {
+            if self.has_exited()? {
+                return self.reap_and_finish();
+            }
+            if let Some(limit) = limit
+                && self.started_at.elapsed() >= limit
+            {
+                self.interventions
+                    .push(HarnessIntervention::TimedOut(limit));
+                return self.force_kill_and_finish();
+            }
+            std::thread::sleep(TIMEOUT_POLL);
+        }
+    }
+
+    fn reap_and_finish(mut self) -> Result<CommandOutcome, DriverError> {
+        let mut cleanup = ProcessGroupCleanup::default();
+        // 先趁组首领尚未被 `wait` 回收、数值 `pgid` 仍被内核锁定时清理同组残留后代，再正式回收组首领。
+        if process_group_requires_cleanup(&mut cleanup, processes_in_pgid(self.pgid)) {
+            self.interventions.push(HarnessIntervention::ForcedKill);
+            cleanup.forced = true;
+            record_process_group_signal_result(
+                &mut cleanup,
+                CleanupOperation::SignalProcessGroup(libc::SIGKILL),
+                signal_process_group(self.pgid, libc::SIGKILL),
+                || processes_in_pgid(self.pgid),
+            );
+        }
+        let mut child = self.child.take().expect("running child");
+        let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
+        self.finish(status, cleanup)
+    }
+
+    fn force_kill_and_finish(mut self) -> Result<CommandOutcome, DriverError> {
         self.interventions.push(HarnessIntervention::ForcedKill);
         let mut cleanup = ProcessGroupCleanup {
             forced: true,
@@ -335,44 +408,10 @@ impl RunningCommand {
             signal_process_group(self.pgid, libc::SIGKILL),
             || processes_in_pgid(self.pgid),
         );
-        let child = self.child.as_mut().expect("running child");
+        let mut child = self.child.take().expect("running child");
         record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
         let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
         self.finish(status, cleanup)
-    }
-
-    /// Wait for completion while retaining all bytes drained before cleanup.
-    /// Timeout and interrupt are outcomes, not I/O errors.
-    pub fn wait(mut self, timeout: Option<Duration>) -> Result<CommandOutcome, DriverError> {
-        let limit = self.timeout.or(timeout);
-        loop {
-            if let Some(status) = self.child.as_mut().expect("running child").try_wait()? {
-                return self.finish(Some(status), ProcessGroupCleanup::default());
-            }
-            if let Some(limit) = limit
-                && self.started_at.elapsed() >= limit
-            {
-                self.interventions
-                    .push(HarnessIntervention::TimedOut(limit));
-                self.interventions.push(HarnessIntervention::ForcedKill);
-                let mut cleanup = ProcessGroupCleanup {
-                    forced: true,
-                    ..ProcessGroupCleanup::default()
-                };
-                record_process_group_signal_result(
-                    &mut cleanup,
-                    CleanupOperation::SignalProcessGroup(libc::SIGKILL),
-                    signal_process_group(self.pgid, libc::SIGKILL),
-                    || processes_in_pgid(self.pgid),
-                );
-                let child = self.child.as_mut().expect("running child");
-                record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
-                let status =
-                    record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
-                return self.finish(status, cleanup);
-            }
-            std::thread::sleep(TIMEOUT_POLL);
-        }
     }
 
     fn finish(
@@ -380,19 +419,6 @@ impl RunningCommand {
         status: Option<ExitStatus>,
         mut cleanup: ProcessGroupCleanup,
     ) -> Result<CommandOutcome, DriverError> {
-        self.child.take();
-        if !cleanup.forced
-            && process_group_requires_cleanup(&mut cleanup, processes_in_pgid(self.pgid))
-        {
-            self.interventions.push(HarnessIntervention::ForcedKill);
-            cleanup.forced = true;
-            record_process_group_signal_result(
-                &mut cleanup,
-                CleanupOperation::SignalProcessGroup(libc::SIGKILL),
-                signal_process_group(self.pgid, libc::SIGKILL),
-                || processes_in_pgid(self.pgid),
-            );
-        }
         if cleanup.forced
             && let Some(survivors) =
                 record_inspection_result(&mut cleanup, wait_for_process_group_exit(self.pgid))
@@ -415,12 +441,134 @@ impl RunningCommand {
 
 impl Drop for RunningCommand {
     fn drop(&mut self) {
-        if let Some(child) = self.child.as_mut() {
+        if let Some(mut child) = self.child.take() {
             kill_process_group(self.pgid);
             let _ = child.kill();
             let _ = child.wait();
         }
-        self.child.take();
+        let _ = finish_drain(self.stdout.take());
+        let _ = finish_drain(self.stderr.take());
+    }
+}
+
+/// 供 `ScenarioDaemon` 独占持有的未回收直接子进程句柄。
+///
+/// 只要该句柄尚未被回收入口按值消费，底层 `Child` 就从未调用过 `wait` 或 `try_wait`，
+/// 内核保证其数值 `pgid` 不会被其他新进程组复用；退出探测由调用方经 `pidfd` 完成。
+/// 一旦消费回收，立即产出 [`CommandOutcome`]，不再残留任何会在 `Drop` 时向数值进程组发信号的句柄。
+pub(crate) struct DaemonChild {
+    child: Option<Child>,
+    pid: u32,
+    pgid: u32,
+    stdout: Option<DrainHandle>,
+    stderr: Option<DrainHandle>,
+    interventions: Vec<HarnessIntervention>,
+}
+
+impl DaemonChild {
+    pub(crate) fn spawn(mut command: Command) -> std::io::Result<Self> {
+        command.stdin(Stdio::null());
+        command.stdout(Stdio::piped());
+        command.stderr(Stdio::piped());
+        set_new_process_group(&mut command);
+        let mut child = command.spawn()?;
+        let pid = child.id();
+        let pgid = match resolve_child_pgid(&child) {
+            Ok(pgid) => pgid,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
+        };
+        let stdout_stream = child.stdout.take();
+        let stderr_stream = child.stderr.take();
+        if let Err(error) = stdout_stream
+            .as_ref()
+            .map(set_nonblocking)
+            .transpose()
+            .and_then(|_| stderr_stream.as_ref().map(set_nonblocking).transpose())
+        {
+            kill_process_group(pgid);
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
+        let stdout = Some(drain_to_thread(stdout_stream));
+        let stderr = Some(drain_to_thread(stderr_stream));
+        Ok(Self {
+            child: Some(child),
+            pid,
+            pgid,
+            stdout,
+            stderr,
+            interventions: Vec::new(),
+        })
+    }
+
+    pub(crate) fn pid(&self) -> u32 {
+        self.pid
+    }
+
+    pub(crate) fn pgid(&self) -> u32 {
+        self.pgid
+    }
+
+    pub(crate) fn stderr_snapshot(&self) -> Vec<u8> {
+        self.stderr
+            .as_ref()
+            .map(|handle| handle.bytes.lock().expect("标准错误锁").clone())
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn record_intervention(&mut self, intervention: HarnessIntervention) {
+        self.interventions.push(intervention);
+    }
+
+    pub(crate) fn reap_exited(
+        mut self,
+        mut cleanup: ProcessGroupCleanup,
+    ) -> Result<CommandOutcome, DriverError> {
+        let mut child = self.child.take().expect("未回收的后台直接子进程");
+        let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
+        self.finish_outcome(status, cleanup)
+    }
+
+    pub(crate) fn force_reap(
+        mut self,
+        mut cleanup: ProcessGroupCleanup,
+    ) -> Result<CommandOutcome, DriverError> {
+        let mut child = self.child.take().expect("未回收的后台直接子进程");
+        record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
+        let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
+        self.finish_outcome(status, cleanup)
+    }
+
+    fn finish_outcome(
+        &mut self,
+        status: Option<ExitStatus>,
+        cleanup: ProcessGroupCleanup,
+    ) -> Result<CommandOutcome, DriverError> {
+        let (stdout, stdout_complete) = finish_drain(self.stdout.take())?;
+        let (stderr, stderr_complete) = finish_drain(self.stderr.take())?;
+        Ok(CommandOutcome {
+            stdout,
+            stderr,
+            stdout_complete,
+            stderr_complete,
+            termination: status.as_ref().and_then(process_termination),
+            interventions: std::mem::take(&mut self.interventions),
+            cleanup,
+        })
+    }
+}
+
+impl Drop for DaemonChild {
+    fn drop(&mut self) {
+        if let Some(mut child) = self.child.take() {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
         let _ = finish_drain(self.stdout.take());
         let _ = finish_drain(self.stderr.take());
     }
@@ -447,7 +595,6 @@ impl LatticeDriver {
         world: &ScenarioWorld,
         command: &LatticeCommand,
     ) -> Result<RunningCommand, DriverError> {
-        world.daemon.register(&self.binary)?;
         let mut cmd = world.command(&self.binary);
         cmd.args(&command.args);
         Ok(RunningCommand::spawn_with_timeout(cmd, command.timeout)?)
@@ -468,7 +615,6 @@ impl LatticeDriver {
         command: &LatticeCommand,
         input: &[u8],
     ) -> Result<CommandOutcome, DriverError> {
-        world.daemon.register(&self.binary)?;
         let mut stdin = tempfile::tempfile()?;
         stdin.write_all(input)?;
         stdin.rewind()?;
@@ -521,15 +667,13 @@ fn set_nonblocking(stream: &impl AsRawFd) -> std::io::Result<()> {
 }
 
 fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
+    let bytes = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let thread_bytes = Arc::clone(&bytes);
     let stop = Arc::new(AtomicBool::new(false));
     let thread_stop = Arc::clone(&stop);
     let thread = std::thread::spawn(move || {
-        let mut bytes = Vec::new();
         let Some(mut stream) = maybe else {
-            return Ok(DrainResult {
-                bytes,
-                reached_eof: true,
-            });
+            return Ok(true);
         };
         let mut chunk = [0_u8; 8192];
         let reached_eof = loop {
@@ -538,7 +682,12 @@ fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
             }
             match stream.read(&mut chunk) {
                 Ok(0) => break true,
-                Ok(read) => bytes.extend_from_slice(&chunk[..read]),
+                Ok(read) => {
+                    thread_bytes
+                        .lock()
+                        .expect("输出收集锁")
+                        .extend_from_slice(&chunk[..read]);
+                }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(TIMEOUT_POLL);
@@ -546,9 +695,13 @@ fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
                 Err(error) => return Err(error),
             }
         };
-        Ok(DrainResult { bytes, reached_eof })
+        Ok(reached_eof)
     });
-    DrainHandle { stop, thread }
+    DrainHandle {
+        bytes,
+        stop,
+        thread,
+    }
 }
 
 fn finish_drain(handle: Option<DrainHandle>) -> Result<(Vec<u8>, bool), DriverError> {
@@ -560,12 +713,13 @@ fn finish_drain(handle: Option<DrainHandle>) -> Result<(Vec<u8>, bool), DriverEr
         std::thread::sleep(TIMEOUT_POLL);
     }
     handle.stop.store(true, Ordering::Release);
-    let result = handle
+    let reached_eof = handle
         .thread
         .join()
         .map_err(|_| DriverError::DrainThreadPanicked)?
         .map_err(DriverError::Io)?;
-    Ok((result.bytes, result.reached_eof))
+    let bytes = std::mem::take(&mut *handle.bytes.lock().expect("输出收集锁"));
+    Ok((bytes, reached_eof))
 }
 
 fn record_cleanup_result<T>(
@@ -1328,5 +1482,98 @@ mod tests {
         assert!(outcome.cleanup.surviving_pids.is_empty());
         // `wait` 返回时进程组必须已经清空，不再额外等待。
         assert_eq!(process_group_members(pgid), Vec::<u32>::new());
+    }
+
+    fn assert_zombie_still_unreaped(pid: u32) {
+        // SAFETY: `info` 清零初始化；`WNOWAIT` 只观察子进程僵尸态而不消费退出状态。
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(
+            rc,
+            0,
+            "has_exited() 返回 true 后子进程不应已被提前回收: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: `waitid` 找到目标僵尸子进程时 `si_pid` 字段有效。
+        assert_eq!(unsafe { info.si_pid() } as u32, pid);
+    }
+
+    fn assert_child_reaped(pid: u32) {
+        // SAFETY: `info` 清零初始化；已被回收的子进程应返回 `ECHILD`。
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let rc = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                pid as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        assert_eq!(rc, -1, "回收后 waitid 应失败，实际仍观察到子进程 pid={pid}");
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+    }
+
+    #[test]
+    fn has_exited_observes_without_reaping_until_wait_or_kill_and_wait() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+
+        // 路径一：`has_exited()` 返回 `true` 后子进程仍未回收，随后的 `wait` 正常回收。
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf waited-out; exit 7"]);
+        let mut running = RunningCommand::spawn(cmd).expect("spawn wait child");
+        let pid = running.pgid();
+        while !running.has_exited().expect("轮询退出状态") {
+            assert!(Instant::now() < deadline, "子进程未在期限内退出");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_zombie_still_unreaped(pid);
+        let outcome = running
+            .wait(Some(Duration::from_secs(2)))
+            .expect("wait 回收已退出子进程");
+        assert!(outcome.is_clean_exit(7), "{}", outcome.summary());
+        assert_eq!(outcome.stdout, b"waited-out");
+        assert_child_reaped(pid);
+
+        // 路径二：`has_exited()` 返回 `true` 后子进程仍占住 `pgid`，随后的 `kill_and_wait` 安全发信号并回收。
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "printf loser-err >&2; exit 1"]);
+        let mut running = RunningCommand::spawn(cmd).expect("spawn kill_and_wait child");
+        let pid = running.pgid();
+        while !running.has_exited().expect("轮询退出状态") {
+            assert!(Instant::now() < deadline, "子进程未在期限内退出");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_zombie_still_unreaped(pid);
+        let outcome = running
+            .kill_and_wait()
+            .expect("kill_and_wait 回收已退出子进程");
+        assert_eq!(outcome.exit_code(), Some(1));
+        assert_eq!(outcome.stderr, b"loser-err");
+        assert!(outcome.cleanup.forced);
+        assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
+        assert_child_reaped(pid);
+
+        // 路径三：`has_exited()` 返回 `true` 后直接 Drop，同样在回收前安全向原组发信号并完成回收。
+        let mut cmd = Command::new("sh");
+        cmd.args(["-c", "exit 0"]);
+        let mut running = RunningCommand::spawn(cmd).expect("spawn drop child");
+        let pid = running.pgid();
+        while !running.has_exited().expect("轮询退出状态") {
+            assert!(Instant::now() < deadline, "子进程未在期限内退出");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_zombie_still_unreaped(pid);
+        drop(running);
+        assert_child_reaped(pid);
     }
 }

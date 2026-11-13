@@ -52,6 +52,8 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
     let driver = driver();
     let (world, spec) = direct_world("direct-turn-end-events-completed", "end-events", "");
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let server = wire_fake_llm(
         &world,
         "end-events",
@@ -130,6 +132,8 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
         "end-errors",
         "[llm.retry]\nmax_retries = 2\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(
         &world,
         "end-errors",

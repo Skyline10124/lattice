@@ -7,14 +7,14 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | IPC `stop`、`SIGTERM` 与 `SIGINT` 共用有界停机顺序：关闭新准入，在 `--drain-timeout` 内排空已接管工作；超时或排空中再收信号时停写会话库并以退出码 `4` 结束 |
-| 前提 | 用 `FakeLlmServer` 的 `ResponseGate` 保持已接管 Turn 在途，另备查询、取消与新提交客户端；以不同 `--drain-timeout` 启动前台 `daemon serve`；退场窗口的局部测试在回执之后持有 `InstanceLock` 或挂起尾段任务 |
+| 前提 | 用 `FakeLlmServer` 的 `ResponseGate` 保持已接管 `Turn` 在途，另备查询、取消与新提交客户端；经统一的后台生命周期接口按需传入 `--drain-timeout` 显式启动直接子进程后台；退场窗口的局部测试在回执之后持有 `InstanceLock` 或挂起尾段任务 |
 | 相关测试 | `direct_background`：`busy_cancel_and_stop_do_not_serialize_distinct_sessions`、`sigterm_drains_inflight_turn_and_exits_zero`、`sigint_right_after_ready_exits_zero_and_releases_resources`、`sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn`、`ipc_daemon_stop_drain_timeout_reports_unconfirmed_and_daemon_exits_four`、`second_sigterm_during_drain_triggers_immediate_timeout_exit_four`；`fast_cli_help`：`fast_daemon_serve_invalid_drain_timeout_exits_two` |
 
 ## 操作
 
-1. 经 IPC `stop`、`SIGTERM` 或 `SIGINT`（含就绪后无在途 Turn 时发送 `SIGINT`）发起停机；排空期间执行查询或取消原请求，尝试提交新工作，随后释放 `ResponseGate`。
-2. 以短 `--drain-timeout` 启动 `daemon serve`，在模型请求在途且阻塞时分别经 `SIGTERM` 与 `lattice daemon stop`（文本与 `--json`）触发排空超时，停机完成后启动新后台查询原 Turn 并续发新一轮；另对无效 `--drain-timeout` 运行 `daemon serve`。
-3. 以长 `--drain-timeout` 启动 `daemon serve`，第一次发送 `SIGTERM` 进入排空并确认 `daemon status` 为 `stopping: true`，在远早于排空上限时发送第二个 `SIGTERM`。
+1. 经公开 Local IPC `stop`、`SIGTERM` 或 `SIGINT`（含就绪后无在途 `Turn` 时发送 `SIGINT`）向自有后台发起停机；排空期间执行查询或取消原请求，尝试提交新工作，随后释放 `ResponseGate`，停机退场后显式启动新后台核对持久结局。
+2. 以短 `--drain-timeout` 显式启动自有后台，在模型请求在途且阻塞时分别经 `SIGTERM` 与 `lattice daemon stop`（文本与 `--json`）触发排空超时，停机完成后显式启动新后台查询原 `Turn` 并续发新一轮；另对无效 `--drain-timeout` 运行 `daemon serve`。
+3. 以长 `--drain-timeout` 显式启动自有后台，第一次发送 `SIGTERM` 进入排空并确认 `daemon status` 为 `stopping: true`，在远早于排空上限时发送第二个 `SIGTERM`。
 
 ## 断言
 

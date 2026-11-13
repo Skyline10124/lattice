@@ -42,6 +42,8 @@ fn direct_secrets_sentinels_never_leak_into_public_sinks() {
     // 不带密钥前缀、认证语法、URL 或 40 字符随机串：只有按已录入凭据值脱敏才能隐藏它。
     let credential = format!("fixture.{unique}");
     assert!(credential.len() < 40);
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
 
     let server = wire_fake_llm(&world, "dl-secret", SseScript::plain("hello"));
     world
@@ -158,6 +160,8 @@ fn direct_secrets_failure_bundle_redacts_sentinels() {
         ("protected", protected.as_str()),
         ("injected", injected.as_str()),
     ];
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(&world, "dl-sec-b", SseScript::plain(&reply));
     world
         .register_key(

@@ -28,6 +28,7 @@ pub use assert::{
     assert_stderr_contains, assert_stdout_contains, assert_stdout_contains_all, failure_dir,
     finalize_with_failure_artifacts,
 };
+pub use daemon::{DaemonError, DaemonOptions};
 pub use driver::processes_in_pgid;
 pub use driver::{
     CleanupError, CleanupOperation, CommandOutcome, CommandOutcomeSummary, DriverError,

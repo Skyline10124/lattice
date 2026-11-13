@@ -102,7 +102,6 @@ impl PtyTuiDriver {
         world: &ScenarioWorld,
         args: &[&str],
     ) -> Result<Self, PtyError> {
-        world.daemon.register(driver.binary_path())?;
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {

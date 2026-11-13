@@ -10,6 +10,8 @@ use support::*;
 fn direct_session_tree_rewind_and_context_isolation() {
     let driver = driver();
     let (world, spec) = direct_world("direct-tree-isolation", "isolation", "");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(&world, "isolation", SseScript::plain("answer"));
     let mut evidence = evidence(&world, &spec);
     let a = SessionSendDriver::new(&driver, &world, &spec, "isolation");

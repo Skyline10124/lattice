@@ -12,7 +12,8 @@ use std::sync::Mutex;
 
 use std::time::Duration;
 
-use crate::daemon::ScenarioDaemon;
+use crate::daemon::{DaemonError, DaemonOptions, ScenarioDaemon};
+use crate::driver::{CommandOutcome, LatticeDriver};
 use crate::scenario::{ScenarioBudget, ScenarioSpec};
 
 use thiserror::Error;
@@ -47,7 +48,7 @@ pub struct ScenarioWorld {
     port: u16,
     allowed_env: Mutex<HashMap<String, String>>,
     pub(crate) daemon: Arc<ScenarioDaemon>,
-    /// 场景唯一预算及其单步上限；首次 [`Self::budget`] 时登记，正常 daemon stop 也用它的剩余量。
+    /// 场景唯一预算及其单步上限；首次 [`Self::budget`] 时登记，后台启动与收尾共享同一起点。
     budget: Arc<BudgetSlot>,
 }
 
@@ -57,7 +58,7 @@ pub(crate) struct BudgetSlot(Mutex<Option<(ScenarioBudget, Duration)>>);
 
 impl BudgetSlot {
     fn budget(&self, spec: &ScenarioSpec) -> ScenarioBudget {
-        let mut slot = self.0.lock().expect("budget lock");
+        let mut slot = self.0.lock().expect("预算锁");
         let (budget, _) = slot.get_or_insert_with(|| {
             (
                 ScenarioBudget::new(spec.total_timeout()),
@@ -67,10 +68,20 @@ impl BudgetSlot {
         budget.clone()
     }
 
+    /// 后台启动与就绪轮询的绝对截止时间：取场景剩余预算与 5 秒上限中的较小值。
+    pub(crate) fn startup_deadline(&self) -> std::time::Instant {
+        let started = std::time::Instant::now();
+        let cap = started + crate::daemon::STARTUP_TIMEOUT;
+        match &*self.0.lock().expect("预算锁") {
+            Some((budget, _)) => budget.deadline(cap),
+            None => cap,
+        }
+    }
+
     /// 正常 stop 的绝对期限；取锁等待计入单步上限，已登记场景还受原总期限约束。
     pub(crate) fn normal_stop_deadline(&self) -> std::time::Instant {
         let started = std::time::Instant::now();
-        match &*self.0.lock().expect("budget lock") {
+        match &*self.0.lock().expect("预算锁") {
             Some((budget, step)) => budget.deadline(started + *step),
             None => started + ScenarioSpec::default_step_timeout(),
         }
@@ -182,17 +193,14 @@ impl ScenarioWorld {
     pub fn set_env(&self, key: impl Into<String>, value: impl Into<String>) {
         self.allowed_env
             .lock()
-            .expect("allowed_env lock")
+            .expect("环境白名单锁")
             .insert(key.into(), value.into());
     }
 
     /// 从允许列表移除变量，使子进程中该变量不存在。
     /// 将值设为空串仍表示变量已定义，不能代替不存在状态。
     pub fn unset_env(&self, key: &str) {
-        self.allowed_env
-            .lock()
-            .expect("allowed_env lock")
-            .remove(key);
+        self.allowed_env.lock().expect("环境白名单锁").remove(key);
     }
 
     pub fn init_git_project(&self) -> Result<(), WorldError> {
@@ -228,7 +236,7 @@ impl ScenarioWorld {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.project);
         cmd.env_clear();
-        for (key, value) in self.allowed_env.lock().expect("allowed_env lock").iter() {
+        for (key, value) in self.allowed_env.lock().expect("环境白名单锁").iter() {
             cmd.env(key, value);
         }
         cmd
@@ -319,7 +327,7 @@ impl ScenarioWorld {
         let mut pairs: Vec<_> = self
             .allowed_env
             .lock()
-            .expect("allowed_env lock")
+            .expect("环境白名单锁")
             .iter()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();
@@ -352,20 +360,90 @@ impl ScenarioWorld {
         Arc::clone(&self.budget)
     }
 
-    /// 显式收尾用于场景证据；Drop 仍覆盖断言 panic 的路径。预算耗尽时正常 stop 记为失败。
+    /// 按当前环境白名单快照显式启动场景后台并等待就绪。
+    pub fn start_daemon(&self) -> Result<(), DaemonError> {
+        self.start_daemon_with(&DaemonOptions::default())
+    }
+
+    /// 按当前环境白名单快照叠加选项覆盖，显式启动场景后台并等待就绪。
+    pub fn start_daemon_with(&self, options: &DaemonOptions) -> Result<(), DaemonError> {
+        let driver = LatticeDriver::from_env()?;
+        let mut snapshot = self.allowed_env.lock().expect("环境白名单锁").clone();
+        options.apply_env(&mut snapshot);
+        self.daemon.start(
+            driver.binary_path(),
+            &self.project,
+            snapshot,
+            options,
+            self.budget.startup_deadline(),
+        )
+    }
+
+    /// 停止当前后台并确认其完全退出后，按当前环境白名单快照重新启动后台并等待就绪。
+    pub fn restart_daemon(&self) -> Result<(), DaemonError> {
+        self.restart_daemon_with(&DaemonOptions::default())
+    }
+
+    /// 停止当前后台并确认其完全退出后，按指定选项与环境重新启动后台并等待就绪。
+    pub fn restart_daemon_with(&self, options: &DaemonOptions) -> Result<(), DaemonError> {
+        self.stop_daemon().map_err(DaemonError::StopFailed)?;
+        self.start_daemon_with(options)
+    }
+
+    /// 显式停止并清理自有后台，同时检查无残留后台；绝不隐式重启。
     pub fn stop_daemon(&self) -> Result<(), Vec<String>> {
         self.daemon.cleanup(self.budget.normal_stop_deadline())
     }
 
-    /// 场景显式 `daemon stop` 干净返回后立即调用：`owner.lock` 已可取得、`api.sock` 已撤下（立即核验）；
-    /// 旧后台组须在有界窗口内退空。
+    /// 场景显式 `daemon stop` 返回后立即调用：核验 `owner.lock` 与 `api.sock` 已释放，
+    /// 并在有界窗口内等待自有后台组退空。
     pub fn daemon_departed(&self) -> Result<(), Vec<String>> {
         self.daemon.departed()
     }
 
-    /// 进程控制仅作用于经过产物、状态根和组首领核对的后台。
+    /// 返回当前存活的自有后台组首领列表。
     pub fn daemon_pids(&self) -> std::io::Result<Vec<u32>> {
         self.daemon.owners()
+    }
+
+    /// 返回当前受管理后台的进程组号。
+    pub fn daemon_pgid(&self) -> Option<u32> {
+        self.daemon.pgid()
+    }
+
+    /// 向自有后台进程组发送 `SIGTERM`。
+    pub fn terminate_daemon(&self) -> Result<(), DaemonError> {
+        self.daemon.terminate()
+    }
+
+    /// 向自有后台进程组发送 `SIGINT`。
+    pub fn interrupt_daemon(&self) -> Result<(), DaemonError> {
+        self.daemon.interrupt()
+    }
+
+    /// 非阻塞检查自有后台直接子进程是否已退出。
+    pub fn daemon_has_exited(&self) -> Result<bool, DaemonError> {
+        self.daemon.has_exited()
+    }
+
+    /// 等待自有后台直接子进程退出（或取出最近一次已回收的退出结果）。
+    pub fn wait_daemon(&self, timeout: Option<Duration>) -> Result<CommandOutcome, DaemonError> {
+        self.daemon.wait(timeout)
+    }
+
+    /// 向自有后台进程组发送 `SIGKILL` 并回收退出结果。
+    pub fn kill_daemon(&self) -> Result<CommandOutcome, DaemonError> {
+        self.daemon.kill_and_wait()
+    }
+
+    /// 读取当前运行中（或最近一次已退出）自有后台的标准错误字节快照。
+    pub fn daemon_stderr(&self) -> Vec<u8> {
+        self.daemon.stderr_snapshot()
+    }
+
+    /// 取出最近一次已回收的自有后台 `CommandOutcome`。
+    pub fn take_daemon_outcome(&self) -> Option<CommandOutcome> {
+        self.daemon.take_outcome()
     }
 }
 

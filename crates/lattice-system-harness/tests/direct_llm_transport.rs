@@ -89,6 +89,8 @@ fn retry_after_is_honoured_and_requests_identify_lattice() {
     let driver = driver();
     let (world, spec) = direct_world("direct-transport-retry-after", "transport", RETRY_FAST);
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let server = wire_fake_llm(
         &world,
         "transport",
@@ -165,6 +167,8 @@ fn retry_after_beyond_limits_fails_at_once_with_the_provider_reason() {
             &format!("{limits}{RETRY_FAST}"),
         );
         world.set_env("LATTICE_TEST_TOOLS", "read_note");
+        world.budget(&spec);
+        world.start_daemon().expect("显式启动带测试工具的后台");
         // 第一个 Step 正常执行工具，限流落在第二个 Step。
         let server = wire_fake_llm(
             &world,
@@ -227,6 +231,8 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
     let spec = lattice_system_harness::ScenarioSpec::direct_local("direct-transport-overload");
     let world = lattice_system_harness::ScenarioWorld::new(&spec.name).expect("world");
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let provider = lattice_system_harness::ProviderFixture {
         protocol: lattice_system_harness::ProviderProtocol::AnthropicMessages,
         target: lattice_system_harness::ProviderTarget::Builtin("anthropic"),
@@ -324,6 +330,8 @@ fn overload_and_gateway_errors_retry_with_bounded_diagnostics() {
 fn unauthorized_request_fails_without_retry_notice() {
     let driver = driver();
     let (world, spec) = direct_world("direct-transport-unauthorized", "transport", RETRY_FAST);
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(
         &world,
         "transport",
@@ -376,6 +384,8 @@ fn stream_cut_before_completion_is_retried() {
     let driver = driver();
     let (world, spec) = direct_world("direct-transport-cut", "transport", RETRY_FAST);
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     // 第二个 Step 先遇到正常结束却没有结束事件的流，再遇到读到一半被
     // `RST_STREAM(INTERNAL_ERROR)` 重置的流，第三次成功。
     let server = wire_fake_llm(
@@ -447,6 +457,8 @@ fn multi_step_turn_reuses_one_connection_and_survives_server_close() {
     let driver = driver();
     let (world, spec) = direct_world("direct-transport-reuse", "transport", RETRY_FAST);
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let server = wire_fake_llm(
         &world,
         "transport",
@@ -521,6 +533,8 @@ fn unprocessed_requests_are_resent_inside_one_attempt() {
             "[llm.retry]\nmax_retries = 0\n",
         );
         world.set_env("LATTICE_TEST_TOOLS", "read_note");
+        world.budget(&spec);
+        world.start_daemon().expect("显式启动带测试工具的后台");
         // 第一个 Step 正常执行工具；第二个 Step 的请求先被拒绝，紧接着的重发得到回答。
         let server = wire_fake_llm(
             &world,
@@ -591,6 +605,8 @@ fn plaintext_local_provider_over_http1() {
     let driver = driver();
     let (world, spec) = direct_world("direct-transport-local-http1", "transport", RETRY_FAST);
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let server = FakeLlmServer::start_plain_http1(sequence(vec![
         tool_call(
             "call-1",

@@ -7,14 +7,14 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 回执丢失时按 TurnId 查询得到确定结果（已接受、在途或 NotFound），同一身份只被接受一次 |
-| 前提 | 从第一条 `submit` 记录保存 TurnId 与 SessionId；设置公开 IPC 的可控未读回执窗口；涉及工具不重放核对的用例开启 `fake-tools` feature（配 `test-fake-tools` 二进制与 `LATTICE_TEST_TOOLS`） |
+| 前提 | 显式启动自有后台后，从第一条 `submit` 记录保存 `TurnId` 与 `SessionId`；设置公开 Local IPC 的可控未读回执窗口；涉及工具不重放核对的用例开启 `fake-tools` feature（配 `test-fake-tools` 二进制并在启动后台前设置 `LATTICE_TEST_TOOLS`） |
 | 相关测试 | `direct_background`：`unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts`、`daemon_restart_reads_closed_result_without_resubmitting`、`turn_and_session_identity_conflicts_are_rejected_without_dispatch`；`direct_crash_barriers`：`cli_recovers_accepted_receipt_after_backend_crash`、`admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted` |
 
 ## 操作
 
-1. 在未读回执窗口断开提交连接，按 TurnId 查询。
+1. 在未读回执窗口断开提交连接，按 `TurnId` 查询。
 2. 以同一身份重新提交一次。
-3. 分别覆盖：向已有 Session 提交、不带 `--session` 的首次发送（先经 `configure(New)` 建立草稿会话、再提交）、后台持续运行与后台重启后的找回，以及原请求仍在准入时的查询。
+3. 分别覆盖：向已有会话提交、不带 `--session` 的首次发送（先经 `configure(New)` 建立草稿会话、再提交）、后台持续运行与显式重启后台后的找回，以及原请求仍在准入时的查询。
 
 ## 断言
 

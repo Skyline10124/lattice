@@ -61,6 +61,8 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         "failure",
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(&world, "failure", script);
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "failure");
@@ -144,6 +146,8 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
         "[llm.retry]\nmax_retries = 1\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     world.set_env("LATTICE_TEST_TOOLS", "read_note");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let usage = json!({"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":100},"completion_tokens_details":{"reasoning_tokens":20}});
     let priced = |script| SseScript::WithUsage {
         script: Box::new(script),
@@ -207,6 +211,8 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
         .unwrap();
     set_price("input = 6\noutput = 30\ncache_read = 1.5\ncache_write = 9");
     let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+    world.daemon_departed().unwrap();
+    world.start_daemon().expect("显式重启后台");
     let reopened = send
         .run_command(&[
             "--json",
@@ -393,6 +399,8 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
         "deadline",
         "[llm]\ntimeout_secs = 1\n",
     );
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     // 整份响应的 gate 在发送响应头之前等待，保护打开阶段的 deadline 轮询。
     let (server, gate) = wire_gated_fake_llm(&world, "deadline", SseScript::plain("never-served"));
     let evidence = evidence(&world, &spec);
@@ -459,6 +467,8 @@ fn stopped_after_reported_usage(deadline: bool) {
             ""
         },
     );
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let (server, gate) = FakeLlmServer::start_segmented(
         SseScript::Chunks { chunks: vec![
             json!({"choices":[],"usage":{"prompt_tokens":1000,"completion_tokens":100,"prompt_tokens_details":{"cached_tokens":200,"cache_creation_input_tokens":100},"completion_tokens_details":{"reasoning_tokens":20}}}),
@@ -532,6 +542,8 @@ fn stopped_after_reported_usage(deadline: bool) {
         ])
         .unwrap();
     let stopped = send.run_command(&["daemon", "stop"]).unwrap();
+    world.daemon_departed().unwrap();
+    world.start_daemon().expect("显式重启后台");
     let reopened = send
         .run_command(&[
             "--json",
@@ -623,6 +635,8 @@ fn direct_failure_mutation_survives_provider_failure() {
         "[llm.retry]\nmax_retries = 0\ninitial_delay_ms = 1\nmax_delay_ms = 1\n",
     );
     world.set_env("LATTICE_TEST_TOOLS", "write_marker");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let survivor_path = world
         .project_dir()
         .join("survivor.txt")
@@ -681,6 +695,8 @@ fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
     let driver = driver();
     let (world, spec) = direct_world("direct-failure-tool-error", "tool-fail", "");
     world.set_env("LATTICE_TEST_TOOLS", "check_gate");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let server = wire_fake_llm(
         &world,
         "tool-fail",
@@ -786,6 +802,8 @@ fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
 fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
     let driver = driver();
     let (world, spec) = direct_world("direct-failure-stale-parent", "busy", "");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let baseline_server = wire_fake_llm(&world, "busy", SseScript::plain("baseline done"));
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "busy");
@@ -870,6 +888,8 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
         "[llm]\ntimeout_secs = 2\n",
     );
     world.set_env("LATTICE_TEST_TOOLS", "hold_call,write_marker");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动带测试工具的后台");
 
     let ready_path = world.root().join("hold.ready");
     let marker_path = world.root().join("hold.marker");

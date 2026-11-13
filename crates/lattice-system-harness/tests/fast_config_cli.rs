@@ -12,48 +12,31 @@ use support::{cli, finish_recorded};
 
 #[test]
 fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
-    use lattice_system_harness::{LatticeDriver, RunningCommand, ScenarioEvidence};
+    use lattice_system_harness::{DaemonOptions, ScenarioEvidence};
     use std::time::Instant;
 
     let spec = ScenarioSpec::fast("metadata-auto-refresh-disabled");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     let budget = world.budget(&spec);
-    world.set_env("LATTICE_LOG", "info");
-    let driver = LatticeDriver::from_env().unwrap();
-    let log_path = world.root().join("daemon.stderr");
     let mut evidence = ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new()).unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        // 经驱动登记场景产物，使显式 serve 的产物也纳入场景清理；它不受进程组等待覆盖，见下方 stop 处。
-        let help = cli(&world, &spec, &["--help"]);
-        evidence.record_command("register binary", &help);
-        assert!(help.is_clean_exit(0));
-        // exec 保留驱动创建的进程组；独立日志文件可观察自动刷新分支完成。
-        let mut command = world.command("/bin/sh");
-        command
-            .args([
-                "-c",
-                "exec \"$1\" --verbose daemon serve --state-root \"$2\" 2>\"$3\"",
-                "metadata-daemon",
-            ])
-            .arg(driver.binary_path())
-            .arg(world.session_store_dir().parent().unwrap())
-            .arg(&log_path);
-        let mut daemon = RunningCommand::spawn(command).unwrap();
+        world
+            .start_daemon_with(&DaemonOptions::new().env("LATTICE_LOG", "info"))
+            .expect("显式启动禁用自动刷新的后台");
         let deadline = Instant::now() + budget.cap_timeout(spec.step_timeout());
         let log = loop {
-            let log = match std::fs::read_to_string(&log_path) {
-                Ok(log) => log,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(error) => panic!("daemon log: {error}"),
-            };
+            let log = String::from_utf8_lossy(&world.daemon_stderr()).into_owned();
             // 以跳过日志检查禁用分支的接线。
             if log.contains("automatic model metadata refresh disabled") {
                 break log;
             }
-            assert!(!daemon.has_exited().unwrap(), "daemon exited: {log}");
+            assert!(
+                !world.daemon_has_exited().unwrap(),
+                "后台在写出禁用刷新日志前提前退出: {log}"
+            );
             assert!(
                 Instant::now() < deadline,
-                "automatic refresh did not report skipping: {log}"
+                "后台未在预算内写出跳过自动刷新日志: {log}"
             );
             std::thread::yield_now();
         };
@@ -63,12 +46,10 @@ fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
         let stop = cli(&world, &spec, &["daemon", "stop"]);
         evidence.record_command("stop disabled refresh backend", &stop);
         assert!(stop.is_clean_exit(0));
-        // 这里的后台由场景显式 `daemon serve` 启动（带 --verbose），不在 harness 的归属识别内；
-        // 进程组的有界等待实际不覆盖它，只有锁与 socket 的立即核验生效，进程退出由下方 wait 核验。
         world.daemon_departed().unwrap();
-        let stopped = daemon
-            .wait(Some(budget.cap_timeout(spec.step_timeout())))
-            .unwrap();
+        let stopped = world
+            .take_daemon_outcome()
+            .expect("回收禁用刷新后台的退出结果");
         evidence.record_command("disabled refresh backend", &stopped);
         assert!(stopped.is_clean_exit(0));
         assert!(!world.home().join(".lattice/cache/models.json").exists());
@@ -89,6 +70,7 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
     std::fs::create_dir_all(directory.join("cache")).unwrap();
     let previous = br#"{"anthropic":{"models":{"cached-model":{"id":"cached-model","limit":{"output":8192}}}}}"#;
     std::fs::write(directory.join("cache/models.json"), previous).unwrap();
+    world.start_daemon().expect("以缺失证书根环境显式启动后台");
     let mut evidence =
         lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
             .unwrap();
@@ -133,6 +115,7 @@ fn models_display_merged_metadata_hide_deprecated_and_warn_missing_catalog() {
     let spec = ScenarioSpec::fast("models-metadata-display");
     let world = ScenarioWorld::new(&spec.name).unwrap();
     let budget = world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let directory = world.home().join(".lattice");
     std::fs::create_dir_all(directory.join("cache")).unwrap();
     std::fs::write(
@@ -625,6 +608,7 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     write_credential_providers(&world.home().join(".lattice"));
+    world.start_daemon().expect("显式启动后台");
     let mut evidence = lattice_system_harness::ScenarioEvidence::new(
         &world,
         &spec.name,
@@ -771,6 +755,7 @@ fn models_text_lists_the_selected_provider_without_the_key() {
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     write_credential_providers(&world.home().join(".lattice"));
+    world.start_daemon().expect("显式启动后台");
     world
         .register_key(
             ProviderFixture::chat_completions("current"),
@@ -816,6 +801,7 @@ fn models_redact_catalog_ids_that_match_a_known_credential() {
     world.budget(&spec);
     let directory = world.home().join(".lattice");
     write_credential_providers(&directory);
+    world.start_daemon().expect("显式启动后台");
     let mut evidence =
         lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, [CATALOG_KEY.to_owned()])
             .unwrap();
@@ -888,6 +874,7 @@ fn models_report_unreadable_credentials() {
     world.budget(&spec);
     let directory = world.home().join(".lattice");
     write_credential_providers(&directory);
+    world.start_daemon().expect("显式启动后台");
     let mut evidence =
         lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
             .unwrap();
@@ -982,6 +969,7 @@ fn models_name_available_providers_when_the_requested_one_is_absent() {
     let world = ScenarioWorld::new(&spec.name).unwrap();
     world.budget(&spec);
     write_credential_providers(&world.home().join(".lattice"));
+    world.start_daemon().expect("显式启动后台");
     let mut evidence =
         lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
             .unwrap();

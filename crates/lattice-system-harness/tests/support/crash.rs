@@ -1,121 +1,64 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-use lattice_system_harness::{
-    LatticeCommand, RunningCommand, ScenarioEvidence, ScenarioSpec, ScenarioWorld,
-};
+use lattice_system_harness::{RunningCommand, ScenarioEvidence, ScenarioSpec, ScenarioWorld};
 use std::time::{Duration, Instant};
 
-/// 屏障环境在后台启动时固定；不得通过重发前端请求改变常驻进程的环境。
+/// 屏障环境在后台启动时固定；复用统一生命周期停止旧后台、按当前环境快照重启并等待就绪。
 pub(crate) fn start(
     world: &ScenarioWorld,
     spec: &ScenarioSpec,
     budget: &lattice_system_harness::ScenarioBudget,
-) -> RunningCommand {
+) -> u32 {
     budget.check(&spec.name);
-    let owners = world.daemon_pids().expect("inspect previous daemon");
-    if !owners.is_empty() {
-        let stopped = super::driver()
-            .run(
-                world,
-                &LatticeCommand {
-                    args: vec!["--json".into(), "daemon".into(), "stop".into()],
-                    timeout: Some(budget.cap_timeout(spec.step_timeout())),
-                },
-            )
-            .expect("stop previous scenario daemon");
-        assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
-        // stop 返回即须已放开实例（锁与 socket 立即核验）；旧后台组退出另做有界等待。
-        // 此处停的是先前经归属识别的后台，进程组等待覆盖它。随后场景显式启动的 `daemon serve`
-        // 参数同样符合归属识别，之后 stop 时也受进程组等待约束。
-        world
-            .daemon_departed()
-            .expect("daemon stop returned before the previous backend departed");
-    }
-    budget.check(&spec.name);
-    let daemon = super::driver()
-        .start(
-            world,
-            &LatticeCommand {
-                args: vec![
-                    "daemon".into(),
-                    "serve".into(),
-                    "--state-root".into(),
-                    world
-                        .session_store_dir()
-                        .parent()
-                        .unwrap()
-                        .display()
-                        .to_string(),
-                ],
-                timeout: Some(budget.cap_timeout(spec.step_timeout())),
-            },
-        )
-        .expect("start feature daemon");
-    let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(5));
-    loop {
-        budget.check(&spec.name);
-        let status = super::driver()
-            .run(
-                world,
-                &LatticeCommand {
-                    args: vec!["--json".into(), "daemon".into(), "status".into()],
-                    timeout: Some(
-                        budget
-                            .cap_timeout(spec.step_timeout())
-                            .min(deadline.saturating_duration_since(Instant::now())),
-                    ),
-                },
-            )
-            .expect("query feature daemon");
-        if status.is_clean_exit(0) {
-            break;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "feature daemon did not start: {}",
-            status.summary()
-        );
-        std::thread::sleep(Duration::from_millis(10));
-    }
-    assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
-    daemon
+    world.restart_daemon().expect("启动特性后台");
+    let pgid = world.daemon_pgid().expect("特性后台进程组标识");
+    assert_eq!(world.daemon_pids().unwrap(), vec![pgid]);
+    pgid
 }
 
-/// 先核验后台确实停在SIGSTOP窗口，再杀后台；前端只能因连接关闭自行退出。
+/// 先核验后台确实停在 `SIGSTOP` 窗口，再强制终止后台；前端只能因连接关闭自行退出。
 pub(crate) fn kill(
     world: &ScenarioWorld,
-    daemon: RunningCommand,
+    daemon_pgid: u32,
     frontend: RunningCommand,
     evidence: &mut ScenarioEvidence,
     budget: &lattice_system_harness::ScenarioBudget,
 ) {
-    evidence.record_json("crash-processes", &serde_json::json!({
-        "backend_pid":daemon.pgid(),"backend_pgid":daemon.pgid(),"frontend_pgid":frontend.pgid(),
-        "binary":super::driver().binary_path(),"state_root":world.session_store_dir().parent()
-    })).unwrap();
-    assert_ne!(daemon.pgid(), frontend.pgid());
-    kill_backend(world, daemon, evidence, budget);
+    evidence
+        .record_json(
+            "crash-processes",
+            &serde_json::json!({
+                "backend_pid": daemon_pgid,
+                "backend_pgid": daemon_pgid,
+                "frontend_pgid": frontend.pgid(),
+                "binary": super::driver().binary_path(),
+                "state_root": world.session_store_dir().parent(),
+            }),
+        )
+        .unwrap();
+    assert_ne!(daemon_pgid, frontend.pgid());
+    kill_backend(world, daemon_pgid, evidence, budget);
     let disconnected = frontend.wait(None).unwrap();
     evidence.record_command("frontend observes backend crash", &disconnected);
     assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
 }
 
-/// 只杀停在屏障的自有后台，前端的调度与等待由场景控制。
+/// 只强制终止停在屏障的自有后台，前端的调度与等待由场景控制。
 pub(crate) fn kill_backend(
     world: &ScenarioWorld,
-    daemon: RunningCommand,
+    daemon_pgid: u32,
     evidence: &mut ScenarioEvidence,
     budget: &lattice_system_harness::ScenarioBudget,
 ) {
-    assert_eq!(world.daemon_pids().unwrap(), vec![daemon.pgid()]);
+    assert_eq!(world.daemon_pids().unwrap(), vec![daemon_pgid]);
     let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(2));
     loop {
         assert!(
             Instant::now() < deadline,
-            "scenario budget expired before backend SIGSTOP"
+            "后台进入 `SIGSTOP` 前场景预算已耗尽"
         );
-        let stat = std::fs::read_to_string(format!("/proc/{}/stat", daemon.pgid())).unwrap();
+        let stat = std::fs::read_to_string(format!("/proc/{daemon_pgid}/stat")).unwrap();
         if stat
             .rsplit_once(')')
             .unwrap()
@@ -127,11 +70,11 @@ pub(crate) fn kill_backend(
         }
         assert!(
             Instant::now() < deadline,
-            "ack was not followed by backend SIGSTOP"
+            "屏障确认文件写入后后台未进入 `SIGSTOP`"
         );
         std::thread::sleep(Duration::from_millis(5));
     }
-    let killed = daemon.kill_and_wait().unwrap();
+    let killed = world.kill_daemon().expect("强制终止停在屏障的自有后台");
     evidence.record_command("SIGKILL acknowledged backend barrier", &killed);
     super::assert_forced_kill(&killed);
     assert!(world.daemon_pids().unwrap().is_empty());

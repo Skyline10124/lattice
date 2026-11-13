@@ -12,6 +12,8 @@ use support::*;
 fn direct_turn_completed_reopen_contract() {
     let driver = driver();
     let (world, spec) = direct_world("direct-turn-contract", "dl-contract", "");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let server = wire_fake_llm(
         &world,
         "dl-contract",
@@ -158,6 +160,8 @@ fn direct_turn_registered_model_with_missing_credentials_rejects_before_acceptan
         .write_agent_profile("dl-sonnet", "anthropic/claude-sonnet-4-6")
         .unwrap();
     world.init_git_project().unwrap();
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "dl-sonnet");
     let resolved = send
@@ -254,6 +258,7 @@ fn direct_turn_availability_requirements_gate_submission_and_status() {
     world
         .write_agent_profile("dl-avail", "custom-key/chat")
         .unwrap();
+    world.start_daemon().expect("显式启动后台");
 
     let mut evidence = evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {

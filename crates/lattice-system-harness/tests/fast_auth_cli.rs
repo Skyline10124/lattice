@@ -6,8 +6,8 @@
 use std::{fs, os::unix::fs::PermissionsExt};
 
 use lattice_system_harness::{
-    CommandOutcome, LatticeCommand, LatticeDriver, ScenarioBudget, ScenarioEvidence, ScenarioSpec,
-    ScenarioWorld, assert_exit_code, assert_no_secret,
+    CommandOutcome, DaemonOptions, LatticeCommand, LatticeDriver, ScenarioBudget, ScenarioEvidence,
+    ScenarioSpec, ScenarioWorld, assert_exit_code, assert_no_secret,
 };
 
 const KEY: &str = "auth-cli-sentinel-secret-7Y29";
@@ -49,53 +49,18 @@ fn state(output: &CommandOutcome, provider: &str) -> Result<String, String> {
 #[test]
 fn fast_auth_stdin_status_permissions_and_rejections() {
     let spec = ScenarioSpec::direct_local("fast-auth-cli");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界");
     let budget = world.budget(&spec);
-    let driver =
-        LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary");
-    let mut evidence = ScenarioEvidence::new(&world, &spec.name, [KEY.into()]).expect("evidence");
-    world.set_env("LATTICE_LOG", "trace");
-    let state_root = world
-        .session_store_dir()
-        .parent()
-        .unwrap()
-        .display()
-        .to_string();
-    let daemon = driver
-        .start(
-            &world,
-            &LatticeCommand {
-                args: vec![
-                    "daemon".into(),
-                    "serve".into(),
-                    "--state-root".into(),
-                    state_root,
-                ],
-                timeout: Some(budget.cap_timeout(spec.step_timeout())),
-            },
-        )
-        .expect("start explicit daemon with captured output");
+    let driver = LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的二进制");
+    let mut evidence =
+        ScenarioEvidence::new(&world, &spec.name, [KEY.into()]).expect("创建场景证据");
+    world
+        .start_daemon_with(&DaemonOptions::new().env("LATTICE_LOG", "trace"))
+        .expect("显式启动带日志追踪的后台");
+    let daemon_pgid = world.daemon_pgid().expect("获取自有后台进程组");
     let result = (|| -> Result<(), String> {
-        let deadline = std::time::Instant::now() + budget.cap_timeout(spec.step_timeout());
-        loop {
-            let status = run(
-                &world,
-                &driver,
-                &budget,
-                &mut evidence,
-                &["--json", "daemon", "status"],
-                None,
-            )?;
-            if status.is_clean_exit(0) {
-                break;
-            }
-            if std::time::Instant::now() >= deadline {
-                return Err("explicit daemon did not start".into());
-            }
-            std::thread::yield_now();
-        }
-        if world.daemon_pids().map_err(|error| error.to_string())? != vec![daemon.pgid()] {
-            return Err("auth commands must use the explicitly started daemon".into());
+        if world.daemon_pids().map_err(|error| error.to_string())? != vec![daemon_pgid] {
+            return Err("凭据命令必须复用显式启动的自有后台".into());
         }
         let initial = run(
             &world,
@@ -312,8 +277,8 @@ fn fast_auth_stdin_status_permissions_and_rejections() {
     if let Err(errors) = world.stop_daemon() {
         failures.extend(errors);
     }
-    match daemon.wait(None) {
-        Ok(output) => {
+    match world.take_daemon_outcome() {
+        Some(output) => {
             evidence.record_command("lattice daemon serve (LATTICE_LOG=trace)", &output);
             for result in [assert_exit_code(&output, 0), assert_no_secret(&output, KEY)] {
                 if let Err(error) = result {
@@ -321,7 +286,7 @@ fn fast_auth_stdin_status_permissions_and_rejections() {
                 }
             }
         }
-        Err(error) => failures.push(error.to_string()),
+        None => failures.push("停止后台后未取回后台退出结果".into()),
     }
     evidence
         .finish_report((!failures.is_empty()).then(|| failures.join("\n")))
@@ -339,16 +304,19 @@ fn fast_invalid_home_keeps_daemon_available_and_preserves_configuration_reason()
         ),
     ] {
         let spec = ScenarioSpec::direct_local(format!("fast-auth-home-{name}"));
-        let world = ScenarioWorld::new(&spec.name).expect("world");
+        let world = ScenarioWorld::new(&spec.name).expect("创建场景世界");
         if let Some(home) = home {
             world.set_env("HOME", home);
         } else {
             world.unset_env("HOME");
         }
         let budget = world.budget(&spec);
-        let driver = LatticeDriver::from_env().expect("built lattice binary");
+        world
+            .start_daemon()
+            .expect("以无效 HOME 环境快照显式启动后台");
+        let driver = LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的二进制");
         let mut evidence =
-            ScenarioEvidence::new(&world, &spec.name, [KEY.into()]).expect("evidence");
+            ScenarioEvidence::new(&world, &spec.name, [KEY.into()]).expect("创建场景证据");
         let result = (|| -> Result<(), String> {
             for (args, input) in [
                 (vec!["--json", "auth", "status"], None),

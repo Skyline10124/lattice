@@ -6,9 +6,9 @@
 
 use lattice_system_harness::cli::run;
 use lattice_system_harness::{
-    AssertError, CommandOutcome, FAKE_API_KEY, FakeLlmServer, ProviderFixture, ProviderProtocol,
-    ProviderTarget, ScenarioSpec, ScenarioWorld, SseScript, TlsIdentity, assert_exit_code,
-    assert_exit_success,
+    AssertError, DaemonOptions, FAKE_API_KEY, FakeLlmServer, ProviderFixture, ProviderProtocol,
+    ProviderTarget, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SseScript, TlsIdentity,
+    assert_exit_code, assert_exit_success,
 };
 
 const SECRET_SENTINEL: &str = "sk-ant-dotenv-sentinel-4b91";
@@ -24,8 +24,23 @@ fn require(condition: bool, expected: impl Into<String>) -> Result<(), AssertErr
     }
 }
 
+fn new_evidence(world: &ScenarioWorld, name: &str) -> ScenarioEvidence {
+    ScenarioEvidence::new(
+        world,
+        name,
+        [SECRET_SENTINEL.to_owned(), FAKE_API_KEY.to_owned()],
+    )
+    .expect("创建场景证据")
+}
+
+fn finish_evidence(evidence: ScenarioEvidence, result: Result<(), AssertError>) {
+    evidence
+        .finish_report(result.err().map(|error| error.to_string()))
+        .unwrap_or_else(|report| panic!("{report}"));
+}
+
 fn unloaded_world(name: &str) -> ScenarioWorld {
-    let world = ScenarioWorld::new(name).expect("world");
+    let world = ScenarioWorld::new(name).expect("创建场景世界");
     for key in [
         "ANTHROPIC_API_KEY",
         "OPENAI_API_KEY",
@@ -57,7 +72,7 @@ fn unloaded_world(name: &str) -> ScenarioWorld {
                  OPENAI_COMPATIBLE_MODEL=model-from-dotenv\n"
             ),
         )
-        .expect("write .env");
+        .expect("写入 .env");
     world
 }
 
@@ -124,14 +139,27 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
                 }
                 world.set_env("OPENAI_COMPATIBLE_MODEL", "hostile-model");
             } else {
-                world.write_project_file(".env", &format!("{key_env}={SECRET_SENTINEL}\n{url_env}={}\nGOOGLE_API_KEY={SECRET_SENTINEL}\nGOOGLE_BASE_URL={}\nOPENAI_COMPATIBLE_MODEL=hostile-model\n", hostile.base_url(), hostile.base_url())).unwrap();
+                world
+                    .write_project_file(
+                        ".env",
+                        &format!(
+                            "{key_env}={SECRET_SENTINEL}\n{url_env}={}\nGOOGLE_API_KEY={SECRET_SENTINEL}\nGOOGLE_BASE_URL={}\nOPENAI_COMPATIBLE_MODEL=hostile-model\n",
+                            hostile.base_url(),
+                            hostile.base_url()
+                        ),
+                    )
+                    .unwrap();
             }
-            let missing = run(
-                &world,
-                &spec,
-                &["--json", "run", "boundary", "--agent", "boundary"],
-            );
-            let result = assert_exit_code(&missing, 2).and_then(|_| {
+            world.start_daemon().expect("显式启动后台");
+            let mut evidence = new_evidence(&world, &spec.name);
+            let result = (|| -> Result<(), AssertError> {
+                let missing = run(
+                    &world,
+                    &spec,
+                    &["--json", "run", "boundary", "--agent", "boundary"],
+                );
+                evidence.record_command("missing key rejection", &missing);
+                assert_exit_code(&missing, 2)?;
                 let sent =
                     lattice_system_harness::parse_send_stdout(&missing.stdout, missing.exit_code());
                 require(
@@ -139,34 +167,40 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
                         error.kind == "bad_request"
                             && error.message.contains(&format!("lattice auth set {id}"))
                     }),
-                    "environment key cannot accept Turn",
+                    "环境变量中的密钥不能通过轮次准入",
                 )?;
                 require(
                     server.captured_requests().is_empty(),
-                    "preaccept rejection sends no request",
-                )
-            });
-            assert_result(&world, &spec.name, &missing, result);
-            world.register_key(fixture, Some(FAKE_API_KEY)).unwrap();
-            let sent = run(
-                &world,
-                &spec,
-                &["--json", "run", "boundary", "--agent", "boundary"],
-            );
-            assert_result(&world, &spec.name, &sent, assert_exit_success(&sent));
-            let captures = server.captured_requests();
-            assert_eq!(captures.len(), 1);
-            assert_eq!(captures[0].model, "boundary");
-            assert_eq!(
-                captures[0].provider,
-                match id {
+                    "准入拒绝不得发出上游请求",
+                )?;
+                world.register_key(fixture, Some(FAKE_API_KEY)).unwrap();
+                let sent = run(
+                    &world,
+                    &spec,
+                    &["--json", "run", "boundary", "--agent", "boundary"],
+                );
+                evidence.record_command("formal key accepted", &sent);
+                assert_exit_success(&sent)?;
+                let captures = server.captured_requests();
+                require(captures.len() == 1, "正式凭据应恰好发出一笔请求")?;
+                require(captures[0].model == "boundary", "模型名必须来自正式配置")?;
+                let expected_provider = match id {
                     "openai" | "xai" => "responses",
                     "google" => "interactions",
                     "anthropic" => "anthropic",
                     _ => "openai",
-                }
-            );
-            assert!(hostile.captured_requests().is_empty());
+                };
+                require(
+                    captures[0].provider == expected_provider,
+                    "协议必须匹配正式配置",
+                )?;
+                require(
+                    hostile.captured_requests().is_empty(),
+                    "环境变量中的地址不得收到请求",
+                )
+            })();
+            evidence.record_captures(server.captured_requests());
+            finish_evidence(evidence, result);
         }
     }
 }
@@ -177,6 +211,7 @@ fn project_providers_are_ignored_and_old_model_syntax_is_configuration_rejection
     let world = unloaded_world(&spec.name);
     world.budget(&spec);
     world.init_git_project().unwrap();
+    world.start_daemon().expect("显式启动后台");
     let server = FakeLlmServer::start(SseScript::plain("project ignored")).unwrap();
     let hostile = FakeLlmServer::start(SseScript::plain("project endpoint")).unwrap();
     let fixture = ProviderFixture::chat_completions("boundary");
@@ -192,14 +227,17 @@ fn project_providers_are_ignored_and_old_model_syntax_is_configuration_rejection
     world
         .write_project_file(".lattice/providers.toml", &project_config)
         .unwrap();
-    for model in ["project/model", "sonnet", "compat:boundary"] {
-        world.write_agent_profile("boundary", model).unwrap();
-        let out = run(
-            &world,
-            &spec,
-            &["--json", "run", "boundary", "--agent", "boundary"],
-        );
-        let result = assert_exit_code(&out, 2).and_then(|_| {
+    let mut evidence = new_evidence(&world, &spec.name);
+    let result = (|| -> Result<(), AssertError> {
+        for model in ["project/model", "sonnet", "compat:boundary"] {
+            world.write_agent_profile("boundary", model).unwrap();
+            let out = run(
+                &world,
+                &spec,
+                &["--json", "run", "boundary", "--agent", "boundary"],
+            );
+            evidence.record_command(format!("reject {model}"), &out);
+            assert_exit_code(&out, 2)?;
             let sent = lattice_system_harness::parse_send_stdout(&out.stdout, out.exit_code());
             require(
                 sent.rejection().is_some_and(|error| {
@@ -210,22 +248,30 @@ fn project_providers_are_ignored_and_old_model_syntax_is_configuration_rejection
                             error.message.contains("<provider>/<model>")
                         }
                 }),
-                "configuration rejection retains kind and reason",
-            )
-        });
-        assert_result(&world, &spec.name, &out, result);
-    }
-    world
-        .write_agent_profile("boundary", &fixture.model_ref().unwrap())
-        .unwrap();
-    let out = run(
-        &world,
-        &spec,
-        &["--json", "run", "boundary", "--agent", "boundary"],
-    );
-    assert_result(&world, &spec.name, &out, assert_exit_success(&out));
-    assert_eq!(server.captured_requests().len(), 1);
-    assert!(hostile.captured_requests().is_empty());
+                "配置拒绝必须保留错误类型与原因",
+            )?;
+        }
+        world
+            .write_agent_profile("boundary", &fixture.model_ref().unwrap())
+            .unwrap();
+        let out = run(
+            &world,
+            &spec,
+            &["--json", "run", "boundary", "--agent", "boundary"],
+        );
+        evidence.record_command("accept formal provider", &out);
+        assert_exit_success(&out)?;
+        require(
+            server.captured_requests().len() == 1,
+            "正式提供方应收到一笔请求",
+        )?;
+        require(
+            hostile.captured_requests().is_empty(),
+            "项目目录中的提供方配置不得生效",
+        )
+    })();
+    evidence.record_captures(server.captured_requests());
+    finish_evidence(evidence, result);
 }
 
 #[test]
@@ -240,10 +286,17 @@ fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
     let target_ca = world.root().join("target-ca.pem");
     std::fs::write(&startup_ca, foreign.ca_pem()).unwrap();
     std::fs::write(&target_ca, TlsIdentity::shared().unwrap().ca_pem()).unwrap();
-    world.set_env("SSL_CERT_FILE", startup_ca.display().to_string());
+    // 启动前放置冲突的 `.env`，核验后台载入证书根时也不会读取工作区配置。
     world
         .write_project_file(".env", &format!("SSL_CERT_FILE={}\n", target_ca.display()))
         .unwrap();
+    world
+        .start_daemon_with(
+            &DaemonOptions::new().env("SSL_CERT_FILE", startup_ca.display().to_string()),
+        )
+        .expect("以初始证书环境显式启动后台");
+    // 前端随后改用目标证书根，已运行后台仍应保持启动时的信任链。
+    world.set_env("SSL_CERT_FILE", target_ca.display().to_string());
     world
         .write_agent_profile("boundary", "local/boundary")
         .unwrap();
@@ -254,29 +307,40 @@ fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
             FAKE_API_KEY,
         )
         .unwrap();
-    let args = &["--json", "run", "TLS boundary", "--agent", "boundary"];
-    let failed = run(&world, &spec, args);
-    assert_result(&world, &spec.name, &failed, assert_exit_code(&failed, 1));
-    let sent = lattice_system_harness::parse_send_stdout(&failed.stdout, failed.exit_code());
-    assert!(sent.accepted_turn_id().is_some());
-    assert!(server.rejected_handshakes() > 0);
-    assert!(server.captured_requests().is_empty());
-    world.set_env("SSL_CERT_FILE", target_ca.display().to_string());
-    world.stop_daemon().unwrap();
-    let accepted = run(&world, &spec, args);
-    assert_result(
-        &world,
-        &spec.name,
-        &accepted,
-        assert_exit_success(&accepted),
-    );
-    assert_eq!(server.captured_requests().len(), 1);
+    let mut evidence = new_evidence(&world, &spec.name);
+    let result = (|| -> Result<(), AssertError> {
+        let args = &["--json", "run", "TLS boundary", "--agent", "boundary"];
+        let failed = run(&world, &spec, args);
+        evidence.record_command("untrusted startup certificate", &failed);
+        assert_exit_code(&failed, 1)?;
+        let sent = lattice_system_harness::parse_send_stdout(&failed.stdout, failed.exit_code());
+        require(sent.accepted_turn_id().is_some(), "轮次应在连接前已获接受")?;
+        require(server.rejected_handshakes() > 0, "服务端应观察到握手被拒绝")?;
+        require(
+            server.captured_requests().is_empty(),
+            "握手失败不得送达请求体",
+        )?;
+        world
+            .restart_daemon_with(
+                &DaemonOptions::new().env("SSL_CERT_FILE", target_ca.display().to_string()),
+            )
+            .expect("以目标证书环境显式重启后台");
+        let accepted = run(&world, &spec, args);
+        evidence.record_command("restarted target certificate", &accepted);
+        assert_exit_success(&accepted)?;
+        require(
+            server.captured_requests().len() == 1,
+            "显式重启加载新证书后应成功完成请求",
+        )
+    })();
+    evidence.record_captures(server.captured_requests());
+    finish_evidence(evidence, result);
 }
 
 #[test]
 fn agents_use_backend_home_and_project_precedence() {
     let spec = ScenarioSpec::fast("agents-backend-home");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界");
     world.budget(&spec);
     world.init_git_project().unwrap();
     let server = FakeLlmServer::start(SseScript::plain("profile accepted")).unwrap();
@@ -295,8 +359,8 @@ fn agents_use_backend_home_and_project_precedence() {
         source.replace("harness agent", "global test agent"),
     )
     .unwrap();
-    // 固定为 umask 022 的默认权限，不随机器 umask 变化：全局 profile 可被他人读取，
-    // 只要不被 group/other 改写就应接受。
+    // 固定为 `umask 022` 的默认权限，不随机器 `umask` 变化：全局配置可被他人读取，
+    // 只要不被同组或其他用户改写就应接受。
     {
         use std::os::unix::fs::PermissionsExt;
         let mode = |path: &std::path::Path, mode: u32| {
@@ -307,14 +371,14 @@ fn agents_use_backend_home_and_project_precedence() {
         mode(&global.join("agent.toml"), 0o644);
     }
     std::fs::remove_file(&project_profile).unwrap();
-    // 录入凭据先启动后台；前端随后更换 HOME，仍通过相同的 XDG 状态根连接它。
+    // 后台显式以场景 `HOME` 快照启动并录入凭据；前端随后切换为独立的 `HOME`，仍通过同一状态根连接后台。
+    world.start_daemon().expect("以独立后台 HOME 显式启动后台");
     world.wire_provider(fixture, &server, FAKE_API_KEY).unwrap();
     let frontend_home = world.root().join("frontend-home");
     std::fs::create_dir_all(&frontend_home).unwrap();
     world.set_env("HOME", frontend_home.display().to_string());
     let mut evidence =
-        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, [FAKE_API_KEY.into()])
-            .unwrap();
+        ScenarioEvidence::new(&world, &spec.name, [FAKE_API_KEY.into()]).expect("创建场景证据");
     let result = (|| -> Result<(), AssertError> {
         let args = &["--json", "run", "profile sources", "--agent", "boundary"];
         let global_out = run(&world, &spec, args);
@@ -325,14 +389,14 @@ fn agents_use_backend_home_and_project_precedence() {
         evidence.record_command("project profile", &project_out);
         assert_exit_success(&project_out)?;
         let captures = server.captured_requests();
-        require(captures.len() == 2, "one request per accepted submission")?;
+        require(captures.len() == 2, "每次获接受的提交应各发出一笔请求")?;
         require(
             captures[0].raw["messages"][0]["content"] == "global test agent",
-            "backend global prompt",
+            "应读取后台 HOME 下的全局提示词",
         )?;
         require(
             captures[1].raw["messages"][0]["content"] == "harness agent",
-            "project prompt takes precedence",
+            "项目级提示词优先级高于全局提示词",
         )?;
         std::fs::write(&project_profile, "schema_version=@invalid").unwrap();
         let rejected = run(&world, &spec, args);
@@ -344,23 +408,23 @@ fn agents_use_backend_home_and_project_precedence() {
             sent.rejection().is_some_and(|error| {
                 error.kind == "bad_request" && error.message.contains("line 1")
             }),
-            "invalid project profile must not fall back to global",
+            "损坏的项目配置不得回退到全局配置",
         )?;
         require(
             server.captured_requests().len() == 2,
-            "rejected profile must not dispatch",
+            "被拒绝的配置不得发起请求",
         )
     })();
     evidence.record_captures(server.captured_requests());
-    evidence
-        .finish_report(result.err().map(|error| error.to_string()))
-        .unwrap_or_else(|report| panic!("{report}"));
+    finish_evidence(evidence, result);
 }
 
 #[test]
 fn fast_dotenv_cannot_redirect_state_root() {
     let spec = ScenarioSpec::fast("fast-dotenv-state-root");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界");
+    world.budget(&spec);
+    world.start_daemon().expect("以场景状态根显式启动后台");
     let server = FakeLlmServer::start(SseScript::plain("state initialized")).unwrap();
     world
         .wire_provider(
@@ -373,53 +437,40 @@ fn fast_dotenv_cannot_redirect_state_root() {
         .write_agent_profile("boundary", "local/boundary")
         .unwrap();
     world.init_git_project().unwrap();
-    let started = run(
-        &world,
-        &spec,
-        &["--json", "run", "initialize state", "--agent", "boundary"],
-    );
-    let hostile_home = world.root().join("hostile-home");
-    world
-        .write_project_file(
-            ".env",
-            &format!(
-                "HOME={}\nXDG_STATE_HOME={}/.local/state\n",
-                hostile_home.display(),
-                hostile_home.display(),
-            ),
-        )
-        .unwrap();
-    // XDG 变量缺失时应回落到原 HOME；status 不自启，错误重定向不会留下另一后台。
-    world.unset_env("XDG_STATE_HOME");
-    let status = run(&world, &spec, &["--json", "daemon", "status"]);
-    let result = assert_exit_success(&started)
-        .and_then(|_| assert_exit_success(&status))
-        .and_then(|_| {
-            require(
-                world.session_store_dir().join("lattice.redb").is_file(),
-                "state must remain under the scenario HOME",
-            )?;
-            require(
-                !hostile_home.exists(),
-                ".env HOME must contain no generated state",
+    let mut evidence = new_evidence(&world, &spec.name);
+    let result = (|| -> Result<(), AssertError> {
+        let started = run(
+            &world,
+            &spec,
+            &["--json", "run", "initialize state", "--agent", "boundary"],
+        );
+        evidence.record_command("initialize state", &started);
+        assert_exit_success(&started)?;
+        let hostile_home = world.root().join("hostile-home");
+        world
+            .write_project_file(
+                ".env",
+                &format!(
+                    "HOME={}\nXDG_STATE_HOME={}/.local/state\n",
+                    hostile_home.display(),
+                    hostile_home.display(),
+                ),
             )
-        });
-    assert_result(&world, &spec.name, &status, result);
-}
-
-fn assert_result(
-    world: &ScenarioWorld,
-    name: &str,
-    output: &CommandOutcome,
-    result: Result<(), AssertError>,
-) {
-    lattice_system_harness::finalize_with_failure_artifacts(
-        world,
-        name,
-        name,
-        output,
-        &[SECRET_SENTINEL, FAKE_API_KEY],
-        result,
-    )
-    .unwrap_or_else(|report| panic!("{report}"));
+            .unwrap();
+        // 前端环境移除 `XDG_STATE_HOME` 后应回退到前端 `HOME`，忽略工作区 `.env` 中的重定向并命中已运行的后台。
+        world.unset_env("XDG_STATE_HOME");
+        let status = run(&world, &spec, &["--json", "daemon", "status"]);
+        evidence.record_command("daemon status without XDG_STATE_HOME", &status);
+        assert_exit_success(&status)?;
+        require(
+            world.session_store_dir().join("lattice.redb").is_file(),
+            "会话库必须保留在后台状态根下",
+        )?;
+        require(
+            !hostile_home.exists(),
+            "工作区 .env 中的 HOME 不得生成任何状态目录",
+        )
+    })();
+    evidence.record_captures(server.captured_requests());
+    finish_evidence(evidence, result);
 }

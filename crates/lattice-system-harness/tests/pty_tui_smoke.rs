@@ -76,6 +76,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     let budget = world.budget(&spec);
     world.init_git_project().expect("init git project");
     budget.check(&spec.name);
+    world.start_daemon().expect("显式启动带测试工具的后台");
 
     let server =
         lattice_system_harness::FakeLlmServer::start(two_step_script()).expect("start fake llm");
@@ -339,6 +340,7 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
     let step = || budget.cap_timeout(spec.step_timeout());
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let usage = |input, output, cached| json!({"prompt_tokens":input,"completion_tokens":output,"prompt_tokens_details":{"cached_tokens":cached}});
     let with_usage = |script, value| SseScript::WithUsage {
         script: Box::new(script),
@@ -425,7 +427,9 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         tui.send_line("/quit").unwrap();
         tui.wait_for_exit(step()).unwrap();
         evidence.record_pty(tui.output());
-        world.stop_daemon().unwrap();
+        world
+            .restart_daemon()
+            .expect("显式重启后台后再重连终端界面");
 
         let mut reopened = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         let reload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -551,6 +555,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
+    world.start_daemon().expect("显式启动后台");
     let (server, gate) = support::wire_gated_fake_llm(
         &world,
         "tui-smoke",
@@ -595,7 +600,9 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         })();
         evidence.record_pty(reconnected.output());
         result.unwrap();
-        world.stop_daemon().unwrap();
+        world
+            .restart_daemon()
+            .expect("显式重启后台后再重连终端界面");
         let mut reopened = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         let reopened_result = (|| {
             reopened.wait_for_ready(budget.cap_timeout(spec.step_timeout()))?;
@@ -637,6 +644,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     let budget = world.budget(&spec);
     let step = || budget.cap_timeout(spec.step_timeout());
     let mut evidence = support::evidence(&world, &spec);
+    world.start_daemon().expect("显式启动后台");
     let (mut server, gate) = FakeLlmServer::start_segmented(
         SseScript::Sequence {
             scripts: vec![
@@ -885,6 +893,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
+    world.start_daemon().expect("显式启动后台");
     let (server, gate) = support::wire_gated_fake_llm(
         &world,
         "tui-smoke",
@@ -991,6 +1000,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
     spec.total_timeout_secs = Some(300);
     let budget = world.budget(&spec);
     let step = || budget.cap_timeout(spec.step_timeout());
+    world.start_daemon().expect("显式启动带测试工具的后台");
     let profile = "schema_version=1\n[agent]\nname='model-panel'\neffort='low'\n[prompt]\nsystem='Read panel note using read_panel_note.'\n[llm.retry]\nmax_retries=1\ninitial_delay_ms=1\nmax_delay_ms=1\n";
     world
         .write_project_file(".lattice/agents/model-panel/agent.toml", profile)
@@ -1162,7 +1172,9 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         tui.wait_for_exit(step()).unwrap();
         assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
         evidence.record_pty(tui.output());
-        world.stop_daemon().unwrap();
+        world
+            .restart_daemon()
+            .expect("显式重启后台后再重连终端界面");
         tui = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         tui.wait_for_ready(step()).unwrap();
         tui.wait_for(step(), |text| text.contains("panel inherited complete"))

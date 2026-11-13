@@ -7,16 +7,16 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 后台独占持久化的会话设置、草稿会话与项目绑定字节；模型与档位选择经 `configure` 立即保存并跨后续提交与重启沿用；`configure_committed` 与先 `configure` 后 `turn_accepted` 崩溃重开状态一致；旧 `SettingsVersion`、同会话忙时改设置、不支持的档位与跨项目发送均在写入前被拒绝，模型切换的档位调整在 TUI 中可见 |
-| 前提 | 场景 HOME 下配置指向本地 fake provider 的 `providers.toml` 与凭据（配置目录、profile 刷新与 TLS 读取时点见[配置来源与运行时重读](configuration-sources.md)）；无模型草稿会话夹具准备既未写 `[agent].model` 也未写默认 `[agent].effort` 的 agent；多步工具与 TUI 场景启用 `fake-tools` feature 与带门控的 fake provider，准备支持不同推理档位集合的模型；崩溃场景启用 `crash-barriers` feature 与带 `test-crash-barriers` 的产品二进制，分别设置 `configure_committed` 与 `turn_accepted` 屏障；非 UTF-8 路径场景创建名字含 `0xff` 字节的项目目录 |
+| 前提 | 显式启动自有后台后，在场景 `HOME` 下配置指向本地假 provider 的 `providers.toml` 与凭据（配置目录、配置快照刷新与根证书读取时点见[配置来源与运行时重读](configuration-sources.md)）；无模型草稿会话夹具准备既未写 `[agent].model` 也未写默认 `[agent].effort` 的 `agent`；多步工具与终端场景启用 `fake-tools` feature 与带门控的假 provider，准备支持不同推理档位集合的模型；崩溃场景启用 `crash-barriers` feature 与带 `test-crash-barriers` 的产品二进制，分别以带 `configure_committed` 或 `turn_accepted` 屏障的环境显式启动或重启后台；非 UTF-8 路径场景创建名字含 `0xff` 字节的项目目录 |
 | 相关测试 | `direct_background`：`draft_without_model_survives_restart_and_enforces_settings_version`、`public_choices_persist_and_model_changes_use_supported_fallbacks`、`cli_off_survives_tool_retry_restart_and_provider_failure`；`direct_crash_barriers`：`configure_committed_crash_leaves_single_draft_and_reports_unknown`、`accepted_session_settings_and_frozen_turn_reopen_before_receipt`；`fast_session_cli`：`non_utf8_project_path_round_trips_bytes_and_enforces_binding`；`pty_tui_smoke`：`pty_model_effort_selection_survives_retry_tools_and_reopening` |
 
 ## 操作
 
-1. 对未写 `[agent].model` 且未设默认档位的 agent 经公开 IPC 执行 `configure(New)`，停止并重启后台后查询 `session list` 与 `head`，直接提交一轮；再执行 `configure(Existing, model=M)` 后提交，随后分别携带旧 `SettingsVersion` 与新 `SettingsVersion` 各提交一次。
-2. 用 `--model`、`--effort`（含 `--effort off`）配置并提交，之后不带选择继续提交（含工具重试、后台重启与 provider 失败场景）；请求目标模型不支持的档位；切换到另一 provider 或不同档位集合的模型。
-3. 改写 agent 的 profile（换模型、档位与系统提示）及 `providers.toml` 中该模型的档位集合，在后台设 `turn_accepted` 崩溃屏障；分别对新会话执行 `configure(New)`、对已完成一轮的会话执行 `configure(Existing)`，两者都显式给出该 agent；再经不读回执的连接提交一轮，接受后 SIGKILL 后台。重启后台后查询 `head` 与视图，按 TurnId 查询这一轮并以同一 TurnId 重发；删除 profile 目录后，向同一会话不带选择继续发送；另在后台设 `configure_committed` 崩溃屏障，用 CLI `--json session send --agent A` 创建新会话触发 SIGKILL，等待前端退出并重启后台后查询会话状态、在同一会话继续发送。
+1. 对未写 `[agent].model` 且未设默认档位的 `agent` 经公开 Local IPC 执行 `configure(New)`，显式重启后台后查询 `session list` 与 `head`，直接提交一轮；再执行 `configure(Existing, model=M)` 后提交，随后分别携带旧 `SettingsVersion` 与新 `SettingsVersion` 各提交一次。
+2. 用 `--model`、`--effort`（含 `--effort off`）配置并提交，之后不带选择继续提交（含工具重试、显式重启后台与提供方失败场景）；请求目标模型不支持的档位；切换到另一提供方或不同档位集合的模型。
+3. 改写 `agent` 配置（换模型、档位与系统提示）及 `providers.toml` 中该模型的档位集合，以带 `turn_accepted` 崩溃屏障的环境显式重启后台；分别对新会话执行 `configure(New)`、对已完成一轮的会话执行 `configure(Existing)`，两者都显式给出该 `agent`；再经不读回执的连接提交一轮，接受后以 `SIGKILL` 中断后台。显式启动新后台后查询 `head` 与视图，按 `TurnId` 查询这一轮并以同一 `TurnId` 重发；删除配置目录后，向同一会话不带选择继续发送；另以带 `configure_committed` 崩溃屏障的环境显式重启后台，用 CLI `--json session send --agent A` 创建新会话触发 `SIGKILL`，等待前端退出并显式启动新后台后查询会话状态、在同一会话继续发送。
 4. 在名字含 `0xff` 字节的项目目录中运行 `lattice session send --agent A`，分别查看 `session list` 文本与 `--json` 输出，再在同一目录与另一目录各自运行 `--session S` 发送。
-5. 在 TUI 中用 `/model`、`/effort` 选定后提交并经历重试、工具与重新打开会话；在一轮执行中通过 `/model` 选定另一模型；待该轮结束后切换到不支持当前档位的模型。
+5. 在 TUI 中用 `/model`、`/effort` 选定后提交并经历重试、工具及显式重启后台后重新打开会话；在一轮执行中通过 `/model` 选定另一模型；待该轮结束后切换到不支持当前档位的模型。
 
 ## 断言
 
