@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 后台独占持久化的会话设置、草稿会话与项目绑定字节；模型与档位选择经 `configure` 立即保存并跨后续提交与重启沿用；`configure_committed` 与先 `configure` 后 `turn_accepted` 崩溃重开状态一致；旧 `SettingsVersion`、同会话忙时改设置、不支持的档位与跨项目发送均在写入前被拒绝，模型切换的档位调整在 TUI 中可见 |
-| 前提 | 显式启动自有后台后，在场景 `HOME` 下配置指向本地假提供方的 `providers.toml` 与凭据（配置目录、配置快照刷新与根证书读取时点见[配置来源与运行时重读](configuration-sources.md)）；无模型草稿会话夹具准备既未写 `[agent].model` 也未写默认 `[agent].effort` 的 `agent`；多步工具与终端场景启用 `fake-tools` `feature` 与带门控的假提供方，准备支持不同推理档位集合的模型；崩溃场景启用 `crash-barriers` `feature` 与带 `test-crash-barriers` 的产品二进制，分别以带 `configure_committed` 或 `turn_accepted` 屏障的环境显式启动或重启后台；非 UTF-8 路径场景创建名字含 `0xff` 字节的项目目录 |
+| 前提 | 显式启动自有后台后，在场景 `HOME` 下配置指向本地假 provider 的 `providers.toml` 与凭据（配置目录、配置快照刷新与根证书读取时点见[配置来源与运行时重读](configuration-sources.md)）；无模型草稿会话夹具准备既未写 `[agent].model` 也未写默认 `[agent].effort` 的 `agent`；多步工具与终端场景启用 `fake-tools` feature 与带门控的假 provider，准备支持不同推理档位集合的模型；崩溃场景启用 `crash-barriers` feature 与带 `test-crash-barriers` 的产品二进制，分别以带 `configure_committed` 或 `turn_accepted` 屏障的环境显式启动或重启后台；非 UTF-8 路径场景创建名字含 `0xff` 字节的项目目录 |
 | 相关测试 | `direct_background`：`draft_without_model_survives_restart_and_enforces_settings_version`、`public_choices_persist_and_model_changes_use_supported_fallbacks`、`cli_off_survives_tool_retry_restart_and_provider_failure`；`direct_crash_barriers`：`configure_committed_crash_leaves_single_draft_and_reports_unknown`、`accepted_session_settings_and_frozen_turn_reopen_before_receipt`；`fast_session_cli`：`non_utf8_project_path_round_trips_bytes_and_enforces_binding`；`pty_tui_smoke`：`pty_model_effort_selection_survives_retry_tools_and_reopening` |
 
 ## 操作

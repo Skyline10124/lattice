@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 观察者最后持有的条目与关闭后用历史查询重读的一致；已保存的对话、生成中的文字、执行 outcome 与结局，各自的显示与失败边界互相独立 |
-| 前提 | 显式启动自有后台（并发持有者用例在同一状态根并发启动多个 `daemon serve`）；多步 `Turn` 脚本（需要工具步骤的用例开启 `fake-tools` `feature`，配 `test-fake-tools` 二进制并在启动后台前设置 `LATTICE_TEST_TOOLS`）：可区分的用户与模型消息、工具结果；模型流中正文与推理内容交错到达（含 OpenAI 兼容流）；包含一次可重试的尝试失败 |
+| 前提 | 显式启动自有后台（并发持有者用例在同一状态根并发启动多个 `daemon serve`）；多步 `Turn` 脚本（需要工具步骤的用例开启 `fake-tools` feature，配 `test-fake-tools` 二进制并在启动后台前设置 `LATTICE_TEST_TOOLS`）：可区分的用户与模型消息、工具结果；模型流中正文与推理内容交错到达（含 OpenAI 兼容流）；包含一次可重试的尝试失败 |
 | 相关测试 | `direct_background`：`slow_watcher_cannot_block_execution_and_converges_to_history`、`concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history`、`long_session_pages_by_turn_and_rewind_replaces_the_path`、`a_live_new_turn_does_not_block_old_closed_observation`、`daemon_restart_reads_closed_result_without_resubmitting`；`direct_crash_barriers`：`slow_window_and_closed_snapshot_deliver_exact_history`；`pty_tui_smoke`：`pty_tui_smoke_runs_turn_and_quits_cleanly`、`pty_mid_model_reconnect_shows_new_suffix_before_completion` |
 
 ## 操作

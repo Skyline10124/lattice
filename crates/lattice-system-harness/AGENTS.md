@@ -27,7 +27,7 @@
 
 ## 约束
 
-- `Cargo.toml` 只引入通用测试、网络、TLS 与终端库，保持零 `lattice-*` 产品 `crate` 依赖，由 `cargo xtask harness-boundary` 守卫黑盒边界。
+- `Cargo.toml` 只引入通用测试、网络、TLS 与终端库，保持零 `lattice-*` 产品 crate 依赖，由 `cargo xtask harness-boundary` 守卫黑盒边界。
 - 场景只通过 `LATTICE_BIN`（推荐传入绝对路径）调用已构建产品，经公开 CLI、JSONL 与公开 Local IPC 核验行为。
 - 目标平台固定为 Linux，环境隔离、环境变量白名单与后台启动环境快照、`ScenarioWorld` 直接子进程后台显式管理与自有进程组清理、状态根残留后台检查、`ResponseGate`、预算、失败产物占用与脱敏均按[测试工程](../../docs/development/testing.md)执行；运行环境异常（含 PTY 环境错误）直接计为测试失败。
 - `FakeLlmServer` 经场景私有 `HOME` 下的 `providers.toml` 与 `lattice auth set` 接入正式配置入口；需要后台的场景先显式启动后台再录入凭据。验证变量未设置（如 `fast_env_boundary`）时调用 `unset_env` 移除变量，确保真正测试缺失态而非空字符串。

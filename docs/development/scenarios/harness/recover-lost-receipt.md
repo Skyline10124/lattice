@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 回执丢失时按 TurnId 查询得到确定结果（已接受、在途或 NotFound），同一身份只被接受一次 |
-| 前提 | 显式启动自有后台后，从第一条 `submit` 记录保存 `TurnId` 与 `SessionId`；设置公开 Local IPC 的可控未读回执窗口；涉及工具不重放核对的用例开启 `fake-tools` `feature`（配 `test-fake-tools` 二进制并在启动后台前设置 `LATTICE_TEST_TOOLS`） |
+| 前提 | 显式启动自有后台后，从第一条 `submit` 记录保存 `TurnId` 与 `SessionId`；设置公开 Local IPC 的可控未读回执窗口；涉及工具不重放核对的用例开启 `fake-tools` feature（配 `test-fake-tools` 二进制并在启动后台前设置 `LATTICE_TEST_TOOLS`） |
 | 相关测试 | `direct_background`：`unread_acceptance_is_found_by_turn_id_and_resubmission_conflicts`、`daemon_restart_reads_closed_result_without_resubmitting`、`turn_and_session_identity_conflicts_are_rejected_without_dispatch`；`direct_crash_barriers`：`cli_recovers_accepted_receipt_after_backend_crash`、`admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted` |
 
 ## 操作
