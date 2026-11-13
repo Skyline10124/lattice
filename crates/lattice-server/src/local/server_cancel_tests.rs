@@ -2179,6 +2179,89 @@ async fn symlinked_workspace_shares_canonical_project_binding() {
 }
 
 #[tokio::test]
+async fn symlinked_workspace_path_is_rejected_without_side_effects() {
+    fn assert_not_canonical<T: std::fmt::Debug>(
+        result: std::result::Result<T, LocalError>,
+        operation: &str,
+    ) {
+        let error = result.expect_err(&format!("{operation} 传入符号链接路径应被拒绝"));
+        assert_eq!(
+            error.kind,
+            LocalErrorKind::BadRequest,
+            "{operation} 应返回 BadRequest：{error}"
+        );
+        assert_eq!(
+            error.message, "workspace must be canonical",
+            "{operation} 应在规范路径核对处被拒绝：{error}"
+        );
+    }
+
+    let (dir, backend, client, task) = backend().await;
+    let provider = Provider::start().await;
+    config(dir.path(), &provider.endpoint);
+    let link_parent = tempfile::tempdir().expect("创建符号链接父目录");
+    let symlink_ws = link_parent.path().join("project-symlink");
+    std::os::unix::fs::symlink(dir.path(), &symlink_ws).expect("创建指向项目根的符号链接");
+
+    let rejected = new_session_id();
+    assert_not_canonical(
+        client.configure(configure_new(&symlink_ws, rejected)).await,
+        "configure(New)",
+    );
+    let missing = client
+        .session_head(rejected)
+        .await
+        .expect_err("被拒绝的 configure(New) 不应创建草稿会话");
+    assert_eq!(missing.kind, LocalErrorKind::NotFound, "{missing}");
+
+    let first = create_request(&client, dir.path()).await;
+    let sid = first.session;
+    client.submit(first).await.expect("在规范路径提交首轮");
+    idle(&backend).await;
+    let before = client
+        .session_head(sid)
+        .await
+        .expect("读取首轮之后的会话头");
+
+    assert_not_canonical(
+        client
+            .configure(ConfigureRequest {
+                session: ConfigureSession::Existing(sid),
+                workspace: symlink_ws.clone(),
+                agent: Some(AgentName::parse("local-test").unwrap()),
+                model: None,
+                effort: None,
+            })
+            .await,
+        "configure(Existing)",
+    );
+    assert_not_canonical(client.submit(raw_request(&symlink_ws, sid)).await, "submit");
+    assert_not_canonical(
+        client.rewind(sid, NodeId(0), symlink_ws.clone()).await,
+        "rewind",
+    );
+
+    let after = client
+        .session_head(sid)
+        .await
+        .expect("读取被拒请求之后的会话头");
+    assert_eq!(
+        after.position, before.position,
+        "被拒绝的 rewind 不应移动当前位置"
+    );
+    assert_eq!(
+        after.settings_version, before.settings_version,
+        "被拒绝的 configure 不应改动会话设置"
+    );
+    assert_eq!(
+        after.turn_id, before.turn_id,
+        "被拒绝的 submit 不应开始新的一轮"
+    );
+    assert_eq!(provider.finish().await.len(), 1, "只有首轮向模型发出请求");
+    finish(&backend, task).await;
+}
+
+#[tokio::test]
 async fn stop_request_queued_before_serve_drains_immediately_and_removes_socket() {
     let dir = tempfile::tempdir().unwrap();
     let layout = StateLayout::in_state_root(dir.path());
