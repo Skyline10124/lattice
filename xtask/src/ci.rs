@@ -367,7 +367,7 @@ fn run_cargo_test(
     }
 }
 
-/// 按依赖顺序（被依赖的在前）列出 workspace 成员 crate 名，不含 `xtask`。顺序是确定的：
+/// 按依赖顺序（被依赖的在前）列出全部 workspace 成员 crate 名，包括 `xtask` 自身。顺序是确定的：
 /// 同层按名称排序，门禁输出在多次运行之间保持一致。
 fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
     use std::collections::{BTreeMap, HashSet};
@@ -414,9 +414,7 @@ fn ordered_test_crates(metadata: &Metadata) -> anyhow::Result<Vec<String>> {
             }
         }
         let name = id_to_name.get(id).copied().unwrap_or("unknown");
-        if name != "xtask" {
-            order.push(name.to_owned());
-        }
+        order.push(name.to_owned());
     }
 
     for root in roots {
