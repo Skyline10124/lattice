@@ -1,6 +1,6 @@
 # lattice-ipc 工作指引
 
-定义本地 IPC 的请求、响应、登录帧、错误与模型/凭据展示类型，提供 `PROTOCOL_VERSION` 版本魔数、16 MiB 单帧分帧编解码、基于 `rustix` 的有效用户与对端 UID 核验、目录权限核验（`check_dir`）、登录 provider 校验（`require_chatgpt`）以及线上 JSON 形状快照门禁，被 `lattice-local` 与 `lattice-api` 使用。
+定义本地 IPC 的请求、响应、登录帧、错误与模型/凭据展示类型，提供 `PROTOCOL_VERSION` 版本魔数、16 MiB 单帧分帧编解码、基于 `rustix` 的有效用户与对端 UID 核验、目录权限核验（`check_dir`）、登录 provider 校验（`require_chatgpt`）以及线上 JSON 形状快照门禁，被 `lattice-local` 与 `lattice-server` 使用。
 
 ## 模块
 
@@ -26,8 +26,8 @@
 
 - `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 中，workspace 内部成员仅允许 `lattice-session`、`lattice-conversation`、`lattice-store`（当前仅引入前两者），由 `cargo xtask crate-boundary` 门禁强制检查。
 - `src/lib.rs` 仅公开 `ipc` 子模块（`auth`、`models`、`types` 保持私有），根模块保持显式重导出列表，不使用通配符 `*`，也不重导出 `SessionStore` 或存储写入接口；其他 crate 用不到的条目保持私有，仅供测试复用的魔数与分帧辅助收敛在 `test-utils` 下。
-- `AuthKey` 与响应分片缓冲 `ResponseFrame` 保持清零（`Zeroize`）且不实现暴露明文的 `Debug`；线上类型的字段顺序、serde 标签、`null`/省略规则与 `deny_unknown_fields` 严格受 `wire_shape.json` 守卫；`Availability::diagnostic` 文案须与 `lattice-llm` 保持逐字一致（由 `lattice-api` 配对对照测试锁定）。
-- 本 crate 之外：客户端句柄、观察流、登录客户端与日志初始化由 `lattice-local` 负责；实例锁（`owner.lock`）、socket 绑定与清理时序、`ApiError` 映射、`lattice-llm` 到展示类型的逐字段转换及后台执行协调均在 `lattice-api` 中完成。
+- `AuthKey` 与响应分片缓冲 `ResponseFrame` 保持清零（`Zeroize`）且不实现暴露明文的 `Debug`；线上类型的字段顺序、serde 标签、`null`/省略规则与 `deny_unknown_fields` 严格受 `wire_shape.json` 守卫；`Availability::diagnostic` 文案须与 `lattice-llm` 保持逐字一致（由 `lattice-server` 配对对照测试锁定）。
+- 本 crate 之外：客户端句柄、观察流、登录客户端与日志初始化由 `lattice-local` 负责；实例锁（`owner.lock`）、socket 绑定与清理时序、`ApiError` 映射、`lattice-llm` 到展示类型的逐字段转换及后台执行协调均在 `lattice-server` 中完成。
 
 ## 验证
 
@@ -36,4 +36,4 @@
 | 任何改动 | `env -u LATTICE_UPDATE_WIRE_SHAPE cargo test -p lattice-ipc` 与 `cargo clippy -p lattice-ipc --all-targets -- -D warnings` |
 | 修改线上类型、字段属性或协议分帧 | `env -u LATTICE_UPDATE_WIRE_SHAPE cargo test -p lattice-ipc wire_shape`（补齐 `src/wire_shape/fixtures/` 对应片段；故意变更线上格式时须先递增 `PROTOCOL_VERSION`，再以 `LATTICE_UPDATE_WIRE_SHAPE=1` 更新快照） |
 | 修改 `Cargo.toml` 依赖或 `test-utils` feature | `cargo xtask crate-boundary` 与 `cargo xtask harness-boundary` |
-| 修改被后台或前端消费的类型与方法 | `cargo test -p lattice-local`、`cargo test -p lattice-api`、`cargo test -p lattice-cli -p lattice-tui` |
+| 修改被后台或前端消费的类型与方法 | `cargo test -p lattice-local`、`cargo test -p lattice-server`、`cargo test -p lattice-cli -p lattice-tui` |

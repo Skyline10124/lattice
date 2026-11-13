@@ -16,7 +16,8 @@ model-metadata = ["dep:lattice-llm", "dep:tokio"]
 anyhow = { workspace = true }
 cargo_metadata = "0.19"
 chrono = { workspace = true }
-clap = { workspace = true }
+# 帮助文本含中文，按显示宽度对齐需要 clap 的 `unicode` feature。
+clap = { workspace = true, features = ["unicode"] }
 lattice-llm = { workspace = true, optional = true }
 regex = { workspace = true }
 serde = { workspace = true }
@@ -26,6 +27,3 @@ tempfile = { workspace = true }
 tokio = { workspace = true, optional = true }
 toml = { workspace = true }
 walkdir = "2"
-
-[dev-dependencies]
-tempfile = { workspace = true }

@@ -16,7 +16,7 @@ status: active
 
 ```sh
 cargo test -p lattice-session
-cargo test -p lattice-api
+cargo test -p lattice-server
 cargo test -p lattice-agent --features test-utils
 
 cargo test -p lattice-system-harness --test direct_tree_session
@@ -33,12 +33,12 @@ cargo test --workspace --release
 ### 显式 feature 目标
 
 ```sh
-cargo build -p lattice-cli --bin lattice --features test-fake-tools
+cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools
 LATTICE_BIN="$(pwd)/target/debug/lattice" \
   cargo test -p lattice-system-harness --features fake-tools \
   --test direct_tree_session --test direct_failures --test pty_tui_smoke
 
-cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers
+cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers
 LATTICE_BIN="$(pwd)/target/debug/lattice" \
   cargo test -p lattice-system-harness --features fake-tools,crash-barriers \
   --test direct_crash_barriers

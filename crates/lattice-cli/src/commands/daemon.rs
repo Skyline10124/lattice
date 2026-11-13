@@ -86,9 +86,9 @@ pub async fn serve(
     explicit_state_root: Option<&Path>,
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
-) -> anyhow::Result<lattice_api::local::ServeExit> {
+) -> anyhow::Result<lattice_server::ServeExit> {
     let root = state_root(explicit_state_root)?;
-    lattice_api::local::serve(
+    lattice_server::serve(
         StateLayout::in_state_root(&root),
         std::env::var_os("HOME").map(PathBuf::from),
         drain_timeout,

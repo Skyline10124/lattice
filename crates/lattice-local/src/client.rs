@@ -426,14 +426,12 @@ impl LocalClient {
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null());
-            // fork 后只调用 async-signal-safe setsid，使后台脱离终端进程组。
+            // fork 后只调用异步信号安全的 setsid，使后台脱离终端进程组。
             unsafe {
                 command.pre_exec(|| {
-                    if libc::setsid() < 0 {
-                        Err(std::io::Error::last_os_error())
-                    } else {
-                        Ok(())
-                    }
+                    rustix::process::setsid()
+                        .map(|_| ())
+                        .map_err(std::io::Error::from)
                 });
             }
             let mut child = command.spawn()?;

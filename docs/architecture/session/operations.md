@@ -6,38 +6,43 @@ status: active
 
 > 所属领域：[会话与 Turn](README.md)
 
-以下将前面的角色对应到代码模块，展开调用入口和内部协作。`lattice-api` 负责跨领域协调，把 `ToolExecutor` 工具执行接缝、模型网关和会话库写入接入 Turn；适用边界见[范围与禁止事项](concurrency.md#范围与禁止事项)。
+以下将前面的角色对应到代码模块，并按**产品 IPC 协议与客户端门面**、**后台宿主入口**、**后台内部实现**和**领域与网关 crate** 分清调用层级。`lattice-server` 负责后台内的跨领域协调，把工具执行接缝、模型网关和会话库写入接入 Turn；适用边界见[范围与禁止事项](concurrency.md#范围与禁止事项)，公开面规则见[Crate 职责与依赖边界](../crates.md)。
 
-| 模块 | 具体职责 |
-| --- | --- |
-| `lattice-local::LocalClient` / `LocalTurn` | `client.rs` 封装连接与分帧，交付 `configure`、视图与只读查询；`operation.rs` 的具体 LocalTurn 管理提交、取消回执与退出交接 |
-| `lattice-api::local::serve` | 持有实例锁和 socket、接收并核验连接、管理连接任务，并在 `configure(New)` 后触发后台草稿清理；实例退出时释放资源 |
-| `Backend` / `Owner` | Backend 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态；Owner 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接运行，监督者等待操作收尾后才移除 Owner |
-| `lattice-api::configure` | 解析并校验会话设置：加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执 |
-| `lattice-api::SessionApi` | 列表、日志、退回、对话条目与历史查询的领域入口，向后台返回会话事实和对话内容 |
-| `lattice-api::TurnCoordinator`、`ToolExecutor` 及执行核心 | 唯一持久 Turn 协调者，持有全 Turn 执行锁，接受前经注入的 `ToolExecutor::open_turn` 冻结本轮工具目录（生产默认 `NoTools`），从会话设置冻结输入，推进模型循环、调用执行、Step 与 Turn 关闭；会话库写入经 `lattice-session` 的领域接口完成 |
-| `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
-| `lattice-llm` | 请求网关：提供无凭据的模型档位能力查询（`model_supported_efforts`），统一判定可用性，`GatewayTurn::prepare` 完成提交准入与模型及档位复核，每次请求按 provider `id` 与模型 `id` 解析配置、取得凭据，完成 provider wire 请求、流事件适配和对话投影 |
-| `lattice-conversation` | 维护模型选择值（`ProviderId`、`ModelId`、`ModelRef`）、推理档位 `Effort`、有序消息、ToolCall typestate、调用结果与结构化 `ToolError`、内容摘要、尝试诊断和 usage 等纯数据 |
-| `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`ProjectPath`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录（含 `ProjectPath` 项目绑定）、会话树、会话设置（`SessionSettings` 与 `SettingsVersion`）、配置表、TurnId 索引与 InvocationId 索引；提供带类型的事务操作、由阶段给出结论与读取校验 |
-
-公开操作按用户要完成的工作划分：
-
-| 用途与操作 | 输入及前提 | 输出与效果 |
+| 层级 | 模块与入口 | 具体职责 |
 | --- | --- | --- |
-| 配置会话：`configure` | `New(SessionId)` 或 `Existing(SessionId)`、规范工作区 `workspace`（IPC 中为字节数组），以及可选的 `agent`、`model`、`effort`；`New` 必须给出 `agent` | 新建草稿会话并写入初始会话设置，或核对项目绑定后更新已有会话的会话设置并刷新 `updated_at`；返回 `ConfigureReply { head, adjustment }`（`adjustment` 为 `Option<EffortAdjustment { from, to }>`），观察者收到新的会话头。详情见[会话设置](settings.md) |
-| 查看会话：`list`、`log` | 无，或 SessionId | `list` 列出全部会话（草稿会话照常出现在列表中），每行给出 SessionId、项目绑定 `ProjectPath`（`--json` 中为原始字节数组，人类可读输出为有损文本）、当前节点序号、节点数、更新时间，以及最后一轮未关闭时它的 TurnId 和后台是否正在执行它；`log` 先给出项目绑定（同上，`--json` 为原始字节数组，人类可读输出为有损文本）、当前位置、当前 agent 与未关闭的最后一轮，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId 与 `TurnSummary` |
-| 观察会话：`watch` | SessionId | 推送会话头、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](recovery.md#观察与重连)；草稿会话与当前位置为根节点的会话同样可以观察（初始只有会话头），`configure` 成功后观察者收到新的会话头。会话不存在时返回 NotFound |
-| 查看会话头：`head` | SessionId | 返回与视图开头相同的会话头，完整字段为：`session_id`（会话身份）、`position`（当前节点序号）、`agent`（当前 agent，取自会话设置）、`model?`（会话设置中的模型 `id`）、`provider?`（会话设置中的 provider `id`）、`effort?`（会话设置中的推理档位）、`settings_version`（当前设置版本）、`turn_id?`（当前位置所属的那一轮；草稿会话与 `rewind` 回到根节点的会话均为空，因此不能用 `turn_id` 为空判断一个会话是不是草稿会话）、`owner`（`turn_id` 所示那一轮有没有 Owner）、`diagnostic?`（后台已知的执行诊断）、`path_replaced`（单次查询固定为 `false`；观察流中因 `rewind` 替换当前路径时为 `true`）。不读条目，不占观察许可；遇到同会话无 Turn 身份的操作在执行时等待其结束后读取。会话不存在时返回 NotFound |
-| 查看一个 Turn：`turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
-| 提交：`submit` | 已有会话的 SessionId、TurnId、`input`、规范工作区 `workspace`（IPC 中为字节数组），以及可选的 `expected_settings` | 后台分两段检查。登记准入时，在准入锁内依次检查：TurnId 正被在途请求使用，返回 Conflict（`turn_id_used`）；后台正在停机，返回 Stopping；全局 Owner 总数已达上限 32，返回 Busy。登记之后依次检查：TurnId 已在 TurnId 索引中，返回 Conflict（`turn_id_used`）；`workspace` 不是存在的规范绝对路径，返回 BadRequest；会话不存在，返回 NotFound；项目绑定不一致，返回 Conflict（`binding_mismatch`）；同一会话已有 Owner，返回 Busy；输入超过 2 MiB，返回 BadRequest；`SessionExecutionLock` 被占用，返回 Busy；给出了 `expected_settings` 且与当前设置版本不等，返回 Conflict（`settings_changed`）；最后检查网关配置、模型（含凭据）与本轮工具目录。接受事务写入时再核对一次绑定与设置版本，成功后返回 LocalTurn，见[请求接受](acceptance.md#请求接受)与[请求身份与找回](recovery.md#请求身份与找回) |
-| 查看用量：`usage` | SessionId | 当前路径上逐轮的用量与费用估算，给出当前路径合计和全会话合计（含 rewind 丢掉的分支）；用量口径与费用规则见[模型接入合同](../llm/usage.md#用量缓存与费用) |
-| 模型候选：`models` | `ModelCandidateQuery`：`List { provider: Option<ProviderId>, ready_only: bool }` 或 `Target(ModelRef)` | `List` 给出候选及各自的上下文窗口、输出上限、可用档位、价格与 `availability`，过滤 deprecated 与账号目录外的 `chatgpt` 模型；`ready_only` 为真时只返回 `ready` 候选且跳过不可用 provider 的模型与警告。`Target` 返回指定模型的单项候选（含 deprecated、目录外或无元数据的模型）及其 `availability`。合并只读当前全局配置与元数据；`List` 范围包含已登录且未被跳过的 `chatgpt` 且缺目录时先异步补拉，`Target` 保持纯本地，见[模型候选](../llm/models.md#模型候选) |
-| 凭据与元数据：`auth` 与 `models_refresh` 各命令 | 见[凭据命令](../llm/credentials.md#凭据命令) | 录入与删除 key、SIWC 登录与登出、provider 可用性状态；立即刷新 models.dev 与已登录账号的模型目录。两来源分别发布，部分失败返回失败来源、原因及已更新部分 |
-| 读取更早的对话：`history` | SessionId、节点 `before` 与轮数（1 到 100，超出返回 BadRequest） | 沿 `before` 的父链往回取完整的若干轮，条目与视图中的相同，见[观察与重连](recovery.md#观察与重连) |
-| 退回：`rewind` | SessionId、目标 NodeId 与规范工作区 `workspace`（IPC 中为字节数组） | 核对项目绑定 `ProjectPath`（错误诊断中的路径为有损文本）后，把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改会话设置，也不修改工作区文件 |
-| 请求取消：`LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
-| 停止后台：`stop` | 当前本地后台 | 关闭新准入并等待已接管操作收尾，socket 撤下、`owner.lock` 可取得后返回停止时已知状态；回执后限时内锁仍未放开报 Stopping |
+| 产品 IPC 协议 | `lattice-ipc`（`Request` / `Response`、`LoginAction` / `LoginResponse`、`ipc`） | 定义本地 IPC 请求、响应、登录交换帧、`LocalError` 及会话与模型展示类型；执行 16 MiB 单帧魔数校验、本进程有效 UID 读取与对端 UID 核验 |
+| 产品客户端门面 | `lattice-local`（`LocalClient`、`LocalTurn`、`LocalAuthLogin`） | 前端唯一的本地操作入口：`client.rs` 封装连接、按需拉起后台与单次 IPC 请求；`operation.rs` 的 `LocalTurn` 驱动提交、观察流重连、取消回执与 `detach` 退出交接；`login.rs` 的 `LocalAuthLogin` 驱动同连接 SIWC 登录交换 |
+| 后台宿主入口 | `lattice_server::{serve, ServeExit, DrainOutcome, InstanceLock}` | `lattice-server` 唯一的生产公开面，仅由宿主进程入口（`lattice daemon serve`）调用：持有实例锁和 socket、启动模型元数据调度、接收并核验连接，并在 `configure(New)` 后触发后台草稿清理；收尾后经 `ServeExit` 将 `DrainOutcome`、`InstanceLock` 与 `shutdown_deadline` 交回进程入口关闭 runtime |
+| 后台内部实现 | `lattice-server` 私有模块 `local::server`（`Backend` / `Owner`） | `Backend` 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态；`Owner` 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接运行，监督者等待操作收尾后才移除 `Owner` |
+| 后台内部实现 | `lattice-server` 私有模块 `root`、`configure`、`profile`、`config_rejection` | `LocalWorkspaceRoot::from_path` 解析并规范化工作区路径；`configure::resolve_settings` 加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执；`ConfigRejection` 单一入口生成脱敏单行配置拒绝 |
+| 后台内部实现 | `lattice-server` 私有模块 `session`（`SessionApi`）与 `stores` | 当前代会话库的内部异步门面与共享库句柄管理：在 `spawn_blocking` 中执行会话身份精确/前缀解析与用量读取，监控写提交异常并触发停写重开（`SessionApi` 生产不对外公开，仅在 `test` 或 `test-utils` 下供测试导出） |
+| 后台内部实现 | `lattice-server` 私有模块 `turn`（`TurnCoordinator`、`start_execution`、`ToolExecutor`） | 唯一持久 Turn 协调者，持有全 Turn `SessionExecutionLock`，接受前经注入的 `ToolExecutor::open_turn` 冻结本轮工具目录（生产默认私有 `NoTools`），从会话设置冻结输入，推进模型循环、调用执行、Step 与 Turn 关闭；会话库写入经 `lattice-session` 的领域接口完成（`start_turn` 与工具接缝类型仅在 `test` 或 `test-utils` 下供测试导出，`run_turn` 仅限本 crate 单元测试） |
+| 领域与网关 crate | `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
+| 领域与网关 crate | `lattice-llm` | 请求网关：提供无凭据的模型档位能力查询（`model_supported_efforts`），统一判定可用性，`GatewayTurn::prepare` 完成提交准入与模型及档位复核，每次请求按 provider `id` 与模型 `id` 解析配置、取得凭据，完成 provider wire 请求、流事件适配和对话投影 |
+| 领域与网关 crate | `lattice-conversation` | 维护模型选择值（`ProviderId`、`ModelId`、`ModelRef`）、推理档位 `Effort`、有序消息、ToolCall typestate、调用结果与结构化 `ToolError`、内容摘要、尝试诊断和 usage 等纯数据 |
+| 领域与网关 crate | `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`ProjectPath`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录（含 `ProjectPath` 项目绑定）、会话树、会话设置（`SessionSettings` 与 `SettingsVersion`）、配置表、TurnId 索引与 InvocationId 索引；提供带类型的事务操作、由阶段给出结论与读取校验 |
+
+公开入口按调用层级分为两类，后台内部实现不直接向外部调用方暴露：
+
+- **后台宿主入口（进程内 Rust 调用，非 IPC）**：`lattice_server::serve`，参数为状态布局、可选的 home 目录、排空上限与停机请求的接收端，返回 `ServeExit`；仅由 `lattice daemon serve` 在后台进程内调用。
+- **产品的 IPC 操作（前端经 `lattice-local` 发起，线上消息由 `lattice-ipc` 定义）**：客户端命令（`lattice-cli`）与交互界面（`lattice-tui`）全部通过下表中的客户端入口与本地 IPC 消息完成用户工作，不直接调用 `SessionApi`、`configure` 或 `TurnCoordinator`：
+
+| 用途与 IPC 消息 | 客户端入口（`lattice-local`） | 输入及前提 | 输出与效果 |
+| --- | --- | --- | --- |
+| 配置会话：`configure` | `LocalClient::configure_once`、`configure` | `New(SessionId)` 或 `Existing(SessionId)`、工作区路径 `workspace`（IPC 中为原始字节数组；必须是存在的规范绝对路径：后台规范化后核对结果与传入值相同，相对路径、含符号链接或 `..` 的路径以及无法规范化的路径均返回 BadRequest），以及可选的 `agent`、`model`、`effort`；`New` 必须给出 `agent` | 新建草稿会话并写入初始会话设置，或核对项目绑定后更新已有会话的会话设置并刷新 `updated_at`；返回 `ConfigureReply { head, adjustment }`（`adjustment` 为 `Option<EffortAdjustment { from, to }>`），观察者收到新的会话头。详情见[会话设置](settings.md) |
+| 解析会话身份：`resolve_session` | `LocalClient::resolve_session` | 完整 `SessionId` 或至少 4 个字符的前缀 | 精确身份优先，否则在同一读事务内按前缀做一次范围读取并返回匹配的 `SessionRecord`；空白或不足 4 个字符返回 BadRequest，无匹配返回 NotFound，多条匹配列出至多 5 个候选并返回 BadRequest |
+| 查看会话：`list`、`log` | `LocalClient::list_sessions`、`log` | 无，或 SessionId | `list` 列出全部会话（草稿会话照常出现在列表中），每行给出 SessionId、项目绑定 `ProjectPath`（`--json` 中为原始字节数组，人类可读输出为有损文本）、当前节点序号、节点数、更新时间，以及最后一轮未关闭时它的 TurnId 和后台是否正在执行它；`log` 先给出项目绑定（同上，`--json` 为原始字节数组，人类可读输出为有损文本）、当前位置、当前 agent 与未关闭的最后一轮，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId 与 `TurnSummary` |
+| 观察会话：`watch` | `LocalTurn`（`LocalClient::observe`、`follow_turn`、`start_turn`；底层 `LocalClient::watch` 仅在 `test` 或 `test-utils` 下导出） | SessionId | 推送会话头、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](recovery.md#观察与重连)；草稿会话与当前位置为根节点的会话同样可以观察（初始只有会话头），`configure` 成功后观察者收到新的会话头。会话不存在时返回 NotFound |
+| 查看会话头：`head` | `LocalClient::session_head` | SessionId | 返回与视图开头相同的会话头，完整字段为：`session_id`（会话身份）、`position`（当前节点序号）、`agent`（当前 agent，取自会话设置）、`model?`（会话设置中的模型 `id`）、`provider?`（会话设置中的 provider `id`）、`effort?`（会话设置中的推理档位）、`settings_version`（当前设置版本）、`turn_id?`（当前位置所属的那一轮；草稿会话与 `rewind` 回到根节点的会话均为空，因此不能用 `turn_id` 为空判断一个会话是不是草稿会话）、`owner`（`turn_id` 所示那一轮有没有 Owner）、`diagnostic?`（后台已知的执行诊断）、`path_replaced`（单次查询固定为 `false`；观察流中因 `rewind` 替换当前路径时为 `true`）。不读条目，不占观察许可；遇到同会话无 Turn 身份的操作在执行时等待其结束后读取。会话不存在时返回 NotFound |
+| 查看一个 Turn：`turn` | `LocalClient::turn`、`wait_for_turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
+| 提交：`submit` | `LocalClient::start_turn`（返回 `LocalTurn`） | 已有会话的 SessionId、TurnId、`input`、工作区路径 `workspace`（IPC 中为原始字节数组，要求同 `configure`），以及可选的 `expected_settings` | 后台分两段检查。登记准入时，在准入锁内依次检查：TurnId 正被在途请求使用，返回 Conflict（`turn_id_used`）；后台正在停机，返回 Stopping；全局 Owner 总数已达上限 32，返回 Busy。登记之后依次检查：TurnId 已在 TurnId 索引中，返回 Conflict（`turn_id_used`）；`workspace` 不是存在的规范绝对路径，返回 BadRequest；会话不存在，返回 NotFound；项目绑定不一致，返回 Conflict（`binding_mismatch`）；同一会话已有 Owner，返回 Busy；输入超过 2 MiB，返回 BadRequest；`SessionExecutionLock` 被占用，返回 Busy；给出了 `expected_settings` 且与当前设置版本不等，返回 Conflict（`settings_changed`）；最后检查网关配置、模型（含凭据）与本轮工具目录。接受事务写入时再核对一次绑定与设置版本，成功后由 `LocalTurn` 交付接受回执与观察更新，见[请求接受](acceptance.md#请求接受)与[请求身份与找回](recovery.md#请求身份与找回) |
+| 查看用量：`usage` | `LocalClient::usage` | SessionId（支持精确身份或前缀） | 当前路径上逐轮的用量与费用估算，给出当前路径合计和全会话合计（含 rewind 丢掉的分支）；用量口径与费用规则见[模型接入合同](../llm/usage.md#用量缓存与费用) |
+| 模型候选：`models` | `LocalClient::models` | `ModelCandidateQuery`：`List { provider: Option<ProviderId>, ready_only: bool }` 或 `Target(ModelRef)` | `List` 给出候选及各自的上下文窗口、输出上限、可用档位、价格与 `availability`，过滤 deprecated 与账号目录外的 `chatgpt` 模型；`ready_only` 为真时只返回 `ready` 候选且跳过不可用 provider 的模型与警告。`Target` 返回指定模型的单项候选（含 deprecated、目录外或无元数据的模型）及其 `availability`。合并只读当前全局配置与元数据；`List` 范围包含已登录且未被跳过的 `chatgpt` 且缺目录时先异步补拉，`Target` 保持纯本地，见[模型候选](../llm/models.md#模型候选) |
+| 凭据与元数据：`auth_*` 与 `models_refresh` | `LocalClient::{auth_set, auth_login, auth_logout, auth_remove, auth_status, models_refresh}` 与 `LocalAuthLogin` | 见[凭据命令](../llm/credentials.md#凭据命令) | 录入与删除 key、SIWC 登录与登出、provider 可用性状态；立即刷新 models.dev 与已登录账号的模型目录。两来源分别发布，部分失败返回失败来源、原因及已更新部分 |
+| 读取更早的对话：`history` | `LocalClient::history_before`（每次取 `HISTORY_TURNS` 轮） | SessionId、节点 `before` 与轮数（1 到 100，超出返回 BadRequest） | 沿 `before` 的父链往回取完整的若干轮，条目与视图中的相同，见[观察与重连](recovery.md#观察与重连) |
+| 退回：`rewind` | `LocalClient::rewind` | SessionId、目标 NodeId 与工作区路径 `workspace`（IPC 中为原始字节数组，要求同 `configure`） | 核对项目绑定 `ProjectPath`（错误诊断中的路径为有损文本）后，把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改会话设置，也不修改工作区文件 |
+| 请求取消：`cancel` | `LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId（`session cancel` 先经 `head` 查出当前轮的 TurnId） | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
+| 查看与停止后台：`status`、`stop` | `LocalClient::{status, ensure_running, stop}` | 当前本地后台 | `status` 返回后台 PID 与协议版本（`ensure_running` 在未运行时按需拉起）；`stop` 关闭新准入并等待已接管操作收尾，socket 撤下、`owner.lock` 可取得后返回停止时已知状态，回执后限时内锁仍未放开报 Stopping |
 
 CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](../llm/credentials.md#凭据命令)。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。
 
@@ -68,7 +73,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最后已知的提交、取消与诊断，或由 Drop 停止本地后续工作；两者都不新增取消。`LocalTurn::turn_id` 给出提交与取消共用的身份。
 
-公开类型与方法见[本地连接与读取](../../../crates/lattice-local/src/client.rs)、[LocalTurn 与客户端结果类型](../../../crates/lattice-local/src/operation.rs)及[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
+公开类型与方法见[本地客户端门面](../../../crates/lattice-local/src/lib.rs)、[本地连接与单次请求](../../../crates/lattice-local/src/client.rs)、[LocalTurn 与客户端结果类型](../../../crates/lattice-local/src/operation.rs)、[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)及[后台宿主入口](../../../crates/lattice-server/src/lib.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
 
 ## 凭据命令与私有交换
 

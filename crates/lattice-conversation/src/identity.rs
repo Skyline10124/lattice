@@ -1,15 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Strict typed identities (ADR 0005 §1).
+//! 严格类型化的身份值（ADR 0005 第 1 节）。
 //!
-//! `InvocationId` and `TurnId` are lowercase hyphenated UUID v4 values;
-//! `SessionId` is the existing production session identity (32 lowercase hex
-//! characters, as produced by `Uuid::new_v4().simple()` at session creation).
+//! `InvocationId` 与 `TurnId` 为带连字符的小写 UUID v4；`SessionId` 为会话创建时由
+//! `Uuid::new_v4().simple()` 生成的 32 位小写十六进制字符串。
 //!
-//! 本模块仅校验解析、显示与 serde 表示，不生成身份值：`InvocationId` 由
-//! `lattice-api::TurnCoordinator` 经可注入的 UUID v4 源生成，`SessionId` 与
-//! `TurnId` 由客户端经 `lattice_local` 生成（ADR 0009 决策 5）。同一身份不设
+//! 本模块仅校验解析、显示与 `serde` 表示，不生成身份值：`InvocationId` 由
+//! `lattice-server` 内部的 `TurnCoordinator` 经可注入的 UUID v4 源生成，`SessionId` 与
+//! `TurnId` 由客户端经 `lattice-local` 生成（ADR 0009 决策 5）。同一身份不设
 //! `String` 别名或第二个 newtype。
 
 use std::borrow::Cow;

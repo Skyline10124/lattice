@@ -1,12 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! One-attempt model step driver (ADR 0005 §10, #139-B Commit 4).
+//! 单次尝试模型步骤驱动器（ADR 0005 第 10 节）。
 //!
-//! This crate drives exactly one provider attempt per call and owns no
-//! persistence, invocation allocation, Tool execution, retry policy,
-//! reconciliation, or Turn lifecycle. Multi-step sequencing is owned by
-//! `lattice-api::TurnCoordinator`.
+//! 本 crate 每次调用只驱动一次 provider 尝试，不持有持久化、调用身份分配、工具执行、
+//! 重试策略、对账或 Turn 生命周期；多步编排由 `lattice-server` 内部的 `TurnCoordinator` 负责。
 
 pub mod model_step;
 

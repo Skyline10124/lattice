@@ -31,7 +31,7 @@ status: active
 
 ## 相关局部验证
 
-草稿会话的逾期清理属于后台内部并发与存储时机，由 [`server_configure_tests.rs`](../../../../crates/lattice-api/src/local/server_configure_tests.rs) 中的 API 局部测试（非 harness 场景）验证：
+草稿会话的逾期清理属于后台内部并发与存储时机，由 [`server_configure_tests.rs`](../../../../crates/lattice-server/src/local/server_configure_tests.rs) 中的后台局部测试（非 harness 场景）验证：
 
 - `cleanup_drafts_after_configure_new_respects_expiry_update_and_outcome`：期限判定、`updated_at` 刷新，以及 `configure(New)` 成功与被拒都会触发清理；
 - `cleanup_drafts_skips_watched_draft_until_watch_disconnects`：有观察者时保护草稿会话，观察断开后才可清理；

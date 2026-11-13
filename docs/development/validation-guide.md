@@ -13,7 +13,7 @@ status: active
 | 构建宿主 CLI | 用 `cargo build -p lattice-cli --bin lattice` 构建被测宿主二进制 |
 | 被测二进制与验证对象相符 | `LATTICE_BIN` 指向当前产物的绝对路径；`cargo test -p lattice-system-harness` 的工作目录是 crate 目录，相对路径会落在那里；worktree 中指向本 worktree 的产物。见[被测二进制](testing.md#被测二进制) |
 | 测试与产品的 profile 分开 | `cargo test --release` 只切换测试自身的 profile；验证 release 产品时，先构建 release 产物并更新 `LATTICE_BIN` |
-| 带 feature 的产物只用于对应场景 | 假工具与崩溃屏障场景使用带 `test-fake-tools`、`test-crash-barriers` 的产物（`cargo xtask ci` 第二轮也会用它覆盖 `target/debug/lattice`）；之后做普通验证前先重新构建无 feature 的二进制 |
+| 带 feature 的产物只用于对应场景 | 假工具与崩溃屏障场景使用带 `lattice-server/test-fake-tools`、`lattice-server/test-crash-barriers` 的产物（`cargo xtask ci` 第二轮也会用它覆盖 `target/debug/lattice`）；之后做普通验证前先重新构建无 feature 的二进制 |
 | 工具链固定 | Rust 工具链版本以 [`rust-toolchain.toml`](../../rust-toolchain.toml) 为准 |
 
 ## 环境与后台

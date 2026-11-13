@@ -1,0 +1,1869 @@
+// Copyright 2026 Ast Rin
+// SPDX-License-Identifier: Apache-2.0
+
+use super::{ipc, types::*};
+use crate::{
+    config_rejection::ConfigRejection,
+    root::LocalWorkspaceRoot,
+    session::{ApiError, SessionApi},
+    turn::{
+        RunTurnRequest, ToolExecutor, TurnAcceptance, TurnCompletion,
+        coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
+        observer::ObserverSink,
+    },
+};
+use futures::FutureExt;
+use lattice_session::{AgentName, StateLayout};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
+use tokio::{
+    net::{UnixListener, UnixStream},
+    sync::{oneshot, watch},
+    task::JoinSet,
+};
+
+#[cfg(test)]
+#[path = "server_configure_tests.rs"]
+mod configure_tests;
+#[cfg(test)]
+#[path = "server_models_tests.rs"]
+mod models_tests;
+
+/// 后台第 2 步排空的结束方式。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainOutcome {
+    /// 全部活动操作在期限内自然退休。
+    Completed,
+    /// 到达排空期限，或排空期间再次收到停机信号。
+    TimedOut,
+}
+
+/// `serve` 收尾后的返回结果；实例锁由 `instance` 继续持有，不因运行期错误提前释放。
+#[derive(Debug)]
+pub struct ServeExit {
+    pub drain: DrainOutcome,
+    pub failure: Option<LocalError>,
+    pub instance: ipc::InstanceLock,
+    /// 第 6 步的期限：最终释放与撤下 socket 已在它之前结束或放弃等待，进程入口以剩余时间关闭 runtime。
+    pub shutdown_deadline: std::time::Instant,
+}
+
+/// 单次操作的未确认收尾计数标记；仅在持有 `admission` 锁时经 `Admission::count_unconfirmed` 读写。
+#[derive(Default)]
+struct OperationRecord {
+    counted: AtomicBool,
+}
+
+#[derive(Default)]
+enum StopPhase {
+    #[default]
+    Running,
+    Draining {
+        deadline: tokio::time::Instant,
+    },
+    TimedOutDisablingWrites,
+    Finished {
+        status: DaemonStatus,
+    },
+}
+
+impl StopPhase {
+    fn is_stopping(&self) -> bool {
+        !matches!(self, Self::Running)
+    }
+}
+
+enum DrainDecision {
+    Running,
+    Waiting(tokio::time::Instant),
+    Decided(DrainOutcome),
+}
+
+struct Owner {
+    identity: Option<TurnRequest>,
+    session: Option<SessionId>,
+    reply: watch::Sender<Option<Response>>,
+    done: watch::Sender<Option<Result<()>>>,
+    observer: ObserverLease,
+    execution_cancel: Arc<AtomicBool>,
+    started: AtomicBool,
+    core: Mutex<Option<oneshot::Receiver<crate::session::Result<TurnCompletion>>>>,
+    store: Mutex<Option<SessionApi>>,
+    operation: Arc<OperationRecord>,
+}
+impl Owner {
+    fn reply(&self, response: Response) {
+        self.reply.send_replace(Some(response));
+    }
+}
+struct Admission {
+    drain_timeout: Duration,
+    stop: StopPhase,
+    turns: HashMap<TurnId, Arc<Owner>>,
+    sessions: HashMap<SessionId, Arc<Owner>>,
+    owners: Vec<Arc<Owner>>,
+    cleanups: Vec<Arc<OperationRecord>>,
+    diagnostics: HashMap<TurnId, LocalError>,
+    unconfirmed_operations: usize,
+}
+impl Default for Admission {
+    fn default() -> Self {
+        Self {
+            drain_timeout: Duration::from_secs(60),
+            stop: StopPhase::Running,
+            turns: HashMap::new(),
+            sessions: HashMap::new(),
+            owners: Vec::new(),
+            cleanups: Vec::new(),
+            diagnostics: HashMap::new(),
+            unconfirmed_operations: 0,
+        }
+    }
+}
+impl Admission {
+    fn count_unconfirmed(&mut self, operation: &OperationRecord) {
+        if !operation.counted.swap(true, Ordering::Relaxed) {
+            self.unconfirmed_operations += 1;
+        }
+    }
+}
+struct Backend {
+    #[cfg(test)]
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, ConfigRejection>,
+    metadata: Arc<super::metadata::MetadataRefresh>,
+    tools: Arc<dyn ToolExecutor>,
+    epoch: String,
+    admission: Mutex<Admission>,
+    changed: watch::Sender<u64>,
+    closed: watch::Sender<bool>,
+    stores: Arc<crate::stores::StoreManager>,
+    observers: Arc<Mutex<HashMap<SessionId, CachedObserver>>>,
+    subscriptions: tokio::sync::Semaphore,
+    #[cfg(test)]
+    gates: tests::Gates,
+}
+struct CachedObserver {
+    sink: Arc<ObserverSink>,
+    leases: usize,
+}
+struct ObserverLease {
+    sink: Arc<ObserverSink>,
+    session_id: SessionId,
+    cache: Arc<Mutex<HashMap<SessionId, CachedObserver>>>,
+}
+impl std::ops::Deref for ObserverLease {
+    type Target = Arc<ObserverSink>;
+    fn deref(&self) -> &Self::Target {
+        &self.sink
+    }
+}
+impl Drop for ObserverLease {
+    fn drop(&mut self) {
+        let mut cache = lock(&self.cache);
+        let entry = cache.get_mut(&self.session_id).expect("observer lease");
+        entry.leases -= 1;
+        if entry.leases == 0 {
+            cache.remove(&self.session_id);
+        }
+    }
+}
+const DRAFT_TTL_HOURS: i64 = 24;
+/// 同时登记的 Owner 上限；新的提交、configure、rewind 与草稿清理达到上限时都不再占位。
+const MAX_OWNERS: usize = 32;
+struct CleanupGuard {
+    backend: Arc<Backend>,
+    operation: Arc<OperationRecord>,
+}
+impl Drop for CleanupGuard {
+    fn drop(&mut self) {
+        let mut state = lock(&self.backend.admission);
+        state
+            .cleanups
+            .retain(|record| !Arc::ptr_eq(record, &self.operation));
+        self.backend.changed.send_modify(|v| *v += 1);
+    }
+}
+fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    mutex.lock().expect("backend lock poisoned")
+}
+fn internal() -> LocalError {
+    LocalError::new(
+        LocalErrorKind::Internal,
+        "backend operation failed; inspect durable state",
+    )
+}
+fn busy() -> LocalError {
+    LocalError::new(LocalErrorKind::Busy, "session has another owned operation")
+}
+fn conflict(reason: ConflictReason) -> LocalError {
+    LocalError {
+        conflict: Some(reason),
+        ..LocalError::new(
+            LocalErrorKind::Conflict,
+            match reason {
+                ConflictReason::SettingsChanged => "session settings changed",
+                _ => "request identity conflicts",
+            },
+        )
+    }
+}
+fn not_found() -> LocalError {
+    LocalError::new(LocalErrorKind::NotFound, "session or Turn not found")
+}
+fn uninitialized(error: &LocalError) -> bool {
+    matches!(
+        error.store.as_deref(),
+        Some(StoreDiagnostic::NotInitialized { .. })
+    )
+}
+async fn blocking<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    tokio::task::spawn_blocking(work)
+        .await
+        .map_err(|_| internal())?
+}
+impl Backend {
+    fn chatgpt_auth(&self) -> Result<lattice_llm::auth::ChatgptAuth> {
+        self.gateway
+            .as_ref()
+            .map(|gateway| gateway.chatgpt_auth())
+            .map_err(|error| ApiError::Configuration(error.clone()).into())
+    }
+
+    fn begin_stop(&self) {
+        let mut state = lock(&self.admission);
+        if !matches!(state.stop, StopPhase::Running) {
+            return;
+        }
+        let now = tokio::time::Instant::now();
+        let deadline = now
+            .checked_add(state.drain_timeout)
+            .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
+        state.stop = StopPhase::Draining { deadline };
+        self.metadata.stop();
+        if let Ok(gateway) = &self.gateway {
+            gateway.chatgpt_auth().stop_logins();
+        }
+        self.changed.send_modify(|v| *v += 1);
+    }
+
+    fn is_stopping(&self) -> bool {
+        lock(&self.admission).stop.is_stopping()
+    }
+
+    fn decide_drain(&self, force: bool) -> DrainDecision {
+        let mut state = lock(&self.admission);
+        let StopPhase::Draining { deadline } = state.stop else {
+            return DrainDecision::Running;
+        };
+        if state.owners.is_empty() && state.cleanups.is_empty() {
+            let status = self.status_locked(&state);
+            state.stop = StopPhase::Finished { status };
+            self.changed.send_modify(|v| *v += 1);
+            return DrainDecision::Decided(DrainOutcome::Completed);
+        }
+        if force || tokio::time::Instant::now() >= deadline {
+            state.stop = StopPhase::TimedOutDisablingWrites;
+            let active_ops: Vec<Arc<OperationRecord>> = state
+                .owners
+                .iter()
+                .map(|owner| owner.operation.clone())
+                .chain(state.cleanups.iter().cloned())
+                .collect();
+            for op in &active_ops {
+                state.count_unconfirmed(op);
+            }
+            return DrainDecision::Decided(DrainOutcome::TimedOut);
+        }
+        DrainDecision::Waiting(deadline)
+    }
+
+    fn stopped_status(&self) -> Option<DaemonStatus> {
+        match &lock(&self.admission).stop {
+            StopPhase::Finished { status } => Some(status.clone()),
+            StopPhase::Running
+            | StopPhase::Draining { .. }
+            | StopPhase::TimedOutDisablingWrites => None,
+        }
+    }
+
+    fn with_tools(
+        layout: StateLayout,
+        home: Option<std::path::PathBuf>,
+        tools: Arc<dyn ToolExecutor>,
+    ) -> Arc<Self> {
+        Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der(), tools)
+    }
+
+    fn with_tls_roots(
+        layout: StateLayout,
+        home: Option<std::path::PathBuf>,
+        roots: Vec<Vec<u8>>,
+        tools: Arc<dyn ToolExecutor>,
+    ) -> Arc<Self> {
+        let directory = super::auth::directory(home.as_deref())
+            .map_err(|error| ConfigRejection::new(&error.message, None));
+        let gateway = directory.clone().and_then(|directory| {
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
+            lattice_llm::RequestGateway::new(directory, roots)
+                .map(Arc::new)
+                .map_err(|error| ConfigRejection::new(&error.to_string(), Some(&auth)))
+        });
+        let stores = crate::stores::StoreManager::new(layout.clone());
+        Arc::new(Self {
+            #[cfg(test)]
+            layout,
+            home,
+            metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
+            gateway,
+            tools,
+            stores,
+            epoch: uuid::Uuid::new_v4().to_string(),
+            admission: Mutex::default(),
+            changed: watch::channel(0).0,
+            closed: watch::channel(false).0,
+            observers: Arc::default(),
+            subscriptions: tokio::sync::Semaphore::new(32),
+            #[cfg(test)]
+            gates: tests::Gates::default(),
+        })
+    }
+    fn observer(&self, session_id: SessionId) -> ObserverLease {
+        let mut cache = lock(&self.observers);
+        let entry = cache.entry(session_id).or_insert_with(|| CachedObserver {
+            sink: Arc::default(),
+            leases: 0,
+        });
+        entry.leases += 1;
+        ObserverLease {
+            sink: entry.sink.clone(),
+            session_id,
+            cache: self.observers.clone(),
+        }
+    }
+    fn status_locked(&self, state: &Admission) -> DaemonStatus {
+        DaemonStatus {
+            epoch: self.epoch.clone(),
+            stopping: state.stop.is_stopping(),
+            owners: state.owners.len(),
+            unconfirmed_operations: state.unconfirmed_operations,
+        }
+    }
+    fn status(&self) -> DaemonStatus {
+        let state = lock(&self.admission);
+        self.status_locked(&state)
+    }
+    #[cfg(test)]
+    fn has_active_work(&self) -> bool {
+        let state = lock(&self.admission);
+        !state.owners.is_empty() || !state.cleanups.is_empty()
+    }
+    #[cfg(test)]
+    fn has_cleanups(&self) -> bool {
+        !lock(&self.admission).cleanups.is_empty()
+    }
+    fn has_watchers(&self, session_id: SessionId) -> bool {
+        let sink = lock(&self.observers)
+            .get(&session_id)
+            .map(|entry| entry.sink.clone());
+        sink.is_some_and(|sink| sink.has_watchers())
+    }
+    fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
+        let mut state = lock(&self.admission);
+        if state.stop.is_stopping() {
+            return None;
+        }
+        let operation = Arc::new(OperationRecord::default());
+        state.cleanups.push(operation.clone());
+        Some(CleanupGuard {
+            backend: self.clone(),
+            operation,
+        })
+    }
+    fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
+        let backend = self.clone();
+        tokio::spawn(async move {
+            let operation = guard.operation.clone();
+            let _guard = guard;
+            backend.cleanup_drafts(operation).await;
+        });
+    }
+    async fn cleanup_drafts(self: &Arc<Self>, operation: Arc<OperationRecord>) {
+        if self.is_stopping() {
+            return;
+        }
+        let api = match self.open().await {
+            Ok(api) => api,
+            Err(error)
+                if uninitialized(&error)
+                    || error
+                        .recovery
+                        .as_ref()
+                        .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled) =>
+            {
+                return;
+            }
+            Err(error) => {
+                tracing::warn!("草稿清理打开会话库失败：{}", error.message);
+                return;
+            }
+        };
+        let cutoff = chrono::Utc::now() - chrono::Duration::hours(DRAFT_TTL_HOURS);
+        let candidates = match api.read(move |read| read.expired_drafts(cutoff)).await {
+            Ok(candidates) => candidates,
+            Err(error) => {
+                let local = LocalError::from(error);
+                tracing::warn!("草稿清理扫描候选会话失败：{}", local.message);
+                return;
+            }
+        };
+        #[cfg(test)]
+        tests::pause(&self.gates.cleanup_scanned).await;
+
+        for sid in candidates {
+            let owner = {
+                let mut state = lock(&self.admission);
+                if state.stop.is_stopping() {
+                    return;
+                }
+                if state.owners.len() >= MAX_OWNERS
+                    || state.sessions.contains_key(&sid)
+                    || self.has_watchers(sid)
+                {
+                    continue;
+                }
+                let owner = Arc::new(Owner {
+                    identity: None,
+                    session: Some(sid),
+                    reply: watch::channel(None).0,
+                    done: watch::channel(None).0,
+                    observer: self.observer(sid),
+                    execution_cancel: Arc::default(),
+                    started: AtomicBool::new(false),
+                    core: Mutex::new(None),
+                    store: Mutex::new(Some(api.clone())),
+                    operation: operation.clone(),
+                });
+                state.sessions.insert(sid, owner.clone());
+                owner.observer.owner_changed();
+                state.owners.push(owner.clone());
+                owner
+            };
+            let step = std::panic::AssertUnwindSafe(async {
+                #[cfg(test)]
+                tests::pause(&self.gates.cleanup_claimed).await;
+                let io = match CoordinatorStoreIo::acquire_api(api.clone(), sid).await {
+                    Ok(io) => io,
+                    Err(crate::turn::coordinator::CoordinatorIoError::Store(
+                        lattice_session::store::StoreError::Busy { .. },
+                    )) => return Ok(()),
+                    Err(error) => return Err(ApiError::from(error)),
+                };
+                owner.started.store(true, Ordering::Release);
+                io.delete_draft(cutoff)
+                    .await
+                    .map(|_| ())
+                    .map_err(ApiError::from)
+            })
+            .catch_unwind()
+            .await;
+            let reopen =
+                matches!(&step, Ok(Err(error)) if error.requires_reopen()) || step.is_err();
+            let result: Result<()> = match step {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(error)) => {
+                    let local = LocalError::from(error);
+                    tracing::warn!("清理草稿会话 {sid} 失败：{}", local.message);
+                    Err(local)
+                }
+                Err(_) => {
+                    let local = internal();
+                    tracing::warn!("清理草稿会话 {sid} 时发生内部错误");
+                    Err(local)
+                }
+            };
+            {
+                let mut state = lock(&self.admission);
+                if let Err(error) = &result
+                    && matches!(
+                        error.kind,
+                        LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
+                    )
+                    && (owner.started.load(Ordering::Acquire) || error.recovery.is_some())
+                {
+                    state.count_unconfirmed(&owner.operation);
+                }
+                if state
+                    .sessions
+                    .get(&sid)
+                    .is_some_and(|o| Arc::ptr_eq(o, &owner))
+                {
+                    state.sessions.remove(&sid);
+                    owner.observer.owner_changed();
+                }
+                state.owners.retain(|o| !Arc::ptr_eq(o, &owner));
+                owner.done.send_replace(Some(result));
+                self.changed.send_modify(|v| *v += 1);
+            }
+            drop(lock(&owner.store).take());
+            if reopen {
+                break;
+            }
+        }
+    }
+    async fn open(&self) -> Result<SessionApi> {
+        self.stores.acquire(false).await.map_err(Into::into)
+    }
+    async fn optional_store(&self) -> Result<Option<SessionApi>> {
+        let mut changed = self.stores.subscribe();
+        loop {
+            changed.borrow_and_update();
+            match self.open().await {
+                Ok(api) => return Ok(Some(api)),
+                Err(error) if uninitialized(&error) => return Ok(None),
+                Err(error)
+                    if !self.stores.is_stopped()
+                        && error
+                            .recovery
+                            .as_ref()
+                            .is_some_and(|r| r.cause == RecoveryCause::WriteDisabled) =>
+                {
+                    changed.changed().await.map_err(|_| internal())?;
+                }
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    fn claim(
+        self: &Arc<Self>,
+        operation: Request,
+        submitter: Option<UnixStream>,
+    ) -> Result<Arc<Owner>> {
+        let (identity, session) = match &operation {
+            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session)),
+            Request::Rewind { session_id, .. } => (None, Some(*session_id)),
+            Request::Configure { request } => (None, Some(request.session.id())),
+            _ => return Err(internal()),
+        };
+        let owner = {
+            let mut state = lock(&self.admission);
+            if identity
+                .as_ref()
+                .is_some_and(|r| state.turns.contains_key(&r.turn_id))
+            {
+                return Err(conflict(ConflictReason::TurnIdUsed));
+            }
+            if identity.is_none() && session.is_some_and(|sid| state.sessions.contains_key(&sid)) {
+                return Err(busy());
+            }
+            if state.stop.is_stopping() {
+                return Err(LocalError::new(
+                    LocalErrorKind::Stopping,
+                    "backend is draining",
+                ));
+            }
+            if state.owners.len() >= MAX_OWNERS {
+                return Err(busy());
+            }
+            let owner = Arc::new(Owner {
+                identity,
+                session,
+                reply: watch::channel(None).0,
+                done: watch::channel(None).0,
+                observer: self.observer(session.expect("operation session")),
+                execution_cancel: Arc::default(),
+                started: AtomicBool::new(false),
+                core: Mutex::new(None),
+                store: Mutex::new(None),
+                operation: Arc::default(),
+            });
+            if let Some(request) = &owner.identity {
+                state.turns.insert(request.turn_id, owner.clone());
+            } else if let Some(sid) = session {
+                state.sessions.insert(sid, owner.clone());
+                owner.observer.owner_changed();
+            }
+            state.owners.push(owner.clone());
+            owner
+        };
+        let backend = self.clone();
+        let task_owner = owner.clone();
+        tokio::spawn(async move {
+            let mut result =
+                std::panic::AssertUnwindSafe(backend.perform(operation, &task_owner, submitter))
+                    .catch_unwind()
+                    .await
+                    .unwrap_or_else(|_| Err(internal()));
+            let completion = lock(&task_owner.core).take();
+            // 回执转交失败不能等待模型或工具排空，也不能否认可能已提交的接受事务。
+            if task_owner.reply.borrow().is_none() {
+                let response = if let Some(request) = &task_owner.identity
+                    && completion.is_some()
+                {
+                    Response::Acceptance(Acceptance::ConfirmationUnknown {
+                        turn_id: request.turn_id,
+                        session_id: request.session,
+                    })
+                } else {
+                    Response::Error(result.clone().err().unwrap_or_else(internal))
+                };
+                task_owner.reply(response);
+            }
+            if let Some(completion) = completion {
+                match completion
+                    .await
+                    .map_err(|_| LocalError::recovery(RecoveryCause::WorkerFailed))
+                    .and_then(|r| r.map_err(Into::into))
+                {
+                    Ok(TurnCompletion::Closed(_)) => {}
+                    Err(error) => result = Err(error),
+                }
+            }
+            #[cfg(test)]
+            tests::pause(&backend.gates.retire).await;
+            {
+                let mut state = lock(&backend.admission);
+                if let Err(error) = &result
+                    && matches!(
+                        error.kind,
+                        LocalErrorKind::StoreUnavailable | LocalErrorKind::Internal
+                    )
+                    // 只读准入检查失败时尚未写入会话库；已进入写入或带恢复需求的操作仍计入。
+                    && (task_owner.started.load(Ordering::Acquire) || error.recovery.is_some())
+                {
+                    state.count_unconfirmed(&task_owner.operation);
+                    if let Some(request) = &task_owner.identity {
+                        state.diagnostics.insert(request.turn_id, error.clone());
+                    }
+                }
+                if let Some(request) = &task_owner.identity {
+                    state.turns.remove(&request.turn_id);
+                }
+                if let Some(sid) = task_owner.session
+                    && state
+                        .sessions
+                        .get(&sid)
+                        .is_some_and(|o| Arc::ptr_eq(o, &task_owner))
+                {
+                    state.sessions.remove(&sid);
+                    task_owner.observer.owner_changed();
+                    task_owner.observer.release();
+                }
+                state.owners.retain(|o| !Arc::ptr_eq(o, &task_owner));
+                task_owner.done.send_replace(Some(result));
+                backend.changed.send_modify(|v| *v += 1);
+            }
+            // 监督退休前始终持有库代租约，重开不得越过独立收尾。
+            drop(lock(&task_owner.store).take());
+        });
+        Ok(owner)
+    }
+    async fn perform(
+        self: &Arc<Self>,
+        operation: Request,
+        owner: &Arc<Owner>,
+        submitter: Option<UnixStream>,
+    ) -> Result<()> {
+        match operation {
+            Request::Submit { request } => self.submit(request, owner, submitter).await,
+            Request::Configure { request } => self.configure(request, owner).await,
+            Request::Rewind {
+                session_id,
+                target,
+                workspace,
+            } => {
+                let root = canonical_workspace(workspace).await?;
+                let api = self.open().await?;
+                *lock(&owner.store) = Some(api.clone());
+                let binding = api.read(move |r| r.session(session_id)).await?;
+                if binding.project_path != root.project_path() {
+                    return Err(conflict(ConflictReason::BindingMismatch));
+                }
+                let io = CoordinatorStoreIo::acquire_api(api, session_id)
+                    .await
+                    .map_err(ApiError::from)?;
+                owner.started.store(true, Ordering::Release);
+                let record = TurnCoordinator::new(io, Arc::new(RandomIdSource))
+                    .rewind(target, root.project_path())
+                    .await
+                    .map_err(ApiError::from)?;
+                #[cfg(test)]
+                tests::pause(&self.gates.rewind_committed).await;
+                owner.observer.replace_path(target);
+                owner.reply(Response::Rewind(record));
+                Ok(())
+            }
+            _ => Err(internal()),
+        }
+    }
+    async fn configure(
+        self: &Arc<Self>,
+        request: ConfigureRequest,
+        owner: &Arc<Owner>,
+    ) -> Result<()> {
+        if !request.workspace.is_absolute() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "invalid Configure request",
+            ));
+        }
+        let workspace = canonical_workspace(request.workspace).await?;
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        let sid = request.session.id();
+        let is_new = matches!(request.session, ConfigureSession::New(_));
+
+        enum BaseSource {
+            Agent(AgentName),
+            Current(lattice_session::store::SessionSettings),
+        }
+
+        let (mut io, base_source) = match request.session {
+            ConfigureSession::New(_) => {
+                if let Some(api) = &api
+                    && api.read(move |r| r.find_session(sid)).await?.is_some()
+                {
+                    return Err(conflict(ConflictReason::SessionExists));
+                }
+                let Some(agent_name) = request.agent else {
+                    return Err(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "new Session requires explicit agent",
+                    ));
+                };
+                let io = match &api {
+                    Some(api) => Some(
+                        CoordinatorStoreIo::acquire_api(api.clone(), sid)
+                            .await
+                            .map_err(ApiError::from)?,
+                    ),
+                    None => None,
+                };
+                (io, BaseSource::Agent(agent_name))
+            }
+            ConfigureSession::Existing(_) => {
+                let api = api.as_ref().ok_or_else(not_found)?;
+                let record = match api.read(move |r| r.session(sid)).await {
+                    Ok(record) => record,
+                    Err(ApiError::Store(error))
+                        if matches!(
+                            error.as_ref(),
+                            lattice_session::store::StoreError::NotFound { .. }
+                        ) =>
+                    {
+                        return Err(not_found());
+                    }
+                    Err(error) => return Err(error.into()),
+                };
+                if record.project_path != workspace.project_path() {
+                    return Err(conflict(ConflictReason::BindingMismatch));
+                }
+                let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
+                    .await
+                    .map_err(ApiError::from)?;
+                let current = io
+                    .read(move |read| {
+                        read.session(sid)?;
+                        read.session_settings(sid)
+                    })
+                    .await
+                    .map_err(ApiError::from)?;
+                let base_source = match request.agent {
+                    Some(agent_name) => BaseSource::Agent(agent_name),
+                    None => BaseSource::Current(current),
+                };
+                (Some(io), base_source)
+            }
+        };
+
+        let directory = super::auth::directory(self.home.as_deref())?;
+        let workspace_for_load = workspace.clone();
+        let cmd_model = request.model;
+        let cmd_effort = request.effort;
+        let (settings, adjustment) = blocking(move || {
+            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+            let base = match base_source {
+                BaseSource::Agent(name) => {
+                    let loaded =
+                        crate::profile::load_for_turn(&name, &workspace_for_load, &directory)?;
+                    crate::configure::SettingsBase::Agent(crate::configure::LoadedAgent {
+                        profile: crate::profile::TurnProfile::from_loaded(&loaded),
+                        source_path: loaded.path,
+                    })
+                }
+                BaseSource::Current(ref current) => {
+                    crate::configure::SettingsBase::Current(current)
+                }
+            };
+            let (settings, adjustment) =
+                crate::configure::resolve_settings(base, cmd_model, cmd_effort, |target| {
+                    lattice_llm::model_supported_efforts(&directory, target)
+                })
+                .map_err(|rejection| {
+                    ApiError::Configuration(ConfigRejection::new(
+                        &rejection.to_string(),
+                        Some(&auth),
+                    ))
+                })?;
+            settings.validate().map_err(ApiError::from)?;
+            Ok((settings, adjustment))
+        })
+        .await?;
+
+        let io = match io.take() {
+            Some(io) => io,
+            None => {
+                let api = self.stores.acquire(true).await?;
+                *lock(&owner.store) = Some(api.clone());
+                CoordinatorStoreIo::acquire_api(api, sid)
+                    .await
+                    .map_err(ApiError::from)?
+            }
+        };
+
+        owner.started.store(true, Ordering::Release);
+        if is_new {
+            let session = io
+                .create_session(workspace.project_path(), settings)
+                .await
+                .map_err(ApiError::from)?;
+            #[cfg(feature = "test-crash-barriers")]
+            crate::turn::crash_barrier::configure_hit(&session)
+                .await
+                .map_err(ApiError::from)?;
+            #[cfg(not(feature = "test-crash-barriers"))]
+            let _ = session;
+        } else {
+            io.update_settings(workspace.project_path(), settings)
+                .await
+                .map_err(ApiError::from)?;
+        }
+
+        let mut head = io
+            .read(move |read| crate::turn::observer::session_head(read, sid))
+            .await
+            .map_err(ApiError::from)?;
+        {
+            let state = lock(&self.admission);
+            (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
+        }
+        owner.observer.owner_changed();
+        owner.reply(Response::Configure(ConfigureReply { head, adjustment }));
+        Ok(())
+    }
+    async fn submit(
+        self: &Arc<Self>,
+        request: TurnRequest,
+        owner: &Arc<Owner>,
+        submitter: Option<UnixStream>,
+    ) -> Result<()> {
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        // 身份优先于工作区、会话存在性、绑定和同会话 Busy；重发不承担找回职责。
+        if let Some(api) = &api {
+            let turn_id = request.turn_id;
+            if api.read(move |r| r.turn_node(turn_id)).await?.is_some() {
+                return Err(conflict(ConflictReason::TurnIdUsed));
+            }
+        }
+        if !request.workspace.is_absolute() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "invalid Turn request",
+            ));
+        }
+        let workspace = canonical_workspace(request.workspace.clone()).await?;
+        let sid = request.session;
+        let api = api.ok_or_else(not_found)?;
+        let record = match api.read(move |r| r.session(sid)).await {
+            Ok(record) => record,
+            Err(ApiError::Store(error))
+                if matches!(
+                    error.as_ref(),
+                    lattice_session::store::StoreError::NotFound { .. }
+                ) =>
+            {
+                return Err(not_found());
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if record.project_path != workspace.project_path() {
+            return Err(conflict(ConflictReason::BindingMismatch));
+        }
+        {
+            let mut state = lock(&self.admission);
+            if state.sessions.contains_key(&sid) {
+                return Err(busy());
+            }
+            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES {
+                return Err(LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "invalid Turn request",
+                ));
+            }
+            state.sessions.insert(sid, owner.clone());
+            owner.observer.owner_changed();
+        }
+        #[cfg(feature = "test-crash-barriers")]
+        crate::turn::crash_barrier::schedule(
+            "admission_registered",
+            serde_json::json!({"turn_id":request.turn_id,"session_id":sid}),
+        )
+        .await;
+        #[cfg(test)]
+        tests::pause(&self.gates.registered).await;
+        check_submitter(submitter.as_ref())?;
+        let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
+            .await
+            .map_err(ApiError::from)?;
+        let (settings, settings_version) = io
+            .read(move |read| {
+                read.session(sid)?;
+                let settings = read.session_settings(sid)?;
+                let version = settings.version()?;
+                Ok((settings, version))
+            })
+            .await
+            .map_err(ApiError::from)?;
+        if let Some(expected) = &request.expected_settings
+            && *expected != settings_version
+        {
+            return Err(conflict(ConflictReason::SettingsChanged));
+        }
+        #[cfg(test)]
+        tests::pause(&self.gates.prepare).await;
+        let gateway = self.gateway.clone().map_err(ApiError::Configuration)?;
+        let prepared_model =
+            crate::turn::execute::PreparedModel::resolve(&gateway, &settings).await?;
+        let shutdown = api.shutdown();
+        check_submitter(submitter.as_ref())?;
+        {
+            let _state = lock(&self.admission);
+            owner.started.store(true, Ordering::Release);
+            owner.observer.owner_changed();
+        }
+        let execution = crate::turn::start_execution(crate::turn::execute::ExecutionInput {
+            session: api,
+            turn_id: request.turn_id,
+            workspace,
+            shutdown,
+            observer: owner.observer.clone(),
+            request: RunTurnRequest {
+                input: request.input,
+                session_id: sid,
+                expected_settings: request.expected_settings,
+                cancel_flag: Some(owner.execution_cancel.clone()),
+                tools: Some(self.tools.clone()),
+                #[cfg(any(test, feature = "test-utils"))]
+                test_llm: None,
+            },
+            prepared_model: Some(prepared_model),
+            prepared_settings: Some((settings, settings_version)),
+            io: Some(io),
+        });
+        *lock(&owner.core) = Some(execution.completion);
+        let accepted = match execution.acceptance.await {
+            Ok(Ok(accepted)) => accepted,
+            Ok(Err(error)) => {
+                let error = LocalError::from(error);
+                owner.reply(Response::Error(error.clone()));
+                return Err(error);
+            }
+            Err(_) => {
+                owner.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
+                    turn_id: request.turn_id,
+                    session_id: sid,
+                }));
+                return Err(internal());
+            }
+        };
+        #[cfg(test)]
+        tests::fail_forwarding(&self.gates.forward_panic).await;
+        owner.reply(Response::Acceptance(match accepted {
+            TurnAcceptance::Accepted { turn } => Acceptance::Accepted {
+                turn: TurnView::from(&turn),
+            },
+            TurnAcceptance::ConfirmationUnknown { turn_id, .. } => {
+                Acceptance::ConfirmationUnknown {
+                    turn_id,
+                    session_id: sid,
+                }
+            }
+        }));
+        Ok(())
+    }
+    async fn lookup(&self, turn_id: TurnId) -> Result<TurnLookup> {
+        loop {
+            let candidate = lock(&self.admission).turns.get(&turn_id).cloned();
+            if let Some(api) = self.optional_store().await?
+                && let Some(node) = api.read(move |r| r.turn_node(turn_id)).await?
+            {
+                return Ok(TurnLookup::Accepted {
+                    turn: api
+                        .read(move |r| r.turn_detail(node.session_id, turn_id))
+                        .await?,
+                });
+            }
+            let state = lock(&self.admission);
+            if state.turns.contains_key(&turn_id) {
+                return Ok(TurnLookup::InFlight);
+            }
+            // 准入可能在读事务之后完成；撤销登记时必须重读，NotFound 才能是终局。
+            if candidate.is_none() {
+                return Err(not_found());
+            }
+        }
+    }
+    async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
+        let observer = self.observer(session_id);
+        loop {
+            let generation = {
+                let _state = lock(&self.admission);
+                observer.owner_generation()
+            };
+            let api = self.optional_store().await?.ok_or_else(not_found)?;
+            let mut head = api
+                .read(move |read| crate::turn::observer::session_head(read, session_id))
+                .await?;
+            let (same_generation, rewinding) = {
+                let state = lock(&self.admission);
+                (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
+                (
+                    generation == observer.owner_generation(),
+                    state
+                        .sessions
+                        .get(&session_id)
+                        .filter(|owner| owner.identity.is_none())
+                        .cloned(),
+                )
+            };
+            if let Some(owner) = rewinding {
+                let mut done = owner.done.subscribe();
+                while done.borrow_and_update().is_none() {
+                    done.changed().await.map_err(|_| internal())?;
+                }
+                continue;
+            }
+            if same_generation {
+                return Ok(head);
+            }
+        }
+    }
+    async fn dispatch(self: &Arc<Self>, request: Request) -> Result<Response> {
+        match request {
+            Request::Status => Ok(Response::Status(self.status())),
+            Request::AuthSet { provider, key } => {
+                let auth = super::auth::store(self.home.as_deref())?;
+                blocking(move || {
+                    auth.set(&provider, key.as_str())
+                        .map_err(super::auth::error)?;
+                    Ok(Response::AuthUpdated)
+                })
+                .await
+            }
+            Request::AuthRemove { provider } => {
+                if provider == "chatgpt" {
+                    let result = self
+                        .chatgpt_auth()?
+                        .remove()
+                        .await
+                        .map_err(super::auth::error)?;
+                    return Ok(Response::AuthRemoved(AuthRemoval {
+                        removed: result.removed,
+                        revocation: Some(super::presentation::revocation_status(result.revocation)),
+                    }));
+                }
+                let auth = super::auth::store(self.home.as_deref())?;
+                blocking(move || {
+                    let removed = auth.remove_api_key(&provider).map_err(super::auth::error)?;
+                    Ok(Response::AuthRemoved(AuthRemoval {
+                        removed,
+                        revocation: None,
+                    }))
+                })
+                .await
+            }
+            Request::AuthLogout { provider } => {
+                super::auth::require_chatgpt(&provider)?;
+                let revocation = self
+                    .chatgpt_auth()?
+                    .logout()
+                    .await
+                    .map_err(super::auth::error)?;
+                Ok(Response::AuthLoggedOut(AuthLoggedOut {
+                    revocation: super::presentation::revocation_status(revocation),
+                }))
+            }
+            Request::AuthLogin { .. } => Err(LocalError::new(
+                LocalErrorKind::Protocol,
+                "unexpected local response",
+            )),
+            Request::AuthStatus {} => {
+                let auth = super::auth::store(self.home.as_deref())?;
+                blocking(move || {
+                    auth.status()
+                        .map(super::presentation::auth_status)
+                        .map(Response::AuthStatus)
+                        .map_err(super::auth::error)
+                })
+                .await
+            }
+            Request::Models { query } => {
+                let llm_query = super::presentation::model_query(&query);
+                let directory = super::auth::directory(self.home.as_deref())?;
+                let mut warning = None;
+                let ready_only = match &query {
+                    ModelCandidateQuery::List {
+                        provider,
+                        ready_only,
+                    } if provider.as_ref().is_none_or(|id| id == "chatgpt") => {
+                        let check_directory = directory.clone();
+                        let check_query = llm_query.clone();
+                        // 先校验本地请求，错误配置或非法筛选不能触发目录网络请求。
+                        blocking(move || {
+                            let auth = lattice_llm::auth::AuthStore::new(check_directory.clone());
+                            lattice_llm::model_candidates(&check_directory, &check_query)
+                                .map(|_| ())
+                                .map_err(|error| {
+                                    ApiError::Configuration(ConfigRejection::new(
+                                        &error.to_string(),
+                                        Some(&auth),
+                                    ))
+                                    .into()
+                                })
+                        })
+                        .await?;
+                        if let Err(error) = self.metadata.ensure_chatgpt().await {
+                            warning = Some(error.message);
+                        }
+                        Some(*ready_only)
+                    }
+                    _ => None,
+                };
+                blocking(move || {
+                    let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                    lattice_llm::model_candidates(&directory, &llm_query)
+                        .map(|mut candidates| {
+                            if let Some(message) = warning {
+                                let chatgpt_in_scope = ready_only != Some(true)
+                                    || auth.status().is_ok_and(|status| {
+                                        status.providers.iter().any(|provider| {
+                                            provider.provider == "chatgpt"
+                                                && provider.availability.is_ready()
+                                        })
+                                    });
+                                if chatgpt_in_scope {
+                                    candidates.warnings.retain(|warning| {
+                                        warning.provider.as_deref() != Some("chatgpt")
+                                    });
+                                    candidates.warnings.push(lattice_llm::ModelWarning {
+                                        provider: Some("chatgpt".into()),
+                                        message,
+                                    });
+                                }
+                            }
+                            redact_model_candidates(&mut candidates, &auth);
+                            Response::Models(super::presentation::model_candidates(candidates))
+                        })
+                        .map_err(|error| {
+                            ApiError::Configuration(ConfigRejection::new(
+                                &error.to_string(),
+                                Some(&auth),
+                            ))
+                            .into()
+                        })
+                })
+                .await
+            }
+            Request::ModelsRefresh {} => {
+                self.metadata.refresh().await?;
+                Ok(Response::ModelsRefreshed)
+            }
+            Request::Stop => {
+                let mut changed = self.changed.subscribe();
+                self.begin_stop();
+                loop {
+                    changed.borrow_and_update();
+                    if let Some(status) = self.stopped_status() {
+                        return Ok(Response::Status(status));
+                    }
+                    changed.changed().await.map_err(|_| internal())?;
+                }
+            }
+            Request::ResolveSession { prefix } => Ok(Response::Session(
+                self.open().await?.resolve_session(prefix).await?,
+            )),
+            Request::List { after, limit } => {
+                let page = self
+                    .open()
+                    .await?
+                    .read(move |r| r.list(after, limit as usize))
+                    .await?;
+                let state = lock(&self.admission);
+                Ok(Response::Sessions(Page {
+                    next: page.next,
+                    items: page
+                        .items
+                        .into_iter()
+                        .map(|session| {
+                            let owner = session.unclosed_turn.is_some_and(|turn| {
+                                state
+                                    .turns
+                                    .get(&turn)
+                                    .is_some_and(|owner| owner.started.load(Ordering::Acquire))
+                            });
+                            SessionListRow { session, owner }
+                        })
+                        .collect(),
+                }))
+            }
+            Request::Log { session_id } => Ok(Response::Log(
+                self.open().await?.read(move |r| r.log(session_id)).await?,
+            )),
+            Request::Usage { session_id } => Ok(Response::Usage(Box::new(
+                self.open().await?.usage(session_id).await?,
+            ))),
+            Request::Turn { turn_id } => Ok(Response::Turn(self.lookup(turn_id).await?)),
+            Request::Head { session_id } => {
+                Ok(Response::Head(self.session_head(session_id).await?))
+            }
+            Request::History {
+                session_id,
+                before,
+                turns,
+            } => {
+                if !(1..=MAX_HISTORY_TURNS).contains(&turns) {
+                    return Err(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "history turns must be between 1 and 100",
+                    ));
+                }
+                Ok(Response::History(LocalHistory {
+                    entries: self
+                        .open()
+                        .await?
+                        .read(move |r| r.history(session_id, before, turns))
+                        .await?,
+                }))
+            }
+            Request::Cancel { turn_id } => {
+                let owned = {
+                    let state = lock(&self.admission);
+                    state.turns.get(&turn_id).is_some_and(|owner| {
+                        owner.execution_cancel.store(true, Ordering::Release);
+                        true
+                    })
+                };
+                if !owned && let Some(api) = self.optional_store().await? {
+                    api.read(move |r| r.turn_node(turn_id)).await?;
+                }
+                Ok(Response::Cancelled { owned })
+            }
+            Request::Submit { .. } => Err(internal()),
+            request @ (Request::Rewind { .. } | Request::Configure { .. }) => {
+                self.wait_reply(self.claim(request, None)?).await
+            }
+            Request::Watch { .. } => Err(internal()),
+        }
+    }
+    async fn wait_reply(&self, owner: Arc<Owner>) -> Result<Response> {
+        let mut reply = owner.reply.subscribe();
+        loop {
+            let response = reply.borrow_and_update().clone();
+            if let Some(response) = response {
+                if matches!(
+                    response,
+                    Response::Error(_) | Response::Rewind(_) | Response::Configure(_)
+                ) {
+                    let mut done = owner.done.subscribe();
+                    while done.borrow_and_update().is_none() {
+                        done.changed().await.map_err(|_| internal())?;
+                    }
+                }
+                return Ok(response);
+            }
+            reply.changed().await.map_err(|_| internal())?;
+        }
+    }
+    async fn watch(
+        &self,
+        stream: &mut UnixStream,
+        writer: &mut ipc::ResponseWriter,
+        session_id: SessionId,
+    ) -> Result<()> {
+        let _permit = self.subscriptions.try_acquire().map_err(|_| busy())?;
+        let observer = self.observer(session_id);
+        let mut closed = self.closed.subscribe();
+        // 与草稿清理占位共用准入锁边界：发现无身份 Owner 时先等待其结束再登记并重读。
+        let cursor = loop {
+            if *closed.borrow() {
+                return Ok(());
+            }
+            let blocking_owner = {
+                let state = lock(&self.admission);
+                match state
+                    .sessions
+                    .get(&session_id)
+                    .filter(|owner| owner.identity.is_none())
+                    .cloned()
+                {
+                    Some(owner) => Some(owner),
+                    None => break observer.register(),
+                }
+            };
+            if let Some(owner) = blocking_owner {
+                #[cfg(test)]
+                tests::pause(&self.gates.watch_waiting_owner).await;
+                let mut done = owner.done.subscribe();
+                while done.borrow_and_update().is_none() {
+                    tokio::select! {
+                        changed = done.changed() => {
+                            changed.map_err(|_| internal())?;
+                        }
+                        _ = closed.changed() => return Ok(()),
+                    }
+                }
+            }
+        };
+        let mut changed = observer.subscribe();
+        let mut first = true;
+        let mut last_head: Option<SessionHead> = None;
+        loop {
+            if *closed.borrow() {
+                return Ok(());
+            }
+            changed.borrow_and_update();
+            let generation = {
+                let _state = lock(&self.admission);
+                observer.owner_generation()
+            };
+            #[cfg(test)]
+            tests::pause(&self.gates.capture_before).await;
+            let api = self.optional_store().await?.ok_or_else(not_found)?;
+            let sink = observer.clone();
+            let push = cursor.clone();
+            let mut updates = api
+                .blocking(move |api| Ok(sink.capture(&api.store, session_id, &push)?))
+                .await?;
+            drop(api);
+            #[cfg(test)]
+            tests::pause(&self.gates.capture).await;
+            // 代次识别完整的接管/退场；rewind 提交到发布之间也不能交付新位置。
+            let has_head = matches!(updates.first(), Some(ViewUpdate::Head(_)));
+            let head_turn = if let Some(ViewUpdate::Head(head)) = updates.first() {
+                head.turn_id
+            } else {
+                last_head.as_ref().and_then(|head| head.turn_id)
+            };
+            let (owned, diagnostic, same_generation, rewinding) = {
+                let state = lock(&self.admission);
+                let (owned, diagnostic) = head_status(&state, head_turn);
+                (
+                    owned,
+                    diagnostic,
+                    generation == observer.owner_generation(),
+                    state
+                        .sessions
+                        .get(&session_id)
+                        .filter(|owner| owner.identity.is_none())
+                        .cloned(),
+                )
+            };
+            let retry = !same_generation
+                || rewinding.is_some()
+                || observer.path_replacement_pending(&cursor);
+            #[cfg(test)]
+            tests::pause(&self.gates.capture_checked).await;
+            if retry {
+                observer.retry_capture(&cursor, first, &updates);
+                if let Some(owner) = rewinding {
+                    let mut done = owner.done.subscribe();
+                    while done.borrow_and_update().is_none() {
+                        done.changed().await.map_err(|_| internal())?;
+                    }
+                }
+                continue;
+            }
+            // 诊断也可能独立于节点变化发布；比较已交付的头，不读取会话库来探测。
+            if !has_head
+                && last_head
+                    .as_ref()
+                    .is_some_and(|head| head.owner != owned || head.diagnostic != diagnostic)
+            {
+                observer.refresh_head(&cursor);
+                continue;
+            }
+            if let Some(ViewUpdate::Head(head)) = updates.first_mut() {
+                head.owner = owned;
+                head.diagnostic = diagnostic;
+            }
+            for update in updates {
+                writer
+                    .write(stream, &Response::View(update.clone()))
+                    .await?;
+                match &update {
+                    ViewUpdate::Head(head) => last_head = Some(head.clone()),
+                    ViewUpdate::Text(text) => observer.sent(&cursor, text),
+                    ViewUpdate::Entry { .. } => {}
+                }
+            }
+            first = false;
+            #[cfg(test)]
+            tests::pause(&self.gates.watch_wait).await;
+            tokio::select! {
+                _ = changed.changed() => {},
+                _ = closed.changed() => return Ok(()),
+                result = stream.readable() => {
+                    result?;
+                    match stream.try_read(&mut [0u8; 1]) {
+                        Ok(0) => return Ok(()),
+                        Ok(_) => return Err(LocalError::new(LocalErrorKind::Protocol, "unexpected data on watch connection")),
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {},
+                        Err(error) => return Err(error.into()),
+                    }
+                },
+            }
+        }
+    }
+}
+fn head_status(state: &Admission, turn: Option<TurnId>) -> (bool, Option<LocalError>) {
+    (
+        turn.is_some_and(|turn| {
+            state
+                .turns
+                .get(&turn)
+                .is_some_and(|owner| owner.started.load(Ordering::Acquire))
+        }),
+        turn.and_then(|turn| state.diagnostics.get(&turn).cloned()),
+    )
+}
+fn check_submitter(submitter: Option<&UnixStream>) -> Result<()> {
+    if let Some(submitter) = submitter
+        && !connected(submitter)?
+    {
+        return Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "submitter departed before admission",
+        ));
+    }
+    Ok(())
+}
+fn connected(stream: &UnixStream) -> Result<bool> {
+    use rustix::net::RecvFlags;
+    let mut byte = [0u8; 1];
+    // 非阻塞窥读检查连接当前是否已关闭，不消费后续协议数据，也不依赖缓存的 readiness。
+    match rustix::net::recv(stream, &mut byte, RecvFlags::PEEK | RecvFlags::DONTWAIT) {
+        Ok((_, 0)) => Ok(false),
+        Ok(_) => Ok(true),
+        Err(errno) => {
+            let error = std::io::Error::from(errno);
+            if error.kind() == std::io::ErrorKind::WouldBlock {
+                Ok(true)
+            } else {
+                Err(error.into())
+            }
+        }
+    }
+}
+async fn canonical_workspace(path: std::path::PathBuf) -> Result<LocalWorkspaceRoot> {
+    blocking(move || {
+        let root = LocalWorkspaceRoot::from_path(&path)?;
+        if root.canonical_path() != path {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "workspace must be canonical",
+            ));
+        }
+        Ok(root)
+    })
+    .await
+}
+async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()> {
+    ipc::check_peer(&stream)?;
+    let request = tokio::time::timeout(
+        Duration::from_secs(10),
+        ipc::read_request::<Request>(&mut stream),
+    )
+    .await
+    .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
+    let mut writer = ipc::ResponseWriter::default();
+    if let Request::AuthLogin { provider } = request {
+        let auth = super::auth::require_chatgpt(&provider).and_then(|()| {
+            if backend.status().stopping {
+                Err(LocalError::new(
+                    LocalErrorKind::Stopping,
+                    "backend is stopping",
+                ))
+            } else {
+                backend.chatgpt_auth()
+            }
+        });
+        return match auth {
+            Ok(auth) => {
+                let metadata = backend.metadata.clone();
+                super::auth::login::exchange(stream, auth.start_login(), move || {
+                    let metadata = metadata.clone();
+                    Box::pin(async move {
+                        match metadata.refresh_chatgpt().await {
+                            Ok(model_count) => {
+                                super::auth::login::AuthCatalogOutcome::Refreshed { model_count }
+                            }
+                            Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
+                                warning: error.message,
+                            },
+                        }
+                    })
+                })
+                .await
+            }
+            Err(error) => writer.write(&mut stream, &Response::Error(error)).await,
+        };
+    }
+    if let Request::Watch { session_id } = request {
+        let result = backend.watch(&mut stream, &mut writer, session_id).await;
+        #[cfg(test)]
+        tests::pause(&backend.gates.watch_done).await;
+        if let Err(error) = result {
+            writer.write(&mut stream, &Response::Error(error)).await?;
+        }
+        return Ok(());
+    }
+    let cleanup_after_reply = matches!(
+        &request,
+        Request::Configure {
+            request: ConfigureRequest {
+                session: ConfigureSession::New(_),
+                ..
+            }
+        }
+    );
+    let response = if matches!(request, Request::Submit { .. }) {
+        let socket = stream.into_std()?;
+        let submitter = UnixStream::from_std(socket.try_clone()?)?;
+        stream = UnixStream::from_std(socket)?;
+        match backend.claim(request, Some(submitter)) {
+            Ok(owner) => backend.wait_reply(owner).await,
+            Err(error) => Err(error),
+        }
+    } else {
+        backend.dispatch(request).await
+    };
+    let cleanup_guard = if cleanup_after_reply {
+        backend.begin_cleanup()
+    } else {
+        None
+    };
+    let write_result = writer
+        .write(&mut stream, &response.unwrap_or_else(Response::Error))
+        .await;
+    if let Some(guard) = cleanup_guard {
+        backend.spawn_cleanup_drafts(guard);
+    }
+    write_result
+}
+/// 实例锁唯一持有者；按统一停机顺序执行有界排空、收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
+/// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
+pub async fn serve(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+) -> Result<ServeExit> {
+    let backend_layout = layout.clone();
+    let tools = crate::turn::default_tool_executor();
+    serve_with_backend(layout, drain_timeout, stop_requests, move || {
+        Backend::with_tools(backend_layout, home, tools)
+    })
+    .await
+}
+
+/// 测试后台以空动作替代自动与手动元数据刷新，其余操作沿用正式入口。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+) -> Result<ServeExit> {
+    let backend_layout = layout.clone();
+    let tools = crate::turn::default_tool_executor();
+    serve_with_backend(layout, drain_timeout, stop_requests, move || {
+        let mut backend = Backend::with_tools(backend_layout, home, tools);
+        Arc::get_mut(&mut backend)
+            .expect("unshared test backend")
+            .metadata = super::metadata::MetadataRefresh::without_network();
+        backend
+    })
+    .await
+}
+
+/// 第 6 步：在阻塞线程上最终释放后台（排空完成时其中有会话库的最后一个引用，释放即关库落盘），
+/// 同时撤下 socket，两者共用 5 秒期限。到期只停止等待，未结束的阻塞任务交给关闭 runtime；
+/// 撤下 socket 未完成记为运行错误。
+async fn finish_serve(
+    endpoint: ipc::SocketEndpoint,
+    drain: DrainOutcome,
+    mut failure: Option<LocalError>,
+    instance: ipc::InstanceLock,
+    backend: Option<Arc<Backend>>,
+) -> ServeExit {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let release = tokio::task::spawn_blocking(move || {
+        if let Some(backend) = backend {
+            #[cfg(test)]
+            tests::pause_blocking(&backend.gates.final_release);
+            drop(backend);
+        }
+    });
+    let cleanup = tokio::task::spawn_blocking(move || endpoint.cleanup());
+    let (released, cleaned) = tokio::join!(
+        tokio::time::timeout_at(deadline, release),
+        tokio::time::timeout_at(deadline, cleanup),
+    );
+    match cleaned {
+        Ok(Ok(Ok(()))) => {}
+        Ok(Ok(Err(error))) => {
+            failure.get_or_insert(error);
+        }
+        Ok(Err(_)) => {
+            failure.get_or_insert_with(internal);
+        }
+        Err(_) => {
+            failure.get_or_insert_with(|| {
+                LocalError::new(LocalErrorKind::Internal, "撤下 socket 超过停机期限")
+            });
+        }
+    }
+    if released.is_err() {
+        tracing::warn!("最终释放后台资源超过停机期限，会话库随进程退出关闭");
+    }
+    ServeExit {
+        drain,
+        failure,
+        instance,
+        shutdown_deadline: deadline.into_std(),
+    }
+}
+
+async fn serve_with_backend(
+    layout: StateLayout,
+    drain_timeout: Duration,
+    mut stop_requests: tokio::sync::mpsc::Receiver<()>,
+    build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
+) -> Result<ServeExit> {
+    let binding_layout = layout.clone();
+    let (instance, listener) = blocking(move || ipc::Instance::bind(&binding_layout)).await?;
+    // 取得实例锁之后不再用 `?` 提前退出，确保任何后续错误仍由 ServeExit 携带锁返回调用方。
+    let (instance, endpoint) = instance.into_parts();
+    let listener = match UnixListener::from_std(listener) {
+        Ok(listener) => listener,
+        Err(error) => {
+            return Ok(finish_serve(
+                endpoint,
+                DrainOutcome::Completed,
+                Some(error.into()),
+                instance,
+                None,
+            )
+            .await);
+        }
+    };
+    let backend = match blocking(move || Ok(build_backend())).await {
+        Ok(backend) => backend,
+        Err(error) => {
+            drop(listener);
+            return Ok(finish_serve(
+                endpoint,
+                DrainOutcome::Completed,
+                Some(error),
+                instance,
+                None,
+            )
+            .await);
+        }
+    };
+    {
+        let mut state = lock(&backend.admission);
+        if matches!(state.stop, StopPhase::Running) {
+            state.drain_timeout = drain_timeout;
+        }
+    }
+
+    let metadata_task = backend.metadata.start();
+    let mut connections = JoinSet::new();
+    let mut failure = None;
+    let mut accept_failed = false;
+    let mut force_timeout = false;
+    let mut stop_closed = false;
+    let mut changed = backend.changed.subscribe();
+
+    let drain = loop {
+        while !stop_closed {
+            match stop_requests.try_recv() {
+                Ok(()) => {
+                    if backend.is_stopping() {
+                        force_timeout = true;
+                    } else {
+                        backend.begin_stop();
+                    }
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    stop_closed = true;
+                }
+            }
+        }
+
+        changed.borrow_and_update();
+        let drain_sleep = match backend.decide_drain(force_timeout) {
+            DrainDecision::Decided(outcome) => break outcome,
+            DrainDecision::Waiting(deadline) => Some(tokio::time::sleep_until(deadline)),
+            DrainDecision::Running => None,
+        };
+        tokio::pin!(drain_sleep);
+
+        tokio::select! {
+            accepted = listener.accept(), if !accept_failed => match accepted {
+                Ok((stream, _)) if connections.len() < 64 => {
+                    connections.spawn(connection(backend.clone(), stream));
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    failure.get_or_insert_with(|| error.into());
+                    accept_failed = true;
+                    backend.begin_stop();
+                }
+            },
+            signal = stop_requests.recv(), if !stop_closed => match signal {
+                Some(()) => {
+                    if backend.is_stopping() {
+                        force_timeout = true;
+                    } else {
+                        backend.begin_stop();
+                    }
+                }
+                None => {
+                    stop_closed = true;
+                }
+            },
+            _ = async { drain_sleep.as_mut().as_pin_mut().expect("armed drain sleep").await }, if drain_sleep.is_some() => {}
+            _ = connections.join_next(), if !connections.is_empty() => {}
+            _ = changed.changed() => {}
+        }
+    };
+
+    // 排空超时停写与元数据、认证尾段期间继续接受连接，服务 status 与重复 IPC stop。
+    let tail_failure = {
+        let tail_backend = backend.clone();
+        let post_drain = async move {
+            if drain == DrainOutcome::TimedOut {
+                tail_backend.stores.disable_writes().await;
+                let mut state = lock(&tail_backend.admission);
+                let status = tail_backend.status_locked(&state);
+                state.stop = StopPhase::Finished { status };
+                tail_backend.changed.send_modify(|v| *v += 1);
+            }
+
+            // 尾段 1：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
+            // 三项各自以同一期限包裹：到期只停止等待尚未结束的一项，已经返回的错误照常记录。
+            let tail_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            let auth = tail_backend.chatgpt_auth().ok();
+            let metadata = tail_backend.metadata.clone();
+            #[cfg(test)]
+            let metadata_drain_backend = tail_backend.clone();
+            drop(tail_backend);
+            let (meta_join, _, auth_res) = tokio::join!(
+                tokio::time::timeout_at(tail_deadline, metadata_task),
+                tokio::time::timeout_at(tail_deadline, async move {
+                    metadata.drain().await;
+                    #[cfg(test)]
+                    tests::pause(&metadata_drain_backend.gates.metadata_drain).await;
+                }),
+                tokio::time::timeout_at(tail_deadline, async move {
+                    match auth {
+                        Some(auth) => auth.shutdown().await,
+                        None => Ok(()),
+                    }
+                }),
+            );
+            let mut tail_failure = None;
+            if let Ok(Err(_)) = meta_join {
+                tail_failure.get_or_insert_with(internal);
+            }
+            if let Ok(Err(error)) = auth_res {
+                tail_failure.get_or_insert_with(|| super::auth::error(error));
+            }
+            tail_failure
+        };
+        tokio::pin!(post_drain);
+
+        loop {
+            tokio::select! {
+                tail_failure = &mut post_drain => break tail_failure,
+                accepted = listener.accept(), if !accept_failed => match accepted {
+                    Ok((stream, _)) if connections.len() < 64 => {
+                        connections.spawn(connection(backend.clone(), stream));
+                    }
+                    Ok(_) => {}
+                    Err(error) => {
+                        failure.get_or_insert_with(|| error.into());
+                        accept_failed = true;
+                    }
+                },
+                _ = connections.join_next(), if !connections.is_empty() => {}
+            }
+        }
+    };
+    if let Some(error) = tail_failure {
+        failure.get_or_insert(error);
+    }
+
+    // 尾段 2：关闭推送与监听套接字，等待连接任务至多 5 秒；到期 abort 后不再等待。
+    #[cfg(test)]
+    tests::pause(&backend.gates.listener_close).await;
+    backend.closed.send_replace(true);
+    drop(listener);
+    if tokio::time::timeout(Duration::from_secs(5), async {
+        while connections.join_next().await.is_some() {}
+    })
+    .await
+    .is_err()
+    {
+        connections.abort_all();
+    }
+    drop(connections);
+
+    Ok(finish_serve(endpoint, drain, failure, instance, Some(backend)).await)
+}
+
+/// 告警和单模型配置诊断跨过后台边界前都要遮掉已知凭据。
+pub(super) fn redact_model_candidates(
+    candidates: &mut lattice_llm::ModelCandidates,
+    auth: &lattice_llm::auth::AuthStore,
+) {
+    let redact = |message: &mut String| {
+        *message = ConfigRejection::new(message, Some(auth)).to_string();
+    };
+    for warning in &mut candidates.warnings {
+        redact(&mut warning.message);
+    }
+    for model in &mut candidates.models {
+        if let lattice_llm::Availability::Invalid { reason } = &mut model.availability {
+            redact(reason);
+        }
+    }
+}
+
+#[cfg(test)]
+#[path = "server_cancel_tests.rs"]
+mod tests;

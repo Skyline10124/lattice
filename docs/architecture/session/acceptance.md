@@ -47,7 +47,7 @@ status: active
 | `FrozenTurnConfig.catalog` | `ToolExecutor::open_turn` 给出的本轮 `ToolSpec` 列表（生产默认 `NoTools` 为空目录） | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存按工具名排序的 entries 及摘要；entry 含名称、不透明工具身份 `tool_identity`、描述、规范输入 schema（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。模型请求使用同一份目录，`NoTools` 下不发送工具定义；回复含目录外工具名时按 `InvalidBatch` 整批拒绝 |
 | `FrozenTurnConfig.limits` | 会话设置中 `profile` 的超时、重试次数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
 
-持久冻结事实的类型由 `lattice-session` 维护，接受接线见[接受接线](../../../crates/lattice-api/src/turn/live.rs)。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。
+持久冻结事实的类型由 `lattice-session` 维护，接受接线见[接受接线](../../../crates/lattice-server/src/turn/live.rs)。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。
 
 ### 配置来源与后台启动
 
@@ -79,7 +79,7 @@ status: active
 - **`configure` 时拒绝**：profile 的查找、全局 `agents` 权限校验、未知或禁止的顶层节（如 `[lancet]`、`[tools]`）、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、系统提示文件缺失或超限、`providers.toml` 与模型元数据的解析失败，以及档位规则拒绝（模型为空时给出了 `effort`，或模型不支持所求档位，诊断来源为 `(from --effort)`、`(from [agent].effort in <路径>)` 或 `(from session settings)`，见[档位规则](settings.md#档位规则)）。
 - **提交时拒绝**：会话设置中的模型为空，`providers.toml` 或 `auth.json` 解析失败，provider 与模型未满足可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效），没有可用的根证书时所选 provider 的端点是 https，以及全局配置或元数据变更后模型不支持会话设置中的推理档位（诊断来源为 `(from session settings)`）。
 
-说明由 [`ConfigRejection`](../../../crates/lattice-api/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../../crates/lattice-api/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
+说明由 [`ConfigRejection`](../../../crates/lattice-server/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../../crates/lattice-server/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
 | 顺序 | 替换什么 |
 | --- | --- |

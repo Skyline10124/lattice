@@ -6,7 +6,7 @@ members = [
     "crates/lattice-ipc",
     "crates/lattice-local",
     "crates/lattice-llm",
-    "crates/lattice-api",
+    "crates/lattice-server",
     "crates/lattice-session",
     "crates/lattice-conversation",
     "crates/lattice-agent",
@@ -31,7 +31,7 @@ lattice-store    = { path = "crates/lattice-store" }
 lattice-ipc      = { path = "crates/lattice-ipc" }
 lattice-local    = { path = "crates/lattice-local" }
 lattice-llm      = { path = "crates/lattice-llm" }
-lattice-api      = { path = "crates/lattice-api" }
+lattice-server   = { path = "crates/lattice-server" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-conversation = { path = "crates/lattice-conversation" }
 lattice-agent    = { path = "crates/lattice-agent" }
@@ -55,7 +55,6 @@ serde_json = "1"
 sha2 = "0.11"
 thiserror = "2"
 tokio = { version = "1", features = ["full"] }
-tokio-stream = "0.1"
 toml = "1.1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "time"] }
@@ -67,6 +66,7 @@ zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
 # 凭据文件读写与所有权核验（`lattice-llm`：openat/renameat/unlinkat/geteuid）、
 # 本地 IPC 对端身份核验（`lattice-ipc`：geteuid/socket_peercred）、
+# 本地后台与客户端系统调用（`lattice-server`、`lattice-local`：flock/recv/kill_process/setsid）、
 # 会话库创建时带 `NOREPLACE` 的原子发布重命名（`lattice-session`），以及测试构造 FIFO。
 rustix = { version = "1.1.4", features = ["fs"] }
 rustls = "0.23"
@@ -77,7 +77,6 @@ bytes = "1"
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = "0.29"
 dirs = "6"
-colored = "3.1"
 anyhow = "1"
 base64 = "0.22"
 ratatui = "0.30"

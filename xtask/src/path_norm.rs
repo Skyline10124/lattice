@@ -3,7 +3,7 @@
 
 use std::path::{Component, Path, PathBuf};
 
-/// `os.path.normpath` equivalent for dependency path checks (no symlink resolution).
+/// 依赖路径检查用的路径规整，等价于 Python 的 `os.path.normpath`，不解析符号链接。
 pub fn normpath(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for component in path.components() {

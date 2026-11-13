@@ -1,0 +1,46 @@
+[package]
+name = "lattice-server"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+authors.workspace = true
+description = "LATTICE 本地后台：准入、Owner、观察者、停机、IPC 处理与 Turn 协调"
+
+[dependencies]
+async-trait = { workspace = true }
+chrono = { workspace = true }
+futures = { workspace = true }
+lattice-agent = { workspace = true }
+lattice-conversation = { workspace = true }
+lattice-ipc = { workspace = true }
+lattice-llm = { workspace = true }
+lattice-profile = { workspace = true }
+lattice-session = { workspace = true }
+regex = { workspace = true }
+rustix = { workspace = true, features = ["fs", "net"] }
+# 崩溃屏障需要线程定向的 `raise(SIGSTOP)`，只随 `test-crash-barriers` 引入。
+libc = { workspace = true, optional = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+uuid = { workspace = true }
+
+[dev-dependencies]
+lattice-agent = { workspace = true, features = ["test-utils"] }
+lattice-ipc = { workspace = true, features = ["test-utils"] }
+lattice-local = { workspace = true, features = ["test-utils"] }
+lattice-server = { workspace = true, features = ["test-utils"] }
+lattice-session = { workspace = true, features = ["test-utils"] }
+lattice-store = { workspace = true }
+tempfile = { workspace = true }
+tokio = { workspace = true, features = ["test-util"] }
+toml = { workspace = true }
+
+[features]
+default = []
+# 仅供本 crate 集成测试复用本地后台与同进程 Turn 执行入口。
+test-utils = []
+test-crash-barriers = ["lattice-session/test-crash-barriers", "dep:libc"]
+test-fake-tools = []

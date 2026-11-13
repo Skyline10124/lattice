@@ -1,6 +1,6 @@
 # lattice-profile 工作指引
 
-负责单 Agent `agent.toml` 的发现、全局目录权限检查、严格 schema 解析、系统提示读取与默认模板生成，产出供 `lattice-api` 使用的 Agent 配置数据。
+负责单 Agent `agent.toml` 的发现、全局目录权限检查、严格 schema 解析、系统提示读取与默认模板生成，产出供 `lattice-server` 使用的 Agent 配置数据。
 
 ## 模块
 
@@ -28,7 +28,7 @@
 - 公开 `schema.rs` 字段在解析边界经 `AgentName::parse`、`ModelRef::parse`、`TurnTimeout::new`（`1..=86400`）与 `RetryPolicy::new` 构造为领域类型，失败时在 `ProfileError` 中保留文件路径、节名、字段名与原始值或行号，见[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)与[输入与传输限制](../../docs/architecture/session/concurrency.md#输入与传输限制)。
 - 系统提示路径规范化失败直接返回 `ProfileError::SystemPathNotFound`；位于全局 `agents` 目录下的目录、`agent.toml` 与外部系统提示文件均须满足属主等于 `expected_uid`、权限与 `0o022` 无交集且路径末段为非符号链接常规文件或目录，见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)。
 - 本 crate 的内部依赖仅限 `lattice-conversation` 与 `lattice-session`。
-- 本 crate 之外：会话配置与执行协调由 `lattice-api` 负责；会话设置持久化由 `lattice-session` 负责；CLI 入口由 `lattice-cli` 负责。
+- 本 crate 之外：会话配置与执行协调由 `lattice-server` 负责；会话设置持久化由 `lattice-session` 负责；CLI 入口由 `lattice-cli` 负责。
 
 ## 验证
 
@@ -36,4 +36,4 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-profile`（未知字段拒绝由 `deny_unknown_fields` 结构保证，测试锁定领域字段校验、禁止顶层节诊断、发现顺序及默认模板往返） |
 | 修改全局权限或系统提示路径解析 | 在 `cargo test -p lattice-profile` 中覆盖路径缺失、父级符号链接放行、末段符号链接拒绝与 `0o022` 写权限拒绝 |
-| 修改公开 profile 类型或错误诊断 | `cargo test -p lattice-api` |
+| 修改公开 profile 类型或错误诊断 | `cargo test -p lattice-server` |

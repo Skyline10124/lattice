@@ -44,7 +44,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 | 元数据（网关内部） | 合并内置快照、缓存与 `providers.toml` 中手写的元数据；后台定时刷新缓存 |
 | 凭据库（网关内部） | 读写 `auth.json`；SIWC 的登录、刷新与撤销 |
 | 可用性与请求准备（网关内部） | 统一判定 provider 与模型的可用性（`ready`、`unconfigured`、`invalid`）；`model_supported_efforts` 只读取 `providers.toml`、模型元数据与 provider features 而不读取凭据；`GatewayTurn::prepare` 单次读取配置与凭据完成提交准入核对 |
-| 后台（`lattice-api`） | `configure` 加载 profile 并经无凭据档位能力查询计算会话设置；提交时使用会话设置，经请求网关完成模型与凭据准备；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
+| 后台（`lattice-server`） | `configure` 加载 profile 并经无凭据档位能力查询计算会话设置；提交时使用会话设置，经请求网关完成模型与凭据准备；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
 | 前端（CLI、TUI） | 发起会话配置与任务提交；凭据录入与登录只负责界面，经私有 IPC 交给后台 |
 
 调用方不接触 endpoint、key 与 features。网关每次请求按当前的内置表、`providers.toml`、元数据与凭据解析，不按 Turn 冻结；一轮固定的只有记在 UserMessage 节点上的 provider `id`、模型 `id` 与推理档位，见[会话合同](../session/acceptance.md#执行配置冻结)。地址固定与连接复用由网关内部按 Turn 维护，规则见[会话合同的模型 HTTP 传输](../session/concurrency.md#输入与传输限制)。

@@ -10,7 +10,6 @@ description = "Strict single-agent profile schema, loading, discovery, and defau
 lattice-conversation = { workspace = true }
 lattice-session = { workspace = true }
 serde = { workspace = true }
-serde_json = { workspace = true }
 toml = { workspace = true }
 thiserror = { workspace = true }
 

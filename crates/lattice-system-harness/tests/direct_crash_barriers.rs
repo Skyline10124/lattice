@@ -202,9 +202,9 @@ fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Va
     let test = script["test"].as_str().expect("exact test identity");
     evidence.record_json("provenance", &json!({
         "binary":driver.binary_path(),"binary_blake3":blake3::hash(&bytes).to_hex().to_string(),
-        "features":"test-fake-tools,test-crash-barriers","harness_features":"fake-tools,crash-barriers","profile":"debug",
+        "features":"lattice-server/test-fake-tools,lattice-server/test-crash-barriers","harness_features":"fake-tools,crash-barriers","profile":"debug",
         "state_root":world.session_store_dir().parent(),"script":script,
-        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features test-fake-tools,test-crash-barriers && LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
+        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers && LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
     })).unwrap();
 }
 fn stage(

@@ -1,6 +1,6 @@
 # lattice-conversation 工作指引
 
-定义 provider 中立的纯数据对话类型、模型选择值、工具调用绑定 typestate 与字节计量规则，被 `lattice-session`、`lattice-profile`、`lattice-llm`、`lattice-agent` 与 `lattice-api` 使用。
+定义 provider 中立的纯数据对话类型、模型选择值、工具调用绑定 typestate 与字节计量规则，被 `lattice-session`、`lattice-profile`、`lattice-llm`、`lattice-agent` 与 `lattice-server` 使用。
 
 ## 模块
 
@@ -41,7 +41,7 @@
 - `OpaqueProviderState` 按片段原样保留不透明回放材料（上限 64 KiB，包含正文为空的片段），见[回放与跨 provider 投影](../../docs/architecture/session/conversation.md#回放与跨-provider-投影)。
 - `Option<TokenUsage>` 为 `None` 表示整次尝试缺失用量，字段级 `None` 表示该项未报告；完整性由 `UsageCompleteness` 表达，路径与全会话汇总按[关闭 Step 与 Turn](../../docs/architecture/session/steps.md#关闭-step-与-turn)派生。
 - `AttemptAssembly` 与 `validate_assistant_bounds` 共用同一套字节上限常量和计量规则，使流式阶段与会话库持久边界的检查口径一致，见[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)。
-- 本 crate 之外：流式回复组装、provider 协议投影与费用计价逻辑由 `lattice-llm` 负责；`TurnId` 与 `InvocationId` 生成由 `lattice-api` 负责；持久落盘与锁由 `lattice-session` 和 `lattice-store` 负责。
+- 本 crate 之外：流式回复组装、provider 协议投影与费用计价逻辑由 `lattice-llm` 负责；`TurnId` 与 `InvocationId` 生成由 `lattice-server` 负责；持久落盘与锁由 `lattice-session` 和 `lattice-store` 负责。
 
 ## 验证
 
@@ -49,4 +49,4 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-conversation` |
 | 修改身份解析、结构地址、参数规范化或摘要构造 | 运行 `cargo test -p lattice-conversation`，保持 `tests/primitives_golden.rs` 与 `src/tool_call.rs` 的 golden 用例原值通过 |
-| 修改公开对话类型、上限常量或用量结构 | `cargo test -p lattice-session`、`cargo test -p lattice-llm`、`cargo test -p lattice-api` |
+| 修改公开对话类型、上限常量或用量结构 | `cargo test -p lattice-session`、`cargo test -p lattice-llm`、`cargo test -p lattice-server` |

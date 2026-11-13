@@ -11,16 +11,14 @@ name = "lattice"
 path = "src/main.rs"
 
 [dependencies]
-lattice-api = { workspace = true }
+lattice-server = { workspace = true }
 lattice-local = { workspace = true }
 lattice-tui = { workspace = true }
 tokio = { workspace = true }
 clap = { workspace = true }
 serde_json = { workspace = true }
 dirs = { workspace = true }
-colored = { workspace = true }
 anyhow = { workspace = true }
-futures = { workspace = true }
 unicode-width = { workspace = true }
 libc = { workspace = true }
 zeroize = { workspace = true }
@@ -29,8 +27,3 @@ zeroize = { workspace = true }
 lattice-local = { workspace = true, features = ["test-utils"] }
 lattice-session = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
-
-[features]
-default = []
-test-crash-barriers = ["lattice-api/test-crash-barriers"]
-test-fake-tools = ["lattice-api/test-fake-tools"]

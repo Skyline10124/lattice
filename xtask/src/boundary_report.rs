@@ -3,7 +3,7 @@
 
 use crate::output::{exit_with_status_on_failures, print_group};
 
-/// Run named boundary groups, print PASS/FAIL per group, then exit(1) on any failure.
+/// 依次运行具名的边界检查组并逐组打印结果；任一组未通过时以退出码 1 结束进程。
 pub fn run_groups(
     passed_message: &str,
     failed_message: &str,
