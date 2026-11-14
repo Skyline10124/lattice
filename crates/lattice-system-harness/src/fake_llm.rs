@@ -584,11 +584,13 @@ impl FakeLlmServer {
         if let Some(gate) = &self.gate {
             gate.cancel();
         }
-        let _ = self.stop.send(true);
 
         {
             let (lock, wake) = &*self.state;
             let mut state = lock.lock().unwrap();
+            // 先取得状态锁再发出停止信号：处理任务与服务线程都要取得这把锁才能登记退出，
+            // 所以第一次检查看到的一定是信号发出前的状态，零期限的关停总是报告超时。
+            let _ = self.stop.send(true);
             while !state.serve_exited || state.active_handlers != 0 {
                 let remaining = deadline.saturating_duration_since(Instant::now());
                 if remaining.is_zero() {
