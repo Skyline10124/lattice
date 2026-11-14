@@ -34,6 +34,9 @@ mod configure_tests;
 #[cfg(test)]
 #[path = "server_models_tests.rs"]
 mod models_tests;
+#[cfg(test)]
+#[path = "server_service_tests.rs"]
+mod service_tests;
 
 /// 后台宿主的生命周期回调，只包含就绪与开始停机两个事件。
 /// 调用点位于准入锁之外，实现不得阻塞异步运行时。
@@ -105,31 +108,80 @@ enum DrainDecision {
     Decided(DrainOutcome),
 }
 
-struct Owner {
+pub(super) enum SubmitSource {
+    Ipc(UnixStream),
+    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
+    InProcess,
+}
+
+impl SubmitSource {
+    fn stream(&self) -> Option<&UnixStream> {
+        match self {
+            Self::Ipc(stream) => Some(stream),
+            Self::InProcess => None,
+        }
+    }
+}
+
+pub(super) enum BackendOperation {
+    Submit {
+        request: TurnRequest,
+        source: SubmitSource,
+    },
+    Configure {
+        request: ConfigureRequest,
+    },
+    Rewind {
+        session_id: SessionId,
+        target: lattice_session::store::NodeId,
+        workspace: std::path::PathBuf,
+    },
+}
+
+#[derive(Clone)]
+pub(super) enum SubmitOutcome {
+    Accepted(Box<lattice_session::store::TurnDetail>),
+    ConfirmationUnknown {
+        turn_id: TurnId,
+        session_id: SessionId,
+        #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
+        cause: RecoveryCause,
+    },
+}
+
+#[derive(Clone)]
+pub(super) enum OwnerReply {
+    Submit(SubmitOutcome),
+    Configure(ConfigureReply),
+    Rewind(lattice_session::store::SessionRecord),
+    Error(LocalError),
+}
+
+pub(super) struct Owner {
     identity: Option<TurnRequest>,
-    session: Option<SessionId>,
-    reply: watch::Sender<Option<Response>>,
-    done: watch::Sender<Option<Result<()>>>,
+    pub(super) session: Option<SessionId>,
+    reply: watch::Sender<Option<OwnerReply>>,
+    pub(super) done: watch::Sender<Option<Result<()>>>,
     observer: ObserverLease,
-    execution_cancel: Arc<AtomicBool>,
-    started: AtomicBool,
+    pub(super) execution_cancel: Arc<AtomicBool>,
+    pub(super) started: AtomicBool,
     core: Mutex<Option<oneshot::Receiver<crate::session::Result<TurnCompletion>>>>,
     store: Mutex<Option<SessionApi>>,
     operation: Arc<OperationRecord>,
 }
 impl Owner {
-    fn reply(&self, response: Response) {
+    fn reply(&self, response: OwnerReply) {
         self.reply.send_replace(Some(response));
     }
 }
-struct Admission {
+pub(super) struct Admission {
     drain_timeout: Duration,
     stop: StopPhase,
-    turns: HashMap<TurnId, Arc<Owner>>,
+    pub(super) turns: HashMap<TurnId, Arc<Owner>>,
     sessions: HashMap<SessionId, Arc<Owner>>,
     owners: Vec<Arc<Owner>>,
     cleanups: Vec<Arc<OperationRecord>>,
-    diagnostics: HashMap<TurnId, LocalError>,
+    pub(super) diagnostics: HashMap<TurnId, LocalError>,
     unconfirmed_operations: usize,
 }
 impl Default for Admission {
@@ -153,7 +205,7 @@ impl Admission {
         }
     }
 }
-struct Backend {
+pub(super) struct Backend {
     #[cfg(test)]
     layout: StateLayout,
     home: Option<std::path::PathBuf>,
@@ -162,10 +214,11 @@ struct Backend {
     tools: Arc<dyn ToolExecutor>,
     lifecycle: Arc<dyn HostLifecycle>,
     epoch: String,
-    admission: Mutex<Admission>,
+    pub(super) admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
+    pub(super) stopping: watch::Sender<bool>,
     closed: watch::Sender<bool>,
-    stores: Arc<crate::stores::StoreManager>,
+    pub(super) stores: Arc<crate::stores::StoreManager>,
     observers: Arc<Mutex<HashMap<SessionId, CachedObserver>>>,
     subscriptions: tokio::sync::Semaphore,
     #[cfg(test)]
@@ -175,7 +228,7 @@ struct CachedObserver {
     sink: Arc<ObserverSink>,
     leases: usize,
 }
-struct ObserverLease {
+pub(super) struct ObserverLease {
     sink: Arc<ObserverSink>,
     session_id: SessionId,
     cache: Arc<Mutex<HashMap<SessionId, CachedObserver>>>,
@@ -199,7 +252,7 @@ impl Drop for ObserverLease {
 const DRAFT_TTL_HOURS: i64 = 24;
 /// 同时登记的 Owner 上限；新的提交、configure、rewind 与草稿清理达到上限时都不再占位。
 const MAX_OWNERS: usize = 32;
-struct CleanupGuard {
+pub(super) struct CleanupGuard {
     backend: Arc<Backend>,
     operation: Arc<OperationRecord>,
 }
@@ -212,10 +265,10 @@ impl Drop for CleanupGuard {
         self.backend.changed.send_modify(|v| *v += 1);
     }
 }
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("backend lock poisoned")
 }
-fn internal() -> LocalError {
+pub(super) fn internal() -> LocalError {
     LocalError::new(LocalErrorKind::Internal, "后台操作失败；请检查持久化状态")
 }
 fn listener_io_error(action: &str, error: std::io::Error) -> LocalError {
@@ -241,7 +294,7 @@ fn conflict(reason: ConflictReason) -> LocalError {
         )
     }
 }
-fn not_found() -> LocalError {
+pub(super) fn not_found() -> LocalError {
     LocalError::new(LocalErrorKind::NotFound, "session or Turn not found")
 }
 fn uninitialized(error: &LocalError) -> bool {
@@ -258,6 +311,10 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| internal())?
 }
 impl Backend {
+    pub(super) fn service(self: &Arc<Self>) -> super::service::Service {
+        super::service::Service::new(self.clone())
+    }
+
     fn chatgpt_auth(&self) -> Result<lattice_llm::auth::ChatgptAuth> {
         self.gateway
             .as_ref()
@@ -276,6 +333,7 @@ impl Backend {
                 .checked_add(state.drain_timeout)
                 .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
             state.stop = StopPhase::Draining { deadline };
+            self.stopping.send_replace(true);
         }
         self.lifecycle.on_stopping();
         self.metadata.stop();
@@ -361,6 +419,7 @@ impl Backend {
             epoch: uuid::Uuid::new_v4().to_string(),
             admission: Mutex::default(),
             changed: watch::channel(0).0,
+            stopping: watch::channel(false).0,
             closed: watch::channel(false).0,
             observers: Arc::default(),
             subscriptions: tokio::sync::Semaphore::new(32),
@@ -368,7 +427,7 @@ impl Backend {
             gates: tests::Gates::default(),
         })
     }
-    fn observer(&self, session_id: SessionId) -> ObserverLease {
+    pub(super) fn observer(&self, session_id: SessionId) -> ObserverLease {
         let mut cache = lock(&self.observers);
         let entry = cache.entry(session_id).or_insert_with(|| CachedObserver {
             sink: Arc::default(),
@@ -408,7 +467,7 @@ impl Backend {
             .map(|entry| entry.sink.clone());
         sink.is_some_and(|sink| sink.has_watchers())
     }
-    fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
+    pub(super) fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
         let mut state = lock(&self.admission);
         if state.stop.is_stopping() {
             return None;
@@ -420,7 +479,7 @@ impl Backend {
             operation,
         })
     }
-    fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
+    pub(super) fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
         let backend = self.clone();
         tokio::spawn(async move {
             let operation = guard.operation.clone();
@@ -551,10 +610,10 @@ impl Backend {
             }
         }
     }
-    async fn open(&self) -> Result<SessionApi> {
+    pub(super) async fn open(&self) -> Result<SessionApi> {
         self.stores.acquire(false).await.map_err(Into::into)
     }
-    async fn optional_store(&self) -> Result<Option<SessionApi>> {
+    pub(super) async fn optional_store(&self) -> Result<Option<SessionApi>> {
         let mut changed = self.stores.subscribe();
         loop {
             changed.borrow_and_update();
@@ -574,16 +633,13 @@ impl Backend {
             }
         }
     }
-    fn claim(
-        self: &Arc<Self>,
-        operation: Request,
-        submitter: Option<UnixStream>,
-    ) -> Result<Arc<Owner>> {
+    pub(super) fn claim(self: &Arc<Self>, operation: BackendOperation) -> Result<Arc<Owner>> {
         let (identity, session) = match &operation {
-            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session)),
-            Request::Rewind { session_id, .. } => (None, Some(*session_id)),
-            Request::Configure { request } => (None, Some(request.session.id())),
-            _ => return Err(internal()),
+            BackendOperation::Submit { request, .. } => {
+                (Some(request.clone()), Some(request.session))
+            }
+            BackendOperation::Rewind { session_id, .. } => (None, Some(*session_id)),
+            BackendOperation::Configure { request } => (None, Some(request.session.id())),
         };
         let owner = {
             let mut state = lock(&self.admission);
@@ -629,23 +685,23 @@ impl Backend {
         let backend = self.clone();
         let task_owner = owner.clone();
         tokio::spawn(async move {
-            let mut result =
-                std::panic::AssertUnwindSafe(backend.perform(operation, &task_owner, submitter))
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| Err(internal()));
+            let mut result = std::panic::AssertUnwindSafe(backend.perform(operation, &task_owner))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(internal()));
             let completion = lock(&task_owner.core).take();
             // 回执转交失败不能等待模型或工具排空，也不能否认可能已提交的接受事务。
             if task_owner.reply.borrow().is_none() {
                 let response = if let Some(request) = &task_owner.identity
                     && completion.is_some()
                 {
-                    Response::Acceptance(Acceptance::ConfirmationUnknown {
+                    OwnerReply::Submit(SubmitOutcome::ConfirmationUnknown {
                         turn_id: request.turn_id,
                         session_id: request.session,
+                        cause: RecoveryCause::WorkerFailed,
                     })
                 } else {
-                    Response::Error(result.clone().err().unwrap_or_else(internal))
+                    OwnerReply::Error(result.clone().err().unwrap_or_else(internal))
                 };
                 task_owner.reply(response);
             }
@@ -687,7 +743,9 @@ impl Backend {
                 {
                     state.sessions.remove(&sid);
                     task_owner.observer.owner_changed();
-                    task_owner.observer.release();
+                    task_owner
+                        .observer
+                        .release_turn(task_owner.identity.as_ref().map(|r| r.turn_id));
                 }
                 state.owners.retain(|o| !Arc::ptr_eq(o, &task_owner));
                 task_owner.done.send_replace(Some(result));
@@ -700,14 +758,15 @@ impl Backend {
     }
     async fn perform(
         self: &Arc<Self>,
-        operation: Request,
+        operation: BackendOperation,
         owner: &Arc<Owner>,
-        submitter: Option<UnixStream>,
     ) -> Result<()> {
         match operation {
-            Request::Submit { request } => self.submit(request, owner, submitter).await,
-            Request::Configure { request } => self.configure(request, owner).await,
-            Request::Rewind {
+            BackendOperation::Submit { request, source } => {
+                self.submit(request, owner, source).await
+            }
+            BackendOperation::Configure { request } => self.configure(request, owner).await,
+            BackendOperation::Rewind {
                 session_id,
                 target,
                 workspace,
@@ -730,10 +789,9 @@ impl Backend {
                 #[cfg(test)]
                 tests::pause(&self.gates.rewind_committed).await;
                 owner.observer.replace_path(target);
-                owner.reply(Response::Rewind(record));
+                owner.reply(OwnerReply::Rewind(record));
                 Ok(())
             }
-            _ => Err(internal()),
         }
     }
     async fn configure(
@@ -888,14 +946,14 @@ impl Backend {
             (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
         }
         owner.observer.owner_changed();
-        owner.reply(Response::Configure(ConfigureReply { head, adjustment }));
+        owner.reply(OwnerReply::Configure(ConfigureReply { head, adjustment }));
         Ok(())
     }
     async fn submit(
         self: &Arc<Self>,
         request: TurnRequest,
         owner: &Arc<Owner>,
-        submitter: Option<UnixStream>,
+        source: SubmitSource,
     ) -> Result<()> {
         let api = self.optional_store().await?;
         *lock(&owner.store) = api.clone();
@@ -952,7 +1010,7 @@ impl Backend {
         .await;
         #[cfg(test)]
         tests::pause(&self.gates.registered).await;
-        check_submitter(submitter.as_ref())?;
+        check_submitter(source.stream())?;
         let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
             .await
             .map_err(ApiError::from)?;
@@ -976,7 +1034,7 @@ impl Backend {
         let prepared_model =
             crate::turn::execute::PreparedModel::resolve(&gateway, &settings).await?;
         let shutdown = api.shutdown();
-        check_submitter(submitter.as_ref())?;
+        check_submitter(source.stream())?;
         {
             let _state = lock(&self.admission);
             owner.started.store(true, Ordering::Release);
@@ -1006,33 +1064,33 @@ impl Backend {
             Ok(Ok(accepted)) => accepted,
             Ok(Err(error)) => {
                 let error = LocalError::from(error);
-                owner.reply(Response::Error(error.clone()));
+                owner.reply(OwnerReply::Error(error.clone()));
                 return Err(error);
             }
             Err(_) => {
-                owner.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
+                owner.reply(OwnerReply::Submit(SubmitOutcome::ConfirmationUnknown {
                     turn_id: request.turn_id,
                     session_id: sid,
+                    cause: RecoveryCause::WorkerFailed,
                 }));
                 return Err(internal());
             }
         };
         #[cfg(test)]
         tests::fail_forwarding(&self.gates.forward_panic).await;
-        owner.reply(Response::Acceptance(match accepted {
-            TurnAcceptance::Accepted { turn } => Acceptance::Accepted {
-                turn: TurnView::from(&turn),
-            },
-            TurnAcceptance::ConfirmationUnknown { turn_id, .. } => {
-                Acceptance::ConfirmationUnknown {
+        owner.reply(OwnerReply::Submit(match accepted {
+            TurnAcceptance::Accepted { turn } => SubmitOutcome::Accepted(Box::new(turn)),
+            TurnAcceptance::ConfirmationUnknown { turn_id, cause, .. } => {
+                SubmitOutcome::ConfirmationUnknown {
                     turn_id,
                     session_id: sid,
+                    cause,
                 }
             }
         }));
         Ok(())
     }
-    async fn lookup(&self, turn_id: TurnId) -> Result<TurnLookup> {
+    pub(super) async fn lookup(&self, turn_id: TurnId) -> Result<TurnLookup> {
         loop {
             let candidate = lock(&self.admission).turns.get(&turn_id).cloned();
             if let Some(api) = self.optional_store().await?
@@ -1054,7 +1112,7 @@ impl Backend {
             }
         }
     }
-    async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
+    pub(super) async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
         let observer = self.observer(session_id);
         loop {
             let generation = {
@@ -1261,11 +1319,11 @@ impl Backend {
                 self.open().await?.read(move |r| r.log(session_id)).await?,
             )),
             Request::Usage { session_id } => Ok(Response::Usage(Box::new(
-                self.open().await?.usage(session_id).await?,
+                self.service().usage_by_prefix(session_id).await?,
             ))),
-            Request::Turn { turn_id } => Ok(Response::Turn(self.lookup(turn_id).await?)),
+            Request::Turn { turn_id } => Ok(Response::Turn(self.service().turn(turn_id).await?)),
             Request::Head { session_id } => {
-                Ok(Response::Head(self.session_head(session_id).await?))
+                Ok(Response::Head(self.service().head(session_id).await?))
             }
             Request::History {
                 session_id,
@@ -1286,41 +1344,47 @@ impl Backend {
                         .await?,
                 }))
             }
-            Request::Cancel { turn_id } => {
-                let owned = {
-                    let state = lock(&self.admission);
-                    state.turns.get(&turn_id).is_some_and(|owner| {
-                        owner.execution_cancel.store(true, Ordering::Release);
-                        true
-                    })
-                };
-                if !owned && let Some(api) = self.optional_store().await? {
-                    api.read(move |r| r.turn_node(turn_id)).await?;
-                }
-                Ok(Response::Cancelled { owned })
-            }
+            Request::Cancel { turn_id } => Ok(Response::Cancelled {
+                owned: self.service().cancel(turn_id).await?,
+            }),
             Request::Submit { .. } => Err(internal()),
-            request @ (Request::Rewind { .. } | Request::Configure { .. }) => {
-                self.wait_reply(self.claim(request, None)?).await
+            Request::Configure { .. } => Err(internal()),
+            Request::Rewind {
+                session_id,
+                target,
+                workspace,
+            } => {
+                let owner = self.claim(BackendOperation::Rewind {
+                    session_id,
+                    target,
+                    workspace,
+                })?;
+                match self.wait_owner_reply(owner).await? {
+                    OwnerReply::Rewind(record) => Ok(Response::Rewind(record)),
+                    _ => Err(internal()),
+                }
             }
             Request::Watch { .. } => Err(internal()),
         }
     }
-    async fn wait_reply(&self, owner: Arc<Owner>) -> Result<Response> {
+    pub(super) async fn wait_owner_reply(&self, owner: Arc<Owner>) -> Result<OwnerReply> {
         let mut reply = owner.reply.subscribe();
         loop {
             let response = reply.borrow_and_update().clone();
             if let Some(response) = response {
                 if matches!(
                     response,
-                    Response::Error(_) | Response::Rewind(_) | Response::Configure(_)
+                    OwnerReply::Error(_) | OwnerReply::Rewind(_) | OwnerReply::Configure(_)
                 ) {
                     let mut done = owner.done.subscribe();
                     while done.borrow_and_update().is_none() {
                         done.changed().await.map_err(|_| internal())?;
                     }
                 }
-                return Ok(response);
+                return match response {
+                    OwnerReply::Error(error) => Err(error),
+                    other => Ok(other),
+                };
             }
             reply.changed().await.map_err(|_| internal())?;
         }
@@ -1568,30 +1632,25 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
         }
         return Ok(());
     }
-    let cleanup_after_reply = matches!(
-        &request,
-        Request::Configure {
-            request: ConfigureRequest {
-                session: ConfigureSession::New(_),
-                ..
-            }
+    let service = backend.service();
+    let (response, cleanup_guard) = match request {
+        Request::Configure { request } => {
+            let (result, guard) = service.configure_with_cleanup(request).await;
+            (result.map(Response::Configure), guard)
         }
-    );
-    let response = if matches!(request, Request::Submit { .. }) {
-        let socket = stream.into_std()?;
-        let submitter = UnixStream::from_std(socket.try_clone()?)?;
-        stream = UnixStream::from_std(socket)?;
-        match backend.claim(request, Some(submitter)) {
-            Ok(owner) => backend.wait_reply(owner).await,
-            Err(error) => Err(error),
+        Request::Submit { request } => {
+            let socket = stream.into_std()?;
+            let submitter = UnixStream::from_std(socket.try_clone()?)?;
+            stream = UnixStream::from_std(socket)?;
+            (
+                service
+                    .submit_ipc(request, submitter)
+                    .await
+                    .map(Response::Acceptance),
+                None,
+            )
         }
-    } else {
-        backend.dispatch(request).await
-    };
-    let cleanup_guard = if cleanup_after_reply {
-        backend.begin_cleanup()
-    } else {
-        None
+        other => (backend.dispatch(other).await, None),
     };
     let write_result = writer
         .write(&mut stream, &response.unwrap_or_else(Response::Error))
@@ -1631,15 +1690,44 @@ pub async fn serve_for_test(
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<ServeExit> {
+    serve_test_backend(layout, home, drain_timeout, stop_requests, None).await
+}
+
+/// 启动测试后台，并在监听就绪后通过 `service_tx` 交出同一后台实例的进程内 [`super::service::Service`]。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test_with_service(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    service_tx: oneshot::Sender<super::service::Service>,
+) -> Result<ServeExit> {
+    serve_test_backend(layout, home, drain_timeout, stop_requests, Some(service_tx)).await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+async fn serve_test_backend(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    service_tx: Option<oneshot::Sender<super::service::Service>>,
+) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
-    serve_with_backend(layout, drain_timeout, stop_requests, move || {
-        let mut backend = Backend::with_tools(backend_layout, home, tools);
-        Arc::get_mut(&mut backend)
-            .expect("unshared test backend")
-            .metadata = super::metadata::MetadataRefresh::without_network();
-        backend
-    })
+    serve_with_backend_and_service(
+        layout,
+        drain_timeout,
+        stop_requests,
+        service_tx,
+        move || {
+            let mut backend = Backend::with_tools(backend_layout, home, tools);
+            Arc::get_mut(&mut backend)
+                .expect("unshared test backend")
+                .metadata = super::metadata::MetadataRefresh::without_network();
+            backend
+        },
+    )
     .await
 }
 
@@ -1696,7 +1784,17 @@ async fn finish_serve(
 async fn serve_with_backend(
     layout: StateLayout,
     drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
+) -> Result<ServeExit> {
+    serve_with_backend_and_service(layout, drain_timeout, stop_requests, None, build_backend).await
+}
+
+async fn serve_with_backend_and_service(
+    layout: StateLayout,
+    drain_timeout: Duration,
     mut stop_requests: tokio::sync::mpsc::Receiver<()>,
+    service_tx: Option<oneshot::Sender<super::service::Service>>,
     build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
 ) -> Result<ServeExit> {
     let binding_layout = layout.clone();
@@ -1766,6 +1864,9 @@ async fn serve_with_backend(
             Some(backend),
         )
         .await);
+    }
+    if let Some(tx) = service_tx {
+        let _ = tx.send(backend.service());
     }
 
     let metadata_task = backend.metadata.start();

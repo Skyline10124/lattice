@@ -131,6 +131,7 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
                 Some(session_id) => Ok(TurnAcceptance::ConfirmationUnknown {
                     turn_id,
                     session_id,
+                    cause: confirmation_unknown_cause(error),
                 }),
                 None => Err(error.clone()),
             };
@@ -143,6 +144,18 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
         completion,
         #[cfg(any(test, feature = "test-utils"))]
         cancel_flag,
+    }
+}
+
+fn confirmation_unknown_cause(error: &ApiError) -> lattice_ipc::RecoveryCause {
+    match error {
+        ApiError::WorkerFailed => lattice_ipc::RecoveryCause::WorkerFailed,
+        ApiError::Store(store_error)
+            if matches!(store_error.as_ref(), StoreError::WriteDisabled) =>
+        {
+            lattice_ipc::RecoveryCause::WriteDisabled
+        }
+        _ => lattice_ipc::RecoveryCause::CommitFailed,
     }
 }
 
@@ -297,6 +310,7 @@ async fn execute_owned(
                     TurnAcceptance::ConfirmationUnknown {
                         turn_id,
                         session_id,
+                        cause: confirmation_unknown_cause(&error),
                     },
                 );
             }
