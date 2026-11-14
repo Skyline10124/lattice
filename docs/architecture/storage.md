@@ -44,10 +44,10 @@ status: active
 
 后台生命周期依次为：
 
-1. 首次使用时，客户端可自动启动当前 `lattice` 的后台主体，以独立进程组运行并脱离终端 stdio。
-2. `serve` 取得实例锁，核验本地目录与 socket；需要处理残留 socket 时，仅清理本用户、身份未变化且已失效的对象，再绑定服务地址。
+1. 后台由 `systemd` 用户服务（`lattice.service`）或手动运行的 `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` 启动；前端只连接已经运行的后台，后台未运行时返回 `not_running`。
+2. `serve` 取得实例锁，核验本地目录与 socket；需要处理残留 socket 时，仅清理本用户、身份未变化且已失效的对象，再绑定服务地址。绑定完成且未进入停机时，宿主经 `$NOTIFY_SOCKET`（若已设置）发出 `READY=1`；取不到 `owner.lock` 时不触碰现有 socket，尝试连接已发布 socket 读取对端进程号并以退出码 `3` 退出。
 3. 通信双方完成身份和协议检查后，Backend 接管请求，并通过领域接口打开存储、管理独立任务。最后一个客户端断开后，后台继续运行。
-4. IPC `stop`、`SIGTERM` 或 `SIGINT` 关闭新准入并在有界期限内等待已接管操作收尾，具体查询、取消、排空与尾段责任见[停止后台](session/recovery.md#停止后台)。
+4. IPC `stop`、`SIGTERM` 或 `SIGINT` 关闭新准入（首次进入排空时经 `$NOTIFY_SOCKET` 发出 `STOPPING=1`）并在有界期限内等待已接管操作收尾，具体查询、取消、排空与尾段责任见[停止后台](session/recovery.md#停止后台)。
 5. 后台正常退出时由实例锁持有者先清理自己的 socket，进程退出后内核释放 `owner.lock`。锁文件可以留存，是否持锁以 flock 为准；异常退出留下的 socket 由下一持锁者按第 2 步核验处理。
 
 请求接受、执行进度与请求身份由会话库的节点与 TurnId 索引保存，见[请求身份与找回](session/recovery.md#请求身份与找回)。进程控制资源不构成业务状态库；后台启动保持领域库原样，执行者消失的 Turn 停在已写入的进度，见[执行者消失后的 Turn](session/recovery.md#执行者消失后的-turn)。

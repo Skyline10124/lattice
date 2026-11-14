@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 面向已构建 `lattice` 二进制的外置全系统验收套件。
+//! 面向已构建 `lattice` 与 `lattice-daemon` 二进制的外置全系统验收套件。
 //!
-//! 本 crate 不得依赖任何 `lattice-*` 或工作区内的产品 crate，只通过 `LATTICE_BIN` 驱动已构建的二进制。
+//! 本 crate 不得依赖任何 `lattice-*` 或工作区内的产品 crate，只通过 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 驱动已构建的二进制。
 
 pub mod artifacts;
 mod assert;
@@ -31,7 +31,7 @@ pub use daemon::{DaemonError, DaemonOptions};
 pub use driver::processes_in_pgid;
 pub use driver::{
     CleanupError, CleanupOperation, CommandOutcome, CommandOutcomeSummary, DriverError,
-    HarnessIntervention, LatticeCommand, LatticeDriver, ProcessGroupCleanup,
+    HarnessIntervention, LatticeCommand, LatticeDaemonDriver, LatticeDriver, ProcessGroupCleanup,
     ProcessInspectionOperation, ProcessTermination, RunningCommand,
 };
 pub use fake_llm::{

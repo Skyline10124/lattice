@@ -318,25 +318,46 @@ impl PtyTuiDriver {
     ///
     /// 验证 `/quit` 等主动退出行为的场景必须在 `Drop` 之前调用本方法观察自然退出，
     /// 否则 `kill_and_reap` 的 `SIGKILL` 会掩盖 `/quit` 失效的问题。
-    pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<(), PtyError> {
-        let child = match self.child.as_mut() {
-            Some(child) => child,
-            None => return Ok(()),
-        };
+    /// 等待子进程自然退出，排空已写出的伪终端输出并返回其退出码。
+    pub fn wait_for_exit_code(&mut self, timeout: Duration) -> Result<u32, PtyError> {
         let start = Instant::now();
-        loop {
-            match child.try_wait() {
-                Ok(Some(status)) if status.success() => return Ok(()),
-                Ok(Some(status)) => {
-                    return Err(PtyError::Pty(format!("TUI 未干净退出: {status}")));
+        let code = {
+            let child = match self.child.as_mut() {
+                Some(child) => child,
+                None => return Ok(0),
+            };
+            loop {
+                match child.try_wait() {
+                    Ok(Some(status)) => break status.exit_code(),
+                    Ok(None) => {}
+                    Err(e) => return Err(PtyError::Pty(e.to_string())),
                 }
-                Ok(None) => {}
-                Err(e) => return Err(PtyError::Pty(e.to_string())),
+                if start.elapsed() >= timeout {
+                    return Err(PtyError::Timeout(timeout, self.tail_for_diagnostics()));
+                }
+                std::thread::sleep(Duration::from_millis(25));
             }
-            if start.elapsed() >= timeout {
-                return Err(PtyError::Timeout(timeout, self.tail_for_diagnostics()));
+        };
+        // 子进程退出后短暂排空后台读取通道，保留退出前写入伪终端的错误文本。
+        let drain_until = Instant::now() + Duration::from_millis(100);
+        while let Ok(chunk) = self
+            .rx
+            .recv_timeout(drain_until.saturating_duration_since(Instant::now()))
+        {
+            self.output.extend_from_slice(&chunk);
+            if Instant::now() >= drain_until {
+                break;
             }
-            std::thread::sleep(Duration::from_millis(25));
+        }
+        Ok(code)
+    }
+
+    pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<(), PtyError> {
+        let code = self.wait_for_exit_code(timeout)?;
+        if code == 0 {
+            Ok(())
+        } else {
+            Err(PtyError::Pty(format!("TUI 未干净退出: 退出码 {code}")))
         }
     }
 }

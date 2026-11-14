@@ -1,9 +1,10 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! LATTICE 本地 IPC 协议类型、模型与凭据展示类型、分帧编解码与对端 UID 核验。
+//! LATTICE 本地 IPC 协议类型、模型与凭据展示类型、分帧编解码、对端核验与排空时长解析。
 
 mod auth;
+mod drain_timeout;
 pub mod ipc;
 mod models;
 mod types;
@@ -15,6 +16,7 @@ pub use auth::{
     AuthCatalogOutcome, AuthKey, AuthLoginOutcome, AuthStatus, LoginAction, LoginResponse,
     ProviderAuthStatus, RevocationStatus, require_chatgpt,
 };
+pub use drain_timeout::{DrainTimeout, parse_drain_timeout};
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, InvocationId, MessageRole, MessageSemantic,
     ModelAttemptKey, ModelId, ModelIdError, ModelRef, ModelRefError, NativeMessage, ProviderId,

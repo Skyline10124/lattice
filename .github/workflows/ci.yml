@@ -51,25 +51,24 @@ jobs:
         if: steps.changes.outputs.code != 'false'
       - run: cargo clippy --workspace --all-targets -- -D warnings
         if: steps.changes.outputs.code != 'false'
-      - run: cargo build -p lattice-cli --bin lattice
+      - run: cargo build -p lattice-cli -p lattice-daemon --bins
         if: steps.changes.outputs.code != 'false'
-      # One test step covers crate-local invariants AND every external-binary
-      # scenario (fast_*, direct_* full-turn, pty_tui_smoke): the harness is a
-      # workspace member, resolves the debug binary via LATTICE_BIN, and none
-      # of its targets are #[ignore]-gated. Direct-Local scenarios run on any
-      # host — no hypervisor, daemon, or container image required.
+      # 一步测试覆盖 crate 内不变量与全部外部二进制场景（fast_*、direct_* 全轮次、pty_tui_smoke）：
+      # harness 是 workspace 成员，经 LATTICE_BIN 与 LATTICE_DAEMON_BIN 解析两个 debug 二进制，
+      # 所有目标均不挂 #[ignore]。Direct-Local 场景可在任意宿主机运行，不依赖虚拟化或容器镜像。
       - run: cargo test --workspace
         if: steps.changes.outputs.code != 'false'
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
+          LATTICE_DAEMON_BIN: ${{ github.workspace }}/target/debug/lattice-daemon
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       # 第二轮：先检查测试专用 feature 的编译与 clippy，再用带测试 feature 的产物覆盖
-      # target/debug/lattice（LATTICE_BIN 路径不变），运行假执行器单元测试、假工具场景与崩溃屏障。
-      - run: cargo clippy -p lattice-server -p lattice-cli --all-targets --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers -- -D warnings
+      # target/debug/lattice-daemon（前端沿用第一轮的 target/debug/lattice），运行假执行器单元测试、假工具场景与崩溃屏障。
+      - run: cargo clippy -p lattice-server -p lattice-daemon --all-targets --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers -- -D warnings
         if: steps.changes.outputs.code != 'false'
       - run: cargo clippy -p lattice-system-harness --all-targets --features fake-tools,crash-barriers -- -D warnings
         if: steps.changes.outputs.code != 'false'
-      - run: cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers
+      - run: cargo build -p lattice-daemon --bin lattice-daemon --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers
         if: steps.changes.outputs.code != 'false'
       - run: cargo test -p lattice-server --features test-fake-tools,test-crash-barriers
         if: steps.changes.outputs.code != 'false'
@@ -77,6 +76,7 @@ jobs:
         if: steps.changes.outputs.code != 'false'
         env:
           LATTICE_BIN: ${{ github.workspace }}/target/debug/lattice
+          LATTICE_DAEMON_BIN: ${{ github.workspace }}/target/debug/lattice-daemon
           LATTICE_HARNESS_FAILURE_DIR: ${{ github.workspace }}/target/harness-failures
       # 依赖与架构边界检查（与本地 `cargo xtask ci` 执行同一组检查）。
       - run: cargo xtask harness-boundary

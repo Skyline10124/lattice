@@ -3,11 +3,16 @@
 
 //! 本地 IPC 协议版本、16 MiB 单帧编解码、响应分片与本地访问边界核验。
 
-use std::{os::unix::fs::MetadataExt, path::Path, time::Duration};
+use std::{
+    os::fd::{AsFd, BorrowedFd},
+    os::unix::fs::MetadataExt,
+    path::Path,
+    time::Duration,
+};
 
 use tokio::{
     io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt},
-    net::UnixStream,
+    net::{UnixStream, unix::OwnedReadHalf},
 };
 use zeroize::{Zeroize, Zeroizing};
 
@@ -32,22 +37,59 @@ pub use defs::{MAGIC, MAX_FRAME, PROTOCOL_VERSION, magic_for_version};
 
 const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const INCOMPATIBLE_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
-const NEWER_BACKEND: &str = "the running backend is newer than this client; use the newer binary";
-const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请用旧二进制执行 `lattice daemon stop` 停止它";
 
-pub fn permission() -> LocalError {
-    LocalError::new(
-        LocalErrorKind::Permission,
-        "local endpoint ownership or permissions rejected",
+/// 携带底层套接字描述符的异步读取流，供版本不兼容诊断在持有连接期间读取对端进程号。
+pub trait PeerStream: AsyncRead + Unpin {
+    fn peer_fd(&self) -> Option<BorrowedFd<'_>>;
+}
+
+impl PeerStream for UnixStream {
+    fn peer_fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.as_fd())
+    }
+}
+
+impl PeerStream for OwnedReadHalf {
+    fn peer_fd(&self) -> Option<BorrowedFd<'_>> {
+        Some(self.as_ref().as_fd())
+    }
+}
+
+/// 经 `SO_PEERCRED` 读取已连接本地套接字的对端进程号，仅用于诊断展示。
+pub fn peer_pid(fd: impl AsFd) -> Option<i32> {
+    rustix::net::sockopt::socket_peercred(fd)
+        .ok()
+        .map(|cred| cred.pid.as_raw_pid())
+}
+
+fn format_peer_pid(peer: Option<BorrowedFd<'_>>) -> String {
+    match peer.and_then(peer_pid) {
+        Some(pid) => format!("对端进程号：{pid}"),
+        None => "对端进程号不可用".into(),
+    }
+}
+
+fn older_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
+    format!(
+        "运行中的后台版本较旧且不兼容（{}）；请用旧二进制执行 `lattice daemon stop` 停止它",
+        format_peer_pid(peer)
     )
 }
 
-fn protocol() -> LocalError {
-    LocalError::new(
-        LocalErrorKind::Protocol,
-        "unsupported or malformed local protocol frame",
+fn newer_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
+    format!(
+        "运行中的后台版本较新且不兼容（{}）；请换用匹配的前端",
+        format_peer_pid(peer)
     )
+}
+
+pub fn permission() -> LocalError {
+    LocalError::new(LocalErrorKind::Permission, "本地端点属主或权限校验未通过")
+}
+
+fn protocol() -> LocalError {
+    LocalError::new(LocalErrorKind::Protocol, "不支持或格式错误的本地协议帧")
 }
 
 /// 前缀相符时取出版本字节；新旧由 `check_magic` 按版本数值比较。
@@ -56,16 +98,16 @@ fn magic_version(magic: &[u8; 8]) -> Option<u8> {
     (*magic == magic_for_version(version)).then_some(version)
 }
 
-fn check_magic(magic: &[u8; 8]) -> Result<()> {
+fn check_magic(magic: &[u8; 8], peer: Option<BorrowedFd<'_>>) -> Result<()> {
     match magic_version(magic) {
         Some(version) if version == PROTOCOL_VERSION => Ok(()),
         Some(version) if version < PROTOCOL_VERSION => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
-            INCOMPATIBLE_BACKEND,
+            &older_backend_message(peer),
         )),
         Some(_) => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
-            NEWER_BACKEND,
+            &newer_backend_message(peer),
         )),
         None => Err(protocol()),
     }
@@ -77,21 +119,83 @@ pub fn uid() -> u32 {
 }
 
 pub fn check_peer(stream: &UnixStream) -> Result<()> {
-    let cred = rustix::net::sockopt::socket_peercred(stream).map_err(std::io::Error::from)?;
-    if cred.uid.as_raw() != uid() {
-        return Err(permission());
+    let cred = rustix::net::sockopt::socket_peercred(stream).map_err(|errno| {
+        let error = std::io::Error::from(errno);
+        let kind = if error.kind() == std::io::ErrorKind::PermissionDenied {
+            LocalErrorKind::Permission
+        } else {
+            LocalErrorKind::Transport
+        };
+        LocalError::new(kind, &format!("读取本地连接对端凭据失败：{error}"))
+    })?;
+    let current_uid = uid();
+    if cred.uid.as_raw() != current_uid {
+        return Err(LocalError::new(
+            LocalErrorKind::Permission,
+            &format!(
+                "本地连接对端用户不匹配（对端 UID：{}，当前有效 UID：{current_uid}）",
+                cred.uid.as_raw()
+            ),
+        ));
     }
     Ok(())
 }
 
 /// 核验状态根或 `local/` 目录类型、有效 UID 属主与权限位。
 pub fn check_dir(path: &Path, private: bool) -> Result<()> {
-    let meta = std::fs::symlink_metadata(path)?;
-    if !meta.is_dir()
-        || meta.uid() != uid()
-        || meta.mode() & if private { 0o077 } else { 0o022 } != 0
-    {
-        return Err(permission());
+    let meta = std::fs::symlink_metadata(path).map_err(|error| match error.kind() {
+        std::io::ErrorKind::NotFound => LocalError::new(
+            LocalErrorKind::NotRunning,
+            &format!("本地状态目录不存在：{}：{error}", path.display()),
+        ),
+        std::io::ErrorKind::PermissionDenied => LocalError::new(
+            LocalErrorKind::Permission,
+            &format!(
+                "读取本地状态目录元数据权限不足：{}：{error}",
+                path.display()
+            ),
+        ),
+        std::io::ErrorKind::NotADirectory => LocalError::new(
+            LocalErrorKind::Permission,
+            &format!("本地状态目录路径不是目录：{}：{error}", path.display()),
+        ),
+        _ => LocalError::new(
+            LocalErrorKind::Transport,
+            &format!("读取本地状态目录元数据失败：{}：{error}", path.display()),
+        ),
+    })?;
+    if !meta.is_dir() {
+        return Err(LocalError::new(
+            LocalErrorKind::Permission,
+            &format!("本地端点目录不是真实目录：{}", path.display()),
+        ));
+    }
+    let current_uid = uid();
+    if meta.uid() != current_uid {
+        return Err(LocalError::new(
+            LocalErrorKind::Permission,
+            &format!(
+                "本地端点目录属主不匹配：{}（目录 UID：{}，当前有效 UID：{current_uid}）",
+                path.display(),
+                meta.uid()
+            ),
+        ));
+    }
+    let forbidden = if private { 0o077 } else { 0o022 };
+    if meta.mode() & forbidden != 0 {
+        let mode = meta.mode() & 0o777;
+        let detail = if private {
+            format!(
+                "本地端点目录权限过宽（须仅当前用户可读写执行，如 0700，当前为 {mode:04o}）：{}",
+                path.display()
+            )
+        } else {
+            format!(
+                "状态根目录权限过宽（不得允许同组或其他用户写入，当前为 {mode:04o}）：{}",
+                path.display()
+            )
+        };
+        return Err(LocalError::new(LocalErrorKind::Permission, &detail));
     }
     Ok(())
 }
@@ -109,7 +213,7 @@ pub async fn read_request<T: serde::de::DeserializeOwned>(stream: &mut UnixStrea
         return Err(eof());
     }
     stream.read_exact(&mut magic[1..]).await?;
-    if let Err(error) = check_magic(&magic) {
+    if let Err(error) = check_magic(&magic, stream.peer_fd()) {
         let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
             stream.write_all(MAGIC).await?;
             stream.write_u32(4).await?;
@@ -122,10 +226,7 @@ pub async fn read_request<T: serde::de::DeserializeOwned>(stream: &mut UnixStrea
 }
 
 fn eof() -> LocalError {
-    LocalError::new(
-        LocalErrorKind::Transport,
-        "local connection ended before the message was complete",
-    )
+    LocalError::new(LocalErrorKind::Transport, "本地连接在消息完整接收前已断开")
 }
 
 /// 不回写就关连接是本改动之前的后台读到新魔数时的行为；当前后台在过载、崩溃时也可能这样，
@@ -136,20 +237,20 @@ fn silent_close() -> LocalError {
 
 /// `reset_is_eof`：对端带着未读完的请求关闭 Unix 套接字时，Linux 让这一端读到 ECONNRESET 而不是 EOF。
 async fn read_frame<T: serde::de::DeserializeOwned>(
-    stream: &mut (impl AsyncRead + Unpin),
+    stream: &mut impl PeerStream,
     reset_is_eof: bool,
 ) -> Result<Option<T>> {
     read_frame_with_timeout(stream, reset_is_eof, None).await
 }
 
 pub async fn read_login_action<T: serde::de::DeserializeOwned>(
-    stream: &mut (impl AsyncRead + Unpin),
+    stream: &mut impl PeerStream,
 ) -> Result<Option<T>> {
     read_frame_with_timeout(stream, false, Some(LOGIN_FRAME_TIMEOUT)).await
 }
 
 async fn read_frame_with_timeout<T: serde::de::DeserializeOwned>(
-    stream: &mut (impl AsyncRead + Unpin),
+    stream: &mut impl PeerStream,
     reset_is_eof: bool,
     timeout: Option<Duration>,
 ) -> Result<Option<T>> {
@@ -164,13 +265,13 @@ async fn read_frame_with_timeout<T: serde::de::DeserializeOwned>(
     }
     let remainder = async {
         stream.read_exact(&mut magic[1..]).await?;
-        check_magic(&magic)?;
+        check_magic(&magic, stream.peer_fd())?;
         read_body(stream).await.map(Some)
     };
     match timeout {
         Some(timeout) => tokio::time::timeout(timeout, remainder)
             .await
-            .map_err(|_| LocalError::new(LocalErrorKind::Transport, "login frame timed out"))?,
+            .map_err(|_| LocalError::new(LocalErrorKind::Transport, "读取登录帧超时"))?,
         None => remainder.await,
     }
 }
@@ -192,7 +293,7 @@ struct Frame(Zeroizing<Vec<u8>>);
 impl std::io::Write for Frame {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if self.0.len().saturating_add(bytes.len()) > MAX_FRAME {
-            return Err(std::io::Error::other("frame exceeds limit"));
+            return Err(std::io::Error::other("帧大小超过上限"));
         }
         self.0.extend_from_slice(bytes);
         Ok(bytes.len())
@@ -247,12 +348,7 @@ async fn write_wire<T: serde::Serialize>(
     wire.extend_from_slice(&frame.0);
     tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&wire))
         .await
-        .map_err(|_| {
-            LocalError::new(
-                LocalErrorKind::Transport,
-                "local write timed out; acknowledgement may be unknown",
-            )
-        })
+        .map_err(|_| LocalError::new(LocalErrorKind::Transport, "本地写入超时；回执状态可能未知"))
 }
 
 /// 每个连接独立编号；片段的 offset 按逻辑 JSON 的 UTF-8 字节计量。
@@ -323,7 +419,7 @@ impl ResponseReader {
     /// 由连接的持续读取任务持有；调用方不能取消后在同一 socket 重启半条响应。
     pub async fn read<T: serde::de::DeserializeOwned>(
         &mut self,
-        stream: &mut (impl AsyncRead + Unpin),
+        stream: &mut impl PeerStream,
     ) -> Result<T> {
         self.read_with_progress(stream, || {}).await
     }
@@ -331,7 +427,7 @@ impl ResponseReader {
     /// 完整合法分片即为读取进度；不必等整个大对象解码完才刷新连接 idle。
     pub async fn read_with_progress<T: serde::de::DeserializeOwned>(
         &mut self,
-        stream: &mut (impl AsyncRead + Unpin),
+        stream: &mut impl PeerStream,
         progress: impl FnMut(),
     ) -> Result<T> {
         let first = self.next_message == 0;
@@ -343,7 +439,7 @@ impl ResponseReader {
     /// 只有完整消息之间的 EOF 是正常结束，半帧或半条消息仍是传输失败。
     pub async fn next_with_progress<T: serde::de::DeserializeOwned>(
         &mut self,
-        stream: &mut (impl AsyncRead + Unpin),
+        stream: &mut impl PeerStream,
         mut progress: impl FnMut(),
     ) -> Result<Option<T>> {
         let next_message = self.next_message.checked_add(1).ok_or_else(protocol)?;
@@ -386,30 +482,50 @@ mod frame_tests {
 
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
-        check_magic(MAGIC).expect("当前协议版本魔数必须通过");
+        let older_unavailable = "运行中的后台版本较旧且不兼容（对端进程号不可用）；请用旧二进制执行 `lattice daemon stop` 停止它";
+        let newer_unavailable =
+            "运行中的后台版本较新且不兼容（对端进程号不可用）；请换用匹配的前端";
+        check_magic(MAGIC, None).expect("当前协议版本魔数必须通过");
         for version in 0..PROTOCOL_VERSION {
-            let error = check_magic(&magic_for_version(version)).unwrap_err();
+            let error = check_magic(&magic_for_version(version), None).unwrap_err();
             assert_eq!(
                 (error.kind, error.message.as_str()),
-                (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND),
+                (LocalErrorKind::IncompatibleBackend, older_unavailable),
                 "version={version}"
             );
         }
         for version in (PROTOCOL_VERSION + 1)..=u8::MAX {
-            let error = check_magic(&magic_for_version(version)).unwrap_err();
+            let error = check_magic(&magic_for_version(version), None).unwrap_err();
             assert_eq!(
                 (error.kind, error.message.as_str()),
-                (LocalErrorKind::IncompatibleBackend, NEWER_BACKEND),
+                (LocalErrorKind::IncompatibleBackend, newer_unavailable),
                 "version={version}"
             );
         }
         // 版本 61 必须固定判为较旧协议。
-        let error = check_magic(&magic_for_version(61)).unwrap_err();
+        let error = check_magic(&magic_for_version(61), None).unwrap_err();
         assert_eq!(
             (error.kind, error.message.as_str()),
-            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+            (LocalErrorKind::IncompatibleBackend, older_unavailable)
+        );
+        // 非套接字描述符（例如管道）无法经 SO_PEERCRED 取对端进程号，必须回退为“对端进程号不可用”。
+        let (pipe_reader, _pipe_writer) = std::io::pipe().unwrap();
+        let pipe_error = check_magic(
+            &magic_for_version(PROTOCOL_VERSION - 1),
+            Some(pipe_reader.as_fd()),
+        )
+        .unwrap_err();
+        assert_eq!(
+            (pipe_error.kind, pipe_error.message.as_str()),
+            (LocalErrorKind::IncompatibleBackend, older_unavailable)
         );
 
+        let self_pid = std::process::id();
+        let older_with_pid = format!(
+            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请用旧二进制执行 `lattice daemon stop` 停止它"
+        );
+        let newer_with_pid =
+            format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
         let cases = [
             (*MAGIC, 4, b"null".as_slice(), None),
             (
@@ -418,14 +534,17 @@ mod frame_tests {
                 b"null".as_slice(),
                 Some((
                     LocalErrorKind::IncompatibleBackend,
-                    Some(INCOMPATIBLE_BACKEND),
+                    Some(older_with_pid.as_str()),
                 )),
             ),
             (
                 magic_for_version(PROTOCOL_VERSION + 1),
                 4,
                 b"null".as_slice(),
-                Some((LocalErrorKind::IncompatibleBackend, Some(NEWER_BACKEND))),
+                Some((
+                    LocalErrorKind::IncompatibleBackend,
+                    Some(newer_with_pid.as_str()),
+                )),
             ),
             (
                 *b"XXLOCAL9",
@@ -543,15 +662,87 @@ mod frame_tests {
 
     #[tokio::test]
     async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
+        let self_pid = std::process::id();
+        let expected_older = format!(
+            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请用旧二进制执行 `lattice daemon stop` 停止它"
+        );
+        let expected_newer =
+            format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
         let older = oversized_request_against(Some(magic_for_version(PROTOCOL_VERSION - 1))).await;
         assert_eq!(
             (older.kind, older.message.as_str()),
-            (LocalErrorKind::IncompatibleBackend, INCOMPATIBLE_BACKEND)
+            (LocalErrorKind::IncompatibleBackend, expected_older.as_str())
         );
         let newer = oversized_request_against(Some(magic_for_version(PROTOCOL_VERSION + 1))).await;
         assert_eq!(
             (newer.kind, newer.message.as_str()),
-            (LocalErrorKind::IncompatibleBackend, NEWER_BACKEND)
+            (LocalErrorKind::IncompatibleBackend, expected_newer.as_str())
+        );
+    }
+
+    #[test]
+    fn generic_io_error_conversion_and_dir_checks_use_chinese_without_client_guidance() {
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            let error = LocalError::from(std::io::Error::from(kind));
+            assert_eq!(error.kind, LocalErrorKind::NotRunning);
+            assert_eq!(error.message, "本地连接目标不存在或拒绝连接");
+            assert!(
+                !error.message.contains("后台未运行")
+                    && !error.message.contains("systemctl")
+                    && !error.message.contains("lattice daemon install"),
+                "通用 io::Error 转换不得附带客户端操作建议：{}",
+                error.message
+            );
+        }
+        for (kind, expected_kind, expected_message) in [
+            (
+                std::io::ErrorKind::PermissionDenied,
+                LocalErrorKind::Permission,
+                "本地连接权限不足；回执状态可能未知",
+            ),
+            (
+                std::io::ErrorKind::BrokenPipe,
+                LocalErrorKind::Transport,
+                "本地连接失败；回执状态可能未知",
+            ),
+        ] {
+            let error = LocalError::from(std::io::Error::from(kind));
+            assert_eq!(error.kind, expected_kind);
+            assert_eq!(error.message, expected_message);
+        }
+
+        use std::os::unix::fs::PermissionsExt;
+        struct TempDir(std::path::PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+        let dir = TempDir(std::env::temp_dir().join(format!(
+            "ltc-ipc-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        std::fs::create_dir_all(&dir.0).unwrap();
+        let local_dir = dir.0.join("local");
+        std::fs::create_dir(&local_dir).unwrap();
+        std::fs::set_permissions(&local_dir, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let perm_err = check_dir(&local_dir, true).unwrap_err();
+        assert_eq!(perm_err.kind, LocalErrorKind::Permission);
+        assert!(
+            perm_err.message.contains(&local_dir.display().to_string())
+                && perm_err.message.contains("0777")
+                && !perm_err
+                    .message
+                    .contains("local endpoint ownership or permissions rejected"),
+            "0777 目录校验应返回含路径与权限的中文报错：{}",
+            perm_err.message
         );
     }
 

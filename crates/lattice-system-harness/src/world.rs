@@ -13,7 +13,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::daemon::{DaemonError, DaemonOptions, ScenarioDaemon};
-use crate::driver::{CommandOutcome, LatticeDriver};
+use crate::driver::{CommandOutcome, LatticeDaemonDriver, LatticeDriver};
 use crate::scenario::{ScenarioBudget, ScenarioSpec};
 
 use thiserror::Error;
@@ -359,11 +359,13 @@ impl ScenarioWorld {
 
     /// 按当前环境白名单快照叠加选项覆盖，显式启动场景后台并等待就绪。
     pub fn start_daemon_with(&self, options: &DaemonOptions) -> Result<(), DaemonError> {
-        let driver = LatticeDriver::from_env()?;
+        let cli_driver = LatticeDriver::from_env()?;
+        let daemon_driver = LatticeDaemonDriver::from_env()?;
         let mut snapshot = self.allowed_env.lock().expect("环境白名单锁").clone();
         options.apply_env(&mut snapshot);
         self.daemon.start(
-            driver.binary_path(),
+            cli_driver.binary_path(),
+            daemon_driver.binary_path(),
             &self.project,
             snapshot,
             options,

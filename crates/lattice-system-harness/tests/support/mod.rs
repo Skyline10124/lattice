@@ -7,9 +7,9 @@
 pub(crate) mod crash;
 use lattice_system_harness::{
     AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
-    LatticeCommand, LatticeDriver, ProcessTermination, ProviderFixture, ReceiptResult,
-    ResponseGate, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution, SendOutcome,
-    SendRecord, SlotOutcome, SseScript, Submit, ViewState, parse_record,
+    LatticeCommand, LatticeDaemonDriver, LatticeDriver, ProcessTermination, ProviderFixture,
+    ReceiptResult, ResponseGate, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution,
+    SendOutcome, SendRecord, SlotOutcome, SseScript, Submit, ViewState, parse_record,
 };
 use serde_json::{Value, json};
 use std::{
@@ -21,6 +21,11 @@ use std::{
 
 pub(crate) fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的 lattice 二进制")
+}
+
+pub(crate) fn daemon_driver() -> LatticeDaemonDriver {
+    LatticeDaemonDriver::from_env()
+        .expect("LATTICE_DAEMON_BIN 必须指向已构建的 lattice-daemon 二进制")
 }
 
 /// 调用者先记录原始命令，再核验 JSON 提交回执，避免失败时丢失证据。

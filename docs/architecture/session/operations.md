@@ -11,8 +11,8 @@ status: active
 | 层级 | 模块与入口 | 具体职责 |
 | --- | --- | --- |
 | 产品 IPC 协议 | `lattice-ipc`（`Request` / `Response`、`LoginAction` / `LoginResponse`、`ipc`） | 定义本地 IPC 请求、响应、登录交换帧、`LocalError` 及会话与模型展示类型；执行 16 MiB 单帧魔数校验、本进程有效 UID 读取与对端 UID 核验 |
-| 产品客户端门面 | `lattice-local`（`LocalClient`、`LocalTurn`、`LocalAuthLogin`） | 前端唯一的本地操作入口：`client.rs` 封装连接、按需拉起后台与单次 IPC 请求；`operation.rs` 的 `LocalTurn` 驱动提交、观察流重连、取消回执与 `detach` 退出交接；`login.rs` 的 `LocalAuthLogin` 驱动同连接 SIWC 登录交换 |
-| 后台宿主入口 | `lattice_server::{serve, ServeExit, DrainOutcome, InstanceLock}` | `lattice-server` 唯一的生产公开面，仅由宿主进程入口（`lattice daemon serve`）调用：持有实例锁和 socket、启动模型元数据调度、接收并核验连接，并在 `configure(New)` 后触发后台草稿清理；收尾后经 `ServeExit` 将 `DrainOutcome`、`InstanceLock` 与 `shutdown_deadline` 交回进程入口关闭 runtime |
+| 产品客户端门面 | `lattice-local`（`LocalClient`、`LocalTurn`、`LocalAuthLogin`） | 前端唯一的本地操作入口：[`client.rs`](../../../crates/lattice-local/src/client.rs) 封装连接已运行的本地后台与单次 IPC 请求；[`operation.rs`](../../../crates/lattice-local/src/operation.rs) 的 `LocalTurn` 驱动提交、观察流重连、取消回执与 `detach` 退出交接；[`login.rs`](../../../crates/lattice-local/src/login.rs) 的 `LocalAuthLogin` 驱动同连接 SIWC 登录交换 |
+| 后台宿主与服务入口 | `lattice-daemon` 调用 `lattice_server::{serve, ServeExit, DrainOutcome, HostLifecycle, InstanceLock}` | `lattice-server` 唯一的生产公开面，仅由独立宿主进程 `lattice-daemon` 调用：持有实例锁和 socket、在绑定发布后触发 `HostLifecycle::on_ready`、启动模型元数据调度、接收并核验连接，并在 `configure(New)` 后触发后台草稿清理；收尾后经 `ServeExit` 将 `DrainOutcome`、`InstanceLock` 与 `shutdown_deadline` 交回 `lattice-daemon` 关闭 runtime |
 | 后台内部实现 | `lattice-server` 私有模块 `local::server`（`Backend` / `Owner`） | `Backend` 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态；`Owner` 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接运行，监督者等待操作收尾后才移除 `Owner` |
 | 后台内部实现 | `lattice-server` 私有模块 `root`、`configure`、`profile`、`config_rejection` | `LocalWorkspaceRoot::from_path` 解析并规范化工作区路径；`configure::resolve_settings` 加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执；`ConfigRejection` 单一入口生成脱敏单行配置拒绝 |
 | 后台内部实现 | `lattice-server` 私有模块 `session`（`SessionApi`）与 `stores` | 当前代会话库的内部异步门面与共享库句柄管理：在 `spawn_blocking` 中执行会话身份精确/前缀解析与用量读取，监控写提交异常并触发停写重开（`SessionApi` 生产不对外公开，仅在 `test` 或 `test-utils` 下供测试导出） |
@@ -24,7 +24,7 @@ status: active
 
 公开入口按调用层级分为两类，后台内部实现不直接向外部调用方暴露：
 
-- **后台宿主入口（进程内 Rust 调用，非 IPC）**：`lattice_server::serve`，参数为状态布局、可选的 home 目录、排空上限与停机请求的接收端，返回 `ServeExit`；仅由 `lattice daemon serve` 在后台进程内调用。
+- **后台宿主入口（进程内 Rust 调用，非 IPC）**：`lattice_server::serve`，参数为状态布局、可选的 home 目录、排空上限、停机请求的接收端与宿主生命周期回调 `HostLifecycle`，返回 `ServeExit`；仅由独立宿主二进制 `lattice-daemon` 在后台进程内调用。
 - **产品的 IPC 操作（前端经 `lattice-local` 发起，线上消息由 `lattice-ipc` 定义）**：客户端命令（`lattice-cli`）与交互界面（`lattice-tui`）全部通过下表中的客户端入口与本地 IPC 消息完成用户工作，不直接调用 `SessionApi`、`configure` 或 `TurnCoordinator`：
 
 | 用途与 IPC 消息 | 客户端入口（`lattice-local`） | 输入及前提 | 输出与效果 |
@@ -42,11 +42,11 @@ status: active
 | 读取更早的对话：`history` | `LocalClient::history_before`（每次取 `HISTORY_TURNS` 轮） | SessionId、节点 `before` 与轮数（1 到 100，超出返回 BadRequest） | 沿 `before` 的父链往回取完整的若干轮，条目与视图中的相同，见[观察与重连](recovery.md#观察与重连) |
 | 退回：`rewind` | `LocalClient::rewind` | SessionId、目标 NodeId 与工作区路径 `workspace`（IPC 中为原始字节数组，要求同 `configure`） | 核对项目绑定 `ProjectPath`（错误诊断中的路径为有损文本）后，把当前位置移到树上任意已有节点；之后的提交从那里分叉，原分支保留在树上。不修改会话设置，也不修改工作区文件 |
 | 请求取消：`cancel` | `LocalTurn::cancel`，或独立命令的 `LocalClient::cancel` | TurnId（`session cancel` 先经 `head` 查出当前轮的 TurnId） | 句柄同步登记意图并管理在途回执；独立命令返回后台接管结果，持久结局另行查询 |
-| 查看与停止后台：`status`、`stop` | `LocalClient::{status, ensure_running, stop}` | 当前本地后台 | `status` 返回后台 PID 与协议版本（`ensure_running` 在未运行时按需拉起）；`stop` 关闭新准入并等待已接管操作收尾，socket 撤下、`owner.lock` 可取得后返回停止时已知状态，回执后限时内锁仍未放开报 Stopping |
+| 查看与停止后台：`status`、`stop` | `LocalClient::{status, status_with_peer_pid, stop}` | 当前本地后台 | `status` 返回 `DaemonStatus`（字段为 `epoch`、`stopping`、`owners`、`unconfirmed_operations`），`status_with_peer_pid` 同时经同一连接的 `SO_PEERCRED` 读取对端进程号；`stop` 关闭新准入并等待已接管操作收尾，socket 撤下、`owner.lock` 可取得后返回停止时已知状态，回执后限时内锁仍未放开报 Stopping |
 
-CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](../llm/credentials.md#凭据命令)。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。
+CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`turn`、`usage` 和 `cancel`，顶层 `lattice run` 是 `session send` 的别名；`lattice daemon` 子命令为 `status`、`stop` 与 `install`（写出用户级 `lattice.service` 并调用 `systemctl --user` 启用与启动后台，见 [ADR 0011](../../adr/0011-im-gateway-inside-backend.md)）；凭据与模型的命令 `lattice auth`、`lattice models` 见[模型接入合同](../llm/credentials.md#凭据命令)。`session usage <SESSION_ID>` 逐轮列出用量与费用估算并给出合计，支持 `--json`。`session turn` 查看单个 Turn 的详情，请求仍在准入时报告在途，接受结果不明时用它找回；`--follow` 遇到请求仍在准入时等准入结束，不在途中退出，已接受则继续观察这一轮直至结束，没有这个请求则报告 NotFound，退出 2。`session cancel <SESSION_ID>` 取消该会话当前正在执行的一轮：CLI 用 `head` 查出会话头所示那一轮的 TurnId，再按 TurnId 取消，并输出该 TurnId；没有正在执行的一轮时报告无可取消。已接管、未接管或没有可取消的一轮时退出 0；取消回复丢失、结果不明时，输出带原 TurnId 的取消记录，状态为 `unknown`，退出 1；会话不存在退出 2。
 
-`session send`（`--model <provider>/<model>` 与 `--effort <档位>` 选择模型与推理档位；新建会话时 `--agent` 必填，已有会话可选）按以下顺序执行：
+`session send`（`--model <provider>/<model>` 与 `--effort <档位>` 选择模型与推理档位；新建会话时 `--agent` 必填，已有会话可选）先经 `LocalClient::status` 连接已经运行的本地后台（未运行时输出 `not_running` 错误记录并以 `1` 退出，不生成请求身份），随后按以下顺序执行：
 
 1. 带 `--session` 时先解析会话前缀，不带时生成新的 SessionId；随后生成 TurnId，输出 `submit` 的 `sending` 记录，再读取当前目录 `current_dir()`（读取前收到 SIGINT 则输出 `submit` 的 `not_accepted` 回执并退出 1；`current_dir()` 失败则输出 `submit` 的 `rejected` 回执并退出 1；路径规范化与校验由后台在 `configure` 或 `submit` 时执行）。因此进程无论在哪一步中断，都能按第一条记录中的 TurnId 查询结果；中断在提交发出之前时，查询返回 NotFound。
 2. 决定是否先执行 `configure`：
@@ -73,7 +73,7 @@ CLI 的 `lattice session` 子命令为 `send`、`rewind`、`list`、`log`、`tur
 
 LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最后已知的提交、取消与诊断，或由 Drop 停止本地后续工作；两者都不新增取消。`LocalTurn::turn_id` 给出提交与取消共用的身份。
 
-公开类型与方法见[本地客户端门面](../../../crates/lattice-local/src/lib.rs)、[本地连接与单次请求](../../../crates/lattice-local/src/client.rs)、[LocalTurn 与客户端结果类型](../../../crates/lattice-local/src/operation.rs)、[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)及[后台宿主入口](../../../crates/lattice-server/src/lib.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
+公开类型与方法见[本地客户端门面](../../../crates/lattice-local/src/lib.rs)、[本地连接与单次请求](../../../crates/lattice-local/src/client.rs)、[LocalTurn 与客户端结果类型](../../../crates/lattice-local/src/operation.rs)、[IPC 协议与结果类型](../../../crates/lattice-ipc/src/types.rs)、[后台协调入口](../../../crates/lattice-server/src/lib.rs)及[后台宿主二进制入口](../../../crates/lattice-daemon/src/main.rs)，命令用法见[验证操作指南](../../development/validation-guide.md#环境与后台)。
 
 ## 凭据命令与私有交换
 

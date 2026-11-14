@@ -1,0 +1,26 @@
+[package]
+name = "lattice-daemon"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "LATTICE 本地后台守护进程宿主"
+
+[[bin]]
+name = "lattice-daemon"
+path = "src/main.rs"
+
+[dependencies]
+# 帮助文本含中文，按显示宽度对齐需要 clap 的 `unicode` feature。
+clap = { workspace = true, features = ["unicode"] }
+lattice-ipc = { workspace = true }
+lattice-server = { workspace = true }
+lattice-store = { workspace = true }
+rustix = { workspace = true, features = ["net"] }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

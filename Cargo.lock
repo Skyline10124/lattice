@@ -2257,10 +2257,10 @@ dependencies = [
  "clap",
  "dirs",
  "lattice-local",
- "lattice-server",
  "lattice-session",
  "lattice-tui",
  "libc",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",
@@ -2276,6 +2276,21 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lattice-daemon"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "lattice-ipc",
+ "lattice-server",
+ "lattice-store",
+ "rustix",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
 ]
 
 [[package]]

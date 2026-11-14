@@ -53,12 +53,34 @@ pub const RULES: &[DirectDependencyRule] = &[
         ]),
     },
     DirectDependencyRule {
+        package: "lattice-cli",
+        policy: WorkspaceDependencyPolicy::AllowOnly(&["lattice-local", "lattice-tui"]),
+    },
+    DirectDependencyRule {
+        package: "lattice-daemon",
+        policy: WorkspaceDependencyPolicy::AllowOnly(&[
+            "lattice-server",
+            "lattice-ipc",
+            "lattice-store",
+        ]),
+    },
+    DirectDependencyRule {
         package: "lattice-server",
         policy: WorkspaceDependencyPolicy::Forbid(&["lattice-local"]),
     },
 ];
 
 pub const CLOSURE_RULES: &[NormalClosureRule] = &[
+    NormalClosureRule {
+        package: "lattice-cli",
+        forbidden_packages: &[
+            "lattice-server",
+            "lattice-llm",
+            "lattice-profile",
+            "lattice-agent",
+            "lattice-im",
+        ],
+    },
     NormalClosureRule {
         package: "lattice-tui",
         forbidden_packages: &[
@@ -386,6 +408,8 @@ mod tests {
 
     const WORKSPACE_MEMBERS: &[&str] = &[
         "lattice-ipc",
+        "lattice-cli",
+        "lattice-daemon",
         "lattice-tui",
         "lattice-local",
         "lattice-server",
@@ -421,6 +445,17 @@ mod tests {
             "lattice-ipc" => CrateSpec::with_deps(concat!(
                 "lattice-session = { path = \"../lattice-session\" }\n",
                 "lattice-conversation = { path = \"../lattice-conversation\" }\n",
+                "lattice-store = { path = \"../lattice-store\" }\n",
+                "outside-util = { path = \"../../../outside-util\" }\n",
+            )),
+            "lattice-cli" => CrateSpec::with_deps(concat!(
+                "lattice-local = { path = \"../lattice-local\" }\n",
+                "lattice-tui = { path = \"../lattice-tui\" }\n",
+                "outside-util = { path = \"../../../outside-util\" }\n",
+            )),
+            "lattice-daemon" => CrateSpec::with_deps(concat!(
+                "lattice-server = { path = \"../lattice-server\" }\n",
+                "lattice-ipc = { path = \"../lattice-ipc\" }\n",
                 "lattice-store = { path = \"../lattice-store\" }\n",
                 "outside-util = { path = \"../../../outside-util\" }\n",
             )),
@@ -817,6 +852,22 @@ mod tests {
         .to_owned();
         ws.write_member("lattice-local", &local_spec);
 
+        let mut cli_spec = baseline_spec("lattice-cli");
+        cli_spec.dev_deps = concat!(
+            "lattice-server = { path = \"../lattice-server\" }\n",
+            "plain-helper = { path = \"../plain-helper\" }\n",
+        )
+        .to_owned();
+        ws.write_member("lattice-cli", &cli_spec);
+
+        let mut daemon_spec = baseline_spec("lattice-daemon");
+        daemon_spec.dev_deps = concat!(
+            "lattice-local = { path = \"../lattice-local\" }\n",
+            "plain-helper = { path = \"../plain-helper\" }\n",
+        )
+        .to_owned();
+        ws.write_member("lattice-daemon", &daemon_spec);
+
         let mut server_spec = baseline_spec("lattice-server");
         server_spec.dev_deps = "lattice-local = { path = \"../lattice-local\" }\n".to_owned();
         ws.write_member("lattice-server", &server_spec);
@@ -865,6 +916,30 @@ mod tests {
     }
 
     #[test]
+    fn direct_rule_lattice_cli_rejects_unlisted_workspace_dependencies() {
+        let ws = TestWorkspace::new();
+        assert_direct_rule_rejects_all_forms(
+            &ws,
+            "lattice-cli",
+            "lattice-server",
+            "允许的内部依赖：[lattice-local, lattice-tui]",
+        );
+        assert_direct_normal_violation(&ws, "lattice-cli", "plain-helper");
+    }
+
+    #[test]
+    fn direct_rule_lattice_daemon_rejects_unlisted_workspace_dependencies() {
+        let ws = TestWorkspace::new();
+        assert_direct_rule_rejects_all_forms(
+            &ws,
+            "lattice-daemon",
+            "lattice-local",
+            "允许的内部依赖：[lattice-server, lattice-ipc, lattice-store]",
+        );
+        assert_direct_normal_violation(&ws, "lattice-daemon", "plain-helper");
+    }
+
+    #[test]
     fn direct_rule_lattice_server_rejects_lattice_local_dependency() {
         let ws = TestWorkspace::new();
         assert_direct_rule_rejects_all_forms(
@@ -893,15 +968,15 @@ mod tests {
             "报错应指出无法识别依赖：{err}"
         );
 
-        let members_without_server: Vec<&str> = WORKSPACE_MEMBERS
+        let members_without_daemon: Vec<&str> = WORKSPACE_MEMBERS
             .iter()
             .copied()
-            .filter(|&m| m != "lattice-server")
+            .filter(|&m| m != "lattice-daemon")
             .collect();
-        TestWorkspace::write_workspace_toml(&ws.ws_root, &members_without_server);
+        TestWorkspace::write_workspace_toml(&ws.ws_root, &members_without_daemon);
         let err = check_workspace_rules(&ws.ws_root, RULES).unwrap_err();
         assert!(
-            err.to_string().contains("受检包 'lattice-server'"),
+            err.to_string().contains("受检包 'lattice-daemon'"),
             "报错应指出缺失的受检包：{err}"
         );
     }
@@ -909,6 +984,14 @@ mod tests {
     #[test]
     fn closure_workspace_allows_baseline_and_dev_only_forbidden_dependencies() {
         let ws = TestWorkspace::new();
+
+        let mut cli_spec = baseline_spec("lattice-cli");
+        cli_spec.dev_deps = concat!(
+            "lattice-server = { path = \"../lattice-server\" }\n",
+            "lattice-llm = { path = \"../lattice-llm\" }\n",
+        )
+        .to_owned();
+        ws.write_member("lattice-cli", &cli_spec);
 
         let mut tui_spec = baseline_spec("lattice-tui");
         tui_spec.dev_deps = concat!(
@@ -941,7 +1024,11 @@ mod tests {
     #[test]
     fn closure_rule_lattice_local_rejects_non_default_optional_dependency() {
         let ws = TestWorkspace::new();
-        // 断开 `lattice-tui -> lattice-local`，让本用例只检验 `CLOSURE_RULES` 中 `lattice-local` 的规则与 `--all-features` 的读取。
+        // 断开 `lattice-cli` 与 `lattice-tui` 到 `lattice-local` 的边，让本用例只检验 `CLOSURE_RULES` 中 `lattice-local` 的规则与 `--all-features` 的读取。
+        ws.write_member(
+            "lattice-cli",
+            &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
+        );
         ws.write_member(
             "lattice-tui",
             &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
@@ -967,6 +1054,10 @@ mod tests {
     #[test]
     fn closure_rule_lattice_local_rejects_inactive_target_specific_dependency() {
         let ws = TestWorkspace::new();
+        ws.write_member(
+            "lattice-cli",
+            &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
+        );
         ws.write_member(
             "lattice-tui",
             &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
@@ -996,6 +1087,10 @@ mod tests {
     #[test]
     fn closure_rule_lattice_tui_rejects_renamed_dependency() {
         let ws = TestWorkspace::new();
+        ws.write_member(
+            "lattice-cli",
+            &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
+        );
         let mut tui_spec = baseline_spec("lattice-tui");
         tui_spec.deps.push_str(
             "agent_alias = { package = \"lattice-agent\", path = \"../lattice-agent\" }\n",
@@ -1032,8 +1127,14 @@ mod tests {
         let hits = check_workspace_normal_closure(&ws.ws_root, CLOSURE_RULES).unwrap();
         assert_eq!(
             hits.len(),
-            2,
-            "lattice-tui 与 lattice-local 两条闭包规则都应命中传递违规：{hits:?}"
+            3,
+            "lattice-cli、lattice-tui 与 lattice-local 三条闭包规则都应命中传递违规：{hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| {
+                h == "lattice-cli: 普通依赖闭包中可达禁止的包 'lattice-server'，路径：lattice-cli -> lattice-local -> lattice-ipc -> plain-helper -> lattice-server"
+            }),
+            "应写出从 lattice-cli 经中间 workspace 成员到达 lattice-server 的完整路径，实际：{hits:?}"
         );
         assert!(
             hits.iter().any(|h| {
@@ -1050,11 +1151,34 @@ mod tests {
     }
 
     #[test]
+    fn closure_rule_lattice_cli_rejects_forbidden_package_through_intermediate_member() {
+        let ws = TestWorkspace::new();
+        ws.write_member(
+            "lattice-cli",
+            &CrateSpec::with_deps("plain-helper = { path = \"../plain-helper\" }\n"),
+        );
+        ws.write_member(
+            "plain-helper",
+            &CrateSpec::with_deps("lattice-llm = { path = \"../lattice-llm\" }\n"),
+        );
+
+        let hits = check_workspace_normal_closure(&ws.ws_root, CLOSURE_RULES).unwrap();
+        assert_eq!(
+            hits,
+            vec![
+                "lattice-cli: 普通依赖闭包中可达禁止的包 'lattice-llm'，路径：lattice-cli -> plain-helper -> lattice-llm"
+            ],
+            "`lattice-cli` 经中间包间接引入禁用包时必须被普通依赖闭包规则检出"
+        );
+    }
+
+    #[test]
     fn closure_reports_transitive_path_through_external_intermediate_node() {
         let metadata = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-llm"],
+            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-llm"],
             &["external-bridge"],
             &[
+                ("lattice-cli", "lattice-tui", &[None]),
                 ("lattice-tui", "lattice-local", &[None]),
                 ("lattice-local", "external-bridge", &[None]),
                 ("external-bridge", "lattice-llm", &[None]),
@@ -1064,8 +1188,14 @@ mod tests {
         let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
         assert_eq!(
             hits.len(),
-            2,
-            "tui 与 local 两个根都应报告违规路径：{hits:?}"
+            3,
+            "cli、tui 与 local 三个根都应报告违规路径：{hits:?}"
+        );
+        assert!(
+            hits.iter().any(|h| h.contains(
+                "lattice-cli -> lattice-tui -> lattice-local -> external-bridge -> lattice-llm"
+            )),
+            "应报告完整路径 cli -> tui -> local -> 中间节点 -> llm，实际：{hits:?}"
         );
         assert!(
             hits.iter()
@@ -1084,9 +1214,15 @@ mod tests {
     fn closure_handles_cycles_with_or_without_forbidden_packages() {
         // 环中含禁止包：local -> cycle-a -> lattice-profile -> cycle-a
         let in_cycle = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-profile"],
+            &[
+                "lattice-cli",
+                "lattice-tui",
+                "lattice-local",
+                "lattice-profile",
+            ],
             &["cycle-a"],
             &[
+                ("lattice-cli", "lattice-tui", &[None]),
                 ("lattice-tui", "lattice-local", &[None]),
                 ("lattice-local", "cycle-a", &[None]),
                 ("cycle-a", "lattice-profile", &[None]),
@@ -1103,9 +1239,15 @@ mod tests {
 
         // 环后含禁止包：local -> cycle-a -> cycle-b -> cycle-a，且 cycle-b -> tail -> lattice-agent
         let after_cycle = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-agent"],
+            &[
+                "lattice-cli",
+                "lattice-tui",
+                "lattice-local",
+                "lattice-agent",
+            ],
             &["cycle-a", "cycle-b", "tail"],
             &[
+                ("lattice-cli", "lattice-tui", &[None]),
                 ("lattice-tui", "lattice-local", &[None]),
                 ("lattice-local", "cycle-a", &[None]),
                 ("cycle-a", "cycle-b", &[None]),
@@ -1125,9 +1267,10 @@ mod tests {
 
         // 无禁止包的环必须正常终止且无命中
         let clean_cycle = build_graph_metadata(
-            &["lattice-tui", "lattice-local"],
+            &["lattice-cli", "lattice-tui", "lattice-local"],
             &["cycle-a", "cycle-b"],
             &[
+                ("lattice-cli", "lattice-tui", &[None]),
                 ("lattice-tui", "lattice-local", &[None]),
                 ("lattice-local", "cycle-a", &[None]),
                 ("cycle-a", "cycle-b", &[None]),
@@ -1144,6 +1287,7 @@ mod tests {
         // 只含 dev 或只含 build 的边不进入普通依赖闭包；`lattice-session` 与 `redb` 允许出现在普通依赖闭包中。
         let clean = build_graph_metadata(
             &[
+                "lattice-cli",
                 "lattice-tui",
                 "lattice-local",
                 "lattice-ipc",
@@ -1153,10 +1297,12 @@ mod tests {
             ],
             &["redb"],
             &[
+                ("lattice-cli", "lattice-tui", &[None]),
                 ("lattice-tui", "lattice-local", &[None]),
                 ("lattice-local", "lattice-ipc", &[None]),
                 ("lattice-ipc", "lattice-session", &[None]),
                 ("lattice-session", "redb", &[None]),
+                ("lattice-cli", "lattice-server", &[Some("dev")]),
                 ("lattice-local", "lattice-server", &[Some("dev")]),
                 ("lattice-ipc", "lattice-llm", &[Some("build")]),
             ],
@@ -1170,9 +1316,15 @@ mod tests {
 
         // 同时含 normal 与 dev 的边进入普通依赖闭包。
         let mixed = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-server"],
+            &[
+                "lattice-cli",
+                "lattice-tui",
+                "lattice-local",
+                "lattice-server",
+            ],
             &[],
             &[
+                ("lattice-cli", "lattice-tui", &[None]),
                 ("lattice-tui", "lattice-local", &[None]),
                 ("lattice-local", "lattice-server", &[Some("dev"), None]),
             ],
@@ -1181,7 +1333,7 @@ mod tests {
         let hits = check_metadata_normal_closure(&mixed, CLOSURE_RULES).unwrap();
         assert_eq!(
             hits.len(),
-            2,
+            3,
             "同时含 normal 与 dev 的边应进入普通依赖闭包，实际：{hits:?}"
         );
         assert!(
@@ -1194,7 +1346,7 @@ mod tests {
     #[test]
     fn closure_errors_on_missing_resolve_missing_package_or_dangling_node() {
         let missing_resolve = build_graph_metadata(
-            &["lattice-tui", "lattice-local"],
+            &["lattice-cli", "lattice-tui", "lattice-local"],
             &[],
             &[("lattice-tui", "lattice-local", &[None])],
             false,
@@ -1205,7 +1357,7 @@ mod tests {
             "报错应指出缺少 resolve：{err}"
         );
 
-        let missing_pkg = build_graph_metadata(&["lattice-tui"], &[], &[], true);
+        let missing_pkg = build_graph_metadata(&["lattice-cli", "lattice-tui"], &[], &[], true);
         let err = check_metadata_normal_closure(&missing_pkg, CLOSURE_RULES).unwrap_err();
         assert!(
             err.to_string().contains("受检包 'lattice-local'"),
@@ -1213,7 +1365,7 @@ mod tests {
         );
 
         let dangling = build_graph_metadata(
-            &["lattice-tui", "lattice-local"],
+            &["lattice-cli", "lattice-tui", "lattice-local"],
             &[],
             &[
                 ("lattice-tui", "lattice-local", &[None]),
@@ -1229,10 +1381,31 @@ mod tests {
     }
 
     #[test]
+    fn closure_rule_lattice_cli_rejects_lattice_im() {
+        let metadata = build_graph_metadata(
+            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-im"],
+            &["im-bridge"],
+            &[
+                ("lattice-cli", "im-bridge", &[None]),
+                ("im-bridge", "lattice-im", &[None]),
+            ],
+            true,
+        );
+        let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
+        assert_eq!(
+            hits,
+            vec![
+                "lattice-cli: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-cli -> im-bridge -> lattice-im"
+            ],
+            "`lattice-cli` 的普通依赖闭包规则应单独检出可达 `lattice-im` 的路径，实际：{hits:?}"
+        );
+    }
+
+    #[test]
     fn closure_rule_lattice_tui_rejects_lattice_im() {
         // `lattice-im` 尚未建包；断开 `lattice-tui -> lattice-local`，单独验证 `lattice-tui` 闭包规则拒绝 `lattice-im`。
         let metadata = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-im"],
+            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-im"],
             &["im-bridge"],
             &[
                 ("lattice-tui", "im-bridge", &[None]),
@@ -1254,7 +1427,7 @@ mod tests {
     fn closure_rule_lattice_local_rejects_lattice_im() {
         // 断开 `lattice-tui -> lattice-local`，单独验证 `lattice-local` 闭包规则拒绝 `lattice-im`。
         let metadata = build_graph_metadata(
-            &["lattice-tui", "lattice-local", "lattice-im"],
+            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-im"],
             &["im-bridge"],
             &[
                 ("lattice-local", "im-bridge", &[None]),

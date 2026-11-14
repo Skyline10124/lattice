@@ -10,23 +10,23 @@ status: active
 
 | 原则 | 做法 |
 | --- | --- |
-| 构建宿主 CLI | 用 `cargo build -p lattice-cli --bin lattice` 构建被测宿主二进制 |
-| 被测二进制与验证对象相符 | `LATTICE_BIN` 指向当前产物的绝对路径；`cargo test -p lattice-system-harness` 的工作目录是 crate 目录，相对路径会落在那里；worktree 中指向本 worktree 的产物。见[被测二进制](testing.md#被测二进制) |
-| 测试与产品的 profile 分开 | `cargo test --release` 只切换测试自身的 profile；验证 release 产品时，先构建 release 产物并更新 `LATTICE_BIN` |
-| 带 feature 的产物只用于对应场景 | 假工具与崩溃屏障场景使用带 `lattice-server/test-fake-tools`、`lattice-server/test-crash-barriers` 的产物（`cargo xtask ci` 第二轮也会用它覆盖 `target/debug/lattice`）；之后做普通验证前先重新构建无 feature 的二进制 |
+| 构建前后台二进制 | 用 `cargo build -p lattice-cli -p lattice-daemon --bins` 构建前端 `lattice` 与后台 `lattice-daemon` |
+| 被测二进制与验证对象相符 | `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 指向当前产物的绝对路径；`cargo test -p lattice-system-harness` 的工作目录是 crate 目录，相对路径会落在那里；worktree 中指向本 worktree 的产物。见[被测二进制](testing.md#被测二进制) |
+| 测试与产品的 profile 分开 | `cargo test --release` 只切换测试自身的 profile；验证 release 产品时，先构建 release 产物并更新 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` |
+| 带 feature 的产物只用于对应场景 | 假工具与崩溃屏障场景使用带 `lattice-server/test-fake-tools`、`lattice-server/test-crash-barriers` 的 `lattice-daemon` 产物（`cargo xtask ci` 第二轮也会用它覆盖 `target/debug/lattice-daemon`）；之后做普通验证前先重新构建无 feature 的 `lattice-daemon` |
 | 工具链固定 | Rust 工具链版本以 [`rust-toolchain.toml`](../../rust-toolchain.toml) 为准 |
 
 ## 环境与后台
 
-- 后台在启动时按自己的环境确定配置目录、全局 agents 目录与 TLS 根（带 `test-fake-tools` 的测试构建还会读取逗号分隔的 `LATTICE_TEST_TOOLS` 注册假工具），之后保持不变；`providers.toml` 与凭据在每次请求时重读。更换决定这些位置、TLS 根或假工具名单的环境后，先执行 `lattice daemon stop` 再启动。规则见[配置来源与后台启动](../architecture/session/acceptance.md#配置来源与后台启动)。
+- 后台（`lattice-daemon`）在启动时按自己的宿主环境确定配置目录、全局 agents 目录与 TLS 根（带 `test-fake-tools` 的测试构建还会读取逗号分隔的 `LATTICE_TEST_TOOLS` 注册假工具），之后保持不变；`providers.toml` 与凭据在每次请求时重读。更换决定这些位置、TLS 根或假工具名单的环境后，重启后台使新环境生效。规则见[配置来源与后台启动](../architecture/session/acceptance.md#配置来源与后台启动)。
 - 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。
-- 崩溃注入与强制清理只在隔离的状态根上进行，例如 `lattice daemon serve --state-root <绝对路径>` 启动的后台。
+- 崩溃注入与强制清理只在隔离的状态根上进行，例如以 `lattice-daemon --state-root <绝对路径>` 启动的后台。
 
-| 命令 | 与后台的关系 |
+| 入口 | 与后台的关系 |
 | --- | --- |
-| `run`、`session`、`tui`、`auth`、`models` | 连接当前状态根的后台；后台未运行时自动启动 |
-| `daemon status`、`daemon stop` | 只连接已有后台；后台未运行时报 `not_running` |
-| `daemon serve` | 在前台运行一个后台实例；支持 `--drain-timeout <时长>`，可由 `SIGTERM`、`SIGINT` 或 IPC `stop` 停机 |
+| `lattice` 的 `run`、`session`、`tui`、`auth`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台） |
+| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload` 与 `systemctl --user enable --now lattice`（不支持 `--json`） |
+| `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT` 或 IPC `stop` 停机并在排空开始时发出 `STOPPING=1` |
 
 ## 判读结果
 
@@ -34,10 +34,11 @@ status: active
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 命令成功。`run`、`session send` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；纯查询只表示读取成功，业务结局看 `TurnSummary`；`daemon serve` 表示在途工作排空完成且无运行错误 |
-| `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，`daemon status`、`daemon stop` 读到非零 `unconfirmed_operations`（`daemon stop` 另在标准错误提示有未确认收尾的操作），以及其余两行之外的后台与运行错误（如 `Busy`、`Stopping`、`Transport`） |
-| `2` | 使用错误或取消：参数错误（含无效的 `--drain-timeout`），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
-| `4` | `daemon serve` 排空超时，或排空期间收到 `SIGTERM`、`SIGINT`；在途操作停止写入，见[停止后台](../architecture/session/recovery.md#停止后台) |
+| `0` | 命令成功。`run`、`session send` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；纯查询只表示读取成功，业务结局看 `TurnSummary`；`lattice-daemon` 表示在途工作排空完成且无运行错误 |
+| `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，后台未运行（`not_running`），`daemon status`、`daemon stop` 读到非零 `unconfirmed_operations`（`daemon stop` 另在标准错误提示有未确认收尾的操作），以及其余行之外的后台与运行错误（如 `Busy`、`Stopping`、`Transport`） |
+| `2` | 使用错误或取消：参数错误（含 `lattice-daemon` 缺 `--state-root`、相对路径、无效或溢出的 `--drain-timeout`，以及 `lattice daemon install` 找不到同目录有效用户可执行的 `lattice-daemon`、传入 `--json` 或可执行路径 / 状态根含无法写入 systemd unit 的字符），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
+| `3` | `lattice-daemon` 取不到 `owner.lock`（状态根已被另一个后台占用，能连上已发布 socket 时附对端进程号） |
+| `4` | `lattice-daemon` 排空超时，或排空期间收到 `SIGTERM`、`SIGINT`；在途操作停止写入，见[停止后台](../architecture/session/recovery.md#停止后台) |
 
 - `configure` 只发一次：结果不明时，CLI 输出 `configure` 的 `unknown` 记录与 `submit` 的 `not_accepted` 回执并退出 `1`（提交尚未发出），由用户重跑命令；TUI 显示警告，实际生效的设置以 `watch` 推送的会话头为准。规则见 [configure 的找回](../architecture/session/recovery.md#configure-的找回)。
 - `submit` 的接受结果不明时，按第一条 `submit` 记录中的 TurnId 查询（`session turn`）。查到即已接受；在途就稍后再查；NotFound 才重新发送，重新发送会生成新的 TurnId。规则见[请求身份与找回](../architecture/session/recovery.md#请求身份与找回)。
