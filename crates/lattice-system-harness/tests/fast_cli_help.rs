@@ -4,13 +4,18 @@
 //! 快速二进制黑盒测试：CLI 帮助表面与 `HOME` 隔离。
 
 use lattice_system_harness::{
-    LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_code,
-    assert_exit_success, assert_stderr_contains, assert_stdout_contains_all,
+    LatticeCommand, LatticeDaemonDriver, LatticeDriver, ScenarioSpec, ScenarioWorld,
+    assert_exit_code, assert_exit_success, assert_stderr_contains, assert_stdout_contains_all,
     finalize_with_failure_artifacts,
 };
 
 fn driver() -> LatticeDriver {
     LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的 lattice 二进制")
+}
+
+fn daemon_driver() -> LatticeDaemonDriver {
+    LatticeDaemonDriver::from_env()
+        .expect("LATTICE_DAEMON_BIN 必须指向已构建的 lattice-daemon 二进制")
 }
 
 /// `lattice --help` 必须列出的公开子命令。
@@ -103,6 +108,37 @@ fn fast_cli_help_lists_public_commands() {
         });
     finalize_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
         .unwrap_or_else(|report| panic!("--help 应以退出码 0 列出全部公开子命令\n{report}"));
+
+    let daemon_help = driver
+        .run(
+            &world,
+            &LatticeCommand {
+                args: vec!["daemon".into(), "--help".into()],
+                timeout: Some(spec.step_timeout()),
+            },
+        )
+        .unwrap();
+    let daemon_help_result = assert_exit_code(&daemon_help, 0)
+        .and_then(|_| assert_stdout_contains_all(&daemon_help, &["status", "stop"]))
+        .and_then(|_| {
+            let stdout = String::from_utf8_lossy(&daemon_help.stdout);
+            if stdout.split_whitespace().any(|token| token == "serve") {
+                return Err(lattice_system_harness::AssertError::StdoutMissing {
+                    expected: "已移除的 `daemon serve` 不得再出现在 `lattice daemon --help` 中"
+                        .into(),
+                });
+            }
+            Ok(())
+        });
+    finalize_with_failure_artifacts(
+        &world,
+        &spec.name,
+        "lattice daemon --help",
+        &daemon_help,
+        &[],
+        daemon_help_result,
+    )
+    .unwrap_or_else(|report| panic!("lattice daemon --help 不符合预期\n{report}"));
 
     for (args, expected) in [
         (vec!["session", "--help"], vec!["usage"]),
@@ -260,35 +296,118 @@ fn fast_unknown_command_rejected() {
 }
 
 #[test]
-fn fast_daemon_serve_invalid_drain_timeout_exits_two() {
-    let spec = ScenarioSpec::fast("lattice-harness-invalid-drain-timeout");
+fn fast_lattice_daemon_chinese_help_and_argument_validation() {
+    let spec = ScenarioSpec::fast("lattice-daemon-cli-args");
     let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
-    let output = driver()
-        .run(
-            &world,
-            &LatticeCommand {
-                args: vec![
-                    "daemon".into(),
-                    "serve".into(),
+    let daemon = daemon_driver();
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let abs_root = world
+        .session_store_dir()
+        .parent()
+        .expect("场景状态根")
+        .display()
+        .to_string();
+
+    let result = (|| -> Result<(), String> {
+        for flag in ["--help", "-h"] {
+            let output = daemon
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: vec![flag.into()],
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            evidence.record_command(format!("查询 lattice-daemon 帮助（{flag}）"), &output);
+            assert_exit_code(&output, 0).map_err(|e| e.to_string())?;
+            assert_stdout_contains_all(
+                &output,
+                &[
+                    "用法：lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
+                    "选项：",
+                    "--state-root <绝对路径>",
+                    "--drain-timeout <时长>",
+                    "-h, --help",
+                    "显示帮助。",
+                ],
+            )
+            .map_err(|e| e.to_string())?;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            for forbidden in ["Usage:", "Options:", "[default:"] {
+                if stdout.contains(forbidden) {
+                    return Err(format!("中文帮助输出不应包含 `{forbidden}`：{stdout}"));
+                }
+            }
+        }
+
+        let invalid_cases: Vec<(&str, Vec<String>, &str)> = vec![
+            ("缺 --state-root（裸调用）", vec![], "--state-root"),
+            (
+                "缺 --state-root（仅带 --drain-timeout）",
+                vec!["--drain-timeout".into(), "30s".into()],
+                "--state-root",
+            ),
+            (
+                "相对路径 --state-root",
+                vec!["--state-root".into(), "relative/state".into()],
+                "绝对路径",
+            ),
+            (
+                "当前目录相对路径 --state-root",
+                vec!["--state-root".into(), "./state".into()],
+                "绝对路径",
+            ),
+            (
+                "非法 --drain-timeout 单位 1h",
+                vec![
+                    "--state-root".into(),
+                    abs_root.clone(),
                     "--drain-timeout".into(),
                     "1h".into(),
                 ],
-                timeout: Some(spec.step_timeout()),
-            },
-        )
-        .expect("执行无效 --drain-timeout 命令失败");
+                "排空时长",
+            ),
+            (
+                "负数 --drain-timeout -1",
+                vec![
+                    "--state-root".into(),
+                    abs_root.clone(),
+                    "--drain-timeout".into(),
+                    "-1".into(),
+                ],
+                "排空时长",
+            ),
+            (
+                "小数 --drain-timeout 1.5s",
+                vec![
+                    "--state-root".into(),
+                    abs_root,
+                    "--drain-timeout".into(),
+                    "1.5s".into(),
+                ],
+                "排空时长",
+            ),
+        ];
 
-    let result = assert_exit_code(&output, 2)
-        .and_then(|_| assert_stderr_contains(&output, "invalid value '1h'"));
-    finalize_with_failure_artifacts(
-        &world,
-        &spec.name,
-        "lattice daemon serve --drain-timeout 1h",
-        &output,
-        &[],
-        result,
-    )
-    .unwrap_or_else(|report| {
-        panic!("无效的 --drain-timeout 应以退出码 2 报告参数值校验错误\n{report}")
-    });
+        for (label, args, expected_stderr) in invalid_cases {
+            let output = daemon
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args,
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            evidence.record_command(format!("校验参数错误（{label}）"), &output);
+            assert_exit_code(&output, 2).map_err(|e| format!("{label}: {e}"))?;
+            assert_stderr_contains(&output, expected_stderr)
+                .map_err(|e| format!("{label}: {e}"))?;
+        }
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
 }

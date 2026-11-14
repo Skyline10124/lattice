@@ -2,100 +2,16 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use clap::Subcommand;
-use lattice_local::{DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout};
+use lattice_local::{DaemonStatus, LocalClient, StateLayout};
 use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::time::Duration;
 
 #[derive(Subcommand)]
 pub enum DaemonAction {
-    /// Run the daemon in the foreground, inheriting the launching process's environment, just like automatic startup.
-    Serve {
-        /// XDG state root; must be an absolute path. Defaults to the submitter's HOME/XDG resolution.
-        #[arg(long)]
-        state_root: Option<PathBuf>,
-        /// Maximum time to wait for active operations to drain during shutdown (ms, s, m; bare integer means seconds).
-        #[arg(
-            long,
-            default_value = "60s",
-            allow_hyphen_values = true,
-            value_parser = parse_drain_timeout
-        )]
-        drain_timeout: Duration,
-    },
     /// Query the running daemon without starting one.
     Status,
     /// Stop accepting new work, wait for taken-over work and durable closure to finish,
     /// then wait for the daemon to remove its socket and release the instance lock.
     Stop,
-}
-
-fn parse_drain_timeout(raw: &str) -> Result<Duration, String> {
-    if raw.is_empty() {
-        return Err("排空时长不能为空".into());
-    }
-    enum Unit {
-        Millis,
-        Secs,
-        Mins,
-    }
-    let (digits, unit) = if let Some(digits) = raw.strip_suffix("ms") {
-        (digits, Unit::Millis)
-    } else if let Some(digits) = raw.strip_suffix('s') {
-        (digits, Unit::Secs)
-    } else if let Some(digits) = raw.strip_suffix('m') {
-        (digits, Unit::Mins)
-    } else {
-        (raw, Unit::Secs)
-    };
-    if digits.is_empty() || !digits.bytes().all(|byte| byte.is_ascii_digit()) {
-        return Err("排空时长必须是非负整数，单位只支持 ms、s 或 m".into());
-    }
-    let value = digits
-        .parse::<u64>()
-        .map_err(|_| "排空时长数值溢出".to_string())?;
-    match unit {
-        Unit::Millis => Ok(Duration::from_millis(value)),
-        Unit::Secs => Ok(Duration::from_secs(value)),
-        Unit::Mins => value
-            .checked_mul(60)
-            .map(Duration::from_secs)
-            .ok_or_else(|| "排空时长数值溢出".to_string()),
-    }
-}
-
-pub(super) fn state_root(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
-    if let Some(root) = explicit {
-        if !root.is_absolute() {
-            return Err(LocalError::new(
-                LocalErrorKind::BadRequest,
-                "request or frozen configuration is invalid",
-            )
-            .into());
-        }
-        return Ok(root.to_owned());
-    }
-    Ok(StateLayout::resolve()?
-        .lattice_root()
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("missing state root"))?
-        .to_owned())
-}
-
-pub async fn serve(
-    explicit_state_root: Option<&Path>,
-    drain_timeout: Duration,
-    stop_requests: tokio::sync::mpsc::Receiver<()>,
-) -> anyhow::Result<lattice_server::ServeExit> {
-    let root = state_root(explicit_state_root)?;
-    lattice_server::serve(
-        StateLayout::in_state_root(&root),
-        std::env::var_os("HOME").map(PathBuf::from),
-        drain_timeout,
-        stop_requests,
-    )
-    .await
-    .map_err(Into::into)
 }
 
 pub async fn run_client(is_stop: bool, json: bool) -> anyhow::Result<std::process::ExitCode> {

@@ -15,7 +15,7 @@ mod types;
 pub use ipc::InstanceLock;
 #[cfg(any(test, feature = "test-utils"))]
 pub use server::serve_for_test;
-pub use server::{DrainOutcome, ServeExit, serve};
+pub use server::{DrainOutcome, HostLifecycle, ServeExit, serve};
 pub(crate) use types::*;
 
 #[cfg(test)]

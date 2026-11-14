@@ -8,7 +8,7 @@
 | --- | --- |
 | `src/lib.rs` | 重导出场景世界、进程驱动、假 provider 服务、预算与断言辅助接口 |
 | `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离、环境变量白名单与后台环境快照、直接子进程后台的显式启动与限时就绪轮询、显式重启、有序 `stop`、自有进程组回收及状态根残留后台检查 |
-| `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 路径解析、独立进程组命令执行、`terminate`（`SIGTERM`）与超时终止、`CommandOutcome` 采集及快速 CLI 辅助 |
+| `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 路径与可执行权限核验、独立进程组命令执行、`terminate`（`SIGTERM`）与超时终止、`CommandOutcome` 采集及快速 CLI 辅助 |
 | `src/scenario.rs` | 场景分层与单命令、整场景时长预算计算 |
 | `src/fake_llm.rs`、`src/provider.rs`、`src/tls.rs` | 五协议 TLS + HTTP/2 `FakeLlmServer`、`ResponseGate`、工具 schema 校验、临时 CA 签发及经 `providers.toml` 与 `lattice auth set` 的正式配置接入 |
 | `src/session_send.rs` | `lattice --json session send` JSONL 解析（含 `configure`、`submit` 等公开记录，保留未知有效记录为 `Unknown` 并单独记录畸形行）与 `0`/`1`/`2` 退出码核验 |
@@ -28,10 +28,10 @@
 ## 约束
 
 - `Cargo.toml` 只引入通用测试、网络、TLS 与终端库，保持零 `lattice-*` 产品 crate 依赖，由 `cargo xtask harness-boundary` 守卫黑盒边界。
-- 场景只通过 `LATTICE_BIN`（推荐传入绝对路径）调用已构建产品，经公开 CLI、JSONL 与公开 Local IPC 核验行为。
+- 场景只通过 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN`（传入绝对路径，不猜同目录）调用已构建前端与后台二进制，经公开 CLI、JSONL 与公开 Local IPC 核验行为。
 - 目标平台固定为 Linux，环境隔离、环境变量白名单与后台启动环境快照、`ScenarioWorld` 直接子进程后台显式管理与自有进程组清理、状态根残留后台检查、`ResponseGate`、预算、失败产物占用与脱敏均按[测试工程](../../docs/development/testing.md)执行；运行环境异常（含 PTY 环境错误）直接计为测试失败。
 - `FakeLlmServer` 经场景私有 `HOME` 下的 `providers.toml` 与 `lattice auth set` 接入正式配置入口；需要后台的场景先显式启动后台再录入凭据。验证变量未设置（如 `fast_env_boundary`）时调用 `unset_env` 移除变量，确保真正测试缺失态而非空字符串。
-- `src/` 只承载跨场景通用驱动，Direct 共用辅助放在 `tests/support/mod.rs`，场景专用夹具与语义断言保留在各自 `tests/*.rs` 中。需要工具循环的场景以 `#[cfg(feature = "fake-tools")]` 标记，配合 `--features lattice-server/test-fake-tools` 构建的 `lattice` 二进制，并在显式启动或重启后台前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 设置逗号分隔的工具名单。
+- `src/` 只承载跨场景通用驱动，Direct 共用辅助放在 `tests/support/mod.rs`，场景专用夹具与语义断言保留在各自 `tests/*.rs` 中。需要工具循环的场景以 `#[cfg(feature = "fake-tools")]` 标记，配合 `--features lattice-server/test-fake-tools` 构建的 `lattice-daemon` 二进制，并在显式启动或重启后台前经 `ScenarioWorld::set_env("LATTICE_TEST_TOOLS", ...)` 设置逗号分隔的工具名单。
 - 本 crate 之外：未公开的 redb 表编码、值版本、纯关闭规划与内部状态机分支由 `lattice-session`、`lattice-llm`、`lattice-server` 等对应产品 crate 的单元或集成测试负责。
 
 ## 验证
@@ -39,8 +39,8 @@
 | 改动 | 运行 |
 | --- | --- |
 | 修改 `src/` 通用驱动或解析器 | `cargo test -p lattice-system-harness --lib` 与 `cargo xtask harness-boundary` |
-| 修改 CLI 帮助、环境变量或参数场景 | 先构建 `lattice`，再运行对应的 `cargo test -p lattice-system-harness --test fast_<场景>` |
-| 修改后台重连、会话树或 provider 默认场景 | 先构建无测试 feature 的 `lattice`，再按影响范围运行对应的 `cargo test -p lattice-system-harness --test direct_<场景>` |
-| 修改工具循环场景或 `tui_mock` 工具分支 | 先构建 `cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools`，再运行对应的 `cargo test -p lattice-system-harness --features fake-tools --test direct_<场景>` |
-| 修改 TUI 冒烟驱动或 `pty_tui_smoke` | 默认非工具子集：构建无测试 feature 的 `lattice` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke`；含假工具块与面板重试的全集：构建 `--features lattice-server/test-fake-tools` 的 `lattice` 后运行 `cargo test -p lattice-system-harness --features fake-tools --test pty_tui_smoke` |
-| 修改崩溃窗口场景 | 先构建带 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 的 `lattice`，运行 `cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers`，并在报告中注明 |
+| 修改 CLI 帮助、环境变量或参数场景 | 先构建 `lattice` 与 `lattice-daemon`，再运行对应的 `cargo test -p lattice-system-harness --test fast_<场景>` |
+| 修改后台重连、会话树或 provider 默认场景 | 先构建无测试 feature 的 `lattice` 与 `lattice-daemon`，再按影响范围运行对应的 `cargo test -p lattice-system-harness --test direct_<场景>` |
+| 修改工具循环场景或 `tui_mock` 工具分支 | 先构建 `lattice` 与带 `--features lattice-server/test-fake-tools` 的 `lattice-daemon`，再运行对应的 `cargo test -p lattice-system-harness --features fake-tools --test direct_<场景>` |
+| 修改 TUI 冒烟驱动或 `pty_tui_smoke` | 默认非工具子集：构建无测试 feature 的 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke`；含假工具块与面板重试的全集：构建 `--features lattice-server/test-fake-tools` 的 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --features fake-tools --test pty_tui_smoke` |
+| 修改崩溃窗口场景 | 先构建 `lattice` 与带 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 的 `lattice-daemon`，运行 `cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers`，并在报告中注明 |

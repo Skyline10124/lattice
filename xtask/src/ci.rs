@@ -14,10 +14,11 @@
 //! 预算并快速失败，整个门禁随之结束。原始记录见
 //! `git show ead22771^:docs/archive/records/FIX.md` 中的 L-26-01。
 //!
-//! 门禁按两轮验证被测二进制：第一轮构建无测试 feature 的生产二进制并跑全部默认测试；
-//! 第二轮先检查测试 feature 下的 clippy，再用 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers`
-//! 重新构建并覆盖同一个 `target/debug/lattice`（`LATTICE_BIN` 路径不变），随后运行假执行器与
-//! 全部 harness 目标（含假工具场景与崩溃屏障）。`xtask ci` 结束后，`target/debug/lattice`
+//! 门禁按两轮验证被测二进制：第一轮构建无测试 feature 的生产前端 `lattice` 与后台 `lattice-daemon`
+//! 并跑全部默认测试；第二轮先检查测试 feature 下的 clippy，再用
+//! `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers`
+//! 重新构建并覆盖同一个 `target/debug/lattice-daemon`（`LATTICE_DAEMON_BIN` 路径不变，前端沿用第一轮产物），
+//! 随后运行假执行器与全部 harness 目标（含假工具场景与崩溃屏障）。`xtask ci` 结束后，`target/debug/lattice-daemon`
 //! 留存的是第二轮带测试 feature 的构建产物。
 
 use std::env;
@@ -41,10 +42,26 @@ const DEFAULT_BUILD_JOBS: &str = "4";
 /// 每个 crate 的测试超时秒数，可用 `LATTICE_TEST_TIMEOUT_SECS` 覆盖。
 const DEFAULT_TEST_TIMEOUT_SECS: u64 = 300;
 
+fn resolve_target_dir(root: &Path) -> std::path::PathBuf {
+    match env::var_os("CARGO_TARGET_DIR") {
+        Some(dir) => {
+            let path = std::path::PathBuf::from(dir);
+            if path.is_absolute() {
+                path
+            } else {
+                root.join(path)
+            }
+        }
+        None => root.join("target"),
+    }
+}
+
 pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     let root = repo_root::repo_root()?;
-    let lattice_bin = root.join("target/debug/lattice");
-    let harness_failures = root.join("target/harness-failures");
+    let target_dir = resolve_target_dir(&root);
+    let lattice_bin = target_dir.join("debug/lattice");
+    let lattice_daemon_bin = target_dir.join("debug/lattice-daemon");
+    let harness_failures = target_dir.join("harness-failures");
     let build_jobs = env::var("CARGO_BUILD_JOBS").unwrap_or_else(|_| DEFAULT_BUILD_JOBS.to_owned());
 
     step("工具链预检", check_toolchain)?;
@@ -70,10 +87,17 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    step("构建 lattice（debug）", || {
+    step("构建 lattice 与 lattice-daemon（debug）", || {
         run_cargo(
             &root,
-            &["build", "-p", "lattice-cli", "--bin", "lattice"],
+            &[
+                "build",
+                "-p",
+                "lattice-cli",
+                "-p",
+                "lattice-daemon",
+                "--bins",
+            ],
             &build_jobs,
         )
     })?;
@@ -83,11 +107,17 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
     step("crate 依赖边界检查", crate_boundary::run)?;
 
     step("测试", || {
-        run_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
+        run_tests(
+            &root,
+            &lattice_bin,
+            &lattice_daemon_bin,
+            &harness_failures,
+            &build_jobs,
+        )
     })?;
 
     // 第二轮：检查测试专用 feature 的编译与 lint，再用带测试 feature 的产物覆盖同一个
-    // target/debug/lattice（LATTICE_BIN 不变），运行假执行器单元测试、假工具场景与崩溃屏障。
+    // target/debug/lattice-daemon（前端沿用第一轮的 target/debug/lattice），运行假执行器单元测试、假工具场景与崩溃屏障。
     step(
         "clippy 检查（带测试 feature：产品 crate）",
         || {
@@ -98,7 +128,7 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
                     "-p",
                     "lattice-server",
                     "-p",
-                    "lattice-cli",
+                    "lattice-daemon",
                     "--all-targets",
                     "--features",
                     "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
@@ -129,24 +159,33 @@ pub fn run(_args: CiArgs) -> anyhow::Result<()> {
         )
     })?;
 
-    step("构建 lattice（debug，带测试 feature）", || {
-        run_cargo(
-            &root,
-            &[
-                "build",
-                "-p",
-                "lattice-cli",
-                "--bin",
-                "lattice",
-                "--features",
-                "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
-            ],
-            &build_jobs,
-        )
-    })?;
+    step(
+        "构建 lattice-daemon（debug，带测试 feature）",
+        || {
+            run_cargo(
+                &root,
+                &[
+                    "build",
+                    "-p",
+                    "lattice-daemon",
+                    "--bin",
+                    "lattice-daemon",
+                    "--features",
+                    "lattice-server/test-fake-tools,lattice-server/test-crash-barriers",
+                ],
+                &build_jobs,
+            )
+        },
+    )?;
 
     step("测试（带测试 feature）", || {
-        run_feature_tests(&root, &lattice_bin, &harness_failures, &build_jobs)
+        run_feature_tests(
+            &root,
+            &lattice_bin,
+            &lattice_daemon_bin,
+            &harness_failures,
+            &build_jobs,
+        )
     })?;
 
     println!();
@@ -204,6 +243,7 @@ fn test_timeout_secs() -> u64 {
 fn run_tests(
     root: &Path,
     lattice_bin: &Path,
+    lattice_daemon_bin: &Path,
     harness_failures: &Path,
     build_jobs: &str,
 ) -> anyhow::Result<()> {
@@ -228,6 +268,7 @@ fn run_tests(
             None,
             build_jobs,
             lattice_bin,
+            lattice_daemon_bin,
             harness_failures,
             timeout_secs,
         ) {
@@ -252,6 +293,7 @@ fn run_tests(
 fn run_feature_tests(
     root: &Path,
     lattice_bin: &Path,
+    lattice_daemon_bin: &Path,
     harness_failures: &Path,
     build_jobs: &str,
 ) -> anyhow::Result<()> {
@@ -276,6 +318,7 @@ fn run_feature_tests(
             Some(features),
             build_jobs,
             lattice_bin,
+            lattice_daemon_bin,
             harness_failures,
             timeout_secs,
         ) {
@@ -297,12 +340,14 @@ fn run_feature_tests(
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_cargo_test(
     root: &Path,
     crate_name: &str,
     features: Option<&str>,
     build_jobs: &str,
     lattice_bin: &Path,
+    lattice_daemon_bin: &Path,
     harness_failures: &Path,
     timeout_secs: u64,
 ) -> anyhow::Result<()> {
@@ -325,6 +370,9 @@ fn run_cargo_test(
         .process_group(0);
     if env::var_os("LATTICE_BIN").is_none() {
         cmd.env("LATTICE_BIN", lattice_bin);
+    }
+    if env::var_os("LATTICE_DAEMON_BIN").is_none() {
+        cmd.env("LATTICE_DAEMON_BIN", lattice_daemon_bin);
     }
     if env::var_os("LATTICE_HARNESS_FAILURE_DIR").is_none() {
         cmd.env("LATTICE_HARNESS_FAILURE_DIR", harness_failures);

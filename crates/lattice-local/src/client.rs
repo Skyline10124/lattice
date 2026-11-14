@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 本地 IPC 客户端句柄、后台自动启动与观察流帧读取。
+//! 本地 IPC 客户端句柄与观察流帧读取。
 
 use std::time::Duration;
 
@@ -400,61 +400,6 @@ impl LocalClient {
         let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(&mut stream, &Request::Watch { session_id }).await?;
         Ok(LocalWatch::from_stream(stream))
-    }
-
-    /// 自启当前 CLI，只有端点缺失才启动；不替换不兼容后台。
-    pub async fn ensure_running(&self) -> Result<DaemonStatus> {
-        match self.status().await {
-            Ok(status) => return Ok(status),
-            Err(error) if error.kind == LocalErrorKind::NotRunning => {}
-            Err(error) => return Err(error),
-        }
-        let state_root = self
-            .layout
-            .lattice_root()
-            .parent()
-            .ok_or_else(protocol)?
-            .to_path_buf();
-        tokio::task::spawn_blocking(move || {
-            use std::os::unix::process::CommandExt;
-            use std::process::{Command, Stdio};
-            let mut command = Command::new(std::env::current_exe()?);
-            command
-                .args(["daemon", "serve", "--state-root"])
-                .arg(&state_root)
-                .current_dir("/")
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            // fork 后只调用异步信号安全的 setsid，使后台脱离终端进程组。
-            unsafe {
-                command.pre_exec(|| {
-                    rustix::process::setsid()
-                        .map(|_| ())
-                        .map_err(std::io::Error::from)
-                });
-            }
-            let mut child = command.spawn()?;
-            std::thread::spawn(move || {
-                let _ = child.wait();
-            });
-            Ok::<_, std::io::Error>(())
-        })
-        .await
-        .map_err(|_| protocol())??;
-        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            match self.status().await {
-                Ok(status) => return Ok(status),
-                Err(error)
-                    if error.kind == LocalErrorKind::NotRunning
-                        && tokio::time::Instant::now() < deadline =>
-                {
-                    tokio::time::sleep(Duration::from_millis(25)).await
-                }
-                Err(error) => return Err(error),
-            }
-        }
     }
 }
 

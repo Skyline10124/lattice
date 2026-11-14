@@ -11,7 +11,6 @@ name = "lattice"
 path = "src/main.rs"
 
 [dependencies]
-lattice-server = { workspace = true }
 lattice-local = { workspace = true }
 lattice-tui = { workspace = true }
 tokio = { workspace = true }

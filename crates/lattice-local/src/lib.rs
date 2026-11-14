@@ -24,8 +24,8 @@ pub use lattice_ipc::{
     Acceptance, AgentName, AgentNameError, AttemptProgress, AuthCatalogOutcome, AuthLoginOutcome,
     AuthRemoval, AuthStatus, Availability, CancelStatus, ConfigurationRequirement, ConfigureReply,
     ConfigureRequest, ConfigureResult, ConfigureSession, ConflictReason, ConnectionStatus,
-    ConversationEntry, DaemonStatus, EffortAdjustment, HISTORY_TURNS, LocalError, LocalErrorKind,
-    LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary, ModelCandidate,
+    ConversationEntry, DaemonStatus, DrainTimeout, EffortAdjustment, HISTORY_TURNS, LocalError,
+    LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary, ModelCandidate,
     ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning, Node, NodeId, NodeKind,
     NodeRef, Notice, NoticeLevel, Page, ProjectPath, ProviderAuthStatus, PublicTurnOutcome,
     RecoveryCause, RecoveryNeed, RequestConflict, Result, RetryNotice, RetryPolicy,
@@ -34,6 +34,7 @@ pub use lattice_ipc::{
     StepKey, StepProgress, StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate,
     TextSegment, TextUpdate, TurnDetail, TurnLookup, TurnRef, TurnRequest, TurnSummary,
     TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary, ViewUpdate, WATCH_TURNS,
+    parse_drain_timeout,
 };
 pub use lattice_store::StateLayout;
 pub use logging::init_logging;

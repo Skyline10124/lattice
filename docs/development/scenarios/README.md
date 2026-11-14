@@ -8,7 +8,7 @@ status: active
 
 ## 自动场景
 
-由外部 harness 在构建出的 `lattice` 二进制上运行，共同的准备、计时、清理与证据见[测试工程](../testing.md#场景的共同规则)。卡片写的是要求；“相关测试”列出按名称对应的现有测试，要求是否全部覆盖、是否通过，以执行记录为准。
+由外部 harness 在构建出的 `lattice` 与 `lattice-daemon` 二进制上运行，共同的准备、计时、清理与证据见[测试工程](../testing.md#场景的共同规则)。卡片写的是要求；“相关测试”列出按名称对应的现有测试，要求是否全部覆盖、是否通过，以执行记录为准。
 
 这些场景检验同一条提交链上的不同边界：前端提交一次，后台读取配置、接管执行并把每一步写入会话库，前端经视图与查询独立读取与观察。正常协作见[从提交到结果可见](../../architecture/session/flow.md#从提交到结果可见)，观察见[观察与重连](../../architecture/session/recovery.md#观察与重连)；断言以这些合同为准。
 
@@ -41,7 +41,7 @@ status: active
 
 | 卡片 | 内容 |
 | --- | --- |
-| [构建被测产物](manual/build.md) | 构建宿主 CLI，设置被测路径 |
+| [构建被测产物](manual/build.md) | 构建前端 `lattice` 与后台 `lattice-daemon`，设置被测路径 |
 | [提交与找回](manual/submit-and-recover.md) | 新建与续接会话、选择模型与档位、提交中断后按 TurnId 找回 |
 | [查询、观察与用量](manual/observe-and-usage.md) | 读取 Turn 详情、持续观察、在 TUI 中打开会话、查询用量 |
 | [会话退回与分叉](manual/rewind.md) | 查看会话树，退回到节点后分叉提交 |

@@ -201,15 +201,18 @@ fn end() -> Value {
 }
 fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Value) {
     let driver = support::driver();
+    let daemon_driver = support::daemon_driver();
     let bytes = std::fs::read(driver.binary_path()).unwrap();
+    let daemon_bytes = std::fs::read(daemon_driver.binary_path()).unwrap();
     let test = script["test"]
         .as_str()
         .expect("provenance 需携带精确测试名称");
     evidence.record_json("provenance", &json!({
         "binary":driver.binary_path(),"binary_blake3":blake3::hash(&bytes).to_hex().to_string(),
+        "daemon_binary":daemon_driver.binary_path(),"daemon_binary_blake3":blake3::hash(&daemon_bytes).to_hex().to_string(),
         "features":"lattice-server/test-fake-tools,lattice-server/test-crash-barriers","harness_features":"fake-tools,crash-barriers","profile":"debug",
         "state_root":world.session_store_dir().parent(),"script":script,
-        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers && TMPDIR=/tmp LATTICE_BIN=$(pwd)/target/debug/lattice CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
+        "reproduce":format!("CARGO_BUILD_JOBS=8 cargo build -p lattice-cli --bin lattice && CARGO_BUILD_JOBS=8 cargo build -p lattice-daemon --bin lattice-daemon --features lattice-server/test-fake-tools,lattice-server/test-crash-barriers && TMPDIR=/tmp LATTICE_BIN=$(pwd)/target/debug/lattice LATTICE_DAEMON_BIN=$(pwd)/target/debug/lattice-daemon CARGO_BUILD_JOBS=8 cargo test -p lattice-system-harness --features fake-tools,crash-barriers --test direct_crash_barriers {test} -- --exact --nocapture")
     })).unwrap();
 }
 fn stage(
@@ -900,7 +903,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             assert!(Instant::now() < deadline);
             std::thread::yield_now();
         }
-        evidence.record_json("daemon-identity",&json!({"pid":daemon_pgid,"pgid":daemon_pgid,"state_root":world.session_store_dir().parent(),"binary":support::driver().binary_path(),"stopped":true})).unwrap();
+        evidence.record_json("daemon-identity",&json!({"pid":daemon_pgid,"pgid":daemon_pgid,"state_root":world.session_store_dir().parent(),"binary":support::daemon_driver().binary_path(),"stopped":true})).unwrap();
         let killed = world.kill_daemon().expect("强制终止屏障处的自有后台");
         support::assert_forced_kill(&killed);
         assert!(killed.stdout_complete && killed.stderr_complete);

@@ -1,16 +1,16 @@
 # lattice-cli 工作指引
 
-维护 `lattice` 二进制入口、命令行解析、文本与 JSONL 渲染及退出码，客户端命令与日志初始化全部经 `lattice-local` 与 `lattice-tui` 完成，仅 `daemon serve` 子命令经 `lattice_server::{serve, ServeExit, DrainOutcome}` 托管本地后台。
+维护 `lattice` 前端二进制入口、命令行解析、文本与 JSONL 渲染及退出码，客户端命令、日志初始化与交互界面全部经 `lattice-local` 与 `lattice-tui` 完成；本地后台守护进程由独立的 `lattice-daemon` 二进制承担。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/main.rs` | `lattice` 入口、显式多线程 Tokio runtime 构建、`clap` 命令定义、参数解析错误脱敏、`lattice_local::init_logging` 日志初始化，`daemon serve` 的 `SIGTERM`/`SIGINT` 转发、`shutdown_timeout` 与持有 `InstanceLock` 下的 `0`/`1`/`2`/`4` 进程退出（见[停止后台](../../docs/architecture/session/recovery.md#停止后台)） |
+| `src/main.rs` | `lattice` 前端入口、显式多线程 Tokio runtime 构建、`clap` 命令定义、参数解析错误脱敏与 `lattice_local::init_logging` 日志初始化 |
 | `src/commands/mod.rs` | 子命令模块导出 |
 | `src/commands/run.rs` | 请求身份预生成与输出、`current_dir()` 读取与透传、`configure` 会话创建/设置更新、`LocalTurn` 提交/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
-| `src/commands/session.rs` | `session` 子命令（`send`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）参数处理、后台调用与用量费用渲染 |
-| `src/commands/daemon.rs` | `daemon serve`（含 `--drain-timeout` 解析）、`status`、`stop`（含未确认收尾标准错误提示）入口与私有状态根解析 |
+| `src/commands/session.rs` | `session` 子命令（`send`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）先经 `LocalClient::status` 检查已运行后台，再完成参数处理、后台调用与用量费用渲染 |
+| `src/commands/daemon.rs` | `daemon status` 与 `daemon stop`（含未确认收尾标准错误提示）客户端入口与私有状态根解析 |
 | `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、无回显终端或标准输入读取密钥、SIWC 登录浏览器与粘贴交互（`login.rs`）、可唤醒输入线程（`login/input.rs`）及信号下终端模式恢复（`terminal.rs`） |
 | `src/commands/models.rs` | `models` 候选列表渲染、配置问题 stderr 提示与 `models refresh` |
 
@@ -27,7 +27,7 @@
 
 ## 约束
 
-- CLI 客户端命令只依赖 `lattice-local`（不直接引入 `lattice-session` 或后台内部类型），保持配置与环境读取中立，把会话、凭据与模型操作经 `lattice_local::LocalClient` 交给后台执行；仅 `daemon serve` 入口调用 `lattice_server::{serve, ServeExit, DrainOutcome}`。`Cargo.toml` 不定义测试转发 feature，构建带假工具或崩溃屏障的被测二进制时显式传入 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers`（或 `--features lattice-server/test-fake-tools`），见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)、[Crate 职责与依赖边界](../../docs/architecture/crates.md)与[测试工程](../../docs/development/testing.md)。
+- `Cargo.toml` 的内部直接依赖只允许 `lattice-local` 与 `lattice-tui`，普通依赖闭包中禁止出现 `lattice-server`、`lattice-llm`、`lattice-profile`、`lattice-agent`、`lattice-im`，由 `cargo xtask crate-boundary` 强制检查。前端不自动拉起后台：各命令连接已经运行的后台，未运行时返回中文 `not_running` 错误并以 `1` 退出；后台宿主与测试 feature 构建在 `lattice-daemon` 上完成，见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)、[Crate 职责与依赖边界](../../docs/architecture/crates.md)与[测试工程](../../docs/development/testing.md)。
 - 前端对工作区只读取 `std::env::current_dir()` 原样发送（`workspace_override` 原样透传），不在前端做 `canonicalize`；`current_dir()` 失败时在前端按 `Internal` 固定文案报错并以 `1` 退出，规范路径校验统一交由后台处理。
 - API key 只从无回显终端或标准输入读取，并在命令行解析错误处做脱敏拦截；SIWC 登录只输出授权 URL 与最终结果，使敏感材料隔离于命令行参数、日志、错误与标准输出，见[凭据命令](../../docs/architecture/llm/credentials.md#凭据命令)。
 - `--model` 与 `--effort` 在前端只校验 `<provider>/<model>` 与档位名语法；提交前先生成并输出请求身份（新会话同时生成 `SessionId`），新建会话或显式传入 `--agent`、`--model`、`--effort` 时先调用 `configure` 再发出 `submit`，找回与历史读取统一走后台公开只读查询，见[会话设置](../../docs/architecture/session/settings.md#会话设置)与[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)。
@@ -40,7 +40,7 @@
 | 改动 | 运行 |
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-cli` |
-| 修改子命令、参数冲突或公开帮助面 | `cargo test -p lattice-cli`（常规标志类型由 `clap` 结构保证，单测锁定参数冲突与脱敏），构建 `lattice` 后运行 `cargo test -p lattice-system-harness --test fast_cli_help` |
+| 修改子命令、参数冲突或公开帮助面 | `cargo test -p lattice-cli`（常规标志类型由 `clap` 结构保证，单测锁定参数冲突与脱敏），构建 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test fast_cli_help` |
 | 修改流前拒绝、正文读取或退出码映射 | 在 `cargo test -p lattice-cli` 中同时核对 `pre-stream` 错误分类、正文读取失败与 `TurnOutcome` 的精确 `0`/`1`/`2` 退出码 |
-| 修改环境与配置来源隔离 | 构建 `lattice` 后运行 `cargo test -p lattice-system-harness --test fast_env_boundary` |
+| 修改环境与配置来源隔离 | 构建 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test fast_env_boundary` |
 | 修改 Turn 流式渲染或交互流程 | `cargo test -p lattice-local`、`cargo test -p lattice-server`，并按影响运行对应的 `lattice-system-harness` 场景 |

@@ -23,12 +23,14 @@ LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命
 git clone https://github.com/Skyline10124/lattice.git
 cd lattice
 cargo install --locked --path crates/lattice-cli
+cargo install --locked --path crates/lattice-daemon
 ```
 
 确保 Cargo 的可执行文件安装目录已加入 `PATH`，然后检查入口：
 
 ```sh
 lattice --help
+lattice-daemon --help
 ```
 
 ## 快速开始
@@ -62,7 +64,13 @@ system = "请用中文回答，表达简洁准确。"
 后台在新会话首次提交或显式选择 agent 时读取 profile，先查项目内的 `.lattice/agents`，再查后台启动环境中 `$HOME/.lattice/agents`。全局目录与其中的 profile 须属于当前用户、不可被同组或其他用户写入（默认的 0755/0644 即可），路径最后一段不能是符号链接，否则提交时按配置错误拒绝。连接同一后台的前端共用这一全局目录；固定 `XDG_STATE_HOME` 时，更换前端 HOME 不会改变它。接受事务会保存 profile 的有效副本和提示引用；后续未显式选择 agent 时使用副本，即使源文件修改或删除也不受影响。退回历史节点或根节点不会改变副本；显式选择同名 agent 可重新加载源配置。
 当前版本生产环境默认以纯对话运行，不向模型暴露工具。`agent.toml` 仅允许 `schema_version`、`[agent]`、`[prompt]` 与可选 `[llm]`；出现已移除的 `[lancet]` 或 `[tools]` 时，提交按配置错误拒绝（`bad_request`，CLI 退出 `2`，诊断指出 `forbidden top-level section` 与文件路径），删除对应节后重试（已有会话需更新副本时，提交显式带上 `--agent <name>`）。
 
-### 2. 配置模型凭据
+### 2. 启动后台并配置模型凭据
+
+先在单独的终端中启动本地后台（默认状态根为 `${XDG_STATE_HOME:-$HOME/.local/state}`）：
+
+```sh
+lattice-daemon --state-root "${XDG_STATE_HOME:-$HOME/.local/state}"
+```
 
 通过终端录入服务商密钥（输入不回显），后台保存到用户级 `~/.lattice/auth.json`。配置目录 `~/.lattice` 属于当前用户，新建时为 0700，不能向同组或其他用户开放；`auth.json` 为 0600。权限更宽、属主不符或是符号链接时，`lattice auth set` 与需要 key 的提交会被拒绝，后台不自动修改权限。
 
@@ -108,9 +116,9 @@ lattice tui "$SESSION_ID"
 
 ## 后台执行与重连
 
-Session 命令、TUI、`auth` 与 `models` 首次使用时会自动启动本地后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
+Session 命令、TUI、`auth` 与 `models` 只连接已经运行的本地后台（`lattice-daemon`），不会自动拉起后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-自动启动与显式运行 `lattice daemon serve` 都继承启动进程的环境。后台在启动时按这份环境确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再启动。
+`lattice-daemon` 使用启动它的宿主进程环境，在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`。
 
 配置目录里的 `providers.toml` 与凭据在每次模型请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。凭据也可通过 `lattice auth set` 更新。价格的生效时机见[费用估算](docs/architecture/llm/usage.md#费用估算)。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 

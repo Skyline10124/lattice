@@ -35,6 +35,26 @@ mod configure_tests;
 #[path = "server_models_tests.rs"]
 mod models_tests;
 
+/// 后台宿主的生命周期回调，只包含就绪与开始停机两个事件。
+/// 调用点位于准入锁之外，实现不得阻塞异步运行时。
+pub trait HostLifecycle: Send + Sync + 'static {
+    /// 监听套接字已绑定发布且尚未收到停机请求、进入接受循环之前调用。
+    fn on_ready(&self) -> Result<()>;
+
+    /// 后台首次从运行中转入排空阶段时调用一次。
+    fn on_stopping(&self);
+}
+
+struct NoopLifecycle;
+
+impl HostLifecycle for NoopLifecycle {
+    fn on_ready(&self) -> Result<()> {
+        Ok(())
+    }
+
+    fn on_stopping(&self) {}
+}
+
 /// 后台第 2 步排空的结束方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DrainOutcome {
@@ -140,6 +160,7 @@ struct Backend {
     gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, ConfigRejection>,
     metadata: Arc<super::metadata::MetadataRefresh>,
     tools: Arc<dyn ToolExecutor>,
+    lifecycle: Arc<dyn HostLifecycle>,
     epoch: String,
     admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
@@ -195,10 +216,15 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("backend lock poisoned")
 }
 fn internal() -> LocalError {
-    LocalError::new(
-        LocalErrorKind::Internal,
-        "backend operation failed; inspect durable state",
-    )
+    LocalError::new(LocalErrorKind::Internal, "后台操作失败；请检查持久化状态")
+}
+fn listener_io_error(action: &str, error: std::io::Error) -> LocalError {
+    let kind = if error.kind() == std::io::ErrorKind::PermissionDenied {
+        LocalErrorKind::Permission
+    } else {
+        LocalErrorKind::Internal
+    };
+    LocalError::new(kind, &format!("{action}失败：{error}"))
 }
 fn busy() -> LocalError {
     LocalError::new(LocalErrorKind::Busy, "session has another owned operation")
@@ -240,15 +266,18 @@ impl Backend {
     }
 
     fn begin_stop(&self) {
-        let mut state = lock(&self.admission);
-        if !matches!(state.stop, StopPhase::Running) {
-            return;
+        {
+            let mut state = lock(&self.admission);
+            if !matches!(state.stop, StopPhase::Running) {
+                return;
+            }
+            let now = tokio::time::Instant::now();
+            let deadline = now
+                .checked_add(state.drain_timeout)
+                .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
+            state.stop = StopPhase::Draining { deadline };
         }
-        let now = tokio::time::Instant::now();
-        let deadline = now
-            .checked_add(state.drain_timeout)
-            .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
-        state.stop = StopPhase::Draining { deadline };
+        self.lifecycle.on_stopping();
         self.metadata.stop();
         if let Ok(gateway) = &self.gateway {
             gateway.chatgpt_auth().stop_logins();
@@ -327,6 +356,7 @@ impl Backend {
             metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
             gateway,
             tools,
+            lifecycle: Arc::new(NoopLifecycle),
             stores,
             epoch: uuid::Uuid::new_v4().to_string(),
             admission: Mutex::default(),
@@ -1578,11 +1608,17 @@ pub async fn serve(
     home: Option<std::path::PathBuf>,
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
+    lifecycle: impl HostLifecycle,
 ) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
+    let lifecycle: Arc<dyn HostLifecycle> = Arc::new(lifecycle);
     serve_with_backend(layout, drain_timeout, stop_requests, move || {
-        Backend::with_tools(backend_layout, home, tools)
+        let mut backend = Backend::with_tools(backend_layout, home, tools);
+        Arc::get_mut(&mut backend)
+            .expect("独占构造的后台实例")
+            .lifecycle = lifecycle;
+        backend
     })
     .await
 }
@@ -1636,7 +1672,9 @@ async fn finish_serve(
             failure.get_or_insert(error);
         }
         Ok(Err(_)) => {
-            failure.get_or_insert_with(internal);
+            failure.get_or_insert_with(|| {
+                LocalError::new(LocalErrorKind::Internal, "清理监听套接字工作线程异常退出")
+            });
         }
         Err(_) => {
             failure.get_or_insert_with(|| {
@@ -1671,7 +1709,7 @@ async fn serve_with_backend(
             return Ok(finish_serve(
                 endpoint,
                 DrainOutcome::Completed,
-                Some(error.into()),
+                Some(listener_io_error("接入异步监听套接字", error)),
                 instance,
                 None,
             )
@@ -1699,12 +1737,41 @@ async fn serve_with_backend(
         }
     }
 
+    let mut force_timeout = false;
+    let mut stop_closed = false;
+    while !stop_closed {
+        match stop_requests.try_recv() {
+            Ok(()) => {
+                if backend.is_stopping() {
+                    force_timeout = true;
+                } else {
+                    backend.begin_stop();
+                }
+            }
+            Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                stop_closed = true;
+            }
+        }
+    }
+    if !backend.is_stopping()
+        && let Err(error) = backend.lifecycle.on_ready()
+    {
+        drop(listener);
+        return Ok(finish_serve(
+            endpoint,
+            DrainOutcome::Completed,
+            Some(error),
+            instance,
+            Some(backend),
+        )
+        .await);
+    }
+
     let metadata_task = backend.metadata.start();
     let mut connections = JoinSet::new();
     let mut failure = None;
     let mut accept_failed = false;
-    let mut force_timeout = false;
-    let mut stop_closed = false;
     let mut changed = backend.changed.subscribe();
 
     let drain = loop {
@@ -1739,7 +1806,7 @@ async fn serve_with_backend(
                 }
                 Ok(_) => {}
                 Err(error) => {
-                    failure.get_or_insert_with(|| error.into());
+                    failure.get_or_insert_with(|| listener_io_error("接受本地 IPC 连接", error));
                     accept_failed = true;
                     backend.begin_stop();
                 }
@@ -1798,10 +1865,15 @@ async fn serve_with_backend(
             );
             let mut tail_failure = None;
             if let Ok(Err(_)) = meta_join {
-                tail_failure.get_or_insert_with(internal);
+                tail_failure.get_or_insert_with(|| {
+                    LocalError::new(LocalErrorKind::Internal, "元数据调度任务异常终止")
+                });
             }
             if let Ok(Err(error)) = auth_res {
-                tail_failure.get_or_insert_with(|| super::auth::error(error));
+                tail_failure.get_or_insert_with(|| {
+                    let mapped = super::auth::error(error);
+                    LocalError::new(mapped.kind, "关闭 ChatGPT 认证服务时后台工作任务失败")
+                });
             }
             tail_failure
         };
@@ -1816,7 +1888,9 @@ async fn serve_with_backend(
                     }
                     Ok(_) => {}
                     Err(error) => {
-                        failure.get_or_insert_with(|| error.into());
+                        failure.get_or_insert_with(|| {
+                            listener_io_error("停机尾段接受本地 IPC 连接", error)
+                        });
                         accept_failed = true;
                     }
                 },

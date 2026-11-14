@@ -143,6 +143,7 @@ fn verdict(steps: &[StepRecord]) -> Verdict {
 struct Ctx {
     root: PathBuf,
     lattice_bin: PathBuf,
+    lattice_daemon_bin: PathBuf,
     harness_failures: PathBuf,
 }
 
@@ -165,9 +166,14 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
     let rollout_dir = root.join("target/rollout");
     let harness_failures = rollout_dir.join("harness-failures");
     fs::create_dir_all(&harness_failures).context("创建 rollout 的 harness 失败产物目录")?;
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_absolute() { p } else { root.join(p) })
+        .unwrap_or_else(|| root.join("target"));
     let ctx = Ctx {
         root: root.clone(),
-        lattice_bin: root.join("target/release/lattice"),
+        lattice_bin: target_dir.join("release/lattice"),
+        lattice_daemon_bin: target_dir.join("release/lattice-daemon"),
         harness_failures,
     };
 
@@ -305,8 +311,9 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "--release",
         "-p",
         "lattice-cli",
-        "--bin",
-        "lattice",
+        "-p",
+        "lattice-daemon",
+        "--bins",
     ]);
 
     let mut harness_boundary = Command::new("cargo");
@@ -319,6 +326,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         .current_dir(&ctx.root)
         .args(["test", "-p", "lattice-system-harness"])
         .env("LATTICE_BIN", &ctx.lattice_bin)
+        .env("LATTICE_DAEMON_BIN", &ctx.lattice_daemon_bin)
         .env("LATTICE_HARNESS_FAILURE_DIR", &ctx.harness_failures);
 
     let mut offline = Command::new("cargo");
@@ -753,6 +761,7 @@ mod tests {
         let ctx = Ctx {
             root: temp.path().to_path_buf(),
             lattice_bin: temp.path().join("target/release/lattice"),
+            lattice_daemon_bin: temp.path().join("target/release/lattice-daemon"),
             harness_failures: temp.path().join("harness-failures"),
         };
         let plan = build_plan(&ctx);
