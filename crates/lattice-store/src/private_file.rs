@@ -397,7 +397,7 @@ impl PrivateDirectory {
 
     /// 通过同目录 `0600` 临时文件、`fsync`、目标复核、`renameat` 与目录同步原子替换单分量文件。
     pub fn replace(&self, name: &OsStr, bytes: &[u8]) -> Result<(), PrivateFileError> {
-        self.replace_with_hooks(name, bytes, File::sync_all, || Ok(()), |()| {})
+        self.replace_with_hooks(name, bytes, &NEXT_TEMP, File::sync_all, || Ok(()), |()| {})
     }
 
     /// 带发布门闩的原子替换：在重命名前执行 `before_publish`，重命名成功后执行 `published`
@@ -409,19 +409,27 @@ impl PrivateDirectory {
         before_publish: impl FnOnce() -> Result<G, E>,
         published: impl FnOnce(&mut G),
     ) -> Result<(), E> {
-        self.replace_with_hooks(name, bytes, File::sync_all, before_publish, published)
+        self.replace_with_hooks(
+            name,
+            bytes,
+            &NEXT_TEMP,
+            File::sync_all,
+            before_publish,
+            published,
+        )
     }
 
     fn replace_with_hooks<G, E: From<PrivateFileError>>(
         &self,
         name: &OsStr,
         bytes: &[u8],
+        next_temp: &AtomicU64,
         sync_directory: impl FnOnce(&File) -> std::io::Result<()>,
         before_publish: impl FnOnce() -> Result<G, E>,
         published: impl FnOnce(&mut G),
     ) -> Result<(), E> {
         validate_single_component(name)?;
-        let mut temporary = self.create_temporary()?;
+        let mut temporary = self.create_temporary(name, next_temp)?;
         (&temporary.file)
             .write_all(bytes)
             .map_err(|source| PrivateFileError::Io {
@@ -455,13 +463,21 @@ impl PrivateDirectory {
             .map_err(E::from)
     }
 
-    fn create_temporary(&self) -> Result<Temporary<'_>, PrivateFileError> {
+    fn create_temporary(
+        &self,
+        excluded_name: &OsStr,
+        next_temp: &AtomicU64,
+    ) -> Result<Temporary<'_>, PrivateFileError> {
         loop {
             let name = format!(
                 ".private.{}.{}.tmp",
                 std::process::id(),
-                NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+                next_temp.fetch_add(1, Ordering::Relaxed)
             );
+            // 排除目标文件名本身：若尚不存在的目标恰好与候选临时名相同，直接使用该名称会在发布门闩放行前暴露正文。
+            if OsStr::new(&name) == excluded_name {
+                continue;
+            }
             match openat(
                 &self.dir,
                 &name,
@@ -577,6 +593,7 @@ mod tests {
         let synced = directory.replace_with_hooks(
             target,
             b"published-payload",
+            &NEXT_TEMP,
             |_| {
                 assert!(
                     published_flag.load(Ordering::SeqCst),
@@ -678,7 +695,9 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
         let directory = PrivateDirectory::open(root.path()).unwrap().unwrap();
 
-        let temporary = directory.create_temporary().unwrap();
+        let temporary = directory
+            .create_temporary(OsStr::new("unused"), &NEXT_TEMP)
+            .unwrap();
         let temp_path = root.path().join(&temporary.name);
         assert_eq!(
             temporary.file.metadata().unwrap().mode() & 0o777,
@@ -688,6 +707,121 @@ mod tests {
         assert!(temp_path.exists(), "Drop 前临时文件应存在");
         drop(temporary);
         assert!(!temp_path.exists(), "未发布的临时文件在 Drop 后必须删除");
+    }
+
+    #[test]
+    fn temporary_name_never_collides_with_target_name() {
+        let root = tempfile::tempdir().unwrap();
+        fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let directory = PrivateDirectory::open(root.path()).unwrap().unwrap();
+
+        let pid = std::process::id();
+        let counter = AtomicU64::new(0);
+        let colliding_name = format!(".private.{pid}.0.tmp");
+        let target = OsStr::new(&colliding_name);
+
+        let rejected: Result<(), GuardedError> = directory.replace_with_hooks(
+            target,
+            b"unapproved-payload",
+            &counter,
+            File::sync_all,
+            || {
+                assert!(
+                    directory.read(target, None).unwrap().is_none(),
+                    "发布门闩放行前目标文件不得可读"
+                );
+                assert!(
+                    !root.path().join(&colliding_name).exists(),
+                    "临时文件不得直接创建在尚不存在的目标路径上"
+                );
+                assert!(
+                    root.path().join(format!(".private.{pid}.1.tmp")).exists(),
+                    "候选临时名与目标重合时应顺延分配下一个序号"
+                );
+                Err(GuardedError::Conflict)
+            },
+            |()| panic!("门闩拒绝时不得执行 published 回调"),
+        );
+        assert!(
+            matches!(rejected, Err(GuardedError::Conflict)),
+            "预期返回业务门闩冲突错误，实际：{rejected:?}"
+        );
+        assert_eq!(
+            counter.load(Ordering::Relaxed),
+            2,
+            "跳过重合序号 0 后应实际分配序号 1"
+        );
+        assert!(
+            directory.read(target, None).unwrap().is_none(),
+            "门闩拒绝后目标路径必须仍不存在"
+        );
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            0,
+            "门闩拒绝后目录内不得残留任何文件"
+        );
+
+        counter.store(0, Ordering::Relaxed);
+        directory
+            .replace_with_hooks::<(), PrivateFileError>(
+                target,
+                b"approved-payload",
+                &counter,
+                File::sync_all,
+                || {
+                    assert!(
+                        directory.read(target, None).unwrap().is_none(),
+                        "重命名前目标路径必须不可见"
+                    );
+                    Ok(())
+                },
+                |()| {
+                    assert_eq!(
+                        directory
+                            .read(target, None)
+                            .unwrap()
+                            .as_deref()
+                            .map(Vec::as_slice),
+                        Some(b"approved-payload".as_slice()),
+                        "published 回调期间目标文件必须已原子可见"
+                    );
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            directory
+                .read(target, None)
+                .unwrap()
+                .as_deref()
+                .map(Vec::as_slice),
+            Some(b"approved-payload".as_slice()),
+            "发布完成后目标文件内容必须可读"
+        );
+        assert_eq!(
+            fs::read_dir(root.path()).unwrap().count(),
+            1,
+            "发布完成后目录内应仅保留目标文件"
+        );
+
+        let public_root = tempfile::tempdir().unwrap();
+        fs::set_permissions(public_root.path(), fs::Permissions::from_mode(0o700)).unwrap();
+        let public_dir = PrivateDirectory::open(public_root.path()).unwrap().unwrap();
+        let predicted = format!(".private.{pid}.{}.tmp", NEXT_TEMP.load(Ordering::Relaxed));
+        let public_target = OsStr::new(&predicted);
+        let public_rejected: Result<(), GuardedError> = public_dir.replace_guarded(
+            public_target,
+            b"public-unapproved",
+            || {
+                assert!(
+                    public_dir.read(public_target, None).unwrap().is_none(),
+                    "replace_guarded 放行前目标路径不得可读"
+                );
+                Err(GuardedError::Conflict)
+            },
+            |()| panic!("门闩拒绝时不得执行 published 回调"),
+        );
+        assert!(matches!(public_rejected, Err(GuardedError::Conflict)));
+        assert!(public_dir.read(public_target, None).unwrap().is_none());
     }
 
     #[test]
