@@ -10,12 +10,15 @@ pub(crate) mod ipc;
 mod metadata;
 pub(crate) mod presentation;
 mod server;
+mod service;
 mod types;
 
 pub use ipc::InstanceLock;
-#[cfg(any(test, feature = "test-utils"))]
-pub use server::serve_for_test;
 pub use server::{DrainOutcome, HostLifecycle, ServeExit, serve};
+#[cfg(any(test, feature = "test-utils"))]
+pub use server::{serve_for_test, serve_for_test_with_service};
+#[cfg(any(test, feature = "test-utils"))]
+pub use service::{InProcessTurn, InProcessTurnOutcome, Service, StopNotification};
 pub(crate) use types::*;
 
 #[cfg(test)]

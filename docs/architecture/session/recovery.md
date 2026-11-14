@@ -22,15 +22,15 @@ status: active
 | Session 最后一轮未关闭，且没有 Owner | 旧 Turn 停在已写入的进度，不需要处理；直接接受本次新输入，见[执行者消失后的 Turn](#执行者消失后的-turn) |
 | 以上都不是 | 从当前会话设置冻结本轮配置，在接受事务中追加本轮节点并返回接受回执 |
 
-“接受结果未知”有三种来源：提交连接在回执到达前断开；后台报告接受事务的 `commit` 结果不明；接受事务已提交，后台却没能给出接受回执（读回这一轮失败，或转交回执时出错）。后两种由后台立即回复结果不明，不等这一轮执行完。这时 LocalTurn 按 TurnId 查询这一轮（`turn`），结果是三种之一：
+“接受结果未知”有三种来源：提交连接在回执到达前断开；后台报告接受事务的 `commit` 结果不明；接受事务已提交，后台却没能给出接受回执（读回这一轮失败，或转交回执时出错）。后两种由后台立即回复结果不明，不等这一轮执行完（IPC 提交在线上返回 `Acceptance::ConfirmationUnknown`，进程内 `Service::submit` 返回携带 `RecoveryNeed { turn: Some(TurnRef { session_id, turn_id }), cause }` 的 `LocalError`，其中提交或读回不明为 `CommitFailed`、回执通道断开为 `WorkerFailed`）。这时调用方（前端 `LocalTurn` 或进程内调用方）按 TurnId 查询这一轮（`turn`），结果是三种之一：
 
 | 查询结果 | 含义与动作 |
 | --- | --- |
-| 已接受 | 返回这一轮；后台仍在执行它时继续观察 |
+| 已接受 | 返回这一轮；后台仍在执行它时继续观察（进程内调用方可通过 `Service::observe(session_id, turn_id)` 重新附着只读句柄） |
 | 在途 | 后台仍在准入这个请求；稍后再查，准入结束后变为另外两种之一 |
 | NotFound | 确定未被接受；前端保留输入，由用户决定是否重发 |
 
-后台读到提交请求时先登记在途的 TurnId，上表第一行的在途 Conflict 用的也是这份登记；随后确认提交连接仍在，连接已断开的请求直接终止准入。所以连接断开后查到的 NotFound 是终局，找回不需要以同一身份重新提交。后台也可能在连接断开之后才读到请求：它照样先登记为在途，随即因连接已断开而终止准入，所以 NotFound 之后的查询可能短暂为在途，但这个请求不会再被接受。提交连接仍在且尚无回执时，LocalTurn 继续等回执，不查询。视图中出现该 TurnId 的 UserMessage，同样说明已接受。退回操作不释放已用的 TurnId。请求找回保证不扩展为 Tool exactly-once。
+后台读到提交请求时先登记在途的 TurnId，上表第一行的在途 Conflict 用的也是这份登记；IPC 提交随后确认提交连接仍在，连接已断开的请求直接终止准入（进程内提交无外部 socket，跳过连接窥读并共用同一准入路径）。所以连接断开后查到的 NotFound 是终局，找回不需要以同一身份重新提交。后台也可能在连接断开之后才读到请求：它照样先登记为在途，随即因连接已断开而终止准入，所以 NotFound 之后的查询可能短暂为在途，但这个请求不会再被接受。提交连接仍在且尚无回执时，LocalTurn 继续等回执，不查询。视图中出现该 TurnId 的 UserMessage，同样说明已接受。退回操作不释放已用的 TurnId。请求找回保证不扩展为 Tool exactly-once。
 
 执行核心分别给出接受结果、完成结果与推进通知；测试使用的 `run_turn` 复用该核心，同样要取得独立的 completion。Backend 在 Owner 退场后保存本进程已知的执行诊断，例如因会话库写入失败未能关闭 Turn，由视图的会话头给出；未经核验的请求冲突不覆盖原 Turn 的诊断。
 
@@ -84,13 +84,15 @@ CLI 的人类可读输出在一轮结束时打印一次结局摘要；`--json` �
 
 视图推送非阻塞，慢读、断连及 idle timeout 只结束或降级观察，不中止执行和必要持久收尾。视图与历史查询只读：不写会话库、不请求模型、不分发 Tool、不公开冻结配置中的秘密。
 
+进程内只读观察句柄 `InProcessTurn`（由 `Service::submit` 返回，或经 `Service::observe(session_id, turn_id)` 对已持久接受的轮次重新附着；不存在、跨会话或仍在准入未落库的轮次返回 NotFound）严格绑定固定的 `(SessionId, TurnId)`：它持有会话 `ObserverLease` 订阅草稿变化通知，不登记 IPC 视图游标，也不占用外部 IPC `watch` 连接的信号量许可；丢弃 `InProcessTurn` 只释放会话观察租约，不置位取消标志。流式阶段只提取该 `TurnId` 当前尝试中的助手纯文本段（剔除 reasoning，遇到 `LlmRetry`、工具注册或步骤切换时清空上一尝试的半截草稿）；等待该 `TurnId` 的 `Owner` 收尾后，在同一读事务中按固定 `(SessionId, TurnId)` 读取 `TurnDetail` 与最后一步 `Node::Step` 中的助手纯文本回复，并附上本进程记录的执行诊断（排空超时停写导致会话库不可读时返回对应的存储错误，不伪造结局），不受后续同会话新增轮次或 `rewind` 的影响。
+
 单个 IPC 帧有界。超过单帧的消息由连接层分帧发送，收齐后交给上层，API 与前端看不到分片；传输上限不能拒绝原本合法的整个 Turn 的内容。有界帧不代表固定内存：单个节点在读取时整体解码。拼回的整条消息不设总量上限：一轮最多 32 个 Step（模型步骤上限），每次回复最多 16 MiB，单是回复就可达 512 MiB，一次 `history` 又最多取 100 轮。能容纳全部合法内容的总量上限要以数十 GiB 计，超出客户端可用内存，起不到保护作用。
 
 ## 取消与退出
 
 取消按 TurnId 进行：取消的是请求方看到的那一轮，而不是此刻恰好在执行的那一轮。请求方看着 T1 时，T1 可能刚结束，另一个客户端又在同一会话提交了 T2；按 TurnId 取消，后台发现 T1 已结束，返回未接管，不会取消 T2。
 
-用户选择取消后，前端调用 LocalTurn 的 `cancel`，同步登记原 TurnId 的意图。LocalTurn 独立处理在途提交与取消回执；视图的读取和 UI 更新队列不承担控制状态。独立的 `session cancel <SESSION_ID>` 先从会话头查出该会话正在执行的那一轮，再按 TurnId 取消，直接取得后台接管结果。
+用户选择取消后，前端调用 LocalTurn 的 `cancel`，同步登记原 TurnId 的意图。LocalTurn 独立处理在途提交与取消回执；视图的读取和 UI 更新队列不承担控制状态。独立的 `session cancel <SESSION_ID>` 先从会话头查出该会话正在执行的那一轮，再按 TurnId 取消，直接取得后台接管结果。进程内 `Service::cancel(TurnId)` 与 IPC `cancel` 调用同一实现，返回 `Result<bool, LocalError>`。
 
 ### 后台接管与责任区间
 
@@ -148,7 +150,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 | 阶段 | 动作与期限 | 到期或完成结果 |
 | --- | --- | --- |
-| 1. 关闭准入 | 首次进入停机时记下 `deadline = 当前时刻 + drain_timeout`，经宿主回调向 `$NOTIFY_SOCKET`（若已设置）发出 `STOPPING=1`，停止元数据调度，调用共享认证对象的 `stop_logins()` 拒绝新登录并取消活动登录；重复请求复用同一期限与结果 | 新工作准入返回 `Stopping`；`access_token()` 保持可用，已接管的 SIWC Turn 仍可取得和刷新 token |
+| 1. 关闭准入 | 首次进入停机时在准入锁内记下 `deadline = 当前时刻 + drain_timeout` 并同步置位状态感知的 `StopNotification`（`Service::stopping()` 在停机前订阅时于进入停机后从 `wait()` 唤醒，在停机后订阅时立即读到停机状态并从 `wait()` 返回），随后经宿主回调向 `$NOTIFY_SOCKET`（若已设置）发出 `STOPPING=1`，停止元数据调度，调用共享认证对象的 `stop_logins()` 拒绝新登录并取消活动登录；重复请求复用同一期限与结果 | 新工作准入返回 `Stopping`；`access_token()` 保持可用，已接管的 SIWC Turn 仍可取得和刷新 token |
 | 2. 排空 | 继续接受连接以服务查询、取消与 `status`（listener 出错进入停机时跳过新连接接入），等待已接管的操作（Turn、`configure`、`rewind` 及异常任务监督）与进行中的草稿会话清理收尾，无须观察者读完流；停机路径上所有等待在途工作的地方共用 `deadline` | 判定时在途工作已归零即排空完成，这一判定先于期限与信号；到达 `deadline` 或排空期间收到 `SIGTERM`、`SIGINT`（不论停机由信号还是 IPC `stop` 发起）均按排空超时处理：计入 `unconfirmed_operations` 并停写会话库。本阶段结束时保存 `DaemonStatus` 并唤醒全部 IPC `stop` 等待方 |
 | 3. 元数据与认证收尾 | 继续接受连接，`status` 正常回答，IPC `stop` 取保存的结果，新工作准入返回 `Stopping`（listener 已出错时跳过新连接接入）；并发等待元数据调度任务结束、`metadata.drain()` 与认证 `shutdown()`（关闭认证 worker 与必要文件写入），共用 5 秒上限 | 到期即结束本阶段等待 |
 | 4. 连接收尾 | 关闭推送并释放 listener 停止接受连接，等待连接任务结束，上限 5 秒 | 到期对剩余连接任务调用 `abort_all()` 并结束等待 |

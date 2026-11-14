@@ -13,7 +13,8 @@ status: active
 | 产品 IPC 协议 | `lattice-ipc`（`Request` / `Response`、`LoginAction` / `LoginResponse`、`ipc`） | 定义本地 IPC 请求、响应、登录交换帧、`LocalError` 及会话与模型展示类型；执行 16 MiB 单帧魔数校验、本进程有效 UID 读取与对端 UID 核验 |
 | 产品客户端门面 | `lattice-local`（`LocalClient`、`LocalTurn`、`LocalAuthLogin`） | 前端唯一的本地操作入口：[`client.rs`](../../../crates/lattice-local/src/client.rs) 封装连接已运行的本地后台与单次 IPC 请求；[`operation.rs`](../../../crates/lattice-local/src/operation.rs) 的 `LocalTurn` 驱动提交、观察流重连、取消回执与 `detach` 退出交接；[`login.rs`](../../../crates/lattice-local/src/login.rs) 的 `LocalAuthLogin` 驱动同连接 SIWC 登录交换 |
 | 后台宿主与服务入口 | `lattice-daemon` 调用 `lattice_server::{serve, ServeExit, DrainOutcome, HostLifecycle, InstanceLock}` | `lattice-server` 唯一的生产公开面，仅由独立宿主进程 `lattice-daemon` 调用：持有实例锁和 socket、在绑定发布后触发 `HostLifecycle::on_ready`、启动模型元数据调度、接收并核验连接，并在 `configure(New)` 后触发后台草稿清理；收尾后经 `ServeExit` 将 `DrainOutcome`、`InstanceLock` 与 `shutdown_deadline` 交回 `lattice-daemon` 关闭 runtime |
-| 后台内部实现 | `lattice-server` 私有模块 `local::server`（`Backend` / `Owner`） | `Backend` 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态；`Owner` 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接运行，监督者等待操作收尾后才移除 `Owner` |
+| 后台内部实现 | `lattice-server` 私有模块 `local::service`（`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`） | 包装同一个 `Arc<Backend>` 的进程内服务门面，向本地 IPC 分发与进程内调用方提供同一套 `configure`、`submit`、`observe`、`cancel`、`head`、`turn`、`usage` 与 `stopping` 实现；`InProcessTurn` 绑定固定 `(SessionId, TurnId)` 只读观察流式助手纯文本与终态结局，丢弃时不取消执行（仅在 `test` 或 `test-utils` 下对外重导出） |
+| 后台内部实现 | `lattice-server` 私有模块 `local::server`（`Backend` / `Owner`） | `Backend` 管理准入、草稿清理、会话库句柄、视图及本进程诊断，为每个观察者保存视图的推送状态，并将 IPC 的 `configure`、`submit`、`cancel`、`head`、`turn`、`usage` 无条件委托给 `Service`；`Owner` 持有已接管操作的内存槽位（Turn 执行带身份、取消标志、回执、监督信息和当前尝试的段列表；`configure`、`rewind` 与草稿清理为无 Turn 身份占位）。任务脱离请求连接或进程内调用栈运行，监督者等待操作收尾后才移除 `Owner` |
 | 后台内部实现 | `lattice-server` 私有模块 `root`、`configure`、`profile`、`config_rejection` | `LocalWorkspaceRoot::from_path` 解析并规范化工作区路径；`configure::resolve_settings` 加载指定 agent 的 profile 或以当前会话设置为基准，查询模型可用档位并执行档位规则，构造新设置与档位调整回执；`ConfigRejection` 单一入口生成脱敏单行配置拒绝 |
 | 后台内部实现 | `lattice-server` 私有模块 `session`（`SessionApi`）与 `stores` | 当前代会话库的内部异步门面与共享库句柄管理：在 `spawn_blocking` 中执行会话身份精确/前缀解析与用量读取，监控写提交异常并触发停写重开（`SessionApi` 生产不对外公开，仅在 `test` 或 `test-utils` 下供测试导出） |
 | 后台内部实现 | `lattice-server` 私有模块 `turn`（`TurnCoordinator`、`start_execution`、`ToolExecutor`） | 唯一持久 Turn 协调者，持有全 Turn `SessionExecutionLock`，接受前经注入的 `ToolExecutor::open_turn` 冻结本轮工具目录（生产默认私有 `NoTools`），从会话设置冻结输入，推进模型循环、调用执行、Step 与 Turn 关闭；会话库写入经 `lattice-session` 的领域接口完成（`start_turn` 与工具接缝类型仅在 `test` 或 `test-utils` 下供测试导出，`run_turn` 仅限本 crate 单元测试） |
@@ -22,7 +23,7 @@ status: active
 | 领域与网关 crate | `lattice-conversation` | 维护模型选择值（`ProviderId`、`ModelId`、`ModelRef`）、推理档位 `Effort`、有序消息、ToolCall typestate、调用结果与结构化 `ToolError`、内容摘要、尝试诊断和 usage 等纯数据 |
 | 领域与网关 crate | `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`ProjectPath`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录（含 `ProjectPath` 项目绑定）、会话树、会话设置（`SessionSettings` 与 `SettingsVersion`）、配置表、TurnId 索引与 InvocationId 索引；提供带类型的事务操作、由阶段给出结论与读取校验 |
 
-公开入口按调用层级分为两类，后台内部实现不直接向外部调用方暴露：
+公开入口按调用层级分为两类，后台内部实现不直接向外部调用方暴露（进程内 `Service` 与本地 IPC 在后台内部共用同一套准入、草稿清理、取消与查询实现）：
 
 - **后台宿主入口（进程内 Rust 调用，非 IPC）**：`lattice_server::serve`，参数为状态布局、可选的 home 目录、排空上限、停机请求的接收端与宿主生命周期回调 `HostLifecycle`，返回 `ServeExit`；仅由独立宿主二进制 `lattice-daemon` 在后台进程内调用。
 - **产品的 IPC 操作（前端经 `lattice-local` 发起，线上消息由 `lattice-ipc` 定义）**：客户端命令（`lattice-cli`）与交互界面（`lattice-tui`）全部通过下表中的客户端入口与本地 IPC 消息完成用户工作，不直接调用 `SessionApi`、`configure` 或 `TurnCoordinator`：
