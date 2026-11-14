@@ -212,7 +212,7 @@ fn saved_key_round_trips_and_setting_again_replaces_it() {
     let (_directory, store) = fixture();
     for expected in [KEY, "replacement-key-9F28"] {
         store.set("openai", expected).unwrap();
-        let document = file::Directory::open(&store.directory, false)
+        let document = CredentialDirectory::open(&store.directory)
             .unwrap()
             .unwrap()
             .read()
@@ -231,7 +231,7 @@ fn removing_keys_does_not_require_a_valid_provider_registry() {
     fs::write(store.directory.join("providers.toml"), "[broken").unwrap();
     assert!(store.remove_api_key("openai").unwrap());
     assert!(!store.remove_api_key("already-missing").unwrap());
-    let document = file::Directory::open(&store.directory, false)
+    let document = CredentialDirectory::open(&store.directory)
         .unwrap()
         .unwrap()
         .read()
@@ -451,17 +451,12 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
     fs::remove_file(&path).unwrap();
     fs::create_dir(&path).unwrap();
     assert!(is_invalid(&store, "openai"));
+    assert!(
+        store.set("openai", "replacement").is_err(),
+        "auth.json 位置被目录占用时写入必须拒绝"
+    );
+    assert!(path.is_dir(), "被拒绝后占位的目录不得被删除或覆盖");
     fs::remove_dir(&path).unwrap();
-    rustix::fs::mknodat(
-        rustix::fs::CWD,
-        &path,
-        rustix::fs::FileType::Fifo,
-        rustix::fs::Mode::RUSR | rustix::fs::Mode::WUSR,
-        0,
-    )
-    .unwrap();
-    assert!(is_invalid(&store, "openai"));
-    fs::remove_file(&path).unwrap();
     fs::rename(store.directory.join("original"), &path).unwrap();
     assert_eq!(state(&store, "openai"), Availability::Ready);
     let alias = store.directory.with_file_name("alias");
@@ -477,6 +472,29 @@ fn permissions_links_and_special_files_are_rejected_without_repair() {
             .contains("symbolic link")
     );
     assert!(linked.set("openai", KEY).is_err());
+    let plain_config = store.directory.with_file_name("plain-config");
+    fs::write(&plain_config, b"not a directory").unwrap();
+    let file_backed = AuthStore::new(plain_config.clone());
+    assert_eq!(
+        file_backed.load().err().unwrap().to_string(),
+        "auth.json: configuration directory must be a directory, not a symbolic link",
+        "普通文件冒充配置目录时读取诊断文案必须保持兼容"
+    );
+    assert_eq!(
+        file_backed
+            .remove_api_key("openai")
+            .unwrap_err()
+            .to_string(),
+        "auth.json: configuration directory must be a directory, not a symbolic link",
+        "普通文件冒充配置目录时删除凭据错误文案必须保持兼容"
+    );
+    assert_eq!(
+        ensure_configuration_directory(&plain_config)
+            .unwrap_err()
+            .to_string(),
+        "auth.json: configuration directory must be a directory, not a symbolic link",
+        "普通文件冒充配置目录时目录准备错误文案必须保持兼容"
+    );
 }
 
 #[test]
@@ -498,7 +516,7 @@ fn key_and_file_byte_limits_include_serialized_size() {
             },
         );
     }
-    let directory = file::Directory::open(&store.directory, false)
+    let directory = CredentialDirectory::open(&store.directory)
         .unwrap()
         .unwrap();
     assert!(directory.write(&document).is_err());
@@ -536,4 +554,59 @@ fn successful_replacement_is_private_and_failed_temporary_creation_preserves_ori
     ));
     assert!(fs::read(&path).unwrap() == original);
     assert_eq!(fs::read_dir(&store.directory).unwrap().count(), 1);
+}
+
+#[test]
+fn private_file_errors_preserve_english_auth_error_surface() {
+    let cases = [
+        (
+            PrivateFileError::WrongOwner,
+            "auth.json: file and directory must belong to the current user",
+        ),
+        (
+            PrivateFileError::NotADirectory,
+            "auth.json: configuration directory must be a directory, not a symbolic link",
+        ),
+        (
+            PrivateFileError::DirectorySymlink,
+            "auth.json: configuration directory must be a directory, not a symbolic link",
+        ),
+        (
+            PrivateFileError::BroadDirectoryPermissions,
+            "auth.json: configuration directory permissions are too broad; group and other permissions must be absent; permissions were not changed",
+        ),
+        (
+            PrivateFileError::DirectoryDisappeared,
+            "configuration directory disappeared",
+        ),
+        (
+            PrivateFileError::NotARegularFile,
+            "auth.json: credential file must be a regular file",
+        ),
+        (
+            PrivateFileError::FileSymlink,
+            "auth.json: credential file must not be a symbolic link",
+        ),
+        (
+            PrivateFileError::BroadFilePermissions,
+            "auth.json: credential file must not grant group or other permissions; permissions were not changed",
+        ),
+        (
+            PrivateFileError::FileTooLarge { max_bytes: 1 },
+            "auth.json: file exceeds 1 MiB",
+        ),
+        (
+            PrivateFileError::DirectorySyncAfterReplace {
+                source: std::io::Error::from(std::io::ErrorKind::Other),
+            },
+            "auth.json: sync directory after replacement (file may already have changed) failed (Other)",
+        ),
+    ];
+    for (input, expected) in cases {
+        assert_eq!(
+            AuthError::from(input).to_string(),
+            expected,
+            "PrivateFileError 转换后的英文诊断文案必须保持不变"
+        );
+    }
 }

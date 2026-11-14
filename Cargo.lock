@@ -2324,9 +2324,9 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "lattice-conversation",
+ "lattice-store",
  "net-guard",
  "reqwest",
- "rustix",
  "rustls",
  "rustls-native-certs",
  "serde",
@@ -2426,8 +2426,10 @@ name = "lattice-store"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "rustix",
  "tempfile",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
