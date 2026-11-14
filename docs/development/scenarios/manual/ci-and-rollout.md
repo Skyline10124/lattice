@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 运行文档检查、本地 CI 与 alpha rollout，对照门禁差异 |
-| 前提 | 核对并发、内存与磁盘（保持缓存原状）；worktree 可用 `env -u LATTICE_BIN`；`rollout` 要求跟踪文件干净 |
+| 前提 | 核对并发、内存与磁盘（保持缓存原状）；worktree 可用 `env -u LATTICE_BIN -u LATTICE_DAEMON_BIN`；`rollout` 要求跟踪文件干净 |
 | 规则 | [测试工程](../../testing.md)、[`ci.rs`](../../../../xtask/src/ci.rs)、[`ci.yml`](../../../../.github/workflows/ci.yml)、[`full-gate.yml`](../../../../.github/workflows/full-gate.yml)、[`rollout.rs`](../../../../xtask/src/rollout.rs) |
 
 ## 命令
@@ -17,7 +17,7 @@ status: active
 ```sh
 CARGO_BUILD_JOBS=4 cargo xtask docs-check
 cargo xtask ci
-env -u LATTICE_BIN cargo xtask ci
+env -u LATTICE_BIN -u LATTICE_DAEMON_BIN cargo xtask ci
 ```
 
 ### Alpha rollout
@@ -34,7 +34,7 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 | 结果 | 含义与下一步 |
 | --- | --- |
 | `docs-check` 通过 | 输出通过文件数；失败逐行报缺失项 |
-| `xtask ci` 输出 `全部检查通过` | 两轮验证与带 feature 的 clippy 全部通过（第二轮用带 `lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 的构建覆盖 `target/debug/lattice`）；单 crate 超 `LATTICE_TEST_TIMEOUT_SECS`（默认 `300` 秒，`CARGO_BUILD_JOBS=4`）时回收进程组终止 |
+| `xtask ci` 输出 `全部检查通过` | 两轮验证与带 feature 的 clippy 全部通过（第二轮用带 `lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 的构建覆盖 `target/debug/lattice-daemon`）；单 crate 超 `LATTICE_TEST_TIMEOUT_SECS`（默认 `300` 秒，`CARGO_BUILD_JOBS=4`）时回收进程组终止 |
 
 门禁差异（三处均执行两轮验证与测试 feature 的 clippy，见[门禁](../../validation-guide.md#门禁)）：
 
@@ -48,6 +48,6 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `verdict: "pass"` | 7 步（`clean_worktree` 至 `offline_correctness`）全 `passed`（测试步骤 `passed > 0`，release 产物不启用测试 feature） |
-| `verdict: "fail"`（退出 `1`） | 某步 `failed`，后续 `blocked`；查记录中的 `detail` 与 `failure_artifacts` |
+| `verdict: "pass"` | 7 步（`clean_worktree` 至 `offline_correctness`）全 `passed`：`build_release_locked` 构建无测试 feature 的 `lattice` 与 `lattice-daemon`，`artifact_identity` 将两者的 `name`、`path`、`sha256`、`size_bytes` 写入 `schema_version: 2` 记录的 `artifacts`（缺任一产物该步即 `failed`），`direct_local` 同时注入 release 的 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 且测试步骤 `passed > 0` |
+| `verdict: "fail"`（退出 `1`） | 某步 `failed`（含任一 release 产物缺失或散列失败），后续 `blocked`；查记录中的 `detail` 与 `failure_artifacts` |
 | `verdict: "fail"`（退出 `2`） | 工作树脏、Git 失败或参数错误；查 `rejection` |

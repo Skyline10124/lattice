@@ -10,8 +10,8 @@ use std::str::FromStr;
 use thiserror::Error;
 
 use crate::{
-    DriverError, FAKE_API_KEY, FakeLlmServer, LatticeDriver, ProviderFixture, ScenarioWorld,
-    ServeError, SseScript, WorldError,
+    DriverError, FAKE_API_KEY, FakeLlmServer, LatticeDaemonDriver, LatticeDriver, ProviderFixture,
+    ScenarioWorld, ServeError, SseScript, WorldError,
 };
 
 const AGENT: &str = "tui-mock";
@@ -155,6 +155,7 @@ pub enum TuiMockError {
 
 pub fn run_tui_mock(scenario: TuiMockScenario) -> Result<ExitStatus, TuiMockError> {
     let driver = LatticeDriver::from_env()?;
+    let _daemon_driver = LatticeDaemonDriver::from_env()?;
     let world = ScenarioWorld::new("tui-mock")?;
     if let Some(tools) = scenario.test_tools() {
         // 假工具名单由后台启动时的环境快照读取，必须在显式启动后台前设置。

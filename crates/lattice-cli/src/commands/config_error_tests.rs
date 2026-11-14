@@ -57,18 +57,11 @@ fn frontend_local_errors_keep_json_human_output_and_exit_codes() {
         std::io::ErrorKind::InvalidInput,
         "callback URL must be UTF-8 and at most 16384 bytes",
     ));
-    let relative_state_root = super::super::daemon::state_root(Some(std::path::Path::new("rel")))
-        .expect_err("相对 state_root 应失败");
-
     for (error, expected_message) in [
         (invalid_key, "API key input must be valid UTF-8"),
         (
             invalid_callback,
             "callback URL must be UTF-8 and at most 16384 bytes",
-        ),
-        (
-            relative_state_root,
-            "request or frozen configuration is invalid",
         ),
     ] {
         let (code, record) = error_record(&error);
@@ -104,5 +97,37 @@ fn frontend_local_errors_keep_json_human_output_and_exit_codes() {
             "kind": "internal",
             "message": "command failed; inspect configuration and durable state",
         })
+    );
+
+    let empty_root = std::path::PathBuf::from("/tmp").join(format!(
+        "ltc-cli-nr-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    let client_error = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(async {
+            lattice_local::LocalClient::new(lattice_local::StateLayout::in_state_root(&empty_root))
+                .status()
+                .await
+                .unwrap_err()
+        });
+    let not_running = anyhow::Error::new(client_error);
+    let (nr_code, nr_record) = error_record(&not_running);
+    assert_eq!(nr_code, 1, "not_running 应退出 1");
+    assert_eq!(nr_record["type"], "error");
+    assert_eq!(nr_record["kind"], "not_running");
+    let nr_msg = nr_record["message"].as_str().unwrap();
+    assert!(
+        nr_msg.contains("后台未运行")
+            && nr_msg.contains("systemctl --user start lattice")
+            && nr_msg.contains("lattice daemon install")
+            && nr_msg.contains("状态根"),
+        "not_running 中文提示不完整：{nr_msg}"
     );
 }

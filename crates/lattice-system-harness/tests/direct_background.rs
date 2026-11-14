@@ -559,7 +559,7 @@ fn busy_cancel_and_stop_do_not_serialize_distinct_sessions() {
     support::finish_recorded(evidence, result);
 }
 #[test]
-fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
+fn concurrent_lattice_daemon_has_one_owner_and_midway_watch_matches_history() {
     struct CandidateGuard(Vec<RunningCommand>);
     impl Drop for CandidateGuard {
         fn drop(&mut self) {
@@ -597,6 +597,7 @@ fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
             .unwrap()
             .display()
             .to_string();
+        let daemon_drv = support::daemon_driver();
         const CONCURRENCY: usize = 4;
         let barrier = std::sync::Barrier::new(CONCURRENCY);
         let spawned = std::thread::scope(|scope| {
@@ -606,9 +607,18 @@ fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
                     let budget = &budget;
                     let barrier = &barrier;
                     let root = &root;
+                    let daemon_drv = &daemon_drv;
                     scope.spawn(move || {
                         barrier.wait();
-                        command(world, budget, &["daemon", "serve", "--state-root", root])
+                        daemon_drv
+                            .start(
+                                world,
+                                &LatticeCommand {
+                                    args: vec!["--state-root".into(), root.clone()],
+                                    timeout: Some(wait(budget)),
+                                },
+                            )
+                            .unwrap()
                     })
                 })
                 .collect();
@@ -651,7 +661,7 @@ fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
             }
             assert!(
                 Instant::now() < deadline,
-                "并发 `daemon serve` 未在就绪截止时间内收敛为唯一就绪持有者，当前存活数：{alive}"
+                "并发 `lattice-daemon` 未在就绪截止时间内收敛为唯一就绪持有者，当前存活数：{alive}"
             );
             std::thread::sleep(
                 Duration::from_millis(20).min(deadline.saturating_duration_since(Instant::now())),
@@ -659,29 +669,34 @@ fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
         }
 
         let mut winners = Vec::new();
-        let mut loser_codes = Vec::new();
+        let mut loser_outs = Vec::new();
         for mut candidate in guard.0.drain(..) {
             if candidate.has_exited().unwrap() {
                 let out = candidate.wait(Some(wait(&budget))).unwrap();
-                evidence.record_command("并发争抢失败退出的 daemon serve", &out);
-                assert_eq!(
-                    out.exit_code(),
-                    Some(1),
-                    "争抢状态根失败的 `daemon serve` 必须以退出码 1 退出：{}",
-                    out.summary()
-                );
-                let stderr = String::from_utf8_lossy(&out.stderr);
-                assert!(
-                    stderr.contains("already owns"),
-                    "争抢失败的标准错误应报告状态根已被持有：{stderr}"
-                );
-                loser_codes.push(out.exit_code().unwrap());
+                evidence.record_command("并发争抢失败退出的 lattice-daemon", &out);
+                loser_outs.push(out);
             } else {
                 winners.push(candidate);
             }
         }
         assert_eq!(winners.len(), 1, "同一状态根上只能有一个持有者存活");
-        assert_eq!(loser_codes, vec![1; CONCURRENCY - 1]);
+        let winner_pid = winners[0].pgid();
+        let expected_diag = format!("状态根已被另一个后台占用（对端进程号：{winner_pid}）");
+        let mut loser_codes = Vec::new();
+        for out in loser_outs {
+            assert!(
+                out.is_clean_exit(3),
+                "争抢状态根失败的 `lattice-daemon` 必须干净地以退出码 3 退出：{}",
+                out.summary()
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains(&expected_diag),
+                "争抢失败的标准错误应附带对端进程号 `{expected_diag}`，实际：{stderr}"
+            );
+            loser_codes.push(out.exit_code().unwrap());
+        }
+        assert_eq!(loser_codes, vec![3; CONCURRENCY - 1]);
         guard.0 = winners;
 
         let a = command(
@@ -756,7 +771,7 @@ fn concurrent_daemon_serve_has_one_owner_and_midway_watch_matches_history() {
         assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
         let winner = guard.0.pop().expect("存活的唯一持有者");
         let winner_out = winner.wait(Some(wait(&budget))).unwrap();
-        evidence.record_command("并发胜出的 daemon serve 正常退出", &winner_out);
+        evidence.record_command("并发胜出的 lattice-daemon 正常退出", &winner_out);
         assert!(
             winner_out.is_clean_exit(0),
             "唯一持有者正常停机应以退出码 0 退出：{}",
@@ -3256,7 +3271,7 @@ fn sigterm_drains_inflight_turn_and_exits_zero() {
         let front_done = front.wait(None).unwrap();
         evidence.record_command("SIGTERM 排空期间前端完成收尾", &front_done);
         let exited = world.wait_daemon(Some(wait(&budget))).unwrap();
-        evidence.record_command("SIGTERM 排空完成后 daemon serve 退出", &exited);
+        evidence.record_command("SIGTERM 排空完成后 lattice-daemon 退出", &exited);
         assert_eq!(
             exited.exit_code(),
             Some(0),
@@ -3297,7 +3312,7 @@ fn sigint_right_after_ready_exits_zero_and_releases_resources() {
         world.start_daemon().expect("显式启动后台");
         world.interrupt_daemon().expect("向自有后台发送 `SIGINT`");
         let exited = world.wait_daemon(Some(wait(&budget))).unwrap();
-        evidence.record_command("收到 SIGINT 后 daemon serve 正常退出", &exited);
+        evidence.record_command("收到 SIGINT 后 lattice-daemon 正常退出", &exited);
         assert_eq!(
             exited.exit_code(),
             Some(0),
@@ -3344,7 +3359,7 @@ fn sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn() {
             .wait_daemon(Some(Duration::from_millis(20_300)))
             .unwrap();
         let stop_elapsed = stop_started.elapsed();
-        evidence.record_command("排空超时后 daemon serve 以状态码 4 退出", &exited);
+        evidence.record_command("排空超时后 lattice-daemon 以状态码 4 退出", &exited);
         assert!(
             stop_elapsed <= Duration::from_millis(20_300),
             "排空超时停机应在 20.3 秒内退出，实际耗时 {:?}",
@@ -3460,7 +3475,7 @@ fn ipc_daemon_stop_drain_timeout_reports_unconfirmed_and_daemon_exits_four() {
         );
 
         let daemon_out = world.wait_daemon(Some(wait(&budget))).unwrap();
-        evidence.record_command("IPC 停机排空超时后 daemon serve 退出", &daemon_out);
+        evidence.record_command("IPC 停机排空超时后 lattice-daemon 退出", &daemon_out);
         assert!(
             daemon_out.is_clean_exit(4),
             "后台应以 4 退出：{}",
@@ -3518,7 +3533,7 @@ fn second_sigterm_during_drain_triggers_immediate_timeout_exit_four() {
             .expect("第二次向自有后台发送 `SIGTERM`");
         let daemon_out = world.wait_daemon(Some(Duration::from_secs(20))).unwrap();
         let elapsed = second_started.elapsed();
-        evidence.record_command("第二次收到 SIGTERM 后 daemon serve 立即退出", &daemon_out);
+        evidence.record_command("第二次收到 SIGTERM 后 lattice-daemon 立即退出", &daemon_out);
         assert!(
             elapsed <= Duration::from_secs(20),
             "第二次 `SIGTERM` 起应在 20 秒内退出，实际耗时 {:?}",
@@ -3643,4 +3658,604 @@ fn assertion_panic_unwinds_and_cleans_up_owned_daemon() {
         "清理成功完成后，临时场景状态根 {} 应已一并移除",
         state_root.display()
     );
+}
+
+#[test]
+fn frontends_without_daemon_report_not_running_without_spawning_or_locking() {
+    use lattice_system_harness::{PtyTuiDriver, assert_no_secret};
+
+    const AUTH_SENTINEL: &str = "sk-not-running-auth-sentinel-9182";
+    let (world, spec) = direct_world("background-frontends-not-running", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence =
+        ScenarioEvidence::new(&world, &spec.name, [AUTH_SENTINEL.into()]).expect("创建场景证据");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state_root = world
+            .session_store_dir()
+            .parent()
+            .expect("场景状态根")
+            .to_path_buf();
+        let socket_path = state_root.join("lattice/local/api.sock");
+        let owner_lock_path = state_root.join("lattice/local/owner.lock");
+
+        type JsonCase<'a> = (&'a str, Vec<&'a str>, Option<Vec<u8>>);
+        let json_cases: Vec<JsonCase<'_>> = vec![
+            (
+                "session send（JSON）",
+                vec![
+                    "--json",
+                    "session",
+                    "send",
+                    "hello",
+                    "--agent",
+                    "background",
+                ],
+                None,
+            ),
+            (
+                "run（JSON）",
+                vec!["--json", "run", "hello", "--agent", "background"],
+                None,
+            ),
+            (
+                "session list（JSON）",
+                vec!["--json", "session", "list"],
+                None,
+            ),
+            ("models 列表（JSON）", vec!["--json", "models"], None),
+            (
+                "models refresh（JSON）",
+                vec!["--json", "models", "refresh"],
+                None,
+            ),
+            (
+                "auth status（JSON）",
+                vec!["--json", "auth", "status"],
+                None,
+            ),
+            (
+                "auth set（JSON）",
+                vec!["--json", "auth", "set", "openai"],
+                Some(format!("{AUTH_SENTINEL}\n").into_bytes()),
+            ),
+            (
+                "auth remove（JSON）",
+                vec!["--json", "auth", "remove", "openai"],
+                None,
+            ),
+            (
+                "auth logout（JSON）",
+                vec!["--json", "auth", "logout", "chatgpt"],
+                None,
+            ),
+            (
+                "auth login（JSON）",
+                vec!["--json", "auth", "login", "chatgpt"],
+                None,
+            ),
+            (
+                "tui（JSON）",
+                vec!["--json", "tui", "--agent", "background"],
+                None,
+            ),
+        ];
+
+        for (label, args, stdin_bytes) in json_cases {
+            let cmd = LatticeCommand {
+                args: args.iter().map(|arg| (*arg).into()).collect(),
+                timeout: Some(wait(&budget)),
+            };
+            let out = match stdin_bytes {
+                Some(ref input) => driver().run_with_stdin(&world, &cmd, input).unwrap(),
+                None => driver().run(&world, &cmd).unwrap(),
+            };
+            evidence.record_command(format!("无后台调用前端（{label}）"), &out);
+            assert_no_secret(&out, AUTH_SENTINEL).unwrap();
+            assert!(
+                out.is_clean_exit(1),
+                "{label} 在无后台时必须干净地以退出码 1 退出：{}",
+                out.summary()
+            );
+            let parsed_lines = lines(&out);
+            assert_eq!(
+                parsed_lines.len(),
+                1,
+                "{label} 在无后台时只能输出单条 `not_running` 错误记录，不应发出 `sending` 或回执：{parsed_lines:?}"
+            );
+            assert_eq!(
+                parsed_lines[0]["type"], "error",
+                "{label}: {parsed_lines:?}"
+            );
+            assert_eq!(
+                parsed_lines[0]["kind"], "not_running",
+                "{label}: {parsed_lines:?}"
+            );
+            let msg = parsed_lines[0]["message"].as_str().unwrap_or("");
+            for required in [
+                "后台未运行",
+                "systemctl --user start lattice",
+                "lattice daemon install",
+            ] {
+                assert!(
+                    msg.contains(required),
+                    "{label} 的中文提示缺少 `{required}`：{msg}"
+                );
+            }
+        }
+
+        for (label, args) in [
+            ("run（文本）", vec!["run", "hello", "--agent", "background"]),
+            ("models（文本）", vec!["models"]),
+            ("auth status（文本）", vec!["auth", "status"]),
+        ] {
+            let out = run(&world, &budget, &mut evidence, &args);
+            assert!(
+                out.is_clean_exit(1),
+                "{label} 在无后台时必须以退出码 1 退出：{}",
+                out.summary()
+            );
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            assert!(
+                stderr.contains("后台未运行"),
+                "{label} 标准错误应包含中文未运行提示：{stderr}"
+            );
+        }
+
+        let mut tui = PtyTuiDriver::spawn(&driver(), &world, "background")
+            .expect("在无后台环境启动伪终端 TUI");
+        let tui_code = tui
+            .wait_for_exit_code(wait(&budget))
+            .expect("无后台时伪终端 TUI 应立即自然退出");
+        let tui_output = String::from_utf8_lossy(tui.output()).into_owned();
+        evidence
+            .record_json(
+                "pty-tui-not-running",
+                &json!({"exit_code": tui_code, "output": tui_output}),
+            )
+            .unwrap();
+        assert_eq!(tui_code, 1, "无后台时伪终端 TUI 必须以退出码 1 退出");
+        assert!(
+            tui_output.contains("后台未运行"),
+            "伪终端 TUI 应输出中文 `not_running` 提示：{tui_output:?}"
+        );
+
+        assert!(
+            !socket_path.exists(),
+            "无后台调用前端后状态根下不得出现 `api.sock`：{}",
+            socket_path.display()
+        );
+        assert!(
+            !owner_lock_path.exists(),
+            "无后台调用前端后状态根下不得创建 `owner.lock`：{}",
+            owner_lock_path.display()
+        );
+        assert!(
+            world.daemon_pids().unwrap().is_empty(),
+            "前端调用不得自动拉起任何后台进程"
+        );
+        world
+            .daemon_departed()
+            .expect("无后台场景结束时不应存在任何套接字、实例锁持有者或残留 `lattice-daemon` 进程");
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn external_holder_of_owner_lock_causes_lattice_daemon_to_exit_three() {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+    let (world, spec) = direct_world("background-owner-lock-held", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state_root = world
+            .session_store_dir()
+            .parent()
+            .expect("场景状态根")
+            .to_path_buf();
+        let local_dir = state_root.join("lattice/local");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&local_dir)
+            .expect("以 0700 权限创建状态根 local 目录");
+        let lock_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .mode(0o600)
+            .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
+            .open(local_dir.join("owner.lock"))
+            .expect("打开测试占用的 owner.lock");
+        struct FlockGuard(std::fs::File);
+        impl Drop for FlockGuard {
+            fn drop(&mut self) {
+                // `flock` 属于打开文件描述；并行测试线程在 `fork` 之后、`exec` 之前会短暂持有副本（#228），显式 `LOCK_UN` 立即解锁整个描述。
+                // SAFETY: `self.0` 在 Drop 期间持有有效文件描述符。
+                unsafe { libc::flock(self.0.as_raw_fd(), libc::LOCK_UN) };
+            }
+        }
+        // SAFETY: `lock_file` 为当前测试进程独占打开的有效文件描述符；非阻塞加排他锁并交由 `FlockGuard` 管理。
+        let rc = unsafe { libc::flock(lock_file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
+        assert_eq!(
+            rc,
+            0,
+            "测试自身获取 owner.lock 失败：{}",
+            std::io::Error::last_os_error()
+        );
+        let lock_guard = FlockGuard(lock_file);
+
+        let out = support::daemon_driver()
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: vec!["--state-root".into(), state_root.display().to_string()],
+                    timeout: Some(wait(&budget)),
+                },
+            )
+            .expect("启动争抢已占用状态根的 lattice-daemon");
+        evidence.record_command("owner.lock 已被外部占用时启动 lattice-daemon", &out);
+        assert!(
+            out.is_clean_exit(3),
+            "取不到 `owner.lock` 时 `lattice-daemon` 必须干净地以退出码 3 退出：{}",
+            out.summary()
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains("状态根已被另一个后台占用（对端进程号不可用）"),
+            "无监听套接字时应输出中文对端进程号不可用诊断：{stderr}"
+        );
+
+        drop(lock_guard);
+        world
+            .daemon_departed()
+            .expect("释放测试锁后状态根应保持干净");
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn notify_socket_delivers_ready_after_bind_and_stopping_across_shutdown_paths() {
+    use std::os::linux::net::SocketAddrExt;
+    use std::os::unix::net::{SocketAddr, UnixDatagram, UnixStream};
+
+    enum ShutdownTrigger {
+        IpcStop,
+        Sigterm,
+        Sigint,
+    }
+
+    let (world, spec) = direct_world("background-notify-socket", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let state_root = world
+            .session_store_dir()
+            .parent()
+            .expect("场景状态根")
+            .to_path_buf();
+        let api_sock = state_root.join("lattice/local/api.sock");
+        let daemon_drv = support::daemon_driver();
+
+        let notify_dir = tempfile::Builder::new()
+            .prefix("ltc-ntf-")
+            .tempdir_in("/tmp")
+            .expect("创建短路径通知套接字目录");
+
+        let cases = [
+            (
+                "文件路径 NOTIFY_SOCKET + IPC stop",
+                false,
+                ShutdownTrigger::IpcStop,
+            ),
+            (
+                "抽象地址 NOTIFY_SOCKET + SIGTERM",
+                true,
+                ShutdownTrigger::Sigterm,
+            ),
+            (
+                "文件路径 NOTIFY_SOCKET + SIGINT",
+                false,
+                ShutdownTrigger::Sigint,
+            ),
+        ];
+
+        for (idx, (label, use_abstract, trigger)) in cases.into_iter().enumerate() {
+            let (receiver, env_val) = if use_abstract {
+                let name = format!("lattice-notify-{}-{idx}", std::process::id());
+                let addr = SocketAddr::from_abstract_name(name.as_bytes())
+                    .expect("构造抽象命名空间套接字地址");
+                let sock = UnixDatagram::bind_addr(&addr).expect("绑定抽象通知数据报套接字");
+                (sock, format!("@{name}"))
+            } else {
+                let sock_path = notify_dir.path().join(format!("notify-{idx}.sock"));
+                let sock = UnixDatagram::bind(&sock_path).expect("绑定文件通知数据报套接字");
+                (sock, sock_path.display().to_string())
+            };
+            receiver
+                .set_read_timeout(Some(wait(&budget)))
+                .expect("设置通知读取超时");
+
+            world.set_env("NOTIFY_SOCKET", &env_val);
+            let mut proc = daemon_drv
+                .start(
+                    &world,
+                    &LatticeCommand {
+                        args: vec!["--state-root".into(), state_root.display().to_string()],
+                        timeout: Some(wait(&budget)),
+                    },
+                )
+                .expect("启动带 NOTIFY_SOCKET 的 lattice-daemon");
+
+            let mut buf = [0u8; 64];
+            let ready_len = receiver
+                .recv(&mut buf)
+                .unwrap_or_else(|err| panic!("{label} 未在期限内收到 READY=1：{err}"));
+            assert_eq!(
+                &buf[..ready_len],
+                b"READY=1",
+                "{label} 首条通知报文必须为 `READY=1`"
+            );
+
+            // 收到 `READY=1` 的同一刻不作重试直接连接 `api.sock`：若 `READY=1` 在绑定发布前发出，此处会立即失败。
+            let immediate_conn = UnixStream::connect(&api_sock).unwrap_or_else(|err| {
+                panic!(
+                    "{label} 收到 `READY=1` 时监听套接字 `{}` 必须已就绪可连，但直接连接失败：{err}",
+                    api_sock.display()
+                )
+            });
+            drop(immediate_conn);
+
+            receiver.set_nonblocking(true).expect("切换非阻塞检查");
+            match receiver.recv(&mut buf) {
+                Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {}
+                Ok(n) => panic!(
+                    "{label} 停机触发前不应提前收到通知报文：{:?}",
+                    String::from_utf8_lossy(&buf[..n])
+                ),
+                Err(err) => panic!("{label} 非阻塞检查通知套接字失败：{err}"),
+            }
+            receiver.set_nonblocking(false).expect("恢复阻塞等待");
+            receiver
+                .set_read_timeout(Some(wait(&budget)))
+                .expect("恢复通知读取超时");
+
+            match trigger {
+                ShutdownTrigger::IpcStop => {
+                    let stopped = run(
+                        &world,
+                        &budget,
+                        &mut evidence,
+                        &["--json", "daemon", "stop"],
+                    );
+                    assert!(stopped.is_clean_exit(0), "{label}: {}", stopped.summary());
+                }
+                ShutdownTrigger::Sigterm => {
+                    proc.terminate().expect("向 lattice-daemon 发送 SIGTERM");
+                }
+                ShutdownTrigger::Sigint => {
+                    proc.interrupt().expect("向 lattice-daemon 发送 SIGINT");
+                }
+            }
+
+            let stopping_len = receiver
+                .recv(&mut buf)
+                .unwrap_or_else(|err| panic!("{label} 停机开始时未收到 STOPPING=1：{err}"));
+            assert_eq!(
+                &buf[..stopping_len],
+                b"STOPPING=1",
+                "{label} 停机通知报文必须为 `STOPPING=1`"
+            );
+
+            let out = proc
+                .wait(Some(wait(&budget)))
+                .expect("等待 lattice-daemon 退出");
+            evidence.record_command(format!("通知场景后台退出（{label}）"), &out);
+            assert_eq!(
+                out.exit_code(),
+                Some(0),
+                "{label} 正常停机应以退出码 0 退出：{}",
+                out.summary()
+            );
+            assert!(
+                out.stdout_complete
+                    && out.stderr_complete
+                    && !out.cleanup.forced
+                    && out.cleanup.succeeded(),
+                "{label} 后台退出清理异常：{}",
+                out.summary()
+            );
+            world.unset_env("NOTIFY_SOCKET");
+            world
+                .daemon_departed()
+                .expect("单轮通知场景结束后状态根应干净");
+        }
+
+        // 未设置 `NOTIFY_SOCKET` 时，`lattice-daemon` 照常启动、提供状态查询并正常停机。
+        world.unset_env("NOTIFY_SOCKET");
+        world
+            .start_daemon()
+            .expect("未设置 NOTIFY_SOCKET 时正常启动后台");
+        let status = read(
+            &world,
+            &budget,
+            &mut evidence,
+            &["--json", "daemon", "status"],
+        );
+        assert_eq!(status["stopping"], false);
+        world
+            .stop_daemon()
+            .expect("未设置 NOTIFY_SOCKET 时正常停止后台");
+        world
+            .daemon_departed()
+            .expect("未设置 NOTIFY_SOCKET 场景结束后状态根应干净");
+    }));
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn daemon_startup_and_shutdown_failures_report_chinese_diagnostics_and_exit_one() {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+
+    let (world, spec) = direct_world("background-daemon-chinese-errors", "background", "");
+    let budget = world.budget(&spec);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let daemon_drv = support::daemon_driver();
+
+        // 1. `--state-root` 指向普通文件：退出 1，中文指明路径与非目录原因，不含英文连接失败提示。
+        let plain_dir = tempfile::Builder::new()
+            .prefix("ltc-file-")
+            .tempdir_in("/tmp")
+            .expect("创建普通文件探针目录");
+        let plain_file = plain_dir.path().join("state-root-plain-file");
+        std::fs::write(&plain_file, b"plain file").expect("写入普通文件探针");
+        let file_out = daemon_drv
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: vec!["--state-root".into(), plain_file.display().to_string()],
+                    timeout: Some(wait(&budget)),
+                },
+            )
+            .expect("以普通文件作为 --state-root 运行 lattice-daemon");
+        evidence.record_command("--state-root 指向普通文件时启动 lattice-daemon", &file_out);
+        std::fs::remove_file(&plain_file).expect("清理普通文件探针");
+        assert!(
+            file_out.is_clean_exit(1),
+            "`--state-root` 指向普通文件时必须干净地以退出码 1 退出：{}",
+            file_out.summary()
+        );
+        let file_stderr = String::from_utf8_lossy(&file_out.stderr);
+        assert!(
+            file_stderr.contains("错误：")
+                && file_stderr.contains(&plain_file.display().to_string())
+                && file_stderr.contains("目录")
+                && !file_stderr.contains("local connection failed; acknowledgement may be unknown")
+                && !file_stderr.contains("local endpoint ownership or permissions rejected")
+                && !file_stderr.contains("后台未运行"),
+            "`--state-root` 指向普通文件应输出含路径的中文说明，实际：{file_stderr:?}"
+        );
+
+        // 2. `lattice/local` 目录权限设为 0777：退出 1，中文说明权限被拒，不含旧英文原文。
+        let perm_root_dir = tempfile::Builder::new()
+            .prefix("ltc-perm-")
+            .tempdir_in("/tmp")
+            .expect("创建权限探针隔离状态根");
+        let perm_local = perm_root_dir.path().join("lattice/local");
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&perm_local)
+            .expect("创建 lattice/local 目录");
+        std::fs::set_permissions(&perm_local, std::fs::Permissions::from_mode(0o777))
+            .expect("将 lattice/local 权限设为 0777");
+        let perm_out = daemon_drv
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: vec![
+                        "--state-root".into(),
+                        perm_root_dir.path().display().to_string(),
+                    ],
+                    timeout: Some(wait(&budget)),
+                },
+            )
+            .expect("在 0777 local 目录下运行 lattice-daemon");
+        evidence.record_command("lattice/local 权限为 0777 时启动 lattice-daemon", &perm_out);
+        assert!(
+            perm_out.is_clean_exit(1),
+            "`lattice/local` 权限为 0777 时必须干净地以退出码 1 退出：{}",
+            perm_out.summary()
+        );
+        let perm_stderr = String::from_utf8_lossy(&perm_out.stderr);
+        assert!(
+            perm_stderr.contains("错误：")
+                && perm_stderr.contains("权限")
+                && perm_stderr.contains("0777")
+                && !perm_stderr.contains("local endpoint ownership or permissions rejected")
+                && !perm_stderr.contains("local connection failed")
+                && !perm_stderr.contains("后台未运行"),
+            "0777 目录权限探针应输出中文权限报错，实际：{perm_stderr:?}"
+        );
+
+        // 3. 后台就绪后删掉 `api.sock`，再发 SIGTERM：以 1 退出，输出说明 socket 清理失败，不含“后台未运行”。
+        let state_root = world
+            .session_store_dir()
+            .parent()
+            .expect("场景状态根")
+            .to_path_buf();
+        let api_sock = state_root.join("lattice/local/api.sock");
+        let mut proc = daemon_drv
+            .start(
+                &world,
+                &LatticeCommand {
+                    args: vec!["--state-root".into(), state_root.display().to_string()],
+                    timeout: Some(wait(&budget)),
+                },
+            )
+            .expect("启动待测试 socket 清理失败的 lattice-daemon");
+
+        let ready_deadline = std::time::Instant::now() + wait(&budget);
+        loop {
+            let probe = driver()
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: vec!["--json".into(), "daemon".into(), "status".into()],
+                        timeout: Some(Duration::from_secs(2)),
+                    },
+                )
+                .expect("轮询 daemon status");
+            if probe.is_clean_exit(0) {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < ready_deadline,
+                "lattice-daemon 未在期限内就绪：{}",
+                probe.summary()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        std::fs::remove_file(&api_sock).expect("就绪后删除 api.sock");
+        proc.terminate().expect("删除 api.sock 后发送 SIGTERM");
+        let cleanup_out = proc
+            .wait(Some(wait(&budget)))
+            .expect("等待 lattice-daemon 在 SIGTERM 后退出");
+        evidence.record_command(
+            "删除 api.sock 后收到 SIGTERM 退出的 lattice-daemon",
+            &cleanup_out,
+        );
+        assert_eq!(
+            cleanup_out.exit_code(),
+            Some(1),
+            "删除 `api.sock` 后收到 SIGTERM 应以退出码 1 退出：{}",
+            cleanup_out.summary()
+        );
+        assert!(
+            cleanup_out.stdout_complete
+                && cleanup_out.stderr_complete
+                && !cleanup_out.cleanup.forced
+                && cleanup_out.cleanup.succeeded(),
+            "删除 `api.sock` 场景后台退出清理异常：{}",
+            cleanup_out.summary()
+        );
+        let cleanup_stderr = String::from_utf8_lossy(&cleanup_out.stderr);
+        assert!(
+            cleanup_stderr.contains("错误：")
+                && cleanup_stderr.contains("清理 socket 失败")
+                && cleanup_stderr.contains("api.sock")
+                && !cleanup_stderr.contains("后台未运行")
+                && !cleanup_stderr.contains("systemctl --user start lattice")
+                && !cleanup_stderr.contains("lattice daemon install"),
+            "删除 `api.sock` 后停机应报告 socket 清理失败且不得提示后台未运行，实际：{cleanup_stderr:?}"
+        );
+        world
+            .daemon_departed()
+            .expect("异常清理退出后实例锁与进程组仍应完全释放");
+    }));
+    support::finish_recorded(evidence, result);
 }

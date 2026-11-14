@@ -11,7 +11,7 @@ description = "LATTICE 本地前端客户端句柄、会话观察状态机与日
 lattice-conversation = { workspace = true }
 lattice-ipc = { workspace = true }
 lattice-store = { workspace = true }
-rustix = { workspace = true, features = ["fs", "process"] }
+rustix = { workspace = true, features = ["fs"] }
 tokio = { workspace = true }
 tracing-subscriber = { workspace = true }
 uuid = { workspace = true }

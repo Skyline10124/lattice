@@ -12,6 +12,7 @@ members = [
     "crates/lattice-agent",
     "crates/lattice-tui",
     "crates/lattice-cli",
+    "crates/lattice-daemon",
     "crates/lattice-profile",
     "crates/lattice-system-harness",
     "xtask",
@@ -66,7 +67,7 @@ zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
 # 凭据文件读写与所有权核验（`lattice-llm`：openat/renameat/unlinkat/geteuid）、
 # 本地 IPC 对端身份核验（`lattice-ipc`：geteuid/socket_peercred）、
-# 本地后台与客户端系统调用（`lattice-server`、`lattice-local`：flock/recv/kill_process/setsid）、
+# 本地后台、守护进程与客户端系统调用（`lattice-server`、`lattice-daemon`、`lattice-local`：flock/recv/sendto/connect/socket_peercred）、
 # 会话库创建时带 `NOREPLACE` 的原子发布重命名（`lattice-session`），以及测试构造 FIFO。
 rustix = { version = "1.1.4", features = ["fs"] }
 rustls = "0.23"

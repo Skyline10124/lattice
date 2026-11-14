@@ -1,12 +1,13 @@
 # lattice-ipc 工作指引
 
-定义本地 IPC 的请求、响应、登录帧、错误与模型/凭据展示类型，提供 `PROTOCOL_VERSION` 版本魔数、16 MiB 单帧分帧编解码、基于 `rustix` 的有效用户与对端 UID 核验、目录权限核验（`check_dir`）、登录 provider 校验（`require_chatgpt`）以及线上 JSON 形状快照门禁，被 `lattice-local` 与 `lattice-server` 使用。
+定义本地 IPC 的请求、响应、登录帧、错误与模型/凭据展示类型，提供共用的非上线 `--drain-timeout` 时长解析（`DrainTimeout`、`parse_drain_timeout`）、`PROTOCOL_VERSION` 版本魔数、16 MiB 单帧分帧编解码、基于 `rustix` 的有效用户与对端 UID/PID 核验、目录权限核验（`check_dir`）、登录 provider 校验（`require_chatgpt`）以及线上 JSON 形状快照门禁，被 `lattice-local`、`lattice-server` 与 `lattice-daemon` 使用。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 仅公开 `ipc` 子模块（`auth`、`models`、`types` 为私有模块），在根模块显式重导出 IPC 协议类型、模型与凭据展示类型、`require_chatgpt`，以及线上消息引用的 `lattice-conversation` 与 `lattice-session` 只读领域值类型 |
+| `src/lib.rs` | 仅公开 `ipc` 子模块（`auth`、`drain_timeout`、`models`、`types` 为私有模块），在根模块显式重导出 IPC 协议类型、模型与凭据展示类型、`DrainTimeout`、`parse_drain_timeout`、`require_chatgpt`，以及线上消息引用的 `lattice-conversation` 与 `lattice-session` 只读领域值类型 |
+| `src/drain_timeout.rs` | `--drain-timeout` 时长值 `DrainTimeout` 与解析函数 `parse_drain_timeout`（支持 `ms`、`s`、`m` 与无单位秒；不实现 `serde`，不进入线上格式） |
 | `src/types.rs` | 分页常量（`WATCH_TURNS`、`HISTORY_TURNS`、`MAX_HISTORY_TURNS`）、`Request` / `Response`、会话配置与提交载荷、视图更新、`LocalError` / `RequestConflict`（`ConflictReason`）与恢复/存储诊断、`TurnRef` / `TextSegment` 及 Unix 路径原始字节 serde |
 | `src/models.rs` | `ModelCandidateQuery` 请求类型，以及 `ModelCandidates`、`ModelCandidate`、`ModelPrice`、`ModelWarning`、`Availability`（含 `status_str` 与 `diagnostic`）、`ConfigurationRequirement`（含 `Display`）展示类型 |
 | `src/auth.rs` | 透明清零且不实现 `Debug` 的 `AuthKey`、`require_chatgpt`、`AuthStatus` / `ProviderAuthStatus` / `RevocationStatus` 展示类型，以及专用登录连接帧 `LoginAction` / `LoginResponse` / `AuthLoginOutcome` / `AuthCatalogOutcome` |
@@ -25,7 +26,7 @@
 ## 约束
 
 - `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 中，workspace 内部成员仅允许 `lattice-session`、`lattice-conversation`、`lattice-store`（当前仅引入前两者），由 `cargo xtask crate-boundary` 门禁强制检查。
-- `src/lib.rs` 仅公开 `ipc` 子模块（`auth`、`models`、`types` 保持私有），根模块保持显式重导出列表，不使用通配符 `*`，也不重导出 `SessionStore` 或存储写入接口；其他 crate 用不到的条目保持私有，仅供测试复用的魔数与分帧辅助收敛在 `test-utils` 下。
+- `src/lib.rs` 仅公开 `ipc` 子模块（`auth`、`drain_timeout`、`models`、`types` 保持私有），根模块保持显式重导出列表，不使用通配符 `*`，也不重导出 `SessionStore` 或存储写入接口；其他 crate 用不到的条目保持私有，仅供测试复用的魔数与分帧辅助收敛在 `test-utils` 下。
 - `AuthKey` 与响应分片缓冲 `ResponseFrame` 保持清零（`Zeroize`）且不实现暴露明文的 `Debug`；线上类型的字段顺序、serde 标签、`null`/省略规则与 `deny_unknown_fields` 严格受 `wire_shape.json` 守卫；`Availability::diagnostic` 文案须与 `lattice-llm` 保持逐字一致（由 `lattice-server` 配对对照测试锁定）。
 - 本 crate 之外：客户端句柄、观察流、登录客户端与日志初始化由 `lattice-local` 负责；实例锁（`owner.lock`）、socket 绑定与清理时序、`ApiError` 映射、`lattice-llm` 到展示类型的逐字段转换及后台执行协调均在 `lattice-server` 中完成。
 

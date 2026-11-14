@@ -43,11 +43,11 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
     let client = LocalClient::new(StateLayout::resolve()?);
     match action {
         AuthAction::Login { provider } => {
-            client.ensure_running().await?;
+            client.status().await?;
             return login::run(client.auth_login(&provider).await?, json).await;
         }
         AuthAction::Logout { provider } => {
-            client.ensure_running().await?;
+            client.status().await?;
             let revocation = client.auth_logout(&provider).await?;
             if json {
                 println!(
@@ -61,7 +61,7 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
         }
         AuthAction::Set { provider } => {
             let mut key = Zeroizing::new(read_key()?);
-            client.ensure_running().await?;
+            client.status().await?;
             client
                 .auth_set(&provider, std::mem::take(&mut *key))
                 .await?;
@@ -75,7 +75,7 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
             }
         }
         AuthAction::Remove { provider } => {
-            client.ensure_running().await?;
+            client.status().await?;
             let result = client.auth_remove(&provider).await?;
             if json {
                 let mut value = serde_json::json!({"type":"auth","action":"remove","provider":provider,"removed":result.removed});
@@ -94,7 +94,7 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
             }
         }
         AuthAction::Status => {
-            client.ensure_running().await?;
+            client.status().await?;
             let status = client.auth_status().await?;
             if json {
                 println!("{}", serde_json::to_string(&status)?);

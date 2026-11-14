@@ -33,7 +33,7 @@ pub async fn run(mut options: TuiOptions) -> anyhow::Result<std::process::ExitCo
     })?;
     options.project_root = workspace.clone();
     let client = lattice_local::LocalClient::new(lattice_local::StateLayout::resolve()?);
-    client.ensure_running().await?;
+    client.status().await?;
     let ctx = session::open_or_create(&options, &workspace, &client).await?;
     app::run_app(options, ctx, client).await?;
     Ok(std::process::ExitCode::SUCCESS)

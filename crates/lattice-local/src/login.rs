@@ -45,10 +45,7 @@ impl LocalAuthLogin {
         Self::from_reader(read, write)
     }
 
-    fn from_reader(
-        mut read: impl tokio::io::AsyncRead + Unpin + Send + 'static,
-        write: OwnedWriteHalf,
-    ) -> Self {
+    fn from_reader(mut read: impl ipc::PeerStream + Send + 'static, write: OwnedWriteHalf) -> Self {
         let (sender, events) = mpsc::channel(2);
         let reader = tokio::spawn(async move {
             let mut frames = ipc::ResponseReader::for_login();
@@ -183,6 +180,13 @@ mod tests {
         partial: Option<tokio::sync::oneshot::Sender<()>>,
     }
 
+    impl ipc::PeerStream for ObservedRead {
+        fn peer_fd(&self) -> Option<std::os::fd::BorrowedFd<'_>> {
+            use std::os::fd::AsFd;
+            Some(self.read.as_ref().as_fd())
+        }
+    }
+
     impl tokio::io::AsyncRead for ObservedRead {
         fn poll_read(
             mut self: std::pin::Pin<&mut Self>,
@@ -262,7 +266,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(2)).await;
         let error = login.next().await.err().unwrap();
         assert_eq!(error.kind, LocalErrorKind::Transport);
-        assert!(error.message.contains("timed out"));
+        assert!(error.message.contains("读取登录帧超时"));
     }
 
     #[tokio::test]

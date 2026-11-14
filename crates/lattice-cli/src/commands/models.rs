@@ -19,7 +19,7 @@ pub async fn run(
     json: bool,
 ) -> Result<()> {
     let client = LocalClient::new(StateLayout::resolve()?);
-    client.ensure_running().await?;
+    client.status().await?;
     if let Some(ModelsAction::Refresh) = action {
         return refresh(&client, json, &mut std::io::stdout()).await;
     }

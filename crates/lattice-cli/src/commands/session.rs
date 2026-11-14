@@ -39,7 +39,7 @@ pub(crate) fn parse_turn_id(value: &str) -> Result<lattice_local::TurnId, String
 
 pub(crate) async fn local_client() -> Result<lattice_local::LocalClient> {
     let client = lattice_local::LocalClient::new(state_layout()?);
-    client.ensure_running().await?;
+    client.status().await?;
     Ok(client)
 }
 

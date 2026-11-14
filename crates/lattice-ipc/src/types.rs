@@ -361,17 +361,16 @@ impl LocalError {
 
 impl From<std::io::Error> for LocalError {
     fn from(error: std::io::Error) -> Self {
-        let kind = match error.kind() {
+        match error.kind() {
             std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
-                LocalErrorKind::NotRunning
+                Self::new(LocalErrorKind::NotRunning, "本地连接目标不存在或拒绝连接")
             }
-            std::io::ErrorKind::PermissionDenied => LocalErrorKind::Permission,
-            _ => LocalErrorKind::Transport,
-        };
-        Self::new(
-            kind,
-            "local connection failed; acknowledgement may be unknown",
-        )
+            std::io::ErrorKind::PermissionDenied => Self::new(
+                LocalErrorKind::Permission,
+                "本地连接权限不足；回执状态可能未知",
+            ),
+            _ => Self::new(LocalErrorKind::Transport, "本地连接失败；回执状态可能未知"),
+        }
     }
 }
 

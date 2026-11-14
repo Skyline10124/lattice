@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | 后台从启动时给定的配置目录读取 profile、`providers.toml` 与 `auth.json`；profile 快照只在显式指定 `agent` 的 `configure` 时重新加载；`providers.toml` 与凭据按模型尝试读取，TLS 信任材料固定于后台启动时的 `SSL_CERT_FILE`、`SSL_CERT_DIR`；并发 Turn 的 endpoint 与凭据互不影响 |
-| 前提 | 场景 `HOME` 下准备两个 `agent` 的配置（含引用外部系统提示文件的用例；多步工具回合开启 `fake-tools` feature，配 `test-fake-tools` 二进制并在显式启动后台前设置 `LATTICE_TEST_TOOLS`）；按后台环境快照显式启动自有后台；`providers.toml` 配置指向不同假 provider 的条目，其中一个使用不受信任根签发的证书；凭据经 `lattice auth set` 从标准输入录入。场景项目中另放写入其他端点与密钥的 `.env` 和 `providers.toml`；前端环境中单独设置各厂商密钥变量、不同 `HOME` 或根证书变量。会话设置的显式修改、持久化与草稿会话见[会话设置与草稿会话](session-settings-and-drafts.md) |
+| 前提 | 场景 `HOME` 下准备两个 `agent` 的配置（含引用外部系统提示文件的用例；多步工具回合开启 `fake-tools` feature，配带 `lattice-server/test-fake-tools` 的 `lattice-daemon` 二进制并在显式启动后台前设置 `LATTICE_TEST_TOOLS`）；按后台环境快照显式启动自有后台；`providers.toml` 配置指向不同假 provider 的条目，其中一个使用不受信任根签发的证书；凭据经 `lattice auth set` 从标准输入录入。场景项目中另放写入其他端点与密钥的 `.env` 和 `providers.toml`；前端环境中单独设置各厂商密钥变量、不同 `HOME` 或根证书变量。会话设置的显式修改、持久化与草稿会话见[会话设置与草稿会话](session-settings-and-drafts.md) |
 | 相关测试 | `direct_background`：`shared_daemon_uses_registered_providers_and_freezes_profiles`、`session_settings_survive_sources_and_explicit_same_agent_refreshes_profile`、`accepted_effort_survives_retry_and_tools_while_global_budget_reloads`、`invalidated_provider_configuration_records_last_resolved_origin_without_sending`、`backend_tls_roots_are_fixed_until_restart`、`oversized_startup_roots_reject_https_provider_at_submit_and_serve_http`、`no_usable_startup_tls_root_rejects_https_submissions_before_acceptance`；`fast_env_boundary`：`dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart`、`agents_use_backend_home_and_project_precedence` |
 
 ## 操作

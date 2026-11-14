@@ -20,14 +20,18 @@ pub struct TuiMockArgs {
     scenario: String,
 }
 
-/// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，被测二进制须开启 `lattice-server/test-fake-tools`。
-fn build_args() -> [&'static str; 7] {
+fn cli_build_args() -> [&'static str; 5] {
+    ["build", "-p", "lattice-cli", "--bin", "lattice"]
+}
+
+/// `tool-call` 场景经 `LATTICE_TEST_TOOLS` 启用假工具，后台二进制须开启 `lattice-server/test-fake-tools`。
+fn daemon_build_args() -> [&'static str; 7] {
     [
         "build",
         "-p",
-        "lattice-cli",
+        "lattice-daemon",
         "--bin",
-        "lattice",
+        "lattice-daemon",
         "--features",
         "lattice-server/test-fake-tools",
     ]
@@ -35,6 +39,10 @@ fn build_args() -> [&'static str; 7] {
 
 fn lattice_binary(target_dir: &std::path::Path) -> std::path::PathBuf {
     target_dir.join("debug").join("lattice")
+}
+
+fn lattice_daemon_binary(target_dir: &std::path::Path) -> std::path::PathBuf {
+    target_dir.join("debug").join("lattice-daemon")
 }
 
 pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
@@ -47,21 +55,31 @@ pub fn run(args: TuiMockArgs) -> anyhow::Result<()> {
         .target_directory
         .into_std_path_buf();
     let lattice_bin = lattice_binary(&target_dir);
+    let lattice_daemon_bin = lattice_daemon_binary(&target_dir);
 
-    let build = Command::new("cargo")
-        .current_dir(&root)
-        .args(build_args())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("构建 lattice 二进制")?;
-    if !build.success() {
-        bail!("`cargo {}` 失败", build_args().join(" "));
+    for (desc, build_args) in [
+        ("构建 lattice 二进制", cli_build_args().as_slice()),
+        (
+            "构建带假工具 feature 的 lattice-daemon 二进制",
+            daemon_build_args().as_slice(),
+        ),
+    ] {
+        let build = Command::new("cargo")
+            .current_dir(&root)
+            .args(build_args)
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context(desc)?;
+        if !build.success() {
+            bail!("`cargo {}` 失败", build_args.join(" "));
+        }
     }
 
     let status = Command::new("cargo")
         .current_dir(&root)
         .env("LATTICE_BIN", lattice_bin)
+        .env("LATTICE_DAEMON_BIN", lattice_daemon_bin)
         .args([
             "run",
             "-p",

@@ -1,12 +1,12 @@
 # lattice-server 工作指引
 
-提供本地后台宿主入口（`serve`、`ServeExit`、`DrainOutcome`、`InstanceLock`），内部跨领域协调会话库、请求网关、profile、模型元数据与工具执行器，被 `lattice-cli` 的 `daemon serve` 调用。
+提供本地后台协调入口（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`），内部跨领域协调会话库、请求网关、profile、模型元数据与工具执行器，被独立守护进程 `lattice-daemon` 调用。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs`、`src/root.rs` | 根模块生产公开面四项重导出（`serve`、`ServeExit`、`DrainOutcome`、`InstanceLock`）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
+| `src/lib.rs`、`src/root.rs` | 根模块生产公开面五项重导出（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
 | `src/session.rs` | 内部会话库异步门面 `SessionApi`（`spawn_blocking` 封装、写异常上报、`SessionId` 精确/前缀解析与 `usage` 查询；类型本身与 `from_store` 仅在 `test` 或 `test-utils` 下对外导出） |
 | `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
 | `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写与关闭重开、以及排空超时停写终态（`disable_writes`） |
@@ -34,7 +34,7 @@
 
 ## 约束
 
-- 内部子模块全部私有；生产公开面仅由根模块导出 `serve`、`ServeExit`、`DrainOutcome`、`InstanceLock`（不透明句柄，内部字段私有）四项，不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；仅供集成测试复用的 `serve_for_test`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
+- 内部子模块全部私有；生产公开面仅由根模块导出 `serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`（不透明句柄，内部字段私有）五项，不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；仅供集成测试复用的 `serve_for_test`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
 - `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 禁止引入 `lattice-local`（仅允许在 `dev-dependencies` 中用于后台与客户端端到端协议测试），由 `cargo xtask crate-boundary` 检查；系统调用统一经 `rustix` 完成并直接以 `std::io::Error::from(errno)` 转换错误。崩溃屏障是唯一例外：停点经 `libc::raise(SIGSTOP)` 只向调用线程发信号，`libc` 作为可选依赖只随 `test-crash-barriers` 引入。`rustix` 的常规接口只能向整个进程或进程组发信号；进程级的 `SIGSTOP` 可能先由其他线程处理，调用线程会在进程停住前越过停点继续执行。
 - `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的模型驱动与工具分发路径；阻塞式会话库访问放入 `spawn_blocking`，写事务内不等待模型、工具执行器或网络。
 - `submit` 只接受新请求，找回统一走按 `TurnId` 查询；`observer.rs` 为每个观察者维护最新待推条目与文字游标并以非阻塞通知解耦观察背压、实时排空与持久提交；Step 重试提示与 `TurnSummary` notice 按[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)生成，接受与观察交接见[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)与[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。

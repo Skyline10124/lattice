@@ -17,7 +17,7 @@ mod session;
 mod stores;
 mod turn;
 
-pub use local::{DrainOutcome, InstanceLock, ServeExit, serve};
+pub use local::{DrainOutcome, HostLifecycle, InstanceLock, ServeExit, serve};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use config_rejection::ConfigRejection;

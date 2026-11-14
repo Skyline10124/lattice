@@ -6,7 +6,7 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | `TuiOptions` 与 `run` 入口，读取 `current_dir()`、连接 `LocalClient` 并启动终端循环 |
+| `src/lib.rs` | `TuiOptions` 与 `run` 入口，读取 `current_dir()`、经 `LocalClient::status` 连接已运行的本地后台并启动终端循环 |
 | `src/app.rs` | 主事件循环，持有 `LocalTurn`、会话视图、在途 `configure` 请求并调度查询与重绘 |
 | `src/session.rs` | 启动时经 `configure` 创建新会话或更新既有会话设置、按 `current_dir()` 原始字节核对只读打开会话的项目绑定并将对话条目按节点与调用身份转换为 `Block` |
 | `src/connection.rs` | 将回执、`configure` 回复、会话头、连接与查询异常、重试提示、Turn 结局及 `DetachReport` 转换为定级状态消息与退出文案 |
@@ -46,6 +46,6 @@
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-tui` |
 | 修改 `Cargo.toml` 依赖 | `cargo xtask crate-boundary` |
-| 修改前后端接线、选择面板或取消流程 | 重新构建 `lattice-cli` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke` |
+| 修改前后端接线、选择面板或取消流程 | 重新构建 `lattice-cli` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke` |
 | 修改 `TuiOptions` 或启动参数接口 | `cargo test -p lattice-cli` |
 | 修改布局、配色、折行或交互体验 | 按[验证指南](../../docs/development/validation-guide.md)在真实终端中人工核验视觉与交互表现 |

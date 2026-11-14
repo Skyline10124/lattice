@@ -52,7 +52,7 @@ impl DaemonOptions {
         Self::default()
     }
 
-    /// 为 `daemon serve` 指定 `--drain-timeout` 参数。
+    /// 为 `lattice-daemon` 指定 `--drain-timeout` 参数。
     pub fn drain_timeout(mut self, value: impl Into<String>) -> Self {
         self.drain_timeout = Some(value.into());
         self
@@ -143,7 +143,7 @@ enum DaemonState {
 
 /// 组首领尚未被 `wait` 回收的自有后台状态。
 struct UnreapedDaemon {
-    binary: PathBuf,
+    cli_binary: PathBuf,
     child: DaemonChild,
     pgid: u32,
     leader: OwnedProcess,
@@ -965,11 +965,12 @@ impl ScenarioDaemon {
         }
     }
 
-    /// 以直接子进程方式启动 `daemon serve`，在共享截止时间内轮询公开 `daemon status` 直至就绪，
+    /// 以直接子进程方式启动 `lattice-daemon`，在共享截止时间内轮询公开 `daemon status` 直至就绪，
     /// 并核对 `api.sock` 的监听者确为本轮启动的自有直接子进程。
     pub(crate) fn start(
         &self,
-        binary: &Path,
+        cli_binary: &Path,
+        daemon_binary: &Path,
         project_dir: &Path,
         env_snapshot: HashMap<String, String>,
         options: &DaemonOptions,
@@ -996,9 +997,9 @@ impl ScenarioDaemon {
         }
         *guard = DaemonState::Idle;
 
-        let mut command = Command::new(binary);
+        let mut command = Command::new(daemon_binary);
         command
-            .args(["daemon", "serve", "--state-root"])
+            .arg("--state-root")
             .arg(&self.state_root)
             .current_dir(project_dir)
             .env_clear();
@@ -1043,7 +1044,7 @@ impl ScenarioDaemon {
         };
 
         let mut startup_owned = UnreapedDaemon {
-            binary: binary.to_path_buf(),
+            cli_binary: cli_binary.to_path_buf(),
             child,
             pgid,
             leader,
@@ -1063,7 +1064,7 @@ impl ScenarioDaemon {
                 Err(error) => return Err(abort_startup_io(&mut guard, startup_owned, error)),
             }
 
-            match probe_daemon_ready(binary, &self.state_root, deadline) {
+            match probe_daemon_ready(cli_binary, &self.state_root, deadline) {
                 Ok(ProbeState::Ready) => {
                     match verify_socket_owner(&api_sock, child_pid, deadline) {
                         Ok(SocketOwner::Unowned { listener_pid }) => {
@@ -1525,7 +1526,7 @@ impl ScenarioDaemon {
         }
 
         let command = isolated_daemon_cli(
-            &owned.binary,
+            &owned.cli_binary,
             &self.state_root,
             "cleanup-home",
             &["--json", "daemon", "stop"],
@@ -1599,7 +1600,7 @@ impl ScenarioDaemon {
                     .collect();
                 if !residuals.is_empty() {
                     errors.push(format!(
-                        "发现不属于测试套件的残留后台进程（场景可能漏掉显式启动而由前端自动拉起了后台）: pids={residuals:?}"
+                        "发现不属于测试套件的残留 `lattice-daemon` 后台进程: pids={residuals:?}"
                     ));
                 }
             }
@@ -1645,7 +1646,7 @@ fn probe_daemon_ready(
     Ok(ProbeState::Pending(outcome.summary().to_string()))
 }
 
-/// 按 `/proc/<pid>/cmdline` 扫描指向本场景状态根的存活 `daemon serve` 进程，仅用于残留检查。
+/// 按 `/proc/<pid>/cmdline` 扫描指向本场景状态根的存活 `lattice-daemon` 进程，仅用于残留检查。
 fn scan_residual_daemons(state_root: &Path) -> std::io::Result<Vec<u32>> {
     let expected = state_root.as_os_str().as_bytes();
     let mut found = Vec::new();
@@ -1676,7 +1677,7 @@ fn scan_residual_daemons(state_root: &Path) -> std::io::Result<Vec<u32>> {
     Ok(found)
 }
 
-/// 识别 `/proc/<pid>/cmdline` 是否为指向当前场景状态根的 `daemon serve` 进程。
+/// 识别 `/proc/<pid>/cmdline` 是否为 `lattice-daemon --state-root <场景状态根>` 进程。
 /// 只去掉末尾的空段，不过滤中间的空参数。
 fn matches_daemon_cmdline(cmdline: &[u8], expected_state_root: &[u8]) -> bool {
     if cmdline.is_empty() {
@@ -1686,16 +1687,23 @@ fn matches_daemon_cmdline(cmdline: &[u8], expected_state_root: &[u8]) -> bool {
     if fields.last().is_some_and(|part| part.is_empty()) {
         fields.pop();
     }
-    if fields.len() < 3 || fields[0].is_empty() || fields[1] != b"daemon" || fields[2] != b"serve" {
+    if fields.len() < 3 {
         return false;
     }
-    let mut rest = &fields[3..];
+    let exe_name = fields[0].rsplit(|byte| *byte == b'/').next().unwrap_or(b"");
+    if exe_name != b"lattice-daemon" {
+        return false;
+    }
+    let mut rest = &fields[1..];
     let mut saw_state_root = false;
     let mut saw_drain_timeout = false;
     while !rest.is_empty() {
         let [flag, value, tail @ ..] = rest else {
             return false;
         };
+        if value.is_empty() {
+            return false;
+        }
         match *flag {
             b"--state-root" => {
                 if saw_state_root || *value != expected_state_root {
@@ -1728,8 +1736,9 @@ fn owner_lock_held(state_root: &Path) -> std::io::Result<bool> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
         Err(error) => return Err(error),
     };
-    // SAFETY: `flock` 只作用于本函数打开的文件描述符；关闭即释放试探取得的锁。
+    // SAFETY: `flock` 作用于本函数刚打开的文件描述；显式 `LOCK_UN` 避免并行测试线程 `fork` 后、`exec` 前短暂共享描述而延长试探锁（同 `ArtifactClaim`，#228）。
     if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+        unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_UN) };
         return Ok(false);
     }
     let error = std::io::Error::last_os_error();
@@ -1769,6 +1778,72 @@ mod tests {
             .expect("在 /tmp 创建短路径临时目录")
     }
 
+    /// 编译一次复用的最小 ELF `lattice-daemon` 替身二进制，使 `/proc/<pid>/cmdline` 与真实后台一致。
+    fn fake_daemon_binary() -> &'static Path {
+        static BIN: std::sync::OnceLock<(tempfile::TempDir, PathBuf)> = std::sync::OnceLock::new();
+        &BIN.get_or_init(|| {
+            let dir = short_tempdir();
+            let src = dir.path().join("fake_daemon.rs");
+            let out = dir.path().join("lattice-daemon");
+            std::fs::write(
+                &src,
+                r#"
+use std::path::PathBuf;
+use std::process::{Command, Stdio};
+use std::time::Duration;
+
+fn main() {
+    if let Some(coord) = std::env::var_os("FAKE_DAEMON_COORD").map(PathBuf::from) {
+        std::fs::write(coord.join("serve-started"), b"").expect("写入启动标记");
+        while !coord.join("status-probed").exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+        eprintln!("错误：状态根已被另一个后台占用（对端进程号不可用）");
+        std::process::exit(3);
+    }
+    if std::env::var_os("FAKE_DAEMON_SPAWN_CHILD").is_some() {
+        let _ = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("启动同组子进程");
+    }
+    if let Some(ready) = std::env::var_os("FAKE_DAEMON_READY") {
+        std::fs::write(ready, b"").expect("写入就绪标记");
+    }
+    if let Some(secs) = std::env::var("FAKE_DAEMON_SLEEP_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+    {
+        std::thread::sleep(Duration::from_secs(secs));
+    }
+    if let Some(trigger) = std::env::var_os("FAKE_DAEMON_TRIGGER").map(PathBuf::from) {
+        while !trigger.exists() {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+}
+"#,
+            )
+            .expect("写入假后台源码");
+            let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+            let status = Command::new(rustc)
+                .arg("--edition=2024")
+                .arg(&src)
+                .arg("-o")
+                .arg(&out)
+                .status()
+                .expect("调用 rustc 编译假后台");
+            assert!(status.success(), "编译假后台二进制失败: {status}");
+            let canon = std::fs::canonicalize(&out).expect("规范化假后台二进制路径");
+            (dir, canon)
+        })
+        .1
+    }
+
     /// 直接子进程形态的受控假后台：启动在独立进程组中，派生同组子进程后可按触发文件先行退出组首领。
     struct DirectFakeDaemon {
         _dir: tempfile::TempDir,
@@ -1779,53 +1854,34 @@ mod tests {
     impl DirectFakeDaemon {
         fn spawn_into(own_session: bool) -> (Self, ScenarioDaemon, u32) {
             let dir = short_tempdir();
-            let shell = std::fs::canonicalize("/bin/sh").expect("解析 shell 路径");
-            let binary = dir.path().join("fake-lattice");
-            std::fs::copy(&shell, &binary).expect("复制测试假二进制");
-            let binary = std::fs::canonicalize(&binary).expect("规范化假二进制路径");
+            let cli_binary = std::fs::canonicalize("/bin/false").expect("解析假 CLI 路径");
+            let daemon_binary = fake_daemon_binary();
             let state_root = dir.path().join("state");
             std::fs::create_dir_all(&state_root).expect("创建状态根");
             let ready = dir.path().join("ready");
             let trigger = dir.path().join("trigger");
-            std::fs::write(
-                dir.path().join("daemon"),
-                format!(
-                    "sleep 30 &\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 0\n",
-                    ready.display(),
-                    trigger.display()
-                ),
-            )
-            .expect("写入假后台脚本");
 
             let deadline = Instant::now() + Duration::from_secs(5);
-            let child = loop {
-                let mut command = Command::new(&binary);
-                command
-                    .args(["daemon", "serve", "--state-root"])
-                    .arg(&state_root)
-                    .current_dir(dir.path());
-                if own_session {
-                    // SAFETY: `fork` 后仅调用异步信号安全的 `setsid`。
-                    unsafe {
-                        command.pre_exec(|| {
-                            if libc::setsid() < 0 {
-                                return Err(std::io::Error::last_os_error());
-                            }
-                            Ok(())
-                        });
-                    }
+            let mut command = Command::new(daemon_binary);
+            command
+                .arg("--state-root")
+                .arg(&state_root)
+                .current_dir(dir.path())
+                .env("FAKE_DAEMON_SPAWN_CHILD", "1")
+                .env("FAKE_DAEMON_READY", &ready)
+                .env("FAKE_DAEMON_TRIGGER", &trigger);
+            if own_session {
+                // SAFETY: `fork` 后仅调用异步信号安全的 `setsid`。
+                unsafe {
+                    command.pre_exec(|| {
+                        if libc::setsid() < 0 {
+                            return Err(std::io::Error::last_os_error());
+                        }
+                        Ok(())
+                    });
                 }
-                match DaemonChild::spawn(command) {
-                    Ok(child) => break child,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-                            && Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(error) => panic!("启动假后台失败: {error}"),
-                }
-            };
+            }
+            let child = DaemonChild::spawn(command).expect("启动假后台失败");
             while !ready.exists() {
                 assert!(Instant::now() < deadline, "假后台未在截止时间内就绪");
                 std::thread::sleep(Duration::from_millis(5));
@@ -1838,7 +1894,7 @@ mod tests {
 
             let daemon = ScenarioDaemon::new(state_root);
             *daemon.state.lock().expect("自有后台锁") = DaemonState::Unreaped(UnreapedDaemon {
-                binary,
+                cli_binary,
                 child,
                 pgid,
                 leader,
@@ -1873,7 +1929,7 @@ mod tests {
         }
     }
 
-    /// 非自有残留后台夹具：以独立会话运行 `daemon serve --state-root`，模拟前端自动拉起的外部后台。
+    /// 非自有残留后台夹具：以独立会话运行 `lattice-daemon --state-root`，模拟测试套件之外遗留的后台。
     struct UnownedResidualDaemon {
         _dir: tempfile::TempDir,
         state_root: PathBuf,
@@ -1884,48 +1940,31 @@ mod tests {
     impl UnownedResidualDaemon {
         fn spawn() -> Self {
             let dir = short_tempdir();
-            let shell = std::fs::canonicalize("/bin/sh").expect("解析 shell 路径");
-            let binary = dir.path().join("unowned-lattice");
-            std::fs::copy(&shell, &binary).expect("复制非自有测试二进制");
-            let binary = std::fs::canonicalize(&binary).expect("规范化二进制路径");
+            let daemon_binary = fake_daemon_binary();
             let state_root = dir.path().join("state");
             std::fs::create_dir_all(&state_root).expect("创建状态根");
             let ready = dir.path().join("ready");
-            std::fs::write(
-                dir.path().join("daemon"),
-                format!("touch '{}'\nsleep 30\n", ready.display()),
-            )
-            .expect("写入非自有后台脚本");
             let deadline = Instant::now() + Duration::from_secs(5);
-            let child = loop {
-                let mut command = Command::new(&binary);
-                command
-                    .args(["daemon", "serve", "--state-root"])
-                    .arg(&state_root)
-                    .current_dir(dir.path())
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null());
-                // SAFETY: `fork` 后仅调用异步信号安全的 `setsid`。
-                unsafe {
-                    command.pre_exec(|| {
-                        if libc::setsid() < 0 {
-                            return Err(std::io::Error::last_os_error());
-                        }
-                        Ok(())
-                    });
-                }
-                match command.spawn() {
-                    Ok(child) => break child,
-                    Err(error)
-                        if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-                            && Instant::now() < deadline =>
-                    {
-                        std::thread::sleep(Duration::from_millis(5));
+            let mut command = Command::new(daemon_binary);
+            command
+                .arg("--state-root")
+                .arg(&state_root)
+                .current_dir(dir.path())
+                .env("FAKE_DAEMON_READY", &ready)
+                .env("FAKE_DAEMON_SLEEP_SECS", "30")
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            // SAFETY: `fork` 后仅调用异步信号安全的 `setsid`。
+            unsafe {
+                command.pre_exec(|| {
+                    if libc::setsid() < 0 {
+                        return Err(std::io::Error::last_os_error());
                     }
-                    Err(error) => panic!("启动非自有假后台失败: {error}"),
-                }
-            };
+                    Ok(())
+                });
+            }
+            let child = command.spawn().expect("启动非自有假后台失败");
             while !ready.exists() {
                 assert!(Instant::now() < deadline, "非自有假后台未就绪");
                 std::thread::sleep(Duration::from_millis(5));
@@ -2094,40 +2133,23 @@ mod tests {
     #[test]
     fn stale_reaped_group_witness_does_not_kill_unconfirmed_members() {
         let dir = short_tempdir();
-        let shell = std::fs::canonicalize("/bin/sh").expect("解析 shell 路径");
-        let binary = dir.path().join("replacement-lattice");
-        std::fs::copy(&shell, &binary).expect("复制测试二进制");
-        let binary = std::fs::canonicalize(&binary).expect("规范化测试二进制");
+        let daemon_binary = fake_daemon_binary();
         let state_root = dir.path().join("state");
         std::fs::create_dir_all(&state_root).expect("创建状态根");
         let ready = dir.path().join("ready");
-        std::fs::write(
-            dir.path().join("daemon"),
-            format!("sleep 30 &\ntouch '{}'\nexit 0\n", ready.display()),
-        )
-        .expect("写入替代组脚本");
         let deadline = Instant::now() + Duration::from_secs(5);
-        let mut leader_child = loop {
-            let mut command = Command::new(&binary);
-            command
-                .args(["daemon", "serve", "--state-root"])
-                .arg(&state_root)
-                .current_dir(dir.path())
-                .process_group(0)
-                .stdin(Stdio::null())
-                .stdout(Stdio::null())
-                .stderr(Stdio::null());
-            match command.spawn() {
-                Ok(child) => break child,
-                Err(error)
-                    if error.kind() == std::io::ErrorKind::ExecutableFileBusy
-                        && Instant::now() < deadline =>
-                {
-                    std::thread::sleep(Duration::from_millis(5));
-                }
-                Err(error) => panic!("启动替代组失败: {error}"),
-            }
-        };
+        let mut command = Command::new(daemon_binary);
+        command
+            .arg("--state-root")
+            .arg(&state_root)
+            .current_dir(dir.path())
+            .env("FAKE_DAEMON_SPAWN_CHILD", "1")
+            .env("FAKE_DAEMON_READY", &ready)
+            .process_group(0)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut leader_child = command.spawn().expect("启动替代组失败");
         while !ready.exists() {
             assert!(Instant::now() < deadline, "替代组未就绪");
             std::thread::sleep(Duration::from_millis(5));
@@ -2251,7 +2273,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|error| error.contains("不属于测试套件的残留后台进程")),
+                .any(|error| error.contains("不属于测试套件的残留 `lattice-daemon` 后台进程")),
             "{errors:?}"
         );
         assert!(
@@ -2273,20 +2295,17 @@ mod tests {
 
         let root = b"/tmp/scenario-state-root";
         for accepted in [
-            nul_cmdline(&[b"/bin/lattice", b"daemon", b"serve", b"--state-root", root]),
+            nul_cmdline(&[b"/bin/lattice-daemon", b"--state-root", root]),
+            nul_cmdline(&[b"lattice-daemon", b"--state-root", root]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"--drain-timeout",
                 b"300ms",
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--drain-timeout",
                 b"not-validated-here",
                 b"--state-root",
@@ -2301,51 +2320,29 @@ mod tests {
 
         for rejected in [
             Vec::new(),
-            nul_cmdline(&[b"/bin/lattice", b"daemon", b"serve"]),
+            nul_cmdline(&[b"/bin/lattice-daemon"]),
+            nul_cmdline(&[b"/bin/lattice", b"--state-root", root]),
+            nul_cmdline(&[b"/bin/lattice", b"daemon", b"serve", b"--state-root", root]),
+            nul_cmdline(&[b"/bin/lattice-daemon/", b"--state-root", root]),
+            nul_cmdline(&[b"/bin/lattice-daemon", b"--drain-timeout", b"60s"]),
+            nul_cmdline(&[b"/bin/lattice-daemon", b"--state-root", b"/tmp/other-root"]),
+            nul_cmdline(&[b"/bin/lattice-daemon", b"--state-root", root, b"--verbose"]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
-                b"--drain-timeout",
-                b"60s",
-            ]),
-            nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
-                b"--state-root",
-                b"/tmp/other-root",
-            ]),
-            nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
-                b"--state-root",
-                root,
-                b"--verbose",
-            ]),
-            nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"--unknown",
                 b"1",
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"--state-root",
                 root,
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"--drain-timeout",
@@ -2354,60 +2351,37 @@ mod tests {
                 b"2s",
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"--drain-timeout",
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--drain-timeout",
                 b"1s",
                 b"--state-root",
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"extra-positional",
             ]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
                 b"extra-a",
                 b"extra-b",
             ]),
+            nul_cmdline(&[b"/bin/lattice-daemon", b"", b"--state-root", root]),
+            nul_cmdline(&[b"/bin/lattice-daemon", b"--state-root", root, b""]),
             nul_cmdline(&[
-                b"/bin/lattice",
-                b"",
-                b"daemon",
-                b"serve",
+                b"/bin/lattice-daemon",
                 b"--state-root",
                 root,
-            ]),
-            nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
-                b"",
-                b"--state-root",
-                root,
-            ]),
-            nul_cmdline(&[
-                b"/bin/lattice",
-                b"daemon",
-                b"serve",
-                b"--state-root",
-                root,
+                b"--drain-timeout",
                 b"",
             ]),
         ] {
@@ -2541,16 +2515,17 @@ mod tests {
 
         let wrapper = dir.path().join("fake-lattice");
         let script = format!(
-            "#!/bin/sh\nCOORD='{}'\nif [ \"${{1:-}}\" = '--json' ] && [ \"${{2:-}}\" = 'daemon' ] && [ \"${{3:-}}\" = 'status' ]; then\n  if [ -e \"$COORD/external-listening\" ]; then\n    : > \"$COORD/status-probed\"\n    printf '{{\"stopping\":false}}\\n'\n    exit 0\n  fi\n  printf '{{\"type\":\"error\",\"kind\":\"not_running\"}}\\n'\n  exit 1\nfi\nif [ \"${{1:-}}\" = '--json' ] && [ \"${{2:-}}\" = 'daemon' ] && [ \"${{3:-}}\" = 'stop' ]; then\n  : > \"$COORD/stop-invoked\"\n  printf '{{\"owners\":0}}\\n'\n  exit 0\nfi\nif [ \"${{1:-}}\" = 'daemon' ] && [ \"${{2:-}}\" = 'serve' ]; then\n  : > \"$COORD/serve-started\"\n  while [ ! -e \"$COORD/status-probed\" ]; do sleep 0.01; done\n  sleep 0.05\n  printf 'another daemon already owns state root\\n' >&2\n  exit 1\nfi\nexit 2\n",
+            "#!/bin/sh\nCOORD='{}'\nif [ \"${{1:-}}\" = '--json' ] && [ \"${{2:-}}\" = 'daemon' ] && [ \"${{3:-}}\" = 'status' ]; then\n  if [ -e \"$COORD/external-listening\" ]; then\n    : > \"$COORD/status-probed\"\n    printf '{{\"stopping\":false}}\\n'\n    exit 0\n  fi\n  printf '{{\"type\":\"error\",\"kind\":\"not_running\"}}\\n'\n  exit 1\nfi\nif [ \"${{1:-}}\" = '--json' ] && [ \"${{2:-}}\" = 'daemon' ] && [ \"${{3:-}}\" = 'stop' ]; then\n  : > \"$COORD/stop-invoked\"\n  printf '{{\"owners\":0}}\\n'\n  exit 0\nfi\nexit 2\n",
             coord.display(),
         );
         {
             use std::os::unix::fs::PermissionsExt;
-            std::fs::write(&wrapper, script).expect("写入假二进制脚本");
+            std::fs::write(&wrapper, script).expect("写入假 CLI 脚本");
             std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755))
                 .expect("设置脚本可执行权限");
         }
-        let wrapper = std::fs::canonicalize(&wrapper).expect("规范化假二进制路径");
+        let wrapper = std::fs::canonicalize(&wrapper).expect("规范化假 CLI 路径");
+        let daemon_binary = fake_daemon_binary();
         let exe = std::env::current_exe().expect("当前测试二进制");
 
         let daemon = ScenarioDaemon::new(state_root.clone());
@@ -2602,8 +2577,10 @@ mod tests {
             if let Ok(path_env) = std::env::var("PATH") {
                 env_snapshot.insert("PATH".into(), path_env);
             }
+            env_snapshot.insert("FAKE_DAEMON_COORD".into(), coord.display().to_string());
             let start_res = daemon.start(
                 &wrapper,
+                daemon_binary,
                 &project,
                 env_snapshot,
                 &DaemonOptions::default(),
@@ -2660,8 +2637,8 @@ mod tests {
                     ..
                 } => {
                     assert_eq!(*listener_pid, Some(external_pid));
-                    assert_eq!(*exit_code, Some(1));
-                    assert!(stderr.contains("already owns"), "{stderr:?}");
+                    assert_eq!(*exit_code, Some(3));
+                    assert!(stderr.contains("状态根已被另一个后台占用"), "{stderr:?}");
                 }
                 other => panic!("应返回专门的非自有后台占用错误，实际为: {other:?}"),
             }
@@ -2671,28 +2648,19 @@ mod tests {
     #[test]
     fn has_exited_uses_pidfd_without_reaping_group_leader() {
         let dir = short_tempdir();
-        let shell = std::fs::canonicalize("/bin/sh").expect("解析 shell 路径");
-        let binary = dir.path().join("leader-only-lattice");
-        std::fs::copy(&shell, &binary).expect("复制测试假二进制");
-        let binary = std::fs::canonicalize(&binary).expect("规范化假二进制路径");
+        let cli_binary = std::fs::canonicalize("/bin/false").expect("解析假 CLI 路径");
+        let daemon_binary = fake_daemon_binary();
         let state_root = dir.path().join("state");
         std::fs::create_dir_all(&state_root).expect("创建状态根");
         let ready = dir.path().join("ready");
         let trigger = dir.path().join("trigger");
-        std::fs::write(
-            dir.path().join("daemon"),
-            format!(
-                "touch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 0\n",
-                ready.display(),
-                trigger.display()
-            ),
-        )
-        .expect("写入单进程假后台脚本");
 
-        let mut cmd = Command::new(&binary);
-        cmd.args(["daemon", "serve", "--state-root"])
+        let mut cmd = Command::new(daemon_binary);
+        cmd.arg("--state-root")
             .arg(&state_root)
-            .current_dir(dir.path());
+            .current_dir(dir.path())
+            .env("FAKE_DAEMON_READY", &ready)
+            .env("FAKE_DAEMON_TRIGGER", &trigger);
         let child = DaemonChild::spawn(cmd).expect("启动假后台");
         let deadline = Instant::now() + Duration::from_secs(5);
         while !ready.exists() {
@@ -2704,7 +2672,7 @@ mod tests {
         let members = capture_members(pgid, &[pgid]).expect("捕获组首领成员");
         let daemon = ScenarioDaemon::new(state_root);
         *daemon.state.lock().expect("自有后台锁") = DaemonState::Unreaped(UnreapedDaemon {
-            binary,
+            cli_binary,
             child,
             pgid,
             leader,
@@ -2856,28 +2824,20 @@ mod tests {
     #[test]
     fn persistent_inspection_failure_cleans_confirmed_members_across_reap_and_drop() {
         let dir = short_tempdir();
-        let shell = std::fs::canonicalize("/bin/sh").expect("解析 shell 路径");
-        let binary = dir.path().join("no-fallback-lattice");
-        std::fs::copy(&shell, &binary).expect("复制测试二进制");
-        let binary = std::fs::canonicalize(&binary).expect("规范化测试二进制");
+        let cli_binary = std::fs::canonicalize("/bin/false").expect("解析假 CLI 路径");
+        let daemon_binary = fake_daemon_binary();
         let state_root = dir.path().join("state");
         std::fs::create_dir_all(&state_root).expect("创建状态根");
         let ready = dir.path().join("ready");
         let trigger = dir.path().join("trigger");
-        std::fs::write(
-            dir.path().join("daemon"),
-            format!(
-                "sleep 30 &\ntouch '{}'\nwhile [ ! -e '{}' ]; do sleep 0.01; done\nexit 0\n",
-                ready.display(),
-                trigger.display()
-            ),
-        )
-        .expect("写入无兜底夹具的假后台脚本");
 
-        let mut cmd = Command::new(&binary);
-        cmd.args(["daemon", "serve", "--state-root"])
+        let mut cmd = Command::new(daemon_binary);
+        cmd.arg("--state-root")
             .arg(&state_root)
-            .current_dir(dir.path());
+            .current_dir(dir.path())
+            .env("FAKE_DAEMON_SPAWN_CHILD", "1")
+            .env("FAKE_DAEMON_READY", &ready)
+            .env("FAKE_DAEMON_TRIGGER", &trigger);
         let child = DaemonChild::spawn(cmd).expect("启动假后台");
         let deadline = Instant::now() + Duration::from_secs(5);
         while !ready.exists() {
@@ -2894,7 +2854,7 @@ mod tests {
 
         let daemon = ScenarioDaemon::new(state_root);
         *daemon.state.lock().expect("自有后台锁") = DaemonState::Unreaped(UnreapedDaemon {
-            binary,
+            cli_binary,
             child,
             pgid,
             leader,

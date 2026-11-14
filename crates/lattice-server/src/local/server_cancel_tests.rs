@@ -2315,6 +2315,12 @@ async fn drain_timeout_disables_writes_before_inflight_turn_can_record_terminal_
     config(dir.path(), &provider.endpoint);
 
     let input = create_request(&client, dir.path()).await;
+    // configure 与随后的草稿清理各自占用并退休 Owner；等它们全部退休后再挂退休闸门，
+    // 闸门只会拦住下面这一轮的 Owner。
+    idle(&backend).await;
+    // 停写后在途轮次会协作停止（`LiveExecution::join` 看到停写标志后请求模型停止），
+    // 它的 Owner 可能早于 serve 返回就退休。闸门把退休推迟到断言之后，中间状态因此确定。
+    let (_retiring, retire) = arm(&backend.gates.retire);
     client.submit(input.clone()).await.expect("提交在途轮次");
     bounded(&mut provider.arrived).await.unwrap();
 
@@ -2324,11 +2330,12 @@ async fn drain_timeout_disables_writes_before_inflight_turn_can_record_terminal_
     assert_eq!(
         backend.status().owners,
         1,
-        "放行模型前在途轮次的 Owner 仍应存活"
+        "放行退休闸门前在途轮次的 Owner 仍应存活"
     );
 
     provider.release.send_replace(true);
     assert_eq!(provider.finish().await.len(), 1);
+    retire.send(()).expect("放行在途轮次 Owner 的退休");
     idle(&backend).await;
     assert_eq!(backend.status().owners, 0, "在途轮次的 Owner 应实际退休");
 

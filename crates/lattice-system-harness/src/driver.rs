@@ -18,6 +18,7 @@ use crate::scenario::ScenarioSpec;
 use crate::world::ScenarioWorld;
 
 const LATTICE_BIN_ENV: &str = "LATTICE_BIN";
+const LATTICE_DAEMON_BIN_ENV: &str = "LATTICE_DAEMON_BIN";
 const TIMEOUT_POLL: Duration = Duration::from_millis(10);
 const DRAIN_FINISH_GRACE: Duration = Duration::from_millis(250);
 
@@ -26,13 +27,29 @@ pub struct LatticeDriver {
     binary: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+pub struct LatticeDaemonDriver {
+    binary: PathBuf,
+}
+
 #[derive(Debug, Error)]
 pub enum DriverError {
-    #[error("请将环境变量 {LATTICE_BIN_ENV} 设为已构建 lattice 二进制的路径")]
-    MissingLatticeBin,
-    #[error("{LATTICE_BIN_ENV} 指向的文件不存在: {0}")]
-    BinaryNotFound(String),
-    #[error("运行 lattice 失败: {0}")]
+    #[error("请将环境变量 {env} 设为已构建 {binary} 二进制的路径")]
+    MissingBinaryEnv {
+        env: &'static str,
+        binary: &'static str,
+    },
+    #[error("{env} 指向的文件不存在: {path}")]
+    BinaryNotFound { env: &'static str, path: String },
+    #[error("{env} 指向的路径无法规范化: {path}（{reason}）")]
+    BinaryCanonicalizeFailed {
+        env: &'static str,
+        path: String,
+        reason: String,
+    },
+    #[error("{env} 指向的文件不可执行: {path}")]
+    BinaryNotExecutable { env: &'static str, path: String },
+    #[error("运行被测二进制失败: {0}")]
     Io(#[from] std::io::Error),
     #[error("命令输出读取线程发生 panic")]
     DrainThreadPanicked,
@@ -570,15 +587,62 @@ impl Drop for DaemonChild {
     }
 }
 
+fn resolve_binary_value(
+    raw: Option<&std::ffi::OsStr>,
+    env: &'static str,
+    binary_name: &'static str,
+) -> Result<PathBuf, DriverError> {
+    use std::os::unix::fs::PermissionsExt as _;
+    let Some(raw) = raw else {
+        return Err(DriverError::MissingBinaryEnv {
+            env,
+            binary: binary_name,
+        });
+    };
+    if raw.is_empty() {
+        return Err(DriverError::BinaryNotFound {
+            env,
+            path: String::new(),
+        });
+    }
+    let path = Path::new(raw);
+    let display = path.display().to_string();
+    let link_meta = std::fs::symlink_metadata(path).map_err(|_| DriverError::BinaryNotFound {
+        env,
+        path: display.clone(),
+    })?;
+    if link_meta.file_type().is_dir() {
+        return Err(DriverError::BinaryNotFound { env, path: display });
+    }
+    let binary =
+        std::fs::canonicalize(path).map_err(|error| DriverError::BinaryCanonicalizeFailed {
+            env,
+            path: display.clone(),
+            reason: error.to_string(),
+        })?;
+    let meta = std::fs::metadata(&binary).map_err(|_| DriverError::BinaryNotFound {
+        env,
+        path: binary.display().to_string(),
+    })?;
+    if !meta.is_file() {
+        return Err(DriverError::BinaryNotFound {
+            env,
+            path: binary.display().to_string(),
+        });
+    }
+    if meta.permissions().mode() & 0o111 == 0 {
+        return Err(DriverError::BinaryNotExecutable {
+            env,
+            path: binary.display().to_string(),
+        });
+    }
+    Ok(binary)
+}
+
 impl LatticeDriver {
     pub fn from_env() -> Result<Self, DriverError> {
-        let raw = std::env::var(LATTICE_BIN_ENV).map_err(|_| DriverError::MissingLatticeBin)?;
-        let path = Path::new(&raw);
-        if !path.is_file() {
-            return Err(DriverError::BinaryNotFound(raw));
-        }
-        let binary = std::fs::canonicalize(path)
-            .map_err(|_| DriverError::BinaryNotFound(path.display().to_string()))?;
+        let raw = std::env::var_os(LATTICE_BIN_ENV);
+        let binary = resolve_binary_value(raw.as_deref(), LATTICE_BIN_ENV, "lattice")?;
         Ok(Self { binary })
     }
 
@@ -645,6 +709,37 @@ impl LatticeDriver {
                 timeout: Some(spec.step_timeout()),
             },
         )
+    }
+}
+
+impl LatticeDaemonDriver {
+    pub fn from_env() -> Result<Self, DriverError> {
+        let raw = std::env::var_os(LATTICE_DAEMON_BIN_ENV);
+        let binary =
+            resolve_binary_value(raw.as_deref(), LATTICE_DAEMON_BIN_ENV, "lattice-daemon")?;
+        Ok(Self { binary })
+    }
+
+    pub fn binary_path(&self) -> &Path {
+        &self.binary
+    }
+
+    pub fn start(
+        &self,
+        world: &ScenarioWorld,
+        command: &LatticeCommand,
+    ) -> Result<RunningCommand, DriverError> {
+        let mut cmd = world.command(&self.binary);
+        cmd.args(&command.args);
+        Ok(RunningCommand::spawn_with_timeout(cmd, command.timeout)?)
+    }
+
+    pub fn run(
+        &self,
+        world: &ScenarioWorld,
+        command: &LatticeCommand,
+    ) -> Result<CommandOutcome, DriverError> {
+        self.start(world, command)?.wait(None)
     }
 }
 
@@ -973,6 +1068,79 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn binary_resolution_rejects_missing_nonexistent_uncanonicalizable_and_non_executable_paths() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        for (env_name, label) in [
+            (LATTICE_BIN_ENV, "lattice"),
+            (LATTICE_DAEMON_BIN_ENV, "lattice-daemon"),
+        ] {
+            let missing = resolve_binary_value(None, env_name, label).unwrap_err();
+            assert!(
+                matches!(missing, DriverError::MissingBinaryEnv { env, .. } if env == env_name),
+                "未设置 {env_name} 应报错，实际：{missing}"
+            );
+
+            let empty =
+                resolve_binary_value(Some(std::ffi::OsStr::new("")), env_name, label).unwrap_err();
+            assert!(
+                matches!(empty, DriverError::BinaryNotFound { env, .. } if env == env_name),
+                "空路径应报错，实际：{empty}"
+            );
+
+            let dir = tempfile::tempdir().expect("创建临时目录失败");
+            let absent = dir.path().join("absent-bin");
+            let not_found =
+                resolve_binary_value(Some(absent.as_os_str()), env_name, label).unwrap_err();
+            assert!(
+                matches!(not_found, DriverError::BinaryNotFound { env, .. } if env == env_name),
+                "不存在的文件应报错，实际：{not_found}"
+            );
+
+            let dir_err =
+                resolve_binary_value(Some(dir.path().as_os_str()), env_name, label).unwrap_err();
+            assert!(
+                matches!(dir_err, DriverError::BinaryNotFound { env, .. } if env == env_name),
+                "目录路径不应被当作二进制，实际：{dir_err}"
+            );
+
+            let dangling = dir.path().join("dangling-link");
+            symlink(dir.path().join("missing-target"), &dangling).expect("创建悬空符号链接失败");
+            let canon_err =
+                resolve_binary_value(Some(dangling.as_os_str()), env_name, label).unwrap_err();
+            assert!(
+                matches!(
+                    canon_err,
+                    DriverError::BinaryCanonicalizeFailed { env, .. } if env == env_name
+                ),
+                "无法规范化的悬空符号链接应报错，实际：{canon_err}"
+            );
+
+            let non_exec = dir.path().join("non-exec-bin");
+            std::fs::write(&non_exec, b"#!/bin/sh\nexit 0\n").expect("写入不可执行文件失败");
+            std::fs::set_permissions(&non_exec, std::fs::Permissions::from_mode(0o644))
+                .expect("设置 0644 权限失败");
+            let exec_err =
+                resolve_binary_value(Some(non_exec.as_os_str()), env_name, label).unwrap_err();
+            assert!(
+                matches!(exec_err, DriverError::BinaryNotExecutable { env, .. } if env == env_name),
+                "不可执行文件应报错，实际：{exec_err}"
+            );
+
+            let valid = dir.path().join(label);
+            std::fs::write(&valid, b"#!/bin/sh\nexit 0\n").expect("写入可执行文件失败");
+            std::fs::set_permissions(&valid, std::fs::Permissions::from_mode(0o755))
+                .expect("设置 0755 权限失败");
+            let resolved = resolve_binary_value(Some(valid.as_os_str()), env_name, label)
+                .expect("合法可执行文件应通过");
+            assert_eq!(
+                resolved,
+                std::fs::canonicalize(&valid).expect("规范化期望路径")
+            );
+        }
+    }
 
     #[test]
     fn human_output_with_a_sending_record_is_a_clean_exit() {

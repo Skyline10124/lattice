@@ -7,10 +7,10 @@
 //!
 //!   1. 已跟踪工作树干净检查（已跟踪文件有改动时明确拒绝）
 //!   2. 能力探测（核验固定的 rustc 版本，另记录仅供参考的主机信息）
-//!   3. `cargo build --locked --release -p lattice-cli --bin lattice`
-//!   4. 产物身份（sha256 与大小）
+//!   3. `cargo build --locked --release -p lattice-cli -p lattice-daemon --bins`
+//!   4. 双产物身份（`lattice` 与 `lattice-daemon` 各自的名称、路径、sha256 与大小）
 //!   5. `cargo xtask harness-boundary`（依赖与架构边界检查）
-//!   6. 以 release 二进制（`LATTICE_BIN`）运行 Direct-Local harness 场景
+//!   6. 以 release 双产物（`LATTICE_BIN` 与 `LATTICE_DAEMON_BIN`）运行 Direct-Local harness 场景
 //!   7. 离线正确性测试组（带零通过保护，空跑不算通过）
 //!
 //! 跳过不等于通过：每个计划步骤先以 `blocked` 写入记录，只有实际运行后才会覆盖；
@@ -32,7 +32,7 @@ use sha2::{Digest, Sha256};
 
 use crate::repo_root;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// 失败步骤的捕获输出在记录中最多保留的字节数。
 const TAIL_MAX_BYTES: usize = 800;
@@ -74,7 +74,7 @@ pub struct RolloutRecord {
     pub commit_sha: String,
     pub started_utc: String,
     pub finished_utc: String,
-    pub artifact: Option<ArtifactIdentity>,
+    pub artifacts: Vec<ArtifactIdentity>,
     pub probes: Vec<CapabilityProbe>,
     pub steps: Vec<StepRecord>,
     pub failure_artifacts: Vec<String>,
@@ -82,8 +82,9 @@ pub struct RolloutRecord {
     pub rejection: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ArtifactIdentity {
+    pub name: String,
     pub path: String,
     pub sha256: String,
     pub size_bytes: u64,
@@ -143,6 +144,7 @@ fn verdict(steps: &[StepRecord]) -> Verdict {
 struct Ctx {
     root: PathBuf,
     lattice_bin: PathBuf,
+    lattice_daemon_bin: PathBuf,
     harness_failures: PathBuf,
 }
 
@@ -165,9 +167,14 @@ pub fn run(args: RolloutArgs) -> anyhow::Result<()> {
     let rollout_dir = root.join("target/rollout");
     let harness_failures = rollout_dir.join("harness-failures");
     fs::create_dir_all(&harness_failures).context("创建 rollout 的 harness 失败产物目录")?;
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .map(|p| if p.is_absolute() { p } else { root.join(p) })
+        .unwrap_or_else(|| root.join("target"));
     let ctx = Ctx {
         root: root.clone(),
-        lattice_bin: root.join("target/release/lattice"),
+        lattice_bin: target_dir.join("release/lattice"),
+        lattice_daemon_bin: target_dir.join("release/lattice-daemon"),
         harness_failures,
     };
 
@@ -279,9 +286,9 @@ fn execute(planned: &mut Planned, ctx: &Ctx, record: &mut RolloutRecord) -> Resu
                 Err(format!("门禁能力探测未通过：{}", failed.join(", ")))
             }
         }
-        Action::ArtifactIdentity => match hash_artifact(&ctx.lattice_bin) {
-            Ok(identity) => {
-                record.artifact = Some(identity);
+        Action::ArtifactIdentity => match collect_artifacts(ctx) {
+            Ok(identities) => {
+                record.artifacts = identities;
                 Ok(())
             }
             Err(e) => Err(e),
@@ -305,8 +312,9 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         "--release",
         "-p",
         "lattice-cli",
-        "--bin",
-        "lattice",
+        "-p",
+        "lattice-daemon",
+        "--bins",
     ]);
 
     let mut harness_boundary = Command::new("cargo");
@@ -319,6 +327,7 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         .current_dir(&ctx.root)
         .args(["test", "-p", "lattice-system-harness"])
         .env("LATTICE_BIN", &ctx.lattice_bin)
+        .env("LATTICE_DAEMON_BIN", &ctx.lattice_daemon_bin)
         .env("LATTICE_HARNESS_FAILURE_DIR", &ctx.harness_failures);
 
     let mut offline = Command::new("cargo");
@@ -350,7 +359,11 @@ fn build_plan(ctx: &Ctx) -> Vec<Planned> {
         },
         Planned {
             id: "artifact_identity",
-            display: format!("<内部：sha256 {}>", ctx.lattice_bin.display()),
+            display: format!(
+                "<内部：sha256 {} {}>",
+                ctx.lattice_bin.display(),
+                ctx.lattice_daemon_bin.display()
+            ),
             action: Action::ArtifactIdentity,
         },
         Planned {
@@ -379,7 +392,7 @@ fn seed_record(channel: &str, commit_sha: &str, plan: &[Planned]) -> RolloutReco
         commit_sha: commit_sha.to_owned(),
         started_utc: now.clone(),
         finished_utc: now,
-        artifact: None,
+        artifacts: vec![],
         probes: vec![],
         // 每个计划步骤先置为 `blocked`（未执行）：必需步骤不可能从记录中缺失，也不可能悄悄漏记。
         steps: plan
@@ -509,9 +522,27 @@ fn collect_probes() -> Vec<CapabilityProbe> {
     probes
 }
 
-fn hash_artifact(path: &Path) -> Result<ArtifactIdentity, String> {
-    let bytes = fs::read(path).map_err(|e| format!("读取 {} 失败：{e}", path.display()))?;
+fn collect_artifacts(ctx: &Ctx) -> Result<Vec<ArtifactIdentity>, String> {
+    let mut out = Vec::with_capacity(2);
+    for (name, path) in [
+        ("lattice", &ctx.lattice_bin),
+        ("lattice-daemon", &ctx.lattice_daemon_bin),
+    ] {
+        out.push(hash_artifact(name, path)?);
+    }
+    Ok(out)
+}
+
+fn hash_artifact(name: &str, path: &Path) -> Result<ArtifactIdentity, String> {
+    let meta = fs::metadata(path)
+        .map_err(|e| format!("读取产物 `{name}`（{}）失败：{e}", path.display()))?;
+    if !meta.is_file() {
+        return Err(format!("产物 `{name}`（{}）不是普通文件", path.display()));
+    }
+    let bytes =
+        fs::read(path).map_err(|e| format!("读取产物 `{name}`（{}）失败：{e}", path.display()))?;
     Ok(ArtifactIdentity {
+        name: name.to_owned(),
         path: path.display().to_string(),
         sha256: hex(&Sha256::digest(&bytes)),
         size_bytes: bytes.len() as u64,
@@ -753,6 +784,7 @@ mod tests {
         let ctx = Ctx {
             root: temp.path().to_path_buf(),
             lattice_bin: temp.path().join("target/release/lattice"),
+            lattice_daemon_bin: temp.path().join("target/release/lattice-daemon"),
             harness_failures: temp.path().join("harness-failures"),
         };
         let plan = build_plan(&ctx);
@@ -782,6 +814,101 @@ mod tests {
                 step.display
             );
         }
+
+        let build_step = plan
+            .iter()
+            .find(|s| s.id == "build_release_locked")
+            .expect("构建步骤存在");
+        for token in ["-p lattice-cli", "-p lattice-daemon", "--bins"] {
+            assert!(
+                build_step.display.contains(token),
+                "build_release_locked 应同时构建两个产物（缺少 `{token}`）：{}",
+                build_step.display
+            );
+        }
+
+        let identity_step = plan
+            .iter()
+            .find(|s| s.id == "artifact_identity")
+            .expect("产物身份步骤存在");
+        assert!(
+            identity_step
+                .display
+                .contains(&ctx.lattice_bin.display().to_string())
+                && identity_step
+                    .display
+                    .contains(&ctx.lattice_daemon_bin.display().to_string()),
+            "artifact_identity 显示文本应覆盖两个 release 产物：{}",
+            identity_step.display
+        );
+
+        let direct_step = plan
+            .iter()
+            .find(|s| s.id == "direct_local")
+            .expect("direct_local 步骤存在");
+        match &direct_step.action {
+            Action::CargoTest(cmd) => {
+                let envs: std::collections::HashMap<_, _> = cmd
+                    .get_envs()
+                    .filter_map(|(k, v)| Some((k.to_str()?, v?.to_str()?)))
+                    .collect();
+                assert_eq!(
+                    envs.get("LATTICE_BIN").copied(),
+                    ctx.lattice_bin.to_str(),
+                    "direct_local 应注入 LATTICE_BIN"
+                );
+                assert_eq!(
+                    envs.get("LATTICE_DAEMON_BIN").copied(),
+                    ctx.lattice_daemon_bin.to_str(),
+                    "direct_local 应注入 LATTICE_DAEMON_BIN"
+                );
+            }
+            _ => panic!("direct_local 应为 CargoTest 动作"),
+        }
+    }
+
+    #[test]
+    fn collect_artifacts_requires_both_lattice_and_lattice_daemon() {
+        let temp = tempfile::tempdir().expect("创建临时目录");
+        let release_dir = temp.path().join("target/release");
+        fs::create_dir_all(&release_dir).unwrap();
+        let ctx = Ctx {
+            root: temp.path().to_path_buf(),
+            lattice_bin: release_dir.join("lattice"),
+            lattice_daemon_bin: release_dir.join("lattice-daemon"),
+            harness_failures: temp.path().join("harness-failures"),
+        };
+
+        assert!(
+            collect_artifacts(&ctx).is_err(),
+            "两个产物均缺失时 artifact_identity 应失败"
+        );
+
+        fs::write(&ctx.lattice_bin, b"cli-binary").unwrap();
+        let missing_daemon = collect_artifacts(&ctx).expect_err("缺失 lattice-daemon 时应失败");
+        assert!(
+            missing_daemon.contains("lattice-daemon"),
+            "错误应指明缺失的 lattice-daemon：{missing_daemon}"
+        );
+
+        fs::write(&ctx.lattice_daemon_bin, b"daemon-binary").unwrap();
+        let artifacts = collect_artifacts(&ctx).expect("双产物均存在时应成功散列");
+        assert_eq!(artifacts.len(), 2);
+        assert_eq!(artifacts[0].name, "lattice");
+        assert_eq!(artifacts[0].size_bytes, b"cli-binary".len() as u64);
+        assert_eq!(artifacts[0].sha256.len(), 64);
+        assert_eq!(artifacts[1].name, "lattice-daemon");
+        assert_eq!(artifacts[1].size_bytes, b"daemon-binary".len() as u64);
+        assert_eq!(artifacts[1].sha256.len(), 64);
+        assert_ne!(artifacts[0].sha256, artifacts[1].sha256);
+
+        // 只存在 `lattice-daemon`、缺失 `lattice` 时同样失败。
+        fs::remove_file(&ctx.lattice_bin).unwrap();
+        let missing_cli = collect_artifacts(&ctx).expect_err("缺失 lattice 时应失败");
+        assert!(
+            missing_cli.contains("lattice"),
+            "错误应指明缺失的 lattice：{missing_cli}"
+        );
     }
 
     fn sample_record() -> RolloutRecord {
@@ -791,11 +918,20 @@ mod tests {
             commit_sha: "9f4c2b7a1d3e5f6089aabbccddeeff0011223344".to_owned(),
             started_utc: "2026-07-26T03:00:00Z".to_owned(),
             finished_utc: "2026-07-26T03:24:11Z".to_owned(),
-            artifact: Some(ArtifactIdentity {
-                path: "/repo/target/release/lattice".to_owned(),
-                sha256: "b".repeat(64),
-                size_bytes: 48_721_544,
-            }),
+            artifacts: vec![
+                ArtifactIdentity {
+                    name: "lattice".to_owned(),
+                    path: "/repo/target/release/lattice".to_owned(),
+                    sha256: "b".repeat(64),
+                    size_bytes: 48_721_544,
+                },
+                ArtifactIdentity {
+                    name: "lattice-daemon".to_owned(),
+                    path: "/repo/target/release/lattice-daemon".to_owned(),
+                    sha256: "c".repeat(64),
+                    size_bytes: 41_102_336,
+                },
+            ],
             probes: vec![CapabilityProbe {
                 name: "rustc_version".to_owned(),
                 value: "rustc 1.96.0".to_owned(),
@@ -814,6 +950,7 @@ mod tests {
 
     #[test]
     fn record_round_trips_through_serde_with_mandatory_fields() {
+        assert_eq!(SCHEMA_VERSION, 2);
         let record = sample_record();
         let json = serde_json::to_string_pretty(&record).unwrap();
         for key in [
@@ -822,7 +959,7 @@ mod tests {
             "commit_sha",
             "started_utc",
             "finished_utc",
-            "artifact",
+            "artifacts",
             "probes",
             "steps",
             "failure_artifacts",
@@ -831,16 +968,24 @@ mod tests {
         ] {
             assert!(json.contains(&format!("\"{key}\"")), "缺少字段 {key}");
         }
+        assert!(
+            !json.contains("\"artifact\""),
+            "schema_version 2 不得再保留旧的单数 artifact 字段：{json}"
+        );
         let back: RolloutRecord = serde_json::from_str(&json).unwrap();
-        assert_eq!(back.schema_version, SCHEMA_VERSION);
+        assert_eq!(back.schema_version, 2);
         assert_eq!(back.channel, "alpha");
         assert_eq!(back.commit_sha.len(), 40);
         assert!(back.started_utc.ends_with('Z'));
         assert_eq!(back.steps.len(), 2);
         assert_eq!(back.verdict, Verdict::Pass);
-        let art = back.artifact.expect("记录应包含产物身份");
-        assert_eq!(art.sha256.len(), 64);
-        assert!(art.size_bytes > 0);
+        assert_eq!(back.artifacts.len(), 2);
+        assert_eq!(back.artifacts[0].name, "lattice");
+        assert_eq!(back.artifacts[0].sha256.len(), 64);
+        assert!(back.artifacts[0].size_bytes > 0);
+        assert_eq!(back.artifacts[1].name, "lattice-daemon");
+        assert_eq!(back.artifacts[1].sha256.len(), 64);
+        assert!(back.artifacts[1].size_bytes > 0);
     }
 
     #[test]

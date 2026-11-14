@@ -1673,8 +1673,7 @@ async fn status_against(
     .await
 }
 
-const OLDER_BACKEND: &str = "the running backend is an incompatible older version; stop it with the older binary's `lattice daemon stop`";
-const SILENT_CLOSE: &str = "the backend closed the connection without replying; if an older backend is still running, stop it with the older binary's `lattice daemon stop`";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请用旧二进制执行 `lattice daemon stop` 停止它";
 
 /// 已发布的旧后台读到不认识的魔数就关连接，不回写任何字节；请求剩下的部分留在它的接收队列里。
 #[tokio::test]
@@ -1724,9 +1723,13 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
         })
     })
     .await;
+    let expected = format!(
+        "运行中的后台版本较旧且不兼容（对端进程号：{}）；请用旧二进制执行 `lattice daemon stop` 停止它",
+        std::process::id()
+    );
     assert_eq!(
         (error.kind, error.message.as_str()),
-        (LocalErrorKind::IncompatibleBackend, OLDER_BACKEND)
+        (LocalErrorKind::IncompatibleBackend, expected.as_str())
     );
 }
 
@@ -1742,11 +1745,12 @@ async fn status_reports_a_backend_newer_than_the_client() {
         })
     })
     .await;
+    let expected = format!(
+        "运行中的后台版本较新且不兼容（对端进程号：{}）；请换用匹配的前端",
+        std::process::id()
+    );
     assert_eq!(
         (error.kind, error.message.as_str()),
-        (
-            LocalErrorKind::IncompatibleBackend,
-            "the running backend is newer than this client; use the newer binary",
-        )
+        (LocalErrorKind::IncompatibleBackend, expected.as_str())
     );
 }
