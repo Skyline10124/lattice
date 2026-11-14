@@ -17,7 +17,7 @@ LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命
 目前仅支持 Linux 主机。Rust 工具链版本由
 [rust-toolchain.toml](rust-toolchain.toml) 指定。
 
-拉取源码后，在 LATTICE 仓库根目录安装：
+拉取源码后，在 LATTICE 仓库根目录将前端 `lattice` 与后台 `lattice-daemon` 安装到同一目录（`cargo install` 默认写入同一个 `$CARGO_HOME/bin`）：
 
 ```sh
 git clone https://github.com/Skyline10124/lattice.git
@@ -66,7 +66,19 @@ system = "请用中文回答，表达简洁准确。"
 
 ### 2. 启动后台并配置模型凭据
 
-先在单独的终端中启动本地后台（默认状态根为 `${XDG_STATE_HOME:-$HOME/.local/state}`）：
+首次使用前执行 `lattice daemon install`，写出用户级 systemd 服务单元（`${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lattice.service`）并立即启用与启动后台：
+
+```sh
+lattice daemon install
+```
+
+日常通过 `systemctl --user start|stop|restart lattice` 或 `lattice daemon stop` 管理后台。需要后台在当前用户没有任何登录会话时也保持运行的，执行：
+
+```sh
+loginctl enable-linger
+```
+
+没有 systemd user session 的环境（如容器或精简环境）中，改为在独立终端或外部监督器里手动运行 `lattice-daemon`：
 
 ```sh
 lattice-daemon --state-root "${XDG_STATE_HOME:-$HOME/.local/state}"
@@ -118,7 +130,7 @@ lattice tui "$SESSION_ID"
 
 Session 命令、TUI、`auth` 与 `models` 只连接已经运行的本地后台（`lattice-daemon`），不会自动拉起后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-`lattice-daemon` 使用启动它的宿主进程环境，在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`。
+`lattice-daemon` 使用启动它的宿主进程环境（systemd user manager 环境或手动启动时的进程环境），在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，执行 `systemctl --user restart lattice`（手动运行时先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`）。
 
 配置目录里的 `providers.toml` 与凭据在每次模型请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。凭据也可通过 `lattice auth set` 更新。价格的生效时机见[费用估算](docs/architecture/llm/usage.md#费用估算)。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
@@ -130,6 +142,7 @@ TUI 中，输入框为空时按 Ctrl+D 或输入 `/quit` 只退出界面；任�
 lattice session turn <turn_id>
 lattice session turn <turn_id> --follow
 lattice session cancel <session_id> <turn_id>
+lattice daemon install
 lattice daemon status
 lattice daemon stop
 ```
@@ -166,7 +179,7 @@ lattice session usage <session_id>
 lattice --json session usage <session_id>
 ```
 
-升级前先用旧二进制执行 `lattice daemon stop`。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
+由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。从自动拉起后台的旧版本升级时，若执行 `lattice daemon install` 报告旧后台仍占用状态根，先执行 `lattice daemon stop`（协议不兼容时用旧二进制执行），再执行 `systemctl --user start lattice`。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 

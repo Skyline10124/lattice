@@ -19,6 +19,7 @@ cargo test -p lattice-session
 cargo test -p lattice-server
 cargo test -p lattice-agent --features test-utils
 
+cargo test -p lattice-system-harness --test fast_cli_help --test fast_daemon_install
 cargo test -p lattice-system-harness --test direct_tree_session
 cargo test -p lattice-system-harness --test direct_local_turn
 cargo test -p lattice-system-harness --test direct_background -- --list
@@ -54,6 +55,7 @@ LATTICE_BIN="$(pwd)/target/debug/lattice" \
 | 结果 | 含义与下一步 |
 | --- | --- |
 | `N passed`（`N > 0`） | 已运行并通过；`0 passed` 未命中，精确匹配加 `-- --exact` |
+| `fast_daemon_install` | 把 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 复制进场景临时目录，配合假 `systemctl` 与隔离 `XDG_CONFIG_HOME` 验证 `lattice daemon install`，不调用宿主 `systemctl` |
 | `--workspace --release` | 仅切测试二进制 profile，不替换 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` |
 
 ### 显式 feature 目标

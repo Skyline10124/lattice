@@ -2260,6 +2260,7 @@ dependencies = [
  "lattice-session",
  "lattice-tui",
  "libc",
+ "rustix",
  "serde_json",
  "tempfile",
  "tokio",

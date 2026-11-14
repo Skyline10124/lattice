@@ -36,7 +36,7 @@ pub use lattice_ipc::{
     TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary, ViewUpdate, WATCH_TURNS,
     parse_drain_timeout,
 };
-pub use lattice_store::StateLayout;
+pub use lattice_store::{StateLayout, xdg_state_root};
 pub use logging::init_logging;
 pub use login::{AuthLoginEvent, LocalAuthLogin, SensitiveLoginUrl};
 pub use operation::{ConfigureOutcome, DetachReport, LocalTurn, STREAM_IDLE_TIMEOUT_SECS};

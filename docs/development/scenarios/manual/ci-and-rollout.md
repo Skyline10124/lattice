@@ -48,6 +48,6 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `verdict: "pass"` | 7 步（`clean_worktree` 至 `offline_correctness`）全 `passed`（测试步骤 `passed > 0`，release 产物不启用测试 feature） |
-| `verdict: "fail"`（退出 `1`） | 某步 `failed`，后续 `blocked`；查记录中的 `detail` 与 `failure_artifacts` |
+| `verdict: "pass"` | 7 步（`clean_worktree` 至 `offline_correctness`）全 `passed`：`build_release_locked` 构建无测试 feature 的 `lattice` 与 `lattice-daemon`，`artifact_identity` 将两者的 `name`、`path`、`sha256`、`size_bytes` 写入 `schema_version: 2` 记录的 `artifacts`（缺任一产物该步即 `failed`），`direct_local` 同时注入 release 的 `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 且测试步骤 `passed > 0` |
+| `verdict: "fail"`（退出 `1`） | 某步 `failed`（含任一 release 产物缺失或散列失败），后续 `blocked`；查记录中的 `detail` 与 `failure_artifacts` |
 | `verdict: "fail"`（退出 `2`） | 工作树脏、Git 失败或参数错误；查 `rejection` |

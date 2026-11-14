@@ -25,6 +25,7 @@ status: active
 | 入口 | 与后台的关系 |
 | --- | --- |
 | `lattice` 的 `run`、`session`、`tui`、`auth`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台） |
+| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload` 与 `systemctl --user enable --now lattice`（不支持 `--json`） |
 | `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT` 或 IPC `stop` 停机并在排空开始时发出 `STOPPING=1` |
 
 ## 判读结果
@@ -35,7 +36,7 @@ status: active
 | --- | --- |
 | `0` | 命令成功。`run`、`session send` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；纯查询只表示读取成功，业务结局看 `TurnSummary`；`lattice-daemon` 表示在途工作排空完成且无运行错误 |
 | `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，后台未运行（`not_running`），`daemon status`、`daemon stop` 读到非零 `unconfirmed_operations`（`daemon stop` 另在标准错误提示有未确认收尾的操作），以及其余行之外的后台与运行错误（如 `Busy`、`Stopping`、`Transport`） |
-| `2` | 使用错误或取消：参数错误（含 `lattice-daemon` 缺 `--state-root`、相对路径或无效 `--drain-timeout`），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
+| `2` | 使用错误或取消：参数错误（含 `lattice-daemon` 缺 `--state-root`、相对路径、无效或溢出的 `--drain-timeout`，以及 `lattice daemon install` 找不到同目录有效用户可执行的 `lattice-daemon`、传入 `--json` 或可执行路径 / 状态根含无法写入 systemd unit 的字符），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
 | `3` | `lattice-daemon` 取不到 `owner.lock`（状态根已被另一个后台占用，能连上已发布 socket 时附对端进程号） |
 | `4` | `lattice-daemon` 排空超时，或排空期间收到 `SIGTERM`、`SIGINT`；在途操作停止写入，见[停止后台](../architecture/session/recovery.md#停止后台) |
 

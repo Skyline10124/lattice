@@ -6,9 +6,9 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 扁平显式重导出客户端句柄、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`、`lattice-conversation` 与 `StateLayout` 类型，以及 `test-utils` 下的 `Departure` 与 `test_support` |
+| `src/lib.rs` | 扁平显式重导出客户端句柄、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`、`lattice-conversation`、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
 | `src/endpoint.rs` | 本地 Unix socket 端点路径校验、客户端建连与对端有效 UID 核验，以及等待 socket 撤下与 `owner.lock` 释放的 `Departure` |
-| `src/client.rs` | `LocalClient`（连接已运行后台完成单次请求/查询、`stop` 后等待 `Departure`、`auth_login` 握手；不自动启动后台）与 `LocalWatch`（持续读取任务、观察流驱动与按 `STREAM_IDLE_TIMEOUT_SECS` 的有执行者观察 idle 判定） |
+| `src/client.rs` | `LocalClient`（连接已运行后台完成单次请求/查询、`status_with_peer_pid` 经同一连接的 `SO_PEERCRED` 读取对端进程号、`stop` 后等待 `Departure`、`auth_login` 握手；不自动启动后台）与 `LocalWatch`（持续读取任务、观察流驱动与按 `STREAM_IDLE_TIMEOUT_SECS` 的有执行者观察 idle 判定） |
 | `src/operation.rs` | `LocalTurn`（提交请求、取消意图登记、5 秒回执等待与一次补发、按 `TurnId` 找回及 `detach` 退出交接）、`DetachReport`、`ConfigureOutcome` 与 `STREAM_IDLE_TIMEOUT_SECS`（`300` 秒） |
 | `src/login.rs` | `LocalAuthLogin`（持续读取任务保留半帧进度、发送 `callback`/`cancel`、Drop 中止读任务并清零缓冲）、`AuthLoginEvent` 与只提供 `new` / `expose` 的 `SensitiveLoginUrl` |
 | `src/logging.rs` | `init_logging`：将日志输出到 stderr，依据交互终端状态与 `NO_COLOR` 控制 ANSI 颜色，保持 stdout 专供结构化输出 |

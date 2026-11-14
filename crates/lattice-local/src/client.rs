@@ -55,13 +55,27 @@ impl LocalClient {
     }
 
     pub async fn status(&self) -> Result<DaemonStatus> {
-        match tokio::time::timeout(Duration::from_secs(5), self.call(Request::Status))
-            .await
-            .map_err(|_| LocalError::new(LocalErrorKind::Transport, "backend status timed out"))??
-        {
-            Response::Status(status) => Ok(status),
-            _ => Err(protocol()),
-        }
+        let (status, _) = self.status_with_peer_pid(Duration::from_secs(5)).await?;
+        Ok(status)
+    }
+
+    /// 在给定截止时间内查询一次后台状态，并从同一条已连接套接字经 `SO_PEERCRED` 读取对端进程号。
+    pub async fn status_with_peer_pid(
+        &self,
+        timeout: Duration,
+    ) -> Result<(DaemonStatus, Option<i32>)> {
+        tokio::time::timeout(timeout, async {
+            let mut stream = endpoint::connect(self.layout.clone()).await?;
+            let peer_pid = ipc::peer_pid(&stream);
+            ipc::write_request(&mut stream, &Request::Status).await?;
+            match ipc::ResponseReader::default().read(&mut stream).await? {
+                Response::Status(status) => Ok((status, peer_pid)),
+                Response::Error(error) => Err(error),
+                _ => Err(protocol()),
+            }
+        })
+        .await
+        .map_err(|_| LocalError::new(LocalErrorKind::Transport, "查询后台状态超时"))?
     }
 
     /// 回执之后再等 socket 撤下、`owner.lock` 可取得才返回，调用方随即可在同一 STATE_ROOT 启动新后台。
