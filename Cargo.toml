@@ -65,7 +65,7 @@ urlencoding = "2"
 uuid = { version = "1", features = ["v4"] }
 zeroize = { version = "1", features = ["derive"] }
 libc = "0.2"
-# 凭据文件读写与所有权核验（`lattice-llm`：openat/renameat/unlinkat/geteuid）、
+# 私有目录与文件读写及所有权核验（`lattice-store`：openat/mkdirat/renameat/unlinkat/geteuid）、
 # 本地 IPC 对端身份核验（`lattice-ipc`：geteuid/socket_peercred）、
 # 本地后台、守护进程与客户端系统调用（`lattice-server`、`lattice-daemon`、`lattice-local`：flock/recv/sendto/connect/socket_peercred）、
 # 会话库创建时带 `NOREPLACE` 的原子发布重命名（`lattice-session`），以及测试构造 FIFO。

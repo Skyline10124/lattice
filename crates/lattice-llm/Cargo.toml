@@ -9,6 +9,7 @@ description = "LATTICE LLM vocabulary and function-call facade"
 [dependencies]
 net-guard = { workspace = true }
 lattice-conversation = { workspace = true }
+lattice-store = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -27,7 +28,6 @@ urlencoding = { workspace = true }
 reqwest = { workspace = true }
 bytes = { workspace = true }
 zeroize = { workspace = true }
-rustix = { workspace = true, features = ["process"] }
 rustls-native-certs = "0.8.4"
 rustls = { workspace = true }
 tokio = { workspace = true }

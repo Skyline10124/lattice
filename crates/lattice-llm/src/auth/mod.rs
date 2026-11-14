@@ -3,14 +3,20 @@
 
 //! 后台凭据库：按当前注册表校验操作，严格读取并原子替换 auth.json。
 
-use std::{collections::BTreeMap, fmt, path::PathBuf, sync::Mutex};
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    fmt,
+    path::{Path, PathBuf},
+    sync::Mutex,
+};
 
+use lattice_store::{PrivateDirectory, PrivateFileError, PrivateFileOperation};
 use serde::{Deserialize, Serialize};
-use zeroize::{Zeroize, ZeroizeOnDrop};
+use zeroize::{Zeroize, ZeroizeOnDrop, Zeroizing};
 
 use crate::provider::{Auth, config::ProviderRegistry};
 
-mod file;
 mod format;
 mod siwc;
 
@@ -19,10 +25,11 @@ pub use siwc::{
 };
 
 /// 元数据缓存与凭据共用配置目录的创建和安全检查，不读取凭据文件。
-pub(crate) fn ensure_configuration_directory(path: &std::path::Path) -> Result<(), AuthError> {
-    file::Directory::open(path, true).map(|_| ())
+pub(crate) fn ensure_configuration_directory(path: &Path) -> Result<(), AuthError> {
+    CredentialDirectory::open_or_create(path).map(|_| ())
 }
 
+const AUTH_FILE_NAME: &str = "auth.json";
 const MAX_KEY_BYTES: usize = 16_384;
 const MAX_FILE_BYTES: usize = 1_048_576;
 // 锁覆盖读取、修改和发布；多个库句柄也不能覆盖彼此的更新。
@@ -62,6 +69,120 @@ impl AuthError {
             kind: error.into().kind(),
         }
     }
+}
+
+impl From<PrivateFileError> for AuthError {
+    fn from(error: PrivateFileError) -> Self {
+        match error {
+            PrivateFileError::InvalidName => Self::Internal("invalid credential file name"),
+            PrivateFileError::WrongOwner => {
+                Self::InvalidFile("file and directory must belong to the current user")
+            }
+            PrivateFileError::NotADirectory | PrivateFileError::DirectorySymlink => {
+                Self::InvalidFile(
+                    "configuration directory must be a directory, not a symbolic link",
+                )
+            }
+            PrivateFileError::BroadDirectoryPermissions => Self::InvalidFile(
+                "configuration directory permissions are too broad; group and other permissions must be absent; permissions were not changed",
+            ),
+            PrivateFileError::DirectoryDisappeared => {
+                Self::Internal("configuration directory disappeared")
+            }
+            PrivateFileError::NotARegularFile => {
+                Self::InvalidFile("credential file must be a regular file")
+            }
+            PrivateFileError::FileSymlink => {
+                Self::InvalidFile("credential file must not be a symbolic link")
+            }
+            PrivateFileError::BroadFilePermissions => Self::InvalidFile(
+                "credential file must not grant group or other permissions; permissions were not changed",
+            ),
+            PrivateFileError::FileTooLarge { .. } => Self::InvalidFile("file exceeds 1 MiB"),
+            PrivateFileError::DirectorySyncAfterReplace { source } => Self::io(
+                "sync directory after replacement (file may already have changed)",
+                source,
+            ),
+            PrivateFileError::Io { operation, source } => {
+                let operation = match operation {
+                    PrivateFileOperation::CreateDirectory => "create configuration directory",
+                    PrivateFileOperation::OpenDirectory | PrivateFileOperation::OpenFile => {
+                        "open credential file or directory"
+                    }
+                    PrivateFileOperation::InspectDirectory | PrivateFileOperation::InspectFile => {
+                        "inspect credential file or directory"
+                    }
+                    PrivateFileOperation::ReadFile => "read credential file",
+                    PrivateFileOperation::CreateTemporaryFile => "create temporary credential file",
+                    PrivateFileOperation::InspectTemporaryFile => {
+                        "inspect temporary credential file"
+                    }
+                    PrivateFileOperation::WriteTemporaryFile => "write temporary credential file",
+                    PrivateFileOperation::SyncTemporaryFile => "sync temporary credential file",
+                    PrivateFileOperation::ReplaceFile => "replace credential file",
+                };
+                Self::io(operation, source)
+            }
+        }
+    }
+}
+
+struct CredentialDirectory(PrivateDirectory);
+
+impl CredentialDirectory {
+    fn open(path: &Path) -> Result<Option<Self>, AuthError> {
+        PrivateDirectory::open(path)
+            .map(|dir| dir.map(Self))
+            .map_err(AuthError::from)
+    }
+
+    fn open_or_create(path: &Path) -> Result<Self, AuthError> {
+        PrivateDirectory::open_or_create(path)
+            .map(Self)
+            .map_err(AuthError::from)
+    }
+
+    fn read(&self) -> Result<format::Document, AuthError> {
+        match self
+            .0
+            .read(OsStr::new(AUTH_FILE_NAME), Some(MAX_FILE_BYTES))?
+        {
+            Some(bytes) => format::parse(&bytes),
+            None => Ok(format::Document::default()),
+        }
+    }
+
+    fn write(&self, document: &format::Document) -> Result<(), AuthError> {
+        let bytes = encode_document(document)?;
+        self.0
+            .replace(OsStr::new(AUTH_FILE_NAME), &bytes)
+            .map_err(AuthError::from)
+    }
+
+    fn write_guarded<G>(
+        &self,
+        document: &format::Document,
+        before_publish: impl FnOnce() -> Result<G, UpdateError>,
+        published: impl FnOnce(&mut G),
+    ) -> Result<(), UpdateError> {
+        let bytes = encode_document(document)?;
+        self.0.replace_guarded(
+            OsStr::new(AUTH_FILE_NAME),
+            &bytes,
+            before_publish,
+            published,
+        )
+    }
+}
+
+fn encode_document(document: &format::Document) -> Result<Zeroizing<Vec<u8>>, AuthError> {
+    let mut bytes = Zeroizing::new(Vec::new());
+    serde_json::to_writer(&mut *bytes, document)
+        .map_err(|_| AuthError::Internal("cannot encode credentials"))?;
+    if bytes.len() > MAX_FILE_BYTES {
+        return Err(AuthError::InvalidFile("file exceeds 1 MiB"));
+    }
+    Ok(bytes)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -118,13 +239,19 @@ impl From<AuthError> for UpdateError {
     }
 }
 
+impl From<PrivateFileError> for UpdateError {
+    fn from(error: PrivateFileError) -> Self {
+        Self::Storage(AuthError::from(error))
+    }
+}
+
 impl AuthStore {
     pub fn new(directory: PathBuf) -> Self {
         Self { directory }
     }
 
     pub(crate) fn load(&self) -> Result<Credentials, AuthError> {
-        let document = file::Directory::open(&self.directory, false)?.map_or_else(
+        let document = CredentialDirectory::open(&self.directory)?.map_or_else(
             || Ok(format::Document::default()),
             |directory| directory.read(),
         )?;
@@ -140,10 +267,11 @@ impl AuthStore {
         let _writer = WRITER
             .lock()
             .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
-        let directory = file::Directory::open(&self.directory, false)?;
-        let mut document = directory
-            .as_ref()
-            .map_or_else(|| Ok(format::Document::default()), file::Directory::read)?;
+        let directory = CredentialDirectory::open(&self.directory)?;
+        let mut document = directory.as_ref().map_or_else(
+            || Ok(format::Document::default()),
+            CredentialDirectory::read,
+        )?;
         if document.providers.get("chatgpt") != expected.0.providers.get("chatgpt") {
             return Err(UpdateError::Conflict);
         }
@@ -168,8 +296,7 @@ impl AuthStore {
         let _writer = WRITER
             .lock()
             .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
-        let directory = file::Directory::open(&self.directory, true)?
-            .ok_or(AuthError::Internal("configuration directory disappeared"))?;
+        let directory = CredentialDirectory::open_or_create(&self.directory)?;
         let mut document = directory.read()?;
         if document.providers.get("chatgpt") != expected.0.providers.get("chatgpt") {
             return Err(UpdateError::Conflict);
@@ -226,8 +353,7 @@ impl AuthStore {
             return Err(AuthError::UnsupportedAuth);
         }
         validate_key(key)?;
-        let directory = file::Directory::open(&self.directory, true)?
-            .ok_or(AuthError::Internal("configuration directory disappeared"))?;
+        let directory = CredentialDirectory::open_or_create(&self.directory)?;
         let mut document = directory.read()?;
         document.providers.insert(
             provider.id.as_str().to_owned(),
@@ -243,7 +369,7 @@ impl AuthStore {
             .lock()
             .map_err(|_| AuthError::Internal("credential writer lock is unavailable"))?;
         // 删除不要求仍在注册表中，便于清理已从 providers.toml 移除的 API key。
-        let directory = file::Directory::open(&self.directory, false)?;
+        let directory = CredentialDirectory::open(&self.directory)?;
         let mut document = match directory.as_ref() {
             Some(directory) => directory.read()?,
             None => format::Document::default(),
@@ -259,7 +385,7 @@ impl AuthStore {
         let removed = document.providers.remove(provider).is_some();
         if removed {
             directory
-                .expect("existing credential has a directory")
+                .expect("已有凭据条目时目录必然存在")
                 .write(&document)?;
         }
         Ok(removed)

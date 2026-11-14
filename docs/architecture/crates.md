@@ -29,6 +29,7 @@ flowchart LR
     SERVER --> AGENT["lattice-agent"]
     SERVER --> SESSION["lattice-session"]
     SERVER --> CONV
+    LLM --> STORE
     IPC --> SESSION
     IPC --> CONV
 ```
