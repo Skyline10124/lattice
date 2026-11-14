@@ -1,10 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! External system harness for the `lattice` binary.
+//! 面向已构建 `lattice` 二进制的外置全系统验收套件。
 //!
-//! This crate must not depend on any `lattice-*` or workspace product
-//! crate. It only drives a pre-built binary from `LATTICE_BIN`.
+//! 本 crate 不得依赖任何 `lattice-*` 或工作区内的产品 crate，只通过 `LATTICE_BIN` 驱动已构建的二进制。
 
 pub mod artifacts;
 mod assert;

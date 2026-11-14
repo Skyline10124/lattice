@@ -1,13 +1,13 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `PtyTuiDriver`：经 PTY 驱动 TUI，用于冒烟场景。
+//! `PtyTuiDriver`：经伪终端（PTY）驱动 TUI，用于冒烟场景。
 //!
-//! 依据 #41 的第三项决定，PTY 只用于一两个冒烟场景，证明 TUI 入口仍接到与 CLI 相同的
+//! 依据 #41 的第三项决定，PTY 只用于少数冒烟场景，证明 TUI 入口仍接入与 CLI 相同的
 //! 后台提交与执行链路。颜色、提示符形状与布局属于展示细节，场景断言只核对行为；就绪
-//! 识别（进入备用屏幕）与 ANSI 清理都在本驱动内部完成。
+//! 识别（进入备用屏幕）与 ANSI 转义清理都在本驱动内部完成。
 //!
-//! 只支持 Linux。驱动基于通用测试库 `portable-pty`，符合 harness 的依赖边界。
+//! 只支持 Linux。驱动基于通用测试库 `portable-pty`，符合测试套件的依赖边界。
 
 use std::io::{Read, Write};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
@@ -20,66 +20,49 @@ use thiserror::Error;
 use crate::driver::{LatticeDriver, kill_process_group};
 use crate::world::ScenarioWorld;
 
-/// Max bytes drained from the PTY before we stop reading. A full-screen TUI
-/// redraws whole frames, so byte count is no longer proportional to visible
-/// content. 4 MiB bounds a runaway painter without treating a normal session
-/// as a display bug.
+/// 从 PTY 持续读取的最大字节预算。全屏 TUI 会重绘整帧，字节数与可见文本长度不再成正比；
+/// 4 MiB 既能约束失控的死循环重绘，又不会将正常会话误判为输出超限。
 const READ_BUDGET: usize = 4 * 1024 * 1024;
 
-/// CSI enter-alternate-screen (`ESC [ ? 1049 h`). Terminal protocol, not a
-/// presentation detail — this is how the driver knows the full-screen TUI
-/// has taken over the PTY and is ready for input.
+/// CSI 进入备用屏幕序列（`\x1b[?1049h`）。这是终端协议事实而非视觉布局细节，
+/// 驱动借此判定全屏 TUI 已接管 PTY 并准备好接收输入。
 const ENTER_ALTERNATE_SCREEN: &[u8] = b"\x1b[?1049h";
 
 #[derive(Debug, Error)]
 pub enum PtyError {
-    #[error("pty io: {0}")]
+    #[error("伪终端读写失败: {0}")]
     Io(#[from] std::io::Error),
-    #[error("pty: {0}")]
+    #[error("伪终端错误: {0}")]
     Pty(String),
-    /// Timed out waiting for output. Carries a bounded, ANSI-stripped tail of
-    /// what the TUI *did* emit: without it a quiet TUI is indistinguishable
-    /// from a dead one, which turns a one-line bug into a blind CI timeout.
-    #[error("tui did not produce matching output within {0:?}; last output: {1:?}")]
+    /// 等待匹配输出超时；附带一段剥离 ANSI 转义后的有界末尾输出，以便区分静默等待与进程卡死。
+    #[error("TUI 未在 {0:?} 内产出匹配输出；末尾输出: {1:?}")]
     Timeout(Duration, String),
 }
 
-/// A live PTY-backed TUI session. Drop kills and reaps the child so no TUI
-/// process survives the scenario (PRD user story 20: process-group cleanup).
+/// 绑定在活跃 PTY 上的 TUI 会话驱动；`Drop` 时终止并回收子进程，确保场景结束后无残留进程。
 pub struct PtyTuiDriver {
-    /// Kept alive so the PTY stays open; the reader thread owns a clone.
+    /// 保持存活以维持主端打开；后台读取线程持有其克隆读取端。
     #[allow(dead_code)]
     master: Box<dyn MasterPty + Send>,
     master_writer: Box<dyn Write + Send>,
-    /// Chunks drained by a background reader thread. The thread owns the only
-    /// blocking read, so `drain_until` can honour its deadline instead of
-    /// parking forever on a quiet PTY.
+    /// 后台读取线程排空的输出块通道。阻塞读取仅发生在该后台线程内，
+    /// 使 `drain_until` 在 PTY 静默时仍能严格遵守截止时间。
     rx: Receiver<Vec<u8>>,
-    /// Used to kill the child directly (best-effort) on drop/timeout.
+    /// 在 `Drop` 或超时时尽力直接终止子进程。
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
-    /// The child itself, kept so `kill_and_reap` can `try_wait` to reap the
-    /// zombie after SIGKILL. Without this, the killed child becomes a zombie
-    /// whose PID still appears in `/proc/<pid>/stat` with the same pgrp,
-    /// causing `processes_in_pgid` to report it as a "live member" even
-    /// though it is dead-but-unreaped.
+    /// 子进程句柄，供 `kill_and_reap` 在发送 `SIGKILL` 后经 `try_wait` 回收僵尸进程；
+    /// 否则僵尸进程仍会留在 `/proc/<pid>/stat` 中占用同一进程组号。
     child: Option<Box<dyn portable_pty::Child + Send + Sync>>,
-    /// The process-group leader pid reported by the master, as a `u32` to
-    /// match `driver::kill_process_group` and `driver::processes_in_pgid`
-    /// (which both key off `std::process::Child::id()` → `u32`). Used to
-    /// kill the whole group (TUI -> lattice -> fake-LLM sockets) on
-    /// timeout. `None` when the PTY did not report a valid positive leader.
+    /// 主端报告的进程组首领 PID（转为 `u32` 以对齐 `driver::kill_process_group` 与 `processes_in_pgid`）；
+    /// 未报告有效正整数首领时为 `None`。
     pgid: Option<u32>,
-    /// The full drained PTY output so far (raw, ANSI preserved).
+    /// 迄今已排空的完整原始 PTY 输出（保留 ANSI 序列）。
     output: Vec<u8>,
 }
 
 impl PtyTuiDriver {
-    /// Spawn `lattice tui --agent <agent>` in a
-    /// PTY inside the scenario world. The fake LLM env must already be wired
-    /// into the world. The child runs in a new session/process group under
-    /// the PTY; `portable-pty` sets it as the controlling terminal, so
-    /// `process_group_leader()` returns its pgid and `kill -KILL -<pgid>`
-    /// cleans up the whole tree.
+    /// 在场景世界的 PTY 中启动 `lattice tui --agent <agent>`（假 provider 须已提前接线）。
+    /// 子进程在 PTY 控制终端的新会话与进程组中运行，`process_group_leader()` 返回其进程组号。
     pub fn spawn(
         driver: &LatticeDriver,
         world: &ScenarioWorld,
@@ -125,11 +108,8 @@ impl PtyTuiDriver {
             .spawn_command(cmd)
             .map_err(|e| PtyError::Pty(e.to_string()))?;
         let killer = child.clone_killer();
-        // `process_group_leader` reports an `i32` (pid_t); a real leader is
-        // positive, so non-positive values collapse to `None`. Cast to `u32`
-        // to unify with `driver::kill_process_group` / `processes_in_pgid`
-        // (which key off `Child::id()` → `u32`), removing the `as u32` casts
-        // that previously lived at every call site.
+        // `process_group_leader` 返回 `i32`（`pid_t`）；有效组首领必为正整数，非正值折叠为 `None`，
+        // 并统一转为 `u32` 以匹配 `driver::kill_process_group` 与 `processes_in_pgid`。
         let pgid = pair
             .master
             .process_group_leader()
@@ -141,13 +121,11 @@ impl PtyTuiDriver {
             .take_writer()
             .map_err(|e| PtyError::Pty(e.to_string()))?;
 
-        // Drop the slave so EOF propagates to the child when the master closes.
+        // 立即释放从端，使主端关闭时能向子进程传递 EOF。
         drop(pair.slave);
 
-        // One blocking read lives in this thread; the driver only ever waits on
-        // the channel. A full-screen TUI is silent whenever nothing changes, so
-        // a deadline that is only checked *after* a read returns is no deadline
-        // at all — it parks until the process dies.
+        // 唯一的阻塞读取留在该后台线程内，驱动本身只在通道上按超时等待；
+        // 全屏 TUI 在画面无变化时完全静默，若等 `read` 返回后再检查截止时间就会无限挂起。
         let mut reader = pair
             .master
             .try_clone_reader()
@@ -178,15 +156,10 @@ impl PtyTuiDriver {
         })
     }
 
-    /// Send a line to the TUI's prompt input, terminated by `\r` (carriage
-    /// return) — what a real terminal sends when the user presses Enter.
+    /// 向 TUI 输入框发送一行并以回车符 `\r` 结尾（与真实终端按下回车键时发送的字节一致）。
     ///
-    /// `\r`, not `\n`, is load-bearing. The full-screen TUI runs in raw mode,
-    /// and crossterm only maps `\n` to `KeyCode::Enter` when raw mode is
-    /// *disabled* (crossterm issue #371: with the line discipline off, `\n`
-    /// is Ctrl+J, not Enter). A line terminated by `\n` therefore lands in the
-    /// input buffer and is never submitted — the turn silently never starts.
-    /// The inline REPL tolerated `\n` because readline ran in cooked mode.
+    /// 必须使用 `\r` 而非 `\n`：全屏 TUI 运行在 raw 模式下，`crossterm` 在 raw 模式关闭行规程后
+    /// 会将 `\n` 解析为 Ctrl+J 而非 `KeyCode::Enter`（`crossterm` #371），用 `\n` 结尾只会留在输入缓冲区中而不会提交。
     pub fn send_line(&mut self, line: &str) -> Result<(), PtyError> {
         self.master_writer
             .write_all(line.as_bytes())
@@ -195,23 +168,17 @@ impl PtyTuiDriver {
         Ok(())
     }
 
-    /// 原始按键不自动附加 Enter，供取消与只断开的产品交互使用。
+    /// 发送原始按键字节而不自动附加回车，供取消与仅断开连接的产品交互使用。
     pub fn send_keys(&mut self, keys: &[u8]) -> Result<(), PtyError> {
         self.master_writer.write_all(keys)?;
         self.master_writer.flush()?;
         Ok(())
     }
 
-    /// Drain PTY output until `predicate` returns `true` on the accumulated
-    /// output (with ANSI escapes stripped and consecutive whitespace collapsed
-    /// for matching only), or until `timeout` elapses. Returns the raw
-    /// accumulated bytes on success.
+    /// 持续读取 PTY 输出，直到剥离 ANSI 转义并折叠连续空白后的累积文本满足 `predicate`，
+    /// 或超出 `timeout`；成功时返回累积的原始字节。
     ///
-    /// The predicate matches against ANSI-stripped, whitespace-collapsed text
-    /// so a smoke scenario can wait for a semantic marker (e.g. a token, a
-    /// status word) without depending on colors, cursor moves, or 24×80 wrap
-    /// — keeping presentation details out of the long-term contract (RFC #41
-    /// decision three / five).
+    /// 谓词针对剥离转义并折叠空白后的语义文本匹配，使冒烟场景无需耦合颜色、光标移动或 24x80 折行位置。
     pub fn wait_for(
         &mut self,
         timeout: Duration,
@@ -223,8 +190,8 @@ impl PtyTuiDriver {
         })
     }
 
-    /// 用原生 resize 请求完整重绘，返回一个已完成帧的文字而非历史输出拼接。
-    /// 仅用于内容稳定的 gate 窗口；不模拟通用终端，也不检查布局或颜色。
+    /// 用原生窗口大小调整触发完整重绘，返回单个已完成帧的文本而非历史输出拼接。
+    /// 仅用于画面稳定的门闩窗口；不模拟通用终端，也不检查布局或颜色。
     pub fn redraw_text(&mut self, timeout: Duration) -> Result<String, PtyError> {
         let offset = self.output.len();
         let mut size = self
@@ -236,13 +203,12 @@ impl PtyTuiDriver {
             .resize(size)
             .map_err(|e| PtyError::Pty(e.to_string()))?;
         self.drain_until(timeout, |raw| full_redraw(&raw[offset..]).is_some())?;
-        let frame = full_redraw(&self.output[offset..]).expect("completed redraw");
+        let frame = full_redraw(&self.output[offset..]).expect("重绘帧必须完整");
         Ok(collapse_ws(&strip_ansi(&String::from_utf8_lossy(frame))))
     }
 
-    /// Drain PTY output until `predicate` returns `true` on the accumulated
-    /// **raw** bytes (ANSI preserved). Used for terminal-protocol facts such
-    /// as alternate-screen enter, which `strip_ansi` would remove.
+    /// 持续读取 PTY 输出，直到保留 ANSI 序列的累积原始字节满足 `predicate`；
+    /// 用于检测进入备用屏幕等会被 `strip_ansi` 剥离的终端协议序列。
     pub fn wait_for_raw(
         &mut self,
         timeout: Duration,
@@ -251,16 +217,8 @@ impl PtyTuiDriver {
         self.drain_until(timeout, predicate)
     }
 
-    /// Wait until the TUI has entered the alternate screen. This is the
-    /// **ready-recognition seam**: the sequence `\x1b[?1049h` lives inside
-    /// the driver, never in a scenario (RFC #41 decision three — "prompt
-    /// recognition and ANSI cleanup only exist inside the driver; scenarios
-    /// assert no display details"). A scenario that needs to know the TUI is
-    /// ready for input calls this, not `wait_for(..., |s| s.contains('>'))`.
-    ///
-    /// Alternate-screen enter is a terminal protocol fact, not a presentation
-    /// detail, and is stricter than matching a prompt character the
-    /// full-screen shell never prints.
+    /// 等待 TUI 进入备用屏幕。该序列 `\x1b[?1049h` 封装在驱动内部而绝不散落到场景中：
+    /// 场景需要确认 TUI 已可接收输入时统一调用本方法，而非匹配提示符字符。
     pub fn wait_for_ready(&mut self, timeout: Duration) -> Result<Vec<u8>, PtyError> {
         self.wait_for_raw(timeout, |bytes| {
             bytes
@@ -275,7 +233,7 @@ impl PtyTuiDriver {
         mut predicate: impl FnMut(&[u8]) -> bool,
     ) -> Result<Vec<u8>, PtyError> {
         let start = Instant::now();
-        // The predicate may already hold (bytes drained by an earlier wait).
+        // 先前等待期间已排空的字节可能已经满足条件。
         if predicate(&self.output) {
             return Ok(self.output.clone());
         }
@@ -292,7 +250,7 @@ impl PtyTuiDriver {
                     self.output.extend_from_slice(&chunk);
                     if self.output.len() > READ_BUDGET {
                         return Err(PtyError::Pty(format!(
-                            "PTY output exceeded {READ_BUDGET} byte budget"
+                            "伪终端输出超出 {READ_BUDGET} 字节上限"
                         )));
                     }
                     if predicate(&self.output) {
@@ -300,19 +258,18 @@ impl PtyTuiDriver {
                     }
                 }
                 Err(RecvTimeoutError::Timeout) => {}
-                // Reader thread ended: the child closed the PTY. Nothing more
-                // can arrive, so fail now rather than burning the deadline.
+                // 读取线程已结束（子进程关闭了伪终端），后续不会再有新字节到达，立即失败而不空耗剩余超时预算。
                 Err(RecvTimeoutError::Disconnected) => {
                     return Err(PtyError::Timeout(
                         start.elapsed(),
-                        format!("pty closed; {}", self.tail_for_diagnostics()),
+                        format!("伪终端已关闭；{}", self.tail_for_diagnostics()),
                     ));
                 }
             }
         }
     }
 
-    /// Bounded, ANSI-stripped tail of the drained output, for error messages.
+    /// 剥离 ANSI 转义并限制长度的末尾输出摘要，供错误诊断使用。
     fn tail_for_diagnostics(&self) -> String {
         let text = collapse_ws(&strip_ansi(&String::from_utf8_lossy(&self.output)));
         let tail: String = text
@@ -326,56 +283,41 @@ impl PtyTuiDriver {
         tail
     }
 
-    /// The accumulated raw PTY output so far.
+    /// 迄今累积的原始 PTY 输出字节。
     pub fn output(&self) -> &[u8] {
         &self.output
     }
 
-    /// The child's process-group leader pid (if the PTY reports one), as a
-    /// `u32` matching `driver::kill_process_group` / `processes_in_pgid`.
+    /// 子进程的进程组首领 PID（若 PTY 报告了有效值），类型为与 `driver::kill_process_group` 一致的 `u32`。
     pub fn pgid(&self) -> Option<u32> {
         self.pgid
     }
 
-    /// Kill the whole process group and reap the child. Best-effort: errors
-    /// are swallowed because the priority is "no orphaned TUI / sandbox
-    /// children", not precise error reporting. Delegates to the shared
-    /// `driver::kill_process_group` so the `kill -KILL -<pgid>` shape exists
-    /// in exactly one place. Reaps the direct child with a short `try_wait`
-    /// poll so it does not linger as a zombie — a zombie's PID is still in
-    /// `/proc/<pid>/stat` with the same pgrp, which would make
-    /// `processes_in_pgid` report it as a "live member".
+    /// 终止整个进程组并尽力回收直接子进程。
+    /// 统一委托 `driver::kill_process_group` 发送组信号，并以有界 `try_wait` 轮询回收子进程，避免留下僵尸进程。
     pub fn kill_and_reap(&mut self) {
         let _ = self.killer.kill();
         if let Some(pgid) = self.pgid {
             kill_process_group(pgid);
         }
-        // Reap the direct child: poll try_wait for up to ~2s. The child was
-        // just SIGKILL'd (via killer + killpg), so it should exit promptly;
-        // the poll is a bound, not a blocking wait, so a wedged child does
-        // not hang Drop indefinitely.
+        // 以最多 2 秒的有界轮询回收直接子进程，避免卡死的子进程永久阻塞 `Drop`。
         if let Some(mut child) = self.child.take() {
             let deadline = Instant::now() + Duration::from_secs(2);
             while Instant::now() < deadline {
                 match child.try_wait() {
                     Ok(Some(_)) => break,
                     Ok(None) => std::thread::sleep(Duration::from_millis(50)),
-                    Err(_) => break, // not actionable; don't hang Drop
+                    Err(_) => break, // 无法进一步处理，直接跳出以免阻塞 `Drop`
                 }
             }
-            // If still not reaped by the deadline, drop `child` —
-            // portable-pty's Child drop on Linux forgets (no kill/wait), so
-            // the zombie may linger, but we have done our best within a
-            // bounded window.
+            // 若到截止时间仍未回收则丢弃句柄：已在有界窗口内尽力清理。
         }
     }
 
-    /// Wait for the child to exit **on its own**, without killing it.
+    /// 等待子进程自行干净退出而不主动发信号杀死它。
     ///
-    /// A scenario that asserts "`/quit` exits cleanly" must observe the exit
-    /// before `Drop` runs: `kill_and_reap` would make a completely broken
-    /// `/quit` indistinguishable from a working one, since the survivor check
-    /// then only proves that SIGKILL works.
+    /// 验证 `/quit` 等主动退出行为的场景必须在 `Drop` 之前调用本方法观察自然退出，
+    /// 否则 `kill_and_reap` 的 `SIGKILL` 会掩盖 `/quit` 失效的问题。
     pub fn wait_for_exit(&mut self, timeout: Duration) -> Result<(), PtyError> {
         let child = match self.child.as_mut() {
             Some(child) => child,
@@ -386,7 +328,7 @@ impl PtyTuiDriver {
             match child.try_wait() {
                 Ok(Some(status)) if status.success() => return Ok(()),
                 Ok(Some(status)) => {
-                    return Err(PtyError::Pty(format!("TUI exit was not clean: {status}")));
+                    return Err(PtyError::Pty(format!("TUI 未干净退出: {status}")));
                 }
                 Ok(None) => {}
                 Err(e) => return Err(PtyError::Pty(e.to_string())),
@@ -405,8 +347,8 @@ impl Drop for PtyTuiDriver {
     }
 }
 
-// ratatui 的 fullscreen resize 先清屏并重置 back buffer；Crossterm 在
-// 完整字符 diff 后 flush 光标显隐。只截取该帧，排除之前和之后的增量重绘。
+// `ratatui` 的全屏尺寸调整会先清屏并重置后台缓冲区；`crossterm` 在完整字符差异刷新后写出光标显隐序列。
+// 此处只截取该完整帧，排除其前后的增量重绘。
 fn full_redraw(raw: &[u8]) -> Option<&[u8]> {
     let clear = b"\x1b[2J";
     let start = raw.windows(clear.len()).position(|part| part == clear)? + clear.len();
@@ -417,9 +359,8 @@ fn full_redraw(raw: &[u8]) -> Option<&[u8]> {
     Some(&frame[..end])
 }
 
-/// Strip ANSI escape sequences (CSI, OSC, simple escapes) from `text`. Used
-/// only for predicate matching — the raw output is preserved separately so
-/// no display detail ever enters a long-term contract.
+/// 从 `text` 中剥离 ANSI 转义序列（CSI、OSC 与双字符转义），仅用于谓词文本匹配；
+/// 原始输出仍独立保留。
 fn strip_ansi(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -428,10 +369,10 @@ fn strip_ansi(text: &str) -> String {
             out.push(c);
             continue;
         }
-        // ESC consumed; what follows determines the escape kind.
+        // 已消费 ESC，根据紧随其后的字符判定转义类别。
         match chars.next() {
             Some('[') => {
-                // CSI: skip until a 0x40..0x7e terminator.
+                // CSI 序列：跳过参数与中间字节，直到遇到 `0x40..=0x7e` 终止字节。
                 #[allow(clippy::while_let_on_iterator)]
                 while let Some(t) = chars.next() {
                     if ('@'..='~').contains(&t) {
@@ -440,7 +381,7 @@ fn strip_ansi(text: &str) -> String {
                 }
             }
             Some(']') => {
-                // OSC: skip until BEL (\x07) or ST (ESC \).
+                // OSC 序列：跳过内容直到遇到 BEL（`\x07`）或 ST（`\x1b\\`）。
                 #[allow(clippy::while_let_on_iterator)]
                 while let Some(t) = chars.next() {
                     if t == '\x07' {
@@ -453,7 +394,7 @@ fn strip_ansi(text: &str) -> String {
                 }
             }
             Some(other) => {
-                // Simple two-char escape (e.g. ESC c reset).
+                // 简单双字符转义（例如 `\x1bc` 终端重置）。
                 let _ = other;
             }
             None => break,
@@ -462,8 +403,7 @@ fn strip_ansi(text: &str) -> String {
     out
 }
 
-/// Collapse consecutive whitespace (including wrap-induced newlines) to a
-/// single space so scenario predicates match semantic text, not 24×80 layout.
+/// 将连续空白（含折行产生的换行）折叠为单个空格，使场景谓词只匹配语义文本而不耦合固定终端列宽。
 fn collapse_ws(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -481,7 +421,10 @@ mod tests {
             .unwrap()
             + 6;
         for cut in 0..end {
-            assert!(full_redraw(&raw[..cut]).is_none(), "partial frame at {cut}");
+            assert!(
+                full_redraw(&raw[..cut]).is_none(),
+                "位置 {cut} 处的半截帧不应被识别为完整重绘"
+            );
         }
         let frame = full_redraw(raw).unwrap();
         assert_eq!(frame, b"\x1b[1;1Hprefix\x1b[2;1Hprefix");

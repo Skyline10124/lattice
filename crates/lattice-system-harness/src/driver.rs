@@ -28,24 +28,24 @@ pub struct LatticeDriver {
 
 #[derive(Debug, Error)]
 pub enum DriverError {
-    #[error("set {LATTICE_BIN_ENV} to the path of a built lattice binary")]
+    #[error("请将环境变量 {LATTICE_BIN_ENV} 设为已构建 lattice 二进制的路径")]
     MissingLatticeBin,
-    #[error("{LATTICE_BIN_ENV} points to a missing file: {0}")]
+    #[error("{LATTICE_BIN_ENV} 指向的文件不存在: {0}")]
     BinaryNotFound(String),
-    #[error("failed to run lattice: {0}")]
+    #[error("运行 lattice 失败: {0}")]
     Io(#[from] std::io::Error),
-    #[error("command output drain thread panicked")]
+    #[error("命令输出读取线程发生 panic")]
     DrainThreadPanicked,
 }
 
-/// The direct child's observed kernel termination.
+/// 直接子进程被观察到的内核终止结果。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessTermination {
     Exited(i32),
     Signaled(i32),
 }
 
-/// An action the harness requested, retained in request order.
+/// 测试套件主动发起的受控干预，按请求顺序保留。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HarnessIntervention {
     InterruptRequested,
@@ -54,7 +54,7 @@ pub enum HarnessIntervention {
     ForcedKill,
 }
 
-/// One stage of Linux `/proc` process-group inspection.
+/// Linux `/proc` 进程组检查中的单个阶段。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessInspectionOperation {
     ReadProc,
@@ -63,7 +63,7 @@ pub enum ProcessInspectionOperation {
     ParseStat(u32),
 }
 
-/// A fallible operation used to reconcile process-group cleanup.
+/// 收敛进程组清理时执行的可失败操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CleanupOperation {
     SignalProcessGroup(i32),
@@ -72,7 +72,7 @@ pub enum CleanupOperation {
     InspectProcessGroup(ProcessInspectionOperation),
 }
 
-/// One cleanup failure with its operation and complete I/O diagnostics.
+/// 单次清理操作失败及其完整的输入输出诊断信息。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CleanupError {
     pub operation: CleanupOperation,
@@ -96,7 +96,7 @@ impl CleanupError {
     }
 }
 
-/// Forced-cleanup state, operation failures, and final live group members.
+/// 进程组的强制清理状态、操作失败记录以及最终残留的存活成员。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProcessGroupCleanup {
     pub forced: bool,
@@ -110,24 +110,24 @@ impl ProcessGroupCleanup {
     }
 }
 
-/// 一条命令的完整结果：输出字节及其完整性、直接子进程的终止方式、harness 的干预与进程组清理。
+/// 一条命令的完整结果：输出字节及其完整性、直接子进程的终止方式、测试套件的干预与进程组清理。
 ///
 /// [`CommandOutcome::clean_exit_code`] 只在干净退出时给出退出码：两条输出流都读到 EOF，没有
-/// 干预与强制清理，清理成功且没有存活进程。信号、缺失的终止状态或单纯的 exit 0 都不算干净退出。
-/// [`CommandOutcome::summary`] 与 `Debug` 只输出元数据；产品是否 panic 不从信号推断。
+/// 干预与强制清理，清理成功且没有存活进程。信号终止、缺失的终止状态或单纯的退出码 `0` 都不算干净退出。
+/// [`CommandOutcome::summary`] 与 `Debug` 只输出元数据；产品是否发生 panic 不从信号推断。
 #[derive(Clone, PartialEq, Eq)]
 pub struct CommandOutcome {
     pub stdout: Vec<u8>,
     pub stderr: Vec<u8>,
     pub stdout_complete: bool,
     pub stderr_complete: bool,
-    /// `None` only when cleanup could not wait for the direct child.
+    /// 仅当清理阶段无法回收直接子进程时为 `None`。
     pub termination: Option<ProcessTermination>,
     pub interventions: Vec<HarnessIntervention>,
     pub cleanup: ProcessGroupCleanup,
 }
 
-/// Metadata-only command diagnostic. It never renders stdout or stderr bytes.
+/// 仅包含元数据的命令诊断视图，绝不输出 `stdout` 或 `stderr` 原始字节。
 #[derive(Clone, Copy)]
 pub struct CommandOutcomeSummary<'a> {
     outcome: &'a CommandOutcome,
@@ -194,20 +194,17 @@ impl CommandOutcome {
 #[derive(Debug, Clone)]
 pub struct LatticeCommand {
     pub args: Vec<String>,
-    /// Per-invocation wall-clock timeout. `None` waits indefinitely.
+    /// 单次调用的墙钟超时预算；为 `None` 时不设单命令上限。
     pub timeout: Option<Duration>,
 }
 
-/// A spawned command whose output pipes are drained concurrently.
+/// 后台并发排空输出管道的运行中子进程句柄。
 ///
-/// The child is always its process-group leader on Linux. Timeout, interrupt,
-/// and drop cleanup therefore reach descendants as well as the direct child.
+/// 在 Linux 上，直接子进程始终作为自身独立进程组的组首领运行，因此超时、中断与 `Drop` 清理
+/// 都能同时覆盖直接子进程及其派生后代。
 ///
-/// `pgid` is read back from the kernel with `getpgid(child_pid)` rather than
-/// assumed equal to the child pid: a group signal aimed at the wrong group
-/// would hit the test process itself, killing the whole `cargo test` run
-/// (#105). Every group signal additionally refuses to fire when the target
-/// group is this process's own group.
+/// `pgid` 通过 `getpgid(child_pid)` 从内核回读，而不直接假定等于子进程号：若向错误的进程组广播信号，
+/// 可能命中测试进程自身并杀掉整轮 `cargo test`（#105）。每次发送进程组信号前还会再次核验目标组不是本进程自身所在的进程组。
 struct DrainHandle {
     bytes: Arc<std::sync::Mutex<Vec<u8>>>,
     stop: Arc<AtomicBool>,
@@ -229,7 +226,7 @@ impl RunningCommand {
         Self::spawn_with_timeout(command, None)
     }
 
-    /// 正常收尾继承绝对期限；spawn 与后续 wait 都不能重新获得一份旧时长。
+    /// 正常收尾继承绝对期限；`spawn` 与后续 `wait` 都不能重新获得一份旧时长。
     pub(crate) fn spawn_until(command: Command, deadline: Instant) -> std::io::Result<Self> {
         if Instant::now() >= deadline {
             return Err(std::io::Error::new(
@@ -304,7 +301,7 @@ impl RunningCommand {
             .unwrap_or_default()
     }
 
-    /// Remaining command time, capped for one intermediate handshake.
+    /// 当前命令剩余可用时间，按单次中间握手的上限截断。
     pub fn remaining_timeout(&self, cap: Duration) -> Duration {
         self.timeout
             .map(|limit| limit.saturating_sub(self.started_at.elapsed()).min(cap))
@@ -314,7 +311,7 @@ impl RunningCommand {
     /// 非阻塞观察直接子进程是否已退出，不调用 `wait` 提前回收子进程。
     /// 未被回收的组首领会继续占住数值 `pgid`，直到 `wait`、`kill_and_wait` 或 `Drop` 正式回收。
     pub fn has_exited(&mut self) -> std::io::Result<bool> {
-        let pid = self.child.as_ref().expect("running child").id();
+        let pid = self.child.as_ref().expect("运行中的子进程句柄缺失").id();
         loop {
             // SAFETY: `info` 清零初始化；`WEXITED | WNOHANG | WNOWAIT` 只观察退出状态而不消费它。
             let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
@@ -338,7 +335,7 @@ impl RunningCommand {
         }
     }
 
-    /// Deliver a controlled interrupt to the whole process group.
+    /// 向整个进程组发送受控的 `SIGINT` 中断。
     pub fn interrupt(&mut self) -> std::io::Result<()> {
         interrupt_process_group(self.pgid)?;
         self.interventions
@@ -346,7 +343,7 @@ impl RunningCommand {
         Ok(())
     }
 
-    /// Deliver a controlled SIGTERM to the whole process group.
+    /// 向整个进程组发送受控的 `SIGTERM` 终止信号。
     pub fn terminate(&mut self) -> std::io::Result<()> {
         terminate_process_group(self.pgid)?;
         self.interventions
@@ -354,13 +351,12 @@ impl RunningCommand {
         Ok(())
     }
 
-    /// SIGKILL the whole process group and retain bytes drained before death.
+    /// 向整个进程组发送 `SIGKILL` 并保留进程终止前已收集到的输出字节。
     pub fn kill_and_wait(self) -> Result<CommandOutcome, DriverError> {
         self.force_kill_and_finish()
     }
 
-    /// Wait for completion while retaining all bytes drained before cleanup.
-    /// Timeout and interrupt are outcomes, not I/O errors.
+    /// 等待命令完成并保留清理前已收集到的全部输出字节；超时与中断作为结果字段返回，不视为输入输出错误。
     pub fn wait(mut self, timeout: Option<Duration>) -> Result<CommandOutcome, DriverError> {
         let limit = self.timeout.or(timeout);
         loop {
@@ -391,7 +387,7 @@ impl RunningCommand {
                 || processes_in_pgid(self.pgid),
             );
         }
-        let mut child = self.child.take().expect("running child");
+        let mut child = self.child.take().expect("运行中的子进程句柄缺失");
         let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
         self.finish(status, cleanup)
     }
@@ -408,7 +404,7 @@ impl RunningCommand {
             signal_process_group(self.pgid, libc::SIGKILL),
             || processes_in_pgid(self.pgid),
         );
-        let mut child = self.child.take().expect("running child");
+        let mut child = self.child.take().expect("运行中的子进程句柄缺失");
         record_cleanup_result(&mut cleanup, CleanupOperation::KillChild, child.kill());
         let status = record_cleanup_result(&mut cleanup, CleanupOperation::WaitChild, child.wait());
         self.finish(status, cleanup)
@@ -608,7 +604,7 @@ impl LatticeDriver {
         self.start(world, command)?.wait(None)
     }
 
-    /// 用匿名临时文件提供标准输入，秘密不进入参数、Debug 或场景证据。
+    /// 用匿名临时文件提供标准输入，使秘密不进入命令行参数、`Debug` 输出或场景证据。
     pub fn run_with_stdin(
         &self,
         world: &ScenarioWorld,
@@ -654,8 +650,7 @@ impl LatticeDriver {
 
 fn set_nonblocking(stream: &impl AsRawFd) -> std::io::Result<()> {
     let fd = stream.as_raw_fd();
-    // SAFETY: `fd` is a live child-pipe descriptor. `fcntl` reads and updates
-    // only that descriptor's status flags and reports failure through errno.
+    // SAFETY: `fd` 是存活的子进程管道描述符；`fcntl` 仅读写该描述符的状态标志并通过 `errno` 报告失败。
     let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
     if flags < 0 {
         return Err(std::io::Error::last_os_error());
@@ -746,7 +741,7 @@ fn record_process_group_signal_result<F>(
 {
     match result {
         Ok(()) => {}
-        // 清理信号遇到 ESRCH 时立即复核进程组：组已为空才算无害。请求发出的 SIGINT 走另一条路径。
+        // 清理信号遇到 `ESRCH` 时立即复核进程组：组已为空才算无害；主动请求发出的 `SIGINT` 走另一条路径。
         Err(error) if error.raw_os_error() == Some(libc::ESRCH) => {
             let signal_error = CleanupError::new(operation, error);
             match recheck() {
@@ -805,15 +800,13 @@ pub(crate) fn set_new_process_group(cmd: &mut Command) {
     cmd.process_group(0);
 }
 
-/// Read the child's actual process group from the kernel.
+/// 从内核回读子进程实际所属的进程组号。
 ///
-/// `process_group(0)` makes the child its own group leader, so this normally
-/// equals the child pid. Reading it back keeps a failed or unsupported
-/// `setpgid` from silently leaving `pgid` pointing at the harness's own group.
+/// `process_group(0)` 会让子进程成为自身进程组的组首领，因此正常情况下该值等于子进程号；
+/// 显式回读可防止 `setpgid` 失败或不受支持时静默将 `pgid` 留在测试套件自身的进程组上。
 fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
     let pid = child.id();
-    // SAFETY: `getpgid` only reads scheduler metadata for `pid`; it has no
-    // memory-safety preconditions and reports failure through `errno`.
+    // SAFETY: `getpgid` 只读取 `pid` 的内核调度元数据，无内存安全前置条件，失败经 `errno` 报告。
     let pgid = unsafe { libc::getpgid(pid as libc::pid_t) };
     if pgid < 0 {
         return Err(std::io::Error::last_os_error());
@@ -823,18 +816,16 @@ fn resolve_child_pgid(child: &Child) -> std::io::Result<u32> {
     Ok(pgid)
 }
 
-/// Refuse to treat this process's own group as a signal target.
+/// 拒绝把当前测试进程自身的进程组当作信号发送目标。
 ///
-/// Broadcasting into the harness's group interrupts the test binary itself:
-/// `cargo test` then dies with exit 130 while reporting zero failures (#105).
-/// Failing closed turns that silent, whole-run abort into a local error.
+/// 向测试套件自身所在的进程组广播信号会中断测试二进制本身，导致 `cargo test` 以退出码 `130` 终止却报告零失败（#105）；
+/// 封闭失败能把这种静默中止整轮测试的故障转化为局部错误。
 pub(crate) fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
-    // SAFETY: `getpgrp` takes no arguments, reads only the caller's own
-    // process group, and cannot fail.
+    // SAFETY: `getpgrp` 无参数，仅读取调用者自身的进程组号，不会失败。
     let own = unsafe { libc::getpgrp() } as u32;
     if pgid == own {
         return Err(std::io::Error::other(format!(
-            "refusing to signal process group {pgid}: it is this process's own group"
+            "拒绝向进程组 {pgid} 发送信号：它是当前测试进程自身的进程组"
         )));
     }
     Ok(())
@@ -842,8 +833,7 @@ pub(crate) fn reject_own_process_group(pgid: u32) -> std::io::Result<()> {
 
 pub(crate) fn signal_process_group(pgid: u32, signal: libc::c_int) -> std::io::Result<()> {
     reject_own_process_group(pgid)?;
-    // SAFETY: `killpg` only delivers `signal` to the process group; it has no
-    // memory-safety preconditions and reports failure through `errno`.
+    // SAFETY: `killpg` 仅向目标进程组投递 `signal`，无内存安全前置条件，失败经 `errno` 报告。
     if unsafe { libc::killpg(pgid as libc::pid_t, signal) } != 0 {
         return Err(std::io::Error::last_os_error());
     }
@@ -892,8 +882,7 @@ fn processes_in_pgid_at(proc_root: &Path, pgid: u32) -> Result<Vec<u32>, Cleanup
         let stat = match std::fs::read_to_string(&stat_path) {
             Ok(stat) => stat,
             Err(error) if process_exited(&error) => {
-                // The process exited between listing `/proc` and reading its
-                // stat file, so it cannot be a final survivor.
+                // 进程在枚举 `/proc` 与读取 `stat` 之间已退出，不可能是最终残留的存活成员。
                 continue;
             }
             Err(error) => {
@@ -928,8 +917,8 @@ pub(crate) fn process_stat(pid: u32) -> Result<Option<ProcessStat>, CleanupError
     parse_process_stat(pid, &stat)
 }
 
-/// 进程在列出 `/proc` 与读取 stat 之间退出：目录已消失时为 ENOENT，
-/// 目录仍在但进程已回收时读取返回 ESRCH。两者都说明它不再是存活成员。
+/// 进程在列出 `/proc` 与读取 `stat` 之间退出：目录已消失时为 `ENOENT`，
+/// 目录仍在但进程已回收时读取返回 `ESRCH`。两者都说明它不再是存活成员。
 pub(crate) fn process_exited(error: &std::io::Error) -> bool {
     error.kind() == std::io::ErrorKind::NotFound || error.raw_os_error() == Some(libc::ESRCH)
 }
@@ -950,34 +939,34 @@ fn parse_process_stat(pid: u32, stat: &str) -> Result<Option<ProcessStat>, Clean
     };
     let (_, rest) = stat
         .rsplit_once(')')
-        .ok_or_else(|| invalid("process stat is missing the command terminator"))?;
+        .ok_or_else(|| invalid("进程 stat 缺少命令名右括号"))?;
     let mut fields = rest.split_whitespace();
     let state = fields
         .next()
-        .ok_or_else(|| invalid("process stat is missing state"))?;
-    // Z（僵尸）与 X（正在释放）都已退出；它们不是存活成员。
+        .ok_or_else(|| invalid("进程 stat 缺少状态字段"))?;
+    // `Z`（僵尸）与 `X`（正在释放）均已退出，不属于存活成员。
     if matches!(state, "Z" | "X") {
         return Ok(None);
     }
     let _ppid = fields
         .next()
-        .ok_or_else(|| invalid("process stat is missing parent pid"))?;
+        .ok_or_else(|| invalid("进程 stat 缺少父进程号字段"))?;
     let pgid = fields
         .next()
-        .ok_or_else(|| invalid("process stat is missing process group"))?;
-    // 退出后期 sighand 已释放时，内核不论状态字符都把 pgrp/session 报告为 -1
-    // （fs/proc/array.c 的初始值）。这样的进程已经退出，不是存活成员。
+        .ok_or_else(|| invalid("进程 stat 缺少进程组字段"))?;
+    // 退出后期 `sighand` 已释放时，内核无论状态字符为何都会把 `pgrp`/`session` 报告为 `-1`
+    // （`fs/proc/array.c` 的初始值）。这类进程已经退出，不属于存活成员。
     if pgid == "-1" {
         return Ok(None);
     }
     let pgid = pgid
         .parse::<u32>()
-        .map_err(|_| invalid("process stat has an invalid process group"))?;
+        .map_err(|_| invalid("进程 stat 的进程组字段无效"))?;
     let session = fields
         .next()
-        .ok_or_else(|| invalid("process stat is missing session"))?
+        .ok_or_else(|| invalid("进程 stat 缺少会话号字段"))?
         .parse::<u32>()
-        .map_err(|_| invalid("process stat has an invalid session"))?;
+        .map_err(|_| invalid("进程 stat 的会话号字段无效"))?;
     Ok(Some(ProcessStat { pgid, session }))
 }
 
@@ -1000,7 +989,7 @@ mod tests {
     }
 
     fn process_group_members(pgid: u32) -> Vec<u32> {
-        processes_in_pgid(pgid).expect("inspect process group")
+        processes_in_pgid(pgid).expect("检查进程组成员失败")
     }
 
     #[test]
@@ -1008,9 +997,9 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "kill -TERM $$"]);
         let outcome = RunningCommand::spawn(cmd)
-            .expect("spawn")
+            .expect("启动子进程失败")
             .wait(Some(Duration::from_secs(2)))
-            .expect("signal outcome");
+            .expect("等待信号终止结果失败");
 
         assert_eq!(
             outcome.termination,
@@ -1024,7 +1013,7 @@ mod tests {
 
     #[test]
     fn timeout_includes_time_before_wait() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
         let ready = dir.path().join("ready");
         let trigger = dir.path().join("trigger");
         let mut cmd = Command::new("sh");
@@ -1034,20 +1023,20 @@ mod tests {
             trigger.display()
         ));
         let running = RunningCommand::spawn_with_timeout(cmd, Some(Duration::from_millis(500)))
-            .expect("spawn");
+            .expect("启动带超时子进程失败");
         let ready_deadline = Instant::now() + Duration::from_secs(2);
         while !ready.exists() && Instant::now() < ready_deadline {
             std::thread::yield_now();
         }
-        assert!(ready.exists(), "child never reached ready state");
+        assert!(ready.exists(), "子进程未进入就绪状态");
         std::thread::sleep(Duration::from_millis(550));
 
         let release = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(20));
-            std::fs::write(trigger, b"release").expect("release child");
+            std::fs::write(trigger, b"release").expect("写入释放触发文件失败");
         });
-        let outcome = running.wait(None).expect("timeout outcome");
-        release.join().expect("release thread");
+        let outcome = running.wait(None).expect("等待超时结果失败");
+        release.join().expect("回收释放线程失败");
 
         assert_eq!(
             outcome.interventions,
@@ -1058,7 +1047,7 @@ mod tests {
         );
         assert_eq!(
             outcome.stdout, b"",
-            "the timeout restarted at wait(), allowing output after the spawn deadline"
+            "超时从 wait() 重新起算，放过了启动截止时间之后的输出"
         );
     }
 
@@ -1069,11 +1058,11 @@ mod tests {
             "-c",
             "printf partial-out; printf partial-err >&2; sleep 30 & wait",
         ]);
-        let running = RunningCommand::spawn(cmd).expect("spawn");
+        let running = RunningCommand::spawn(cmd).expect("启动子进程失败");
         let pgid = running.pgid();
         let outcome = running
             .wait(Some(Duration::from_millis(100)))
-            .expect("timeout outcome");
+            .expect("等待超时结果失败");
         assert_eq!(
             outcome.termination,
             Some(ProcessTermination::Signaled(libc::SIGKILL))
@@ -1104,13 +1093,13 @@ mod tests {
         let started = Instant::now();
 
         let outcome = RunningCommand::spawn(cmd)
-            .expect("spawn")
+            .expect("启动子进程失败")
             .wait(Some(Duration::from_millis(100)))
-            .expect("descendant cleanup outcome");
+            .expect("等待后代清理结果失败");
 
         assert!(
             started.elapsed() < Duration::from_secs(1),
-            "pipe drain exceeded external bound: {:?}",
+            "管道排空耗时超出外部上限: {:?}",
             started.elapsed()
         );
         assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
@@ -1124,14 +1113,12 @@ mod tests {
     #[test]
     fn incomplete_output_drain_rejects_clean_exit() {
         let (reader, mut writer) =
-            std::os::unix::net::UnixStream::pair().expect("create local pipe");
-        reader
-            .set_nonblocking(true)
-            .expect("set reader nonblocking");
+            std::os::unix::net::UnixStream::pair().expect("创建本地流管道失败");
+        reader.set_nonblocking(true).expect("设置读取端非阻塞失败");
         let drain = drain_to_thread(Some(reader));
-        std::io::Write::write_all(&mut writer, b"prefix").expect("write prefix");
+        std::io::Write::write_all(&mut writer, b"prefix").expect("写入前缀失败");
 
-        let (stdout, stdout_complete) = finish_drain(Some(drain)).expect("finish drain");
+        let (stdout, stdout_complete) = finish_drain(Some(drain)).expect("结束输出排空失败");
         drop(writer);
         let outcome = CommandOutcome {
             stdout,
@@ -1147,30 +1134,30 @@ mod tests {
         assert!(!outcome.stdout_complete);
         assert!(
             !outcome.is_clean_exit(0),
-            "an interrupted output drain must contaminate exact exit"
+            "未读完的输出排空必须使结果不再视为干净退出"
         );
     }
 
     #[test]
     fn interrupt_timeout_preserves_both_interventions_and_forced_kill() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
         let ready = dir.path().join("ready");
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
             "trap '' INT; touch '{}'; sleep 30",
             ready.display()
         ));
-        let mut running = RunningCommand::spawn(cmd).expect("spawn");
+        let mut running = RunningCommand::spawn(cmd).expect("启动子进程失败");
         let deadline = Instant::now() + Duration::from_secs(2);
         while !ready.exists() && Instant::now() < deadline {
             std::thread::yield_now();
         }
-        assert!(ready.exists(), "child never reached interrupt gate");
+        assert!(ready.exists(), "子进程未进入中断等待点");
 
-        running.interrupt().expect("interrupt group");
+        running.interrupt().expect("中断进程组失败");
         let outcome = running
             .wait(Some(Duration::from_millis(100)))
-            .expect("interrupt timeout outcome");
+            .expect("等待中断超时结果失败");
 
         assert_eq!(
             outcome.termination,
@@ -1190,24 +1177,24 @@ mod tests {
 
     #[test]
     fn terminate_delivers_sigterm_to_process_group_and_records_intervention() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
         let ready = dir.path().join("ready");
         let mut cmd = Command::new("sh");
         cmd.arg("-c").arg(format!(
             "trap 'exit 42' TERM; touch '{}'; while :; do sleep 1; done",
             ready.display()
         ));
-        let mut running = RunningCommand::spawn(cmd).expect("spawn");
+        let mut running = RunningCommand::spawn(cmd).expect("启动子进程失败");
         let deadline = Instant::now() + Duration::from_secs(2);
         while !ready.exists() && Instant::now() < deadline {
             std::thread::yield_now();
         }
         assert!(ready.exists(), "子进程未进入 SIGTERM 等待点");
 
-        running.terminate().expect("terminate group");
+        running.terminate().expect("终止进程组失败");
         let outcome = running
             .wait(Some(Duration::from_secs(2)))
-            .expect("wait after terminate");
+            .expect("终止后等待子进程失败");
 
         assert_eq!(
             outcome.exit_code(),
@@ -1250,17 +1237,16 @@ mod tests {
     fn cleanup_failures_are_retained_without_an_invented_process_status() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 0"]);
-        let running = RunningCommand::spawn(cmd).expect("spawn");
-        let child_pid = running.child.as_ref().expect("running child").id();
+        let running = RunningCommand::spawn(cmd).expect("启动子进程失败");
+        let child_pid = running.child.as_ref().expect("运行中的子进程句柄缺失").id();
         let mut status = 0;
-        // SAFETY: `child_pid` belongs to this test and `status` points to a
-        // valid integer for `waitpid` to write.
+        // SAFETY: `child_pid` 属于本测试刚派生的子进程，`status` 指向供 `waitpid` 写入的有效栈上整数。
         assert_eq!(
             unsafe { libc::waitpid(child_pid as libc::pid_t, &mut status, 0) },
             child_pid as libc::pid_t
         );
 
-        let outcome = running.kill_and_wait().expect("cleanup outcome");
+        let outcome = running.kill_and_wait().expect("获取清理结果失败");
 
         assert_eq!(outcome.termination, None);
         assert_eq!(outcome.interventions, vec![HarnessIntervention::ForcedKill]);
@@ -1280,22 +1266,23 @@ mod tests {
     #[test]
     fn process_group_inspection_errors_are_typed_and_fail_cleanup_closed() {
         let missing_root = tempfile::tempdir()
-            .expect("temp parent")
+            .expect("创建临时父目录失败")
             .path()
             .join("missing-proc");
         let root_error =
-            processes_in_pgid_at(&missing_root, 7).expect_err("missing proc root must fail");
+            processes_in_pgid_at(&missing_root, 7).expect_err("缺失的 proc 根目录必须报错");
         assert_eq!(
             root_error.operation,
             CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadProc)
         );
 
-        let proc_root = tempfile::tempdir().expect("temp proc");
+        let proc_root = tempfile::tempdir().expect("创建临时 proc 目录失败");
         let pid_dir = proc_root.path().join("4242");
-        std::fs::create_dir(&pid_dir).expect("pid dir");
-        std::fs::create_dir(pid_dir.join("stat")).expect("unreadable stat entry");
+        std::fs::create_dir(&pid_dir).expect("创建进程号目录失败");
+        std::fs::create_dir(pid_dir.join("stat")).expect("构造不可读的目录型 stat 条目失败");
 
-        let error = processes_in_pgid_at(proc_root.path(), 7).expect_err("stat read must fail");
+        let error =
+            processes_in_pgid_at(proc_root.path(), 7).expect_err("读取目录型 stat 必须报错");
         assert_eq!(
             error.operation,
             CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ReadStat(4242))
@@ -1311,35 +1298,35 @@ mod tests {
 
     #[test]
     fn process_stat_parser_rejects_incomplete_and_invalid_group_fields() {
-        // 组号缺失、组号非数字、会话号缺失、会话号非数字都必须报 InvalidData，不得部分解析。
+        // 组号缺失、组号非数字、会话号缺失、会话号非数字都必须报 `InvalidData`，不得部分解析。
         for stat in [
             "4242 malformed",
             "4242 (test) S 1 nope",
             "4242 (test) S 1 4242",
             "4242 (te st) S 1 4242 sid",
         ] {
-            let error = parse_process_stat(4242, stat).expect_err("malformed stat must fail");
+            let error = parse_process_stat(4242, stat).expect_err("畸形 stat 必须解析失败");
             assert_eq!(
                 error.operation,
                 CleanupOperation::InspectProcessGroup(ProcessInspectionOperation::ParseStat(4242))
             );
             assert_eq!(error.kind, std::io::ErrorKind::InvalidData);
         }
-        // 内核对正在释放的进程报告 pgrp/session 为 -1；它已退出，不是存活成员。
-        // 状态字符不一定是 X：退出后期 sighand 已释放时，状态可能仍是 R/D/S，
-        // 但 pgrp/session 同样是 -1（压力下偶发，曾让中断清理测试失败）。
+        // 内核对正在释放的进程报告 `pgrp`/`session` 为 `-1`；它已退出，不是存活成员。
+        // 状态字符不一定是 `X`：退出后期 `sighand` 已释放时，状态可能仍是 `R`/`D`/`S`，
+        // 但 `pgrp`/`session` 同样是 `-1`（压力下偶发，曾让中断清理测试失败）。
         for dead in [
             "4242 (sleep) X 0 -1 -1 0 -1 4227084",
             "4242 (sleep) R 0 -1 -1 0 -1 4227084",
             "4242 (sleep) D 0 -1 -1 0 -1 4227084",
         ] {
             assert_eq!(
-                parse_process_stat(4242, dead).expect("dead stat"),
+                parse_process_stat(4242, dead).expect("解析已退出进程 stat 失败"),
                 None,
                 "{dead}"
             );
         }
-        // 只有 -1 表示已退出：同样的状态字符带正常组号与会话号时仍是存活成员，
+        // 只有 `-1` 表示已退出：同样的状态字符带正常组号与会话号时仍是存活成员，
         // 不能因为上面的放宽而被漏掉。
         for (live, pgid, session) in [
             ("4242 (sleep) R 1 4300 4100 0 -1 4227084", 4300, 4100),
@@ -1347,64 +1334,57 @@ mod tests {
             ("4242 (sleep) S 1 4300 4100 0 -1 4227084", 4300, 4100),
         ] {
             assert_eq!(
-                parse_process_stat(4242, live).expect("live stat"),
+                parse_process_stat(4242, live).expect("解析存活进程 stat 失败"),
                 Some(ProcessStat { pgid, session }),
                 "{live}"
             );
         }
     }
 
-    /// #105: a group signal aimed at the harness's own group would interrupt
-    /// the test binary itself. The guard must reject it instead of firing.
+    /// #105：瞄准测试套件自身进程组的信号会中断测试二进制本身，守卫必须直接拒绝而不实际发送。
     #[test]
     fn signalling_own_process_group_is_refused() {
-        // SAFETY: `getpgrp` reads only the caller's own process group.
+        // SAFETY: `getpgrp` 仅读取调用者自身的进程组号。
         let own = unsafe { libc::getpgrp() } as u32;
-        let err = signal_process_group(own, libc::SIGINT).expect_err("own group must be refused");
+        let err = signal_process_group(own, libc::SIGINT).expect_err("必须拒绝向自身进程组发信号");
         assert!(
-            err.to_string().contains("own group"),
-            "unexpected error: {err}"
+            err.to_string().contains("自身的进程组"),
+            "错误文本不符合预期: {err}"
         );
-        // The SIGKILL wrapper swallows errors; it must stay a no-op here
-        // rather than tearing down the test run.
+        // `SIGKILL` 包装函数会吞掉错误；此处必须保持空操作而不得杀掉测试进程自身。
         kill_process_group(own);
     }
 
-    /// The spawned child must land in a group that is not the harness's own,
-    /// so `interrupt`/`kill` can never reach back into `cargo test`.
+    /// 派生的子进程必须落入独立于测试套件自身的进程组，使 `interrupt`/`kill` 绝不会反向命中 `cargo test`。
     #[test]
     fn spawned_child_pgid_is_read_back_and_distinct() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "sleep 30"]);
-        let running = RunningCommand::spawn(cmd).expect("spawn");
-        // SAFETY: `getpgrp` reads only the caller's own process group.
+        let running = RunningCommand::spawn(cmd).expect("启动子进程失败");
+        // SAFETY: `getpgrp` 仅读取调用者自身的进程组号。
         let own = unsafe { libc::getpgrp() } as u32;
-        assert_ne!(
-            running.pgid(),
-            own,
-            "child shares the harness process group"
-        );
-        let child_pid = running.child.as_ref().expect("running child").id();
+        assert_ne!(running.pgid(), own, "子进程与测试套件共享了同一个进程组");
+        let child_pid = running.child.as_ref().expect("运行中的子进程句柄缺失").id();
         assert_eq!(
             running.pgid(),
             child_pid,
-            "child should lead its own process group"
+            "子进程应当成为自身进程组的组首领"
         );
     }
 
-    /// 让 interrupt 测试 re-exec 本测试二进制时运行的进程组成员。
+    /// 供中断测试重新执行本测试二进制时运行的进程组成员环境变量。
     const INT_RECORDER_DIR: &str = "LATTICE_HARNESS_INT_RECORDER_DIR";
 
-    /// 后台 `&` 启动的进程继承被忽略的 SIGINT，sh 的 trap 不能恢复它；
-    /// 这里自己装处理器，收到 SIGINT 时在当前目录创建 `got-int` 后退出。
+    /// 后台 `&` 启动的进程继承被忽略的 `SIGINT`，`sh` 的 `trap` 不能恢复它；
+    /// 这里自行安装信号处理器，收到 `SIGINT` 时在当前目录创建 `got-int` 后退出。
     #[test]
-    #[ignore = "re-exec helper"]
+    #[ignore = "供中断测试自执行复用的辅助入口"]
     fn int_recorder_helper() {
         let Some(dir) = std::env::var_os(INT_RECORDER_DIR) else {
             return;
         };
         extern "C" fn record_int(_: libc::c_int) {
-            // SAFETY: open 与 _exit 都是 async-signal-safe；路径是静态 C 字符串。
+            // SAFETY: `open` 与 `_exit` 均为异步信号安全函数，路径是静态 C 字符串。
             unsafe {
                 libc::open(
                     c"got-int".as_ptr(),
@@ -1414,30 +1394,30 @@ mod tests {
                 libc::_exit(0);
             }
         }
-        std::env::set_current_dir(&dir).expect("enter recorder dir");
+        std::env::set_current_dir(&dir).expect("切换至信号记录目录失败");
         let handler: extern "C" fn(libc::c_int) = record_int;
-        // SAFETY: 安装的处理器只调用 async-signal-safe 函数。
+        // SAFETY: 安装的处理器只调用异步信号安全函数。
         let previous = unsafe { libc::signal(libc::SIGINT, handler as libc::sighandler_t) };
-        assert_ne!(previous, libc::SIG_ERR, "install SIGINT handler");
-        std::fs::write("recorder-ready", b"").expect("write recorder ready");
+        assert_ne!(previous, libc::SIG_ERR, "安装 SIGINT 信号处理器失败");
+        std::fs::write("recorder-ready", b"").expect("写入记录器就绪标记失败");
         std::thread::sleep(Duration::from_secs(30));
     }
 
     #[test]
     fn interrupt_reaches_and_reaps_the_process_group() {
-        let dir = tempfile::tempdir().expect("tempdir");
+        let dir = tempfile::tempdir().expect("创建临时目录失败");
         let ready = dir.path().join("ready");
         let recorder_ready = dir.path().join("recorder-ready");
         let got_int = dir.path().join("got-int");
-        // 就绪文件由后台子进程在设置忽略 SIGINT 之后创建。若由外层在 `&` 之后创建，
+        // 就绪文件由后台子进程在设置忽略 `SIGINT` 之后创建。若由外层在 `&` 之后创建，
         // 中断可能赶在子进程设置忽略之前到达，子进程随之退出，进程组里没有幸存者，
-        // 也就不会出现预期的强制清理（压力下约 2%）。外层的 trap 在启动子进程之前
+        // 也就不会出现预期的强制清理（压力下约 2%）。外层的 `trap` 在启动子进程之前
         // 已经设置，所以子进程就绪时外层也已就绪。
-        // 外层用 `sleep 1 & wait`：trap 只在前台命令结束后运行，`wait` 被信号打断后
-        // 立即运行 trap，不必等当前的 sleep 结束。
-        // 第三个成员是 re-exec 的本测试二进制，自己装 SIGINT 处理器并记录收到信号，
-        // 用来区分信号发给了整个进程组还是只发给了组长。
-        let exe = std::env::current_exe().expect("test binary");
+        // 外层用 `sleep 1 & wait`：`trap` 只在前台命令结束后运行，`wait` 被信号打断后
+        // 立即运行 `trap`，不必等当前的 `sleep` 结束。
+        // 第三个成员是自执行的本测试二进制，自行安装 `SIGINT` 处理器并记录收到信号，
+        // 用来区分信号是发给了整个进程组还是只发给了组首领。
+        let exe = std::env::current_exe().expect("获取当前测试二进制路径失败");
         let mut cmd = Command::new("sh");
         cmd.env(INT_RECORDER_DIR, dir.path());
         cmd.arg("-c").arg(format!(
@@ -1447,28 +1427,25 @@ mod tests {
             ready.display(),
             exe.display()
         ));
-        let mut running = RunningCommand::spawn(cmd).expect("spawn");
+        let mut running = RunningCommand::spawn(cmd).expect("启动子进程失败");
         let pgid = running.pgid();
         let deadline = Instant::now() + Duration::from_secs(10);
         while !(ready.exists() && recorder_ready.exists()) && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(ready.exists(), "child never reached interrupt gate");
-        assert!(recorder_ready.exists(), "INT recorder never became ready");
-        running.interrupt().expect("interrupt group");
+        assert!(ready.exists(), "子进程未进入中断等待点");
+        assert!(recorder_ready.exists(), "SIGINT 记录器未进入就绪状态");
+        running.interrupt().expect("中断进程组失败");
         // 先等记录者落盘再收尾，避免强制清理抢在处理器运行之前。
         let deadline = Instant::now() + Duration::from_secs(5);
         while !got_int.exists() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
-        assert!(
-            got_int.exists(),
-            "SIGINT did not reach a non-leader group member"
-        );
+        assert!(got_int.exists(), "SIGINT 未送达非组首领的同组成员");
         // 时限从启动算起，含等待就绪的时间；放宽到 20 秒，负载下也不会误判超时。
         let outcome = running
             .wait(Some(Duration::from_secs(20)))
-            .expect("interrupt outcome");
+            .expect("等待中断结果失败");
         assert_eq!(outcome.termination, Some(ProcessTermination::Exited(0)));
         assert_eq!(
             outcome.interventions,
@@ -1530,7 +1507,7 @@ mod tests {
         // 路径一：`has_exited()` 返回 `true` 后子进程仍未回收，随后的 `wait` 正常回收。
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "printf waited-out; exit 7"]);
-        let mut running = RunningCommand::spawn(cmd).expect("spawn wait child");
+        let mut running = RunningCommand::spawn(cmd).expect("启动待 wait 子进程失败");
         let pid = running.pgid();
         while !running.has_exited().expect("轮询退出状态") {
             assert!(Instant::now() < deadline, "子进程未在期限内退出");
@@ -1547,7 +1524,7 @@ mod tests {
         // 路径二：`has_exited()` 返回 `true` 后子进程仍占住 `pgid`，随后的 `kill_and_wait` 安全发信号并回收。
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "printf loser-err >&2; exit 1"]);
-        let mut running = RunningCommand::spawn(cmd).expect("spawn kill_and_wait child");
+        let mut running = RunningCommand::spawn(cmd).expect("启动待 kill_and_wait 子进程失败");
         let pid = running.pgid();
         while !running.has_exited().expect("轮询退出状态") {
             assert!(Instant::now() < deadline, "子进程未在期限内退出");
@@ -1563,10 +1540,10 @@ mod tests {
         assert!(outcome.cleanup.succeeded(), "{:?}", outcome.cleanup);
         assert_child_reaped(pid);
 
-        // 路径三：`has_exited()` 返回 `true` 后直接 Drop，同样在回收前安全向原组发信号并完成回收。
+        // 路径三：`has_exited()` 返回 `true` 后直接 `Drop`，同样在回收前安全向原组发信号并完成回收。
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 0"]);
-        let mut running = RunningCommand::spawn(cmd).expect("spawn drop child");
+        let mut running = RunningCommand::spawn(cmd).expect("启动待 Drop 子进程失败");
         let pid = running.pgid();
         while !running.has_exited().expect("轮询退出状态") {
             assert!(Instant::now() < deadline, "子进程未在期限内退出");

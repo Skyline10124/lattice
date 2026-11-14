@@ -1,9 +1,9 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 场景用的 TLS 身份：临时 CA 与它签发的服务端证书（`localhost`、`127.0.0.1`）。
+//! 场景使用的 TLS 身份：临时 CA 与它签发的服务端证书（`localhost`、`127.0.0.1`）。
 //!
-//! 产品只信任提交端 `SSL_CERT_FILE` 指向的根，所以每个场景把 CA 写进自己的目录再指过去；
+//! 产品只信任提交端 `SSL_CERT_FILE` 指向的根证书，因此每个场景把 CA 写进自己的目录再指向它；
 //! 本地进程没有任何系统级信任变化。证书由 `openssl` 命令生成，用完的私钥文件随临时目录删除。
 
 use std::io;
@@ -113,7 +113,7 @@ impl TlsIdentity {
         })
     }
 
-    /// 本进程共用的一套身份；`ScenarioWorld` 默认信任它，fake provider 默认用它。
+    /// 本进程共用的一套身份；`ScenarioWorld` 默认信任它，假 provider 默认使用它。
     pub fn shared() -> io::Result<&'static Self> {
         static SHARED: OnceLock<Result<TlsIdentity, String>> = OnceLock::new();
         SHARED
@@ -122,12 +122,12 @@ impl TlsIdentity {
             .map_err(|error| io::Error::other(error.clone()))
     }
 
-    /// CA 证书（PEM），供 `SSL_CERT_FILE` 使用。
+    /// PEM 格式的 CA 证书，供 `SSL_CERT_FILE` 使用。
     pub fn ca_pem(&self) -> &[u8] {
         &self.ca_pem
     }
 
-    /// CA 证书（DER），供进程内客户端使用。
+    /// DER 格式的 CA 证书，供进程内客户端使用。
     pub fn ca_der(&self) -> &[u8] {
         &self.ca_der
     }
@@ -165,7 +165,7 @@ fn run_openssl(args: &[&str], dir: &std::path::Path) -> io::Result<()> {
             let _ = child.kill();
             let _ = child.wait();
             return Err(io::Error::other(format!(
-                "openssl {} did not finish within {LIMIT:?}",
+                "openssl {} 未在 {LIMIT:?} 内完成",
                 args.join(" ")
             )));
         }
@@ -176,7 +176,7 @@ fn run_openssl(args: &[&str], dir: &std::path::Path) -> io::Result<()> {
         return Ok(());
     }
     Err(io::Error::other(format!(
-        "openssl {}: {}",
+        "openssl {} 执行失败：{}",
         args.join(" "),
         String::from_utf8_lossy(&out.stderr)
     )))

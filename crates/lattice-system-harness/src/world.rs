@@ -18,28 +18,22 @@ use crate::scenario::{ScenarioBudget, ScenarioSpec};
 
 use thiserror::Error;
 
-/// Ask the OS for a free ephemeral port by binding to `127.0.0.1:0` and then
-/// dropping the listener.
+/// 通过绑定 `127.0.0.1:0` 再释放监听器，向操作系统申请一个空闲临时端口。
 ///
-/// This replaces the previous in-process `AtomicU16` counter, which only
-/// advanced a process-local cursor from 18000 and never reserved anything from
-/// the OS — so two parallel `cargo test` invocations (or any other process
-/// holding that port) could collide. The OS-assigned port is unique at
-/// reservation time. There is an inherent TOCTOU window between dropping the
-/// listener and the scenario reusing the port; for a test harness this is the
-/// standard accepted trade-off.
+/// 该做法替代了早期的进程内 `AtomicU16` 计数器：旧计数器仅在单进程内从 18000 递增，
+/// 从未向操作系统预留端口，并行 `cargo test` 或宿主其他进程都可能与之冲突。
+/// 操作系统分配的端口在申请时刻保证唯一；释放监听器到场景实际复用端口之间存在固有的竞态窗口，
+/// 对测试套件而言这是常规可接受取舍。
 ///
-/// Returns an error instead of falling back to 0: a `ScenarioWorld` built with
-/// port 0 would violate the scenario-local-port isolation contract (and a
-/// caller that never inspects `port()` would silently proceed), so a bind
-/// failure must surface as a `WorldError` and abort world construction.
+/// 绑定失败时直接返回错误而非回退到 0：端口为 0 的 `ScenarioWorld` 会破坏场景私有端口隔离约定
+/// （不主动读取 `port()` 的调用方还会静默继续执行），因此必须以 `WorldError` 中止世界构造。
 fn os_free_port() -> Result<u16, std::io::Error> {
     let listener = TcpListener::bind("127.0.0.1:0")?;
     let port = listener.local_addr()?.port();
     Ok(port)
 }
 
-/// Isolated external world for one harness scenario.
+/// 单个验收场景独占的外置隔离环境。
 pub struct ScenarioWorld {
     root: Option<tempfile::TempDir>,
     home: PathBuf,
@@ -78,7 +72,7 @@ impl BudgetSlot {
         }
     }
 
-    /// 正常 stop 的绝对期限；取锁等待计入单步上限，已登记场景还受原总期限约束。
+    /// 正常 `daemon stop` 的绝对期限；取锁等待计入单步上限，已登记场景还受原总期限约束。
     pub(crate) fn normal_stop_deadline(&self) -> std::time::Instant {
         let started = std::time::Instant::now();
         match &*self.0.lock().expect("预算锁") {
@@ -90,19 +84,19 @@ impl BudgetSlot {
 
 #[derive(Debug, Error)]
 pub enum WorldError {
-    #[error("failed to create scenario world: {0}")]
+    #[error("创建场景隔离环境失败: {0}")]
     Io(#[from] std::io::Error),
-    #[error("fake provider wiring is unavailable: {0}")]
+    #[error("假 provider 接线不可用: {0}")]
     Provider(&'static str),
 }
 
 impl ScenarioWorld {
-    /// 创建隔离的 HOME/XDG 与项目目录。
+    /// 创建隔离的 `HOME`、XDG 目录与项目目录。
     pub fn new(prefix: &str) -> Result<Self, WorldError> {
         let root = tempfile::TempDir::with_prefix(prefix)?;
         let home = root.path().join("home");
         let project = root.path().join("project");
-        // #143: durable session state lives under the XDG *state* root.
+        // #143：持久会话状态存放在 XDG 状态根目录下。
         let session_store = home.join(".local/state").join("lattice");
         std::fs::DirBuilder::new().mode(0o700).create(&home)?;
         std::fs::DirBuilder::new()
@@ -134,13 +128,13 @@ impl ScenarioWorld {
             "XDG_CACHE_HOME".into(),
             home.join(".cache").display().to_string(),
         );
-        // 会话持久存储与后台运行锁都通过 Linux XDG state 目录解析，显式指向隔离 HOME 内。
+        // 会话持久存储与后台运行锁均通过 Linux 的 `XDG_STATE_HOME` 目录解析，显式指向隔离 `HOME` 内。
         allowed_env.insert(
             "XDG_STATE_HOME".into(),
             home.join(".local/state").display().to_string(),
         );
-        // 后台启动时经 rustls-native-certs 读取信任根；设了这两个变量就只信任它们指向的根。
-        // 场景默认只信任 harness CA，fake provider 默认用它签发的证书。
+        // 后台启动时经 `rustls-native-certs` 读取信任根；设置这两个变量后只信任它们指向的根证书。
+        // 场景默认只信任套件生成的临时 CA，假 provider 默认使用它签发的证书。
         let trust = root.path().join("tls-trust");
         std::fs::create_dir_all(trust.join("empty"))?;
         std::fs::write(
@@ -169,7 +163,7 @@ impl ScenarioWorld {
     }
 
     pub fn root(&self) -> &Path {
-        self.root.as_ref().expect("scenario root").path()
+        self.root.as_ref().expect("场景临时根目录缺失").path()
     }
 
     pub fn home(&self) -> &Path {
@@ -180,8 +174,7 @@ impl ScenarioWorld {
         &self.project
     }
 
-    /// The private-state root holding the global `lattice.redb`, the
-    /// per-project stores, and the lock tree.
+    /// 存放全局 `lattice.redb`、各项目存储与文件锁树的私有状态根目录。
     pub fn session_store_dir(&self) -> &Path {
         &self.session_store
     }
@@ -206,7 +199,7 @@ impl ScenarioWorld {
     pub fn init_git_project(&self) -> Result<(), WorldError> {
         let root = &self.project;
         gix::init(root).map_err(|e| WorldError::Io(std::io::Error::other(e.to_string())))?;
-        // Point HEAD at main before first commit (gix::init already does this).
+        // 首次提交前使 `HEAD` 指向 `main`（`gix::init` 已完成该初始化）。
         self.commit_all("harness init")?;
         Ok(())
     }
@@ -220,7 +213,7 @@ impl ScenarioWorld {
         Ok(())
     }
 
-    /// 向项目内 `.lattice/agents/<name>/agent.toml` 写入最小 agent profile。
+    /// 向项目内 `.lattice/agents/<name>/agent.toml` 写入最小智能体配置。
     ///
     /// 因 `cargo xtask harness-boundary` 禁止依赖任何产品 crate，TOML 直接手写，与用户实际编写的
     /// 文件一致。`[lancet]` 与 `[tools]` 已移除；需要假工具的场景在后台启动前通过
@@ -231,7 +224,7 @@ impl ScenarioWorld {
         );
         self.write_project_file(&format!(".lattice/agents/{name}/agent.toml"), &toml)
     }
-    /// Spawn a subprocess with cleared environment and only the allow-listed vars.
+    /// 构造清空继承环境、仅注入白名单变量的子进程命令。
     pub fn command(&self, program: impl AsRef<OsStr>) -> Command {
         let mut cmd = Command::new(program);
         cmd.current_dir(&self.project);
@@ -242,7 +235,7 @@ impl ScenarioWorld {
         cmd
     }
 
-    /// Commit all current worktree files (skipping `.git`) onto `refs/heads/main`.
+    /// 将当前工作树中的全部文件（跳过 `.git`）提交到 `refs/heads/main`。
     pub fn commit_all(&self, message: &str) -> Result<(), WorldError> {
         let root = &self.project;
         let mut repo = gix::open_opts(root, gix::open::Options::isolated())
@@ -310,15 +303,14 @@ impl ScenarioWorld {
         Ok(())
     }
 
-    /// Backward-compatible shim used by a few scenarios that previously shelled
-    /// out to `git add`/`git commit`. Only `add`+`commit` sequences are
-    /// supported; other git subcommands are rejected.
+    /// 供少数早先直接调用 `git add`/`git commit` 的场景使用的兼容辅助方法；
+    /// 仅支持 `add` 与 `commit` 组合，其余 `git` 子命令一律拒绝。
     pub fn git(&self, args: &[&str]) -> Result<(), WorldError> {
         match args {
-            ["add", ..] => Ok(()), // staging is implicit in commit_all
+            ["add", ..] => Ok(()), // `commit_all` 会自动纳入工作树全部文件，无需单独暂存
             ["commit", "-m", msg] | ["commit", "--allow-empty", "-m", msg] => self.commit_all(msg),
             other => Err(WorldError::Io(std::io::Error::other(format!(
-                "unsupported harness git args: {other:?} (use commit_all)"
+                "不支持的场景 git 参数: {other:?}（请改用 commit_all）"
             )))),
         }
     }
@@ -343,19 +335,19 @@ impl ScenarioWorld {
         let canonical_real = std::fs::canonicalize(&real_home).ok();
         let canonical_test = std::fs::canonicalize(&self.home).ok();
         if canonical_real.is_some() && canonical_real == canonical_test {
-            return Err("scenario HOME resolved to the developer HOME".into());
+            return Err("场景 HOME 解析到了开发者的真实 HOME".into());
         }
         Ok(())
     }
 
     /// 场景唯一的墙钟预算。首次调用从当前时刻起算并登记；之后无论谁在何时调用
-    /// （发送驱动、辅助命令、provider gate 等待）都拿到同一起点的副本，
-    /// 正常 daemon stop 也只用它的剩余量。场景内不存在第二个起点。
+    /// （发送驱动、辅助命令、provider 门闩等待）都拿到同一起点的副本，
+    /// 正常 `daemon stop` 也只用它的剩余量。场景内不存在第二个起点。
     pub fn budget(&self, spec: &ScenarioSpec) -> ScenarioBudget {
         self.budget.budget(spec)
     }
 
-    /// 与场景证据共享的预算槽：证据收尾时的普通 stop 也只用同一起点的剩余量。
+    /// 与场景证据共享的预算槽：证据收尾时的普通 `daemon stop` 也只用同一起点的剩余量。
     pub(crate) fn budget_slot(&self) -> Arc<BudgetSlot> {
         Arc::clone(&self.budget)
     }
@@ -454,11 +446,11 @@ impl Drop for ScenarioWorld {
             if let Some(root) = self.root.take() {
                 let _ = root.keep();
             }
-            // 清理不能覆盖原断言；展开期间只报告，不二次 panic。
+            // 清理不能覆盖原断言；栈展开期间只输出诊断，不触发二次 panic。
             if std::thread::panicking() {
-                eprintln!("scenario daemon cleanup: {errors:?}");
+                eprintln!("场景后台清理失败: {errors:?}");
             } else {
-                panic!("scenario daemon cleanup: {errors:?}");
+                panic!("场景后台清理失败: {errors:?}");
             }
         }
     }
@@ -479,7 +471,7 @@ fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, String)>) {
         } else if path.is_file() {
             let rel = path
                 .strip_prefix(root)
-                .expect("under root")
+                .expect("路径必须位于工作树根目录下")
                 .to_string_lossy()
                 .into_owned();
             let content = std::fs::read_to_string(&path).unwrap_or_default();

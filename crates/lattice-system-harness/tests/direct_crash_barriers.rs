@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 真实后台提交后 SIGSTOP/SIGKILL；只用 CLI/公开 IPC 读取会话事实。
+//! 真实后台提交后发送 `SIGSTOP` 与 `SIGKILL`；只经 CLI 与公开 IPC 读取会话事实。
 mod support;
 
 use lattice_system_harness::{
@@ -41,7 +41,7 @@ fn watch(world: &ScenarioWorld, spec: &ScenarioSpec, sid: &str) -> Watcher {
     watcher.initial();
     watcher
 }
-/// 按 TurnId 查询已接受的一轮，返回 TurnDetail。
+/// 按轮次标识查询已接受的一轮，返回轮次详情 JSON。
 fn accepted_detail(world: &ScenarioWorld, spec: &ScenarioSpec, tid: &str) -> Value {
     let response = turn_lookup(world, timeout(world, spec), tid);
     assert_eq!(response["response"], "turn", "{response}");
@@ -85,10 +85,10 @@ fn unclosed_turn(
 ) -> String {
     read_json(world, spec, evidence, &["--json", "session", "log", sid])["unclosed_turn"]
         .as_str()
-        .expect("unclosed turn")
+        .expect("应有未收束轮次标识")
         .to_owned()
 }
-/// 观察者持有的某个 Step 条目的进度。
+/// 观察者持有的某个步骤条目的进度。
 fn step_progress(view: &ViewState, node: u64) -> Option<&StepProgress> {
     view.entries
         .get(&node)
@@ -117,7 +117,7 @@ fn cli(
             },
         )
         .unwrap();
-    evidence.record_command(args.join(" "), &result);
+    evidence.record_command(format!("执行命令（{}）", args.join(" ")), &result);
     assert!(
         result.is_clean_exit(code),
         "{}: {}",
@@ -142,7 +142,10 @@ fn wait_for_ack(path: &Path, timeout: Duration) -> Value {
         {
             return value;
         }
-        assert!(Instant::now() < deadline, "barrier marker not reached");
+        assert!(
+            Instant::now() < deadline,
+            "未在截止时间前等到崩溃屏障确认文件"
+        );
         std::thread::sleep(Duration::from_millis(5));
     }
 }
@@ -199,7 +202,9 @@ fn end() -> Value {
 fn provenance(world: &ScenarioWorld, evidence: &mut ScenarioEvidence, script: Value) {
     let driver = support::driver();
     let bytes = std::fs::read(driver.binary_path()).unwrap();
-    let test = script["test"].as_str().expect("exact test identity");
+    let test = script["test"]
+        .as_str()
+        .expect("provenance 需携带精确测试名称");
     evidence.record_json("provenance", &json!({
         "binary":driver.binary_path(),"binary_blake3":blake3::hash(&bytes).to_hex().to_string(),
         "features":"lattice-server/test-fake-tools,lattice-server/test-crash-barriers","harness_features":"fake-tools,crash-barriers","profile":"debug",
@@ -333,7 +338,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
         let driver = support::driver();
         let send = SessionSendDriver::new(&driver, &world, &spec, "operator");
         let first = send.send("all determinate outcomes").unwrap();
-        evidence.record_command("alpha determinate", &first.command);
+        evidence.record_command("alpha 项目确定性工具轮次发送", &first.command);
         support::assert_clean_send(&first).unwrap();
         assert!(first.command.is_clean_exit(0));
         let sid = send.session_id().unwrap();
@@ -390,7 +395,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 .unwrap()
                 .wait(Some(budget.cap_timeout(spec.step_timeout())))
                 .unwrap();
-            evidence.record_command(format!("beta {}", args.join(" ")), &out);
+            evidence.record_command(format!("beta 项目执行命令（{}）", args.join(" ")), &out);
             assert!(out.is_clean_exit(0), "{}", out.summary());
             out
         };
@@ -437,7 +442,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             paths, expected_paths,
             "两个项目在共享后台中各自绑定各自的规范项目路径"
         );
-        // 跨项目写操作（在 alpha 工作区 rewind beta 会话）被项目绑定检查拒绝。
+        // 跨项目写操作（在 alpha 工作区对 beta 会话执行 `rewind`）被项目绑定检查拒绝。
         cli(
             &world,
             &spec,
@@ -510,11 +515,11 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                     .unwrap();
                 assert_ne!(owned_pgid, front.pgid());
                 let killed = world.kill_daemon().expect("强制终止活跃工具期间的自有后台");
-                evidence.record_command("SIGKILL backend during active tool", &killed);
+                evidence.record_command("活跃工具执行期间向后台发送 SIGKILL", &killed);
                 support::assert_forced_kill(&killed);
                 assert!(world.daemon_pids().unwrap().is_empty());
                 let out = front.wait(None).unwrap();
-                evidence.record_command("frontend observes tool crash", &out);
+                evidence.record_command("前端观察到工具执行期间后台崩溃", &out);
                 assert!(out.is_clean_exit(1));
                 world.start_daemon().expect("崩溃后显式重启后台");
                 let orphan = stage(&world, &spec, &mut evidence, sid, &turn);
@@ -541,11 +546,11 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
             } else {
                 assert_eq!(cancel(&world, &spec, &turn)["value"]["owned"], true);
                 let out = front.wait(None).unwrap();
-                evidence.record_command("cancelled tool", &out);
+                evidence.record_command("取消工具执行期间的发送", &out);
                 assert!(out.is_clean_exit(2));
             }
             let closed = stage(&world, &spec, &mut evidence, sid, &turn);
-            // 已 Started 的调用没有确定结果：崩溃时是未取得结果，取消时是执行器返回的 Cancelled。
+            // 已进入启动态的调用没有确定结果：崩溃时是未取得结果，取消时是执行器返回的已取消。
             assert_eq!(closed["steps"][0]["slots"][0]["outcome"], "indeterminate");
             assert_eq!(
                 closed["steps"][0]["slots"][0]["reason"],
@@ -562,7 +567,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                 vec![format!("hold-{crash}")],
                 "已开始的阻塞调用只进入执行一次，不能在取消、崩溃重开或退回后重放"
             );
-            assert!(!never_marker.exists(), "停在 Registered 的后续槽位从未执行");
+            assert!(!never_marker.exists(), "停在已登记状态的后续槽位从未执行");
             assert_eq!(provider.captured_requests().len(), count);
             windows.push(json!({"turn":turn,"active":active,"closed":closed,"crash":crash}));
             turns.push(turn);
@@ -610,7 +615,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                     }
                 }
                 let text = detail.to_string();
-                // SlotDetail 只保留绑定摘要、结果摘要与错误机器码，不暴露参数正文、结果正文、错误原文或 schema。
+                // 槽位详情只保留绑定摘要、结果摘要与错误机器码，不暴露参数正文、结果正文、错误原文或参数模式。
                 for private in [
                     "private-small-",
                     "private-result-",
@@ -621,7 +626,7 @@ fn cross_project_operator_lifecycle_cursor_and_payload_isolation() {
                     "never-private",
                     "input_schema",
                 ] {
-                    assert!(!text.contains(private), "turn detail leaked {private}");
+                    assert!(!text.contains(private), "轮次详情泄露了私有材料 {private}");
                 }
             }
         }
@@ -759,7 +764,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         let detached = frontend.kill_and_wait().unwrap();
         support::assert_forced_kill(&detached);
         assert!(detached.stdout_complete && detached.stderr_complete);
-        evidence.record_command("kill frontend only; backend continues", &detached);
+        evidence.record_command("仅终止前端进程而后台继续运行", &detached);
         assert_eq!(world.daemon_pids().unwrap(), vec![daemon_pgid]);
         for i in 6..=75 {
             gate.wait_until_stalled(i, budget.cap_timeout(spec.step_timeout()))
@@ -780,7 +785,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             .collect();
         // 新的观察者从这次尝试的开头收到已生成的文字，之后只收到接在后面的部分。
         let mut resumed = watch(&world, &spec, &sid);
-        resumed.until(deadline(&world, &spec), "70 text segments", |view| {
+        resumed.until(deadline(&world, &spec), "前 70 段流式文本", |view| {
             view.texts.get(&(3, 0)).is_some_and(|text| text.len() == 70)
         });
         assert_eq!(resumed.view.texts[&(3, 0)], expected);
@@ -797,7 +802,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             .unwrap();
         gate.wait_until_stalled(77, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        resumed.until(deadline(&world, &spec), "the 71st text segment", |view| {
+        resumed.until(deadline(&world, &spec), "第 71 段流式文本", |view| {
             view.texts[&(3, 0)].len() == 71
         });
         let sent: usize = expected.iter().map(|segment| segment.text.len()).sum();
@@ -823,7 +828,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
                 .record_json(&format!("busy-{index}"), &rejected)
                 .unwrap();
         }
-        // 同一 TurnId 再次提交不找回原请求，而是先于会话存在性返回冲突；不会建立额外会话。
+        // 同一轮次标识再次提交不找回原请求，而是先于会话存在性返回冲突；不会建立额外会话。
         let reused = ipc(
             &world,
             timeout(&world, &spec),
@@ -848,7 +853,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             &["--json", "session", "log", &sid],
         );
         assert_eq!(log["nodes"].as_array().unwrap().len(), 4);
-        // 同一后台第二 Session 在 A 的 gate 放行前到达独立 provider，证明不是全 Turn 全局排队。
+        // 同一后台的第二个会话在轮次 A 的闸门放行前到达独立 provider，证明并非全局排队。
         let mut peer =
             support::wire_fake_llm(&world, "vertical", SseScript::plain("parallel session"));
         cli(
@@ -899,7 +904,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         let killed = world.kill_daemon().expect("强制终止屏障处的自有后台");
         support::assert_forced_kill(&killed);
         assert!(killed.stdout_complete && killed.stderr_complete);
-        evidence.record_command("SIGKILL barrier backend", &killed);
+        evidence.record_command("向停在屏障处的后台发送 SIGKILL", &killed);
         assert!(world.daemon_pids().unwrap().is_empty());
         world.unset_env(BARRIER);
         world.unset_env(ACK);
@@ -913,7 +918,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert_eq!(slots[1]["progress"]["state"], "started");
         assert_eq!(slots[2]["progress"]["state"], "registered");
         assert_eq!(slots[1]["invocation_id"], marker["invocation_id"]);
-        // 重启后不必先观察那一轮：会话头直接说明它没有 Owner，生成中的文字随进程消失。
+        // 重启后不必先观察那一轮：会话头直接说明它没有占有方，生成中的文字随进程消失。
         let fresh = watch(&world, &spec, &sid);
         let head = fresh.view.head.as_ref().unwrap();
         assert!(!head.owner);
@@ -944,7 +949,7 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
         assert_eq!(closed["summary"]["outcome"], "failed");
         assert_eq!(closed["summary"]["notice"]["level"], "error");
         assert_eq!(closed["steps"][0], first_done["steps"][0]);
-        assert_eq!(closed, reopened, "rewind must not alter the old Turn");
+        assert_eq!(closed, reopened, "回退不得改动既有轮次详情");
         let stopped = &closed["steps"][1];
         assert_eq!(stopped["end"]["end"], "stop");
         assert_eq!(closed["steps"][1]["node"], 3);
@@ -955,11 +960,11 @@ fn r2_s2_multicall_reconnect_busy_sigkill_preserves_unclosed_step() {
             stopped["slots"][1]["reason"],
             json!({"kind":"indeterminate","value":"no_result"})
         );
-        // 没轮到的槽位不带原因；为什么停只记在 Step 的 end.cause。
+        // 没轮到的槽位不带原因；停止原因只记在步骤的 `end.cause`。
         assert!(stopped["slots"][2]["reason"].is_null());
-        // 崩溃发生在 Started 前后，停止原因都是进程退出。
+        // 崩溃发生在槽位启动前后，停止原因都是进程退出。
         assert_eq!(stopped["end"]["cause"], json!({"cause":"process_exit"}));
-        // 未关闭的末端 Step 与它之前的节点一样作为条目给出，并带这一轮的结局。
+        // 未关闭的末端步骤与它之前的节点一样作为条目给出，并带这一轮的结局。
         read_json(
             &world,
             &spec,
@@ -1052,28 +1057,18 @@ fn crash_start_cannot_reset_an_expired_scenario_budget() {
         .downcast_ref::<String>()
         .map(String::as_str)
         .or_else(|| panic.downcast_ref::<&str>().copied())
-        .expect("scenario budget panic must carry a text message");
+        .expect("场景预算超时触发的 panic 必须携带文本消息");
     // 只允许实际耗时变化；场景身份、预算和完整诊断都必须来自预算检查。
-    let prefix = format!(
-        "scenario '{}' exceeded total timeout 0ns (elapsed ",
-        spec.name
-    );
+    let prefix = format!("场景 '{}' 超出总预算 0ns（已耗时 ", spec.name);
     let elapsed = message
         .strip_prefix(&prefix)
-        .and_then(|rest| {
-            rest.strip_suffix(
-                "); a multi-step sequence must terminate within the whole-scenario budget",
-            )
-        })
-        .expect("crash start must panic specifically because the scenario budget expired");
-    assert!(
-        !elapsed.is_empty(),
-        "budget panic must report the elapsed time"
-    );
+        .and_then(|rest| rest.strip_suffix("）；多步骤序列必须在整场景预算内结束"))
+        .expect("崩溃屏障启动必须专门因整场景预算耗尽而触发 panic");
+    assert!(!elapsed.is_empty(), "预算耗尽 panic 必须报告已消耗的时间");
     assert!(world.daemon_pids().unwrap().is_empty());
 }
 
-/// 条目中这一轮的每个 Step 必须与详情逐槽位配对，不只比较调用数；未关闭的末端 Step 同样在条目中。
+/// 条目中这一轮的每个步骤必须与详情逐槽位配对，不只比较调用数；未关闭的末端步骤同样在条目中。
 fn assert_paired_entries(entries: &[&Value], turn: &Value) {
     let steps = turn["steps"].as_array().unwrap();
     let mut ids = std::collections::BTreeSet::new();
@@ -1081,7 +1076,7 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
         assert_eq!(step["key"]["ordinal"], ordinal);
         let node = step["node"].as_u64().unwrap();
         let entry = entries.iter().find(|entry| entry["node"] == node).unwrap();
-        // 条目带的 StepDetail 就是 `session turn` 给出的那一步；结局只随最后一步给出。
+        // 条目携带的步骤详情就是 `session turn` 给出的那一步；结局只随最后一步给出。
         assert_eq!(entry["step"], *step);
         if ordinal + 1 < steps.len() {
             assert_eq!(step["progress"]["progress"], "closed");
@@ -1220,7 +1215,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             }
             assert!(
                 Instant::now() < pause_deadline,
-                "frontend did not enter SIGSTOP before backend crash"
+                "前端未能在后台崩溃前进入 SIGSTOP 暂停状态"
             );
             std::thread::sleep(Duration::from_millis(5));
         }
@@ -1237,10 +1232,10 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
         world.unset_env(BARRIER);
         world.unset_env(ACK);
         let _restarted_pgid = support::crash::start(&world, &spec, &budget);
-        // SAFETY: 同一个场景自有前端仍由 RunningCommand 持有，尚未回收。
+        // SAFETY: 同一个场景自有前端仍由 `RunningCommand` 持有，尚未回收。
         assert_eq!(unsafe { libc::killpg(frontend_pgid, libc::SIGCONT) }, 0);
         let output = frontend.wait(None).unwrap();
-        evidence.record_command("original CLI recovers acceptance", &output);
+        evidence.record_command("原 CLI 恢复运行后找回已接受回执", &output);
         assert!(output.is_clean_exit(1), "{}", output.summary());
         let parsed = parse_send_stdout(&output.stdout, output.exit_code());
         assert!(
@@ -1249,7 +1244,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
             parsed.malformed_lines
         );
         assert_eq!(parsed.sending(), Some((tid, sid)));
-        let receipt = parsed.receipt().expect("one receipt");
+        let receipt = parsed.receipt().expect("应有一条回执记录");
         assert!(receipt.recovered);
         assert_eq!(parsed.accepted_turn_id(), Some(tid));
         assert_eq!(parsed.accepted_session_id(), Some(sid));
@@ -1275,7 +1270,7 @@ fn cli_recovers_accepted_receipt_after_backend_crash() {
         );
         world.daemon_departed().unwrap();
         let stopped = world.wait_daemon(None).unwrap();
-        evidence.record_command("restarted backend drains", &stopped);
+        evidence.record_command("重启后的后台排空并退出", &stopped);
         assert!(stopped.is_clean_exit(0), "{}", stopped.summary());
         provider
             .shutdown(budget.cap_timeout(spec.step_timeout()))
@@ -1451,7 +1446,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
             assert_eq!(
                 watch(&world, &spec, sid).received,
                 observer.received,
-                "usage and observation preserve the Turn and node facts"
+                "用量查询与实时观察不得改写轮次详情及会话节点事实"
             );
             let prior = before["steps"].as_array().unwrap();
             for (index, step) in prior.iter().enumerate() {
@@ -1477,7 +1472,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                         assert_eq!(attempt["cost"]["exact"], !interrupted, "{name}: {attempt}");
                         let fee = attempt["cost"]["usd"]
                             .as_f64()
-                            .expect("committed attempt cost");
+                            .expect("已提交尝试应有计费金额");
                         assert!((fee - expected).abs() < 1e-15, "{name}: {attempt}");
                     }
                 }
@@ -1495,7 +1490,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 assert_eq!(step["progress"]["progress"], "closed");
                 assert_eq!(step["end"], json!({"end":"continue"}));
             }
-            // 当前位置停在这一轮最后写入的 Step，无论它是否关闭。
+            // 当前位点停在这一轮最后写入的步骤节点，无论该步是否已关闭。
             assert_eq!(head.position, last["node"]);
             if final_outcome.is_none() {
                 assert_eq!(
@@ -1611,10 +1606,10 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 );
                 let mut usage = before["usage"].clone();
                 let amount = usage["cost"]["known"]["usd"].take();
-                let amount = amount.as_f64().expect("known aggregate cost");
+                let amount = amount.as_f64().expect("应有已知汇总费用");
                 assert!(
                     (amount - 0.000082).abs() < 1e-15,
-                    "invalid batch cost: {amount}"
+                    "无效的批次汇总费用：{amount}"
                 );
                 assert_eq!(
                     usage,
@@ -1906,7 +1901,7 @@ fn rewind_commit_survives_sigkill_and_keeps_both_branches() {
             );
             assert_eq!(log["session"]["current"], target);
             assert_eq!(log["nodes"].as_array().unwrap().len(), 4);
-            // 退回后的路径是根到目标节点：节点 1..=target 各一条条目。
+            // 回退后的路径是从根到目标节点：节点 `1..=target` 各对应一条条目。
             let observer = watch(&world, &spec, sid);
             assert_eq!(observer.view.head.as_ref().unwrap().position, target);
             assert_eq!(
@@ -2072,7 +2067,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         assert!(live.view.head.as_ref().unwrap().owner);
         live.until(
             deadline(&world, &spec),
-            "the discarded partial text",
+            "首次尝试被丢弃的半截文本",
             |view| view.texts.get(&(2, 0)) == Some(&partial),
         );
         for i in 2..=3 {
@@ -2083,10 +2078,10 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         }
         gate.wait_until_stalled(4, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        // 重试提示是 Step 条目的一部分，随条目推送，没有单独的事件。
+        // 重试提示是步骤条目的一部分，随条目推送，没有单独的事件。
         live.until(
             deadline(&world, &spec),
-            "a retry notice on step 0",
+            "第 0 步出现重试提示",
             |view| {
                 view.entries
                     .get(&2)
@@ -2155,7 +2150,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
                 }
             })
             .collect();
-        live.until(deadline(&world, &spec), "70 text segments", |view| {
+        live.until(deadline(&world, &spec), "前 70 段流式文本", |view| {
             view.texts.get(&(3, 0)).is_some_and(|text| text.len() == 70)
         });
         assert_eq!(live.view.texts[&(3, 0)], reconstructed);
@@ -2163,7 +2158,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             .unwrap();
         gate.wait_until_stalled(80, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
-        live.until(deadline(&world, &spec), "the 71st text segment", |view| {
+        live.until(deadline(&world, &spec), "第 71 段流式文本", |view| {
             view.texts[&(3, 0)].len() == 71
         });
         reconstructed.push(segment(SegmentKind::Text, "text-70;"));
@@ -2177,7 +2172,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         assert_eq!(closed_pause["turn_id"], tid);
         let closed = accepted_detail(&world, &spec, tid);
         assert_eq!(closed["summary"]["outcome"], "completed");
-        // 关闭事务已提交、变化尚未标记：新观察者开头的条目已带关闭的结局，Owner 仍在。
+        // 关闭事务已提交、变化尚未标记：新观察者开头的条目已带收束结局，占有方仍在场。
         assert!(!schedule.join("turn_closed.release").exists());
         let mut observer = watch(&world, &spec, sid);
         assert!(observer.view.head.as_ref().unwrap().owner);
@@ -2187,7 +2182,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         stage(&world, &spec, &mut evidence, sid, tid);
         std::fs::write(schedule.join("turn_closed.release"), b"").unwrap();
         let done = front.wait(None).unwrap();
-        evidence.record_command("front finishes after notification release", &done);
+        evidence.record_command("通知放行后前端命令正常结束", &done);
         assert!(done.is_clean_exit(0), "{}", done.summary());
         let sent = parse_send_stdout(&done.stdout, done.exit_code());
         assert_eq!(sent.closed_result(), Some((sid, tid, "completed")));
@@ -2203,10 +2198,10 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
                 .map(|entry| &entry.raw)
                 .eq(finished.iter())
         );
-        live.until(deadline(&world, &spec), "the closed entries", |view| {
+        live.until(deadline(&world, &spec), "收束后的全部条目", |view| {
             view.raw_entries().into_iter().eq(finished.iter())
         });
-        slow.until(deadline(&world, &spec), "the closed entries", |view| {
+        slow.until(deadline(&world, &spec), "收束后的全部条目", |view| {
             view.raw_entries().into_iter().eq(finished.iter())
         });
         let reply = merge_segments(&observer.view.entries[&3].step().unwrap().reply);
@@ -2239,7 +2234,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             finished.iter().all(|entry| !entry["content"]["reply"]
                 .to_string()
                 .contains("discarded partial")),
-            "stopped partial text never becomes the conversation reply"
+            "中止尝试的半截文本绝不能成为对话正式回复"
         );
         assert_eq!(closed["steps"][0]["attempts"].as_array().unwrap().len(), 2);
         evidence.record_captures(captures);
@@ -2252,7 +2247,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         );
         world.daemon_departed().unwrap();
         let stopped = world.wait_daemon(None).unwrap();
-        evidence.record_command("scheduled backend shutdown", &stopped);
+        evidence.record_command("按计划停止后台并等待退出", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.unset_env("LATTICE_TEST_SCHEDULE_DIR");
         world.start_daemon().expect("停止后显式重启后台");
@@ -2277,7 +2272,7 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         evidence
             .record_json("restart-reconnect", &json!(after_restart.received))
             .unwrap();
-        // `history` 读不到当前最后一轮：先提交下一轮，以它的 UserMessage 为 `before` 重读这一轮，
+        // `history` 读不到当前最后一轮：先提交下一轮，以它的用户消息节点为 `before` 重读这一轮，
         // 与观察者最后持有的条目逐字段相同。
         let next = cli(
             &world,
@@ -2411,7 +2406,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 );
             } else {
                 let done = front.wait(None).unwrap();
-                evidence.record_command("live cancellation", &done);
+                evidence.record_command("实时取消轮次结束", &done);
                 assert!(done.is_clean_exit(2), "{}", done.summary());
                 cli(
                     &world,
@@ -2422,16 +2417,13 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
                 );
                 world.daemon_departed().unwrap();
                 let stopped = world.wait_daemon(None).unwrap();
-                evidence.record_command("live backend stop", &stopped);
+                evidence.record_command("实时取消分支停止后台", &stopped);
                 assert!(stopped.is_clean_exit(0));
                 world.start_daemon().expect("停止后显式重启后台");
             }
             let closed = stage(&world, &spec, &mut evidence, sid, tid);
             if let Some(before) = orphan_before {
-                assert_eq!(
-                    closed, before,
-                    "rewind must preserve the cancelled slot and unclosed Step"
-                );
+                assert_eq!(closed, before, "回退必须保留已取消槽位与未收束步骤记录");
             }
             assert_eq!(closed["summary"]["outcome"], "cancelled");
             assert_eq!(closed["summary"]["notice"]["level"], "info");
@@ -2451,7 +2443,7 @@ fn cancelled_slot_live_and_crash_share_ordered_closure() {
             );
             assert_eq!(slots[2]["outcome"], "not_executed");
             assert!(slots[2]["reason"].is_null());
-            // 实时取消与崩溃后都停在第二步：用户消息与两个 Step 各一条条目，末端 Step 带结局。
+            // 实时取消与崩溃恢复后都停在第二步：用户消息与两个步骤各占一条条目，末端步骤带结局。
             let observer = watch(&world, &spec, sid);
             let entries = observer.view.raw_entries();
             assert_eq!(entries.len(), 3);
@@ -2568,7 +2560,7 @@ fn dispatch_deadline_tail_is_atomic_and_survives_crash() {
                 .iter()
                 .all(|s| s["progress"]["state"] == "registered")
         );
-        // 从已命中的登记点再等满冻结预算，确定 deadline 已过；不是用耗时猜并发。
+        // 从已命中的登记点再等满冻结预算，确定截止时间已过，而非凭耗时猜测并发顺序。
         std::thread::sleep(Duration::from_secs(2));
         std::fs::write(schedule.join("calls_registered.release"), b"").unwrap();
         let marker = wait_for_ack(&ack, budget.cap_timeout(spec.step_timeout()));
@@ -2713,7 +2705,7 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
         );
         let next = parse_send_stdout(&next.stdout, next.exit_code());
         let old = stage(&world, &spec, &mut evidence, sid, tid);
-        assert_eq!(old, reopened, "new send must not modify the old Turn");
+        assert_eq!(old, reopened, "新发送的轮次不得修改旧轮次记录");
         assert_eq!(old["summary"]["outcome"], "failed");
         assert_eq!(old["summary"]["notice"]["level"], "error");
         assert_eq!(
@@ -2764,7 +2756,7 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
     support::finish_recorded(evidence, result);
 }
 
-/// 准入窗口：后台已登记在途的 TurnId、尚未确认提交连接仍在并准入之前，由 `admission_registered`
+/// 准入窗口：后台已登记在途的轮次标识、尚未确认提交连接仍在并完成准入之前，由 `admission_registered`
 /// 暂停这次提交的任务，后台照常服务其他连接。
 #[test]
 fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted() {
@@ -2817,11 +2809,11 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
                 break marker;
             }
             if let Some(reply) = pending.next_within(Duration::from_millis(5)) {
-                panic!("submission answered without pausing at admission_registered: {reply}");
+                panic!("提交请求未在 admission_registered 屏障处暂停便已返回：{reply}");
             }
             assert!(
                 Instant::now() < until,
-                "admission_registered marker not reached"
+                "未在截止时间前等到 admission_registered 屏障确认文件"
             );
         };
         assert_eq!(marker["turn_id"], TURN);
@@ -2843,7 +2835,7 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
             serde_json::from_slice::<Value>(&shown.stdout).unwrap(),
             json!({"status":"in_flight","turn_id":TURN})
         );
-        // 同一 TurnId 再提交是冲突；另一 TurnId 或 configure 访问同一个 S 是 Busy。
+        // 同一轮次标识再次提交返回冲突；另一轮次标识或 `configure` 访问同一会话则返回忙。
         let reused = ipc(&world, timeout(&world, &spec), request.clone());
         assert_eq!(reused["value"]["kind"], "conflict", "{reused}");
         assert_eq!(reused["value"]["conflict"], "turn_id_used", "{reused}");
@@ -2867,7 +2859,7 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
             }
             assert!(
                 Instant::now() < until,
-                "TurnId stayed in flight after the submitter left"
+                "提交端断开后该轮次标识仍停留在在途集合中"
             );
             std::thread::sleep(Duration::from_millis(5));
         };
@@ -2881,7 +2873,7 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
         assert_eq!(draft_head["value"]["position"], 0, "{draft_head}");
         assert_eq!(draft_head["value"]["turn_id"], Value::Null, "{draft_head}");
         assert!(provider.captured_requests().is_empty());
-        // 之后用新的 TurnId 提交同一个草稿会话，正常准入并执行。
+        // 之后用新的轮次标识提交同一个草稿会话，应正常准入并执行。
         let admitted = ipc(
             &world,
             timeout(&world, &spec),
@@ -2890,11 +2882,9 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
         assert_eq!(admitted["value"]["acceptance"], "accepted", "{admitted}");
         assert_eq!(admitted["value"]["turn"]["session_id"], SESSION);
         let mut watcher = watch(&world, &spec, SESSION);
-        watcher.until(
-            deadline(&world, &spec),
-            "the admitted Turn closes",
-            |view| turn_closed(view, THIRD),
-        );
+        watcher.until(deadline(&world, &spec), "新准入的轮次收束", |view| {
+            turn_closed(view, THIRD)
+        });
         assert_eq!(provider.captured_requests().len(), 1);
         evidence
             .record_json(
@@ -2916,7 +2906,7 @@ fn admission_window_reports_in_flight_and_a_departed_submitter_is_not_admitted()
         );
         world.daemon_departed().unwrap();
         let stopped = world.wait_daemon(None).unwrap();
-        evidence.record_command("admission window backend stop", &stopped);
+        evidence.record_command("准入窗口场景停止后台", &stopped);
         assert!(stopped.is_clean_exit(0));
     }));
     support::finish_recorded(evidence, result);
@@ -3089,7 +3079,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
         world.set_env(ACK, ack.display().to_string());
         let daemon_pgid = support::crash::start(&world, &spec, &budget);
 
-        // CLI 对新会话先写明 submit(sending)，随后 configure(New) 在持久创建提交后、回复前停在屏障。
+        // CLI 对新会话先输出 `submit(sending)`，随后 `configure(New)` 在持久创建提交后、回复前停在屏障。
         let frontend = driver
             .start(
                 &world,
@@ -3131,7 +3121,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
         assert_ne!(daemon_pgid, frontend.pgid());
         support::crash::kill_backend(&world, daemon_pgid, &mut evidence, &budget);
         let disconnected = frontend.wait(None).unwrap();
-        evidence.record_command("frontend observes configure crash", &disconnected);
+        evidence.record_command("前端观察到 configure 期间后台崩溃", &disconnected);
         assert!(disconnected.is_clean_exit(1), "{}", disconnected.summary());
 
         // 后台在持久提交后、回复前被杀，单次 `configure` 读不到回复而得到 `transport` 错误，
@@ -3148,7 +3138,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
                 turn_id,
                 session_id,
             }) => (turn_id.clone(), session_id.clone()),
-            other => panic!("第一条 JSONL 必须是写明身份的 submit(sending)：{other:?}"),
+            other => panic!("第一条 JSONL 必须是写明身份的 `submit(sending)`：{other:?}"),
         };
         assert_eq!(sent_sid, sid);
         match &parsed.records[1] {
@@ -3159,7 +3149,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
                 assert_eq!(session_id, &sid);
                 assert_eq!(error.kind, "transport", "{error:?}");
             }
-            other => panic!("第二条 JSONL 必须是 configure(unknown)：{other:?}"),
+            other => panic!("第二条 JSONL 必须是 `configure(unknown)`：{other:?}"),
         }
         assert_eq!(
             parsed.records[2],
@@ -3170,7 +3160,7 @@ fn configure_committed_crash_leaves_single_draft_and_reports_unknown() {
             }))
         );
 
-        // 重启后台后：状态根中只有这一个草稿会话 S，原 Turn 未写入，后续在同一会话发送只执行一轮。
+        // 重启后台后：状态根中只有这一个草稿会话，原轮次未写入，后续在同一会话发送只执行一轮。
         world.unset_env(BARRIER);
         world.unset_env(ACK);
         let _restarted_pgid = support::crash::start(&world, &spec, &budget);

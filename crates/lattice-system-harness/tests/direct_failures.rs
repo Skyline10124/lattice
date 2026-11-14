@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! provider 失败、SIGINT、deadline、文件不回滚与 Busy 的真实二进制场景。
+//! provider 失败、`SIGINT`、截止时间超时、文件不回滚与会话忙拒绝的真实二进制场景。
 mod support;
 use lattice_system_harness::{
     AssertError, FAKE_API_KEY, FakeLlmServer, HarnessIntervention, ProcessTermination,
@@ -23,11 +23,11 @@ fn failed(outcome: &SendExecution, cause: &str) -> Result<(), AssertError> {
         outcome.command.is_clean_exit(1)
             && turn["summary"]["outcome"] == "failed"
             && turn["summary"]["notice"]["level"] == "error",
-        "Failed/Error with exit 1",
+        "失败轮次应以错误级别提示和退出码 1 收束",
     )?;
     require(
         end["end"] == "stop" && end["cause"]["cause"] == cause,
-        format!("Stop cause {cause}: {end}"),
+        format!("停止原因应为 {cause}：{end}"),
     )
 }
 fn finish_failure(
@@ -77,26 +77,29 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
         .unwrap();
     let result = (|| {
         failed(&outcome, "provider_error")?;
-        require(server.captured_requests().len() == 1, "no provider retry")?;
-        require(detail.is_clean_exit(0), "failed Turn remains readable")?;
+        require(
+            server.captured_requests().len() == 1,
+            "禁用重试时不得再次请求 provider",
+        )?;
+        require(detail.is_clean_exit(0), "失败轮次仍应可正常读取")?;
         let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
         require(
             persisted["steps"][0]["attempts"][0]["origin"]
                 == serde_json::json!({"protocol":"chat-completions","provider_id":"local"}),
-            "failed attempt records protocol and provider id",
+            "失败尝试应记录协议类型与 provider 标识",
         )?;
         require(
             same_turn(&final_turn(&outcome), &persisted),
-            "reloaded detail equals the live Step entries",
+            "重新读取的轮次详情应与实时步骤条目一致",
         )?;
         let entries = outcome.entries();
         let entry = entries
             .iter()
             .find(|entry| entry.step().is_some())
-            .expect("reserved Step persists even on failure");
+            .expect("即使尝试失败，预留的步骤条目也必须持久化");
         require(
             outcome.reply_text().is_empty() && entry.raw["content"]["reply"].is_null(),
-            "failed attempt does not produce a complete reply",
+            "失败尝试不得产生完整回复",
         )?;
         // 停止尝试的半截文字不持久化；只从本次连接收到的实时文字证明输出。
         let view = outcome
@@ -114,21 +117,18 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
                     && segments
                         .iter()
                         .all(|segment| segment.kind == lattice_system_harness::SegmentKind::Text),
-                format!("partial attempt must stream a nonempty prefix of partial: {segments:?}"),
+                format!("半截断流尝试必须实时流出 partial 的非空前缀：{segments:?}"),
             )
         } else {
-            require(
-                segments.is_empty(),
-                "pre-output failure must have no text segments",
-            )
+            require(segments.is_empty(), "输出前失败不得产生任何文本片段")
         }
     })();
     finish_failure(
         evidence,
         &send,
         &[
-            ("provider failure", &outcome.command),
-            ("turn detail", &detail),
+            ("触发 provider 失败发送", &outcome.command),
+            ("查询失败轮次详情", &detail),
         ],
         server.captured_requests(),
         result,
@@ -246,18 +246,18 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
     let result = (|| {
         assert_clean_send(&outcome)?;
         assert_clean_send(&next)?;
-        require(next.is_clean_exit(0), "new turn exits 0")?;
+        require(next.is_clean_exit(0), "后续新轮次退出码应为 0")?;
         require(
             outcome.has_completed()
                 && next.has_completed()
                 && server.captured_requests().len() == 4,
-            "failed attempt retried once, tool step completed, and one new request sent",
+            "失败尝试应重试一次、完成工具步骤，并在重开后发出一次新请求",
         )?;
         require(
             [&detail, &stopped, &reopened, &next_detail, &old_detail]
                 .iter()
                 .all(|command| command.is_clean_exit(0)),
-            "query, stop and reopen succeed",
+            "查询、停止后台与重开查询均应成功退出",
         )?;
         let saved: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let attempts = saved["steps"][0]["attempts"].as_array().unwrap();
@@ -275,7 +275,7 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
                 && attempts[1]["cost"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0014).abs() < 1e-15),
-            "interrupted attempt is partial; missing prices omit terms without losing reported usage",
+            "中断尝试应记为部分用量；缺失单价仅省略对应计费项而不丢失已上报用量",
         )?;
         require(
             saved["steps"][1]["attempts"][0]["usage_kind"] == "complete"
@@ -283,7 +283,7 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
                 && saved["steps"][1]["attempts"][0]["cost"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0056).abs() < 1e-15),
-            "next step uses its end-time price",
+            "下一步应按其结束时刻生效的单价计费",
         )?;
         require(
             saved["usage"]["partial_attempts"] == 1
@@ -293,12 +293,12 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
                 && saved["usage"]["cost"]["known"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0098).abs() < 1e-15),
-            "fees aggregate independently of token completeness",
+            "费用汇总应独立于词元完整性标志累计",
         )?;
         require(
             saved == serde_json::from_slice::<Value>(&reopened.stdout).unwrap()
                 && saved == serde_json::from_slice::<Value>(&old_detail.stdout).unwrap(),
-            "repricing, reopening and a new attempt do not rewrite prior fees",
+            "修改单价、重开后台与执行新尝试都不得改写既有费用记录",
         )?;
         let latest: Value = serde_json::from_slice(&next_detail.stdout).unwrap();
         require(
@@ -307,7 +307,7 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
                 && latest["steps"][0]["attempts"][0]["cost"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0084).abs() < 1e-15),
-            "new attempt after reopening uses the latest price",
+            "重开后台后的新尝试应按最新单价计费",
         )?;
         let entries = outcome.entries();
         let entry = entries.iter().find(|entry| entry.step().is_some()).unwrap();
@@ -316,24 +316,24 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
             saved["steps"][0]["end"]["end"] == "continue"
                 && reply.is_object()
                 && !reply.to_string().contains("partial"),
-            "partial reply does not enter history",
+            "失败尝试的半截回复不得进入会话历史",
         )?;
         require(
             same_turn(&final_turn(&outcome), &saved),
-            "live entries match persisted attempts",
+            "实时条目应与持久化尝试记录一致",
         )
     })();
     finish_failure(
         evidence,
         &send,
         &[
-            ("retry turn", &outcome.command),
-            ("turn detail", &detail),
-            ("stop", &stopped),
-            ("reopened", &reopened),
-            ("new turn", &next.command),
-            ("new detail", &next_detail),
-            ("old detail", &old_detail),
+            ("含重试与计费的首轮发送", &outcome.command),
+            ("查询首轮详情", &detail),
+            ("停止后台", &stopped),
+            ("后台重开后查询首轮详情", &reopened),
+            ("重开后发送新轮次", &next.command),
+            ("查询新轮次详情", &next_detail),
+            ("再次核对首轮详情", &old_detail),
         ],
         server.captured_requests(),
         result,
@@ -401,7 +401,7 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
     );
     world.budget(&spec);
     world.start_daemon().expect("显式启动后台");
-    // 整份响应的 gate 在发送响应头之前等待，保护打开阶段的 deadline 轮询。
+    // 整份响应的闸门在发送响应头之前等待，用来覆盖连接打开阶段的截止时间轮询。
     let (server, gate) = wire_gated_fake_llm(&world, "deadline", SseScript::plain("never-served"));
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "deadline");
@@ -415,7 +415,7 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
         failed(&outcome, "deadline")?;
         require(
             outcome.reply_text().is_empty() && server.captured_requests().len() == 1,
-            "one request waiting for response headers, no text",
+            "等待响应头超时应只发出一次请求且无回复文本",
         )?;
         let turn = final_turn(&outcome);
         let attempts = turn["steps"][0]["attempts"].as_array().unwrap();
@@ -424,13 +424,13 @@ fn direct_failure_profile_deadline_while_stalled_commits_error() {
                 && attempts[0]["usage"].is_null()
                 && attempts[0]["usage_kind"] == "partial"
                 && attempts[0]["cost"].is_null(),
-            "opening deadline has no reported usage or estimated cost",
+            "响应打开阶段超时不应包含已上报用量或估算费用",
         )
     })();
     finish_failure(
         evidence,
         &send,
-        &[("opening deadline", &outcome.command)],
+        &[("等待响应头超时轮次发送", &outcome.command)],
         server.captured_requests(),
         result,
         "direct_failure_profile_deadline_while_stalled_commits_error",
@@ -457,7 +457,7 @@ fn stopped_after_reported_usage(deadline: bool) {
         )
     };
     let driver = driver();
-    // 请求预算需容纳分段交付与公开观察确认，再在终态帧被阻塞时等待 deadline。
+    // 请求预算需容纳分段交付与公开观察确认，再在终态帧被阻塞时等待截止时间到期。
     let (world, spec) = direct_world(
         prefix,
         agent,
@@ -517,7 +517,7 @@ fn stopped_after_reported_usage(deadline: bool) {
     // 文字在用量之后：观察到它即可确认用量已被产品消费，终态帧仍被阻塞。
     watcher.until(
         Instant::now() + running.remaining_timeout(Duration::from_secs(30)),
-        "text after reported usage",
+        "收到用量之后的流式文本",
         |view| {
             view.texts
                 .values()
@@ -558,7 +558,7 @@ fn stopped_after_reported_usage(deadline: bool) {
         } else {
             require(
                 outcome.command.termination == Some(ProcessTermination::Exited(2)),
-                "cooperative cancellation exits 2",
+                "协作式取消的退出码应为 2",
             )?;
             require(
                 outcome.command.interventions == vec![HarnessIntervention::InterruptRequested]
@@ -566,13 +566,13 @@ fn stopped_after_reported_usage(deadline: bool) {
                     && outcome.command.cleanup.succeeded()
                     && outcome.command.stdout_complete
                     && outcome.command.stderr_complete,
-                "SIGINT only, complete output and group cleanup",
+                "应仅触发 SIGINT 干预、完整读完输出并清理干净进程组",
             )?;
             assert_accepted_and_closed(&outcome)?;
         }
         require(
             outcome.malformed_lines.is_empty() && outcome.reply_text().is_empty(),
-            "no malformed records or fabricated text",
+            "不得出现畸形记录或伪造的完整回复文本",
         )?;
         let turn = final_turn(&outcome);
         require(
@@ -580,12 +580,12 @@ fn stopped_after_reported_usage(deadline: bool) {
                 && turn["summary"]["notice"]["level"] == if deadline { "error" } else { "info" }
                 && turn["steps"][0]["end"]["cause"]["cause"]
                     == if deadline { "deadline" } else { "cancelled" },
-            "true deadline or cancellation outcome is durable",
+            "真实的超时或取消结局必须已持久化",
         )?;
         let attempts = turn["steps"][0]["attempts"].as_array().unwrap();
         require(
             attempts.len() == 1 && server.captured_requests().len() == 1,
-            "one stopped attempt and one provider request",
+            "应当只有一次中止尝试与一次 provider 请求",
         )?;
         require(
             attempts[0]["usage"]
@@ -595,7 +595,7 @@ fn stopped_after_reported_usage(deadline: bool) {
                 && attempts[0]["cost"]["usd"]
                     .as_f64()
                     .is_some_and(|fee| (fee - 0.0028).abs() < 1e-15),
-            "stopped attempt keeps reported usage and its estimated cost",
+            "中止尝试应保留已上报用量及其估算费用",
         )?;
         require(
             detail.is_clean_exit(0)
@@ -607,18 +607,18 @@ fn stopped_after_reported_usage(deadline: bool) {
                     &turn,
                     &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
                 ),
-            "stopped attempt metering and outcome survive backend reopening without another provider request",
+            "中止尝试的计量与结局在后台重开后应保持不变，且不额外发起 provider 请求",
         )
     })();
     finish_failure(
         evidence,
         &send,
         &[
-            ("in-flight sessions", &list),
-            ("stopped request", &outcome.command),
-            ("reloaded Turn", &detail),
-            ("stop backend", &stopped),
-            ("reopened Turn", &reopened),
+            ("查询运行中会话列表", &list),
+            ("收到用量后中止的发送", &outcome.command),
+            ("查询中止轮次详情", &detail),
+            ("停止后台", &stopped),
+            ("后台重开后查询轮次详情", &reopened),
         ],
         server.captured_requests(),
         result,
@@ -682,7 +682,7 @@ fn direct_failure_mutation_survives_provider_failure() {
     finish_failure(
         evidence,
         &send,
-        &[("mutation then failure", &outcome.command)],
+        &[("工具写文件后触发失败的发送", &outcome.command)],
         server.captured_requests(),
         result,
         "direct_failure_mutation_survives_provider_failure",
@@ -729,7 +729,7 @@ fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
                 && outcome.has_completed()
                 && outcome.reply_text() == "recovered after tool error",
             format!(
-                "工具返回 Failed(ToolError) 后仍推进下一步并正常完成：{}",
+                "工具返回失败结果后仍应推进下一步并正常完成：{}",
                 outcome.reply_text()
             ),
         )?;
@@ -744,7 +744,7 @@ fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
                 && slots[0].state == SlotState::Terminal
                 && slots[0].outcome == SlotOutcome::Failed
                 && slots[0].error_code.as_deref() == Some("gate_denied"),
-            format!("公开槽位记录应为 Failed 且携带机器码 gate_denied：{slots:?}"),
+            format!("公开槽位记录应处于失败终态且携带错误码 gate_denied：{slots:?}"),
         )?;
         let expected_wire =
             r#"{"error":{"code":"gate_denied","message":"simulated tool failure"}}"#;
@@ -760,7 +760,7 @@ fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
                 captures[1].raw["messages"][3]
             ),
         )?;
-        require(detail.is_clean_exit(0), "session turn 查询应返回 0")?;
+        require(detail.is_clean_exit(0), "查询轮次详情应返回退出码 0")?;
         let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let slot = &persisted["steps"][0]["slots"][0];
         let expected_reason = json!({"kind": "failed", "value": {"code": "gate_denied"}});
@@ -783,15 +783,15 @@ fn direct_failure_tool_error_projects_to_model_and_continues_next_step() {
                 && slot["binding"]["method"] == "check_gate"
                 && slot["binding"]["tool_identity"] == "fake:check_gate@1"
                 && same_turn(&final_turn(&outcome), &persisted),
-            format!("持久 Turn 详情与槽位失败结论不一致：{persisted}"),
+            format!("持久化轮次详情与槽位失败结论不一致：{persisted}"),
         )
     })();
     finish_failure(
         evidence,
         &send,
         &[
-            ("tool error turn", &outcome.command),
-            ("turn detail", &detail),
+            ("工具报错后恢复的轮次发送", &outcome.command),
+            ("查询轮次详情", &detail),
         ],
         captures,
         result,
@@ -828,7 +828,7 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
             assert_accepted_and_closed(outcome)?;
             require(
                 outcome.has_completed() && outcome.command.is_clean_exit(0),
-                "accepted Turn completes",
+                "已接受的轮次应正常完成",
             )?;
         }
         assert_clean_send(&racer)?;
@@ -836,17 +836,17 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
             racer.command.is_clean_exit(1)
                 && racer.accepted_turn_id().is_none()
                 && rejected_kind(&racer) == Some("busy"),
-            "Busy rejects without acceptance",
+            "会话忙时应直接拒绝而不接受轮次",
         )?;
         require(
             before_retry.is_empty() && racer_server.captured_requests().len() == 1,
-            "Busy never queues or calls provider",
+            "会话忙拒绝绝不能排队或请求 provider",
         )?;
         let tree: Value = serde_json::from_slice(&log.stdout).unwrap();
         let rows = tree["nodes"].as_array().unwrap();
         require(
             log.is_clean_exit(0) && rows.len() == 7,
-            "root plus exactly three complete Turns",
+            "会话树应包含根节点与恰好三轮完整对话",
         )?;
         let previous = final_turn(&a)["steps"][0]["node"].clone();
         require(
@@ -854,7 +854,7 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
                 r["turn_start"]["turn_id"] == b.accepted_turn_id().unwrap()
                     && r["node"]["parent"] == previous
             }),
-            "B User is parented to A final node, not stale head",
+            "轮次 B 的用户节点父指针应指向轮次 A 的末节点，而非旧头节点",
         )
     })();
     let mut captures = baseline_server.captured_requests();
@@ -864,11 +864,11 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
         evidence,
         &send,
         &[
-            ("baseline", &baseline.command),
-            ("Busy", &racer.command),
-            ("A", &a.command),
-            ("retry B", &b.command),
-            ("tree", &log),
+            ("基线轮次发送", &baseline.command),
+            ("并发争用触发忙拒绝", &racer.command),
+            ("占用会话的轮次 A", &a.command),
+            ("释放后重试轮次 B", &b.command),
+            ("查询会话树", &log),
         ],
         captures,
         result,
@@ -951,13 +951,13 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
         require(
             requests_after_deadline.len() == 1,
             format!(
-                "调用期 deadline 后仅应有 1 次模型请求，实际为 {}",
+                "工具调用期超时后仅应有 1 次模型请求，实际为 {}",
                 requests_after_deadline.len()
             ),
         )?;
         require(
             ready_path.exists() && marker_path.exists(),
-            "hold_call 必须已进入执行并写出 ready/marker 文件",
+            "hold_call 必须已进入执行并写出就绪与标记文件",
         )?;
         let ready_lines: Vec<_> = std::fs::read_to_string(&ready_path)
             .unwrap()
@@ -973,7 +973,7 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
             ready_lines.len() == 1
                 && ready_lines[0].starts_with("hold_call:")
                 && marker_lines == vec!["hold-entered"],
-            format!("hold_call 只应进入一次：ready={ready_lines:?}, marker={marker_lines:?}"),
+            format!("hold_call 只应进入一次：就绪文件={ready_lines:?}，标记文件={marker_lines:?}"),
         )?;
         require(
             !skipped_path.exists(),
@@ -996,7 +996,7 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
             detail.is_clean_exit(0)
                 && followup_detail.is_clean_exit(0)
                 && detail_after.is_clean_exit(0),
-            "session turn 查询应返回 0",
+            "轮次详情查询应全部返回退出码 0",
         )?;
         let persisted: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let expected_end = json!({"end": "stop", "cause": {"cause": "deadline"}});
@@ -1006,7 +1006,7 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
                     == json!({"level": "error", "text": "turn deadline exceeded"})
                 && persisted["steps"].as_array().unwrap().len() == 1
                 && persisted["steps"][0]["end"] == expected_end,
-            format!("持久 Turn 结局、提示或 Step.end 不匹配：{persisted}"),
+            format!("持久化轮次的结局、提示或步骤结束原因不匹配：{persisted}"),
         )?;
         let slots = persisted["steps"][0]["slots"].as_array().unwrap();
         require(slots.len() == 2, format!("预期 2 个槽位：{slots:?}"))?;
@@ -1017,10 +1017,7 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
                 && slots[0]["outcome"] == "indeterminate"
                 && slots[0]["reason"] == json!({"kind": "indeterminate", "value": "no_result"})
                 && slots[0]["material"] == json!({"kind": "no_content"}),
-            format!(
-                "槽位 0 应停在 started 且读出 indeterminate(no_result)：{}",
-                slots[0]
-            ),
+            format!("槽位 0 应停留在已启动状态并读出未决结果：{}", slots[0]),
         )?;
         require(
             slots[1]["binding"]["method"] == "write_marker"
@@ -1029,11 +1026,11 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
                 && slots[1]["outcome"] == "not_executed"
                 && slots[1]["reason"].is_null()
                 && slots[1]["material"] == json!({"kind": "no_content"}),
-            format!("槽位 1 应停在 registered 且读出 not_executed：{}", slots[1]),
+            format!("槽位 1 应停留在已登记状态并读出未执行结果：{}", slots[1]),
         )?;
         require(
             same_turn(&final_turn(&outcome), &persisted),
-            "实时条目与持久 session turn 详情应一致",
+            "实时条目与持久化轮次详情应一致",
         )?;
 
         assert_clean_send(&followup)?;
@@ -1056,7 +1053,7 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
             !skipped_path.exists()
                 && std::fs::read_to_string(&marker_path).unwrap() == "hold-entered\n"
                 && serde_json::from_slice::<Value>(&detail_after.stdout).unwrap() == persisted,
-            "后续轮不得重放旧调用或改写已关闭的 deadline Turn",
+            "后续轮次不得重放旧工具调用或改写已收束的超时轮次",
         )
     })();
 
@@ -1064,11 +1061,11 @@ fn tool_call_deadline_leaves_slot_started_and_stops_turn() {
         evidence,
         &send,
         &[
-            ("tool deadline turn", &outcome.command),
-            ("turn detail", &detail),
-            ("followup turn", &followup.command),
-            ("followup detail", &followup_detail),
-            ("turn detail after followup", &detail_after),
+            ("工具调用期超时轮次发送", &outcome.command),
+            ("查询超时轮次详情", &detail),
+            ("超时后发送后续轮次", &followup.command),
+            ("查询后续轮次详情", &followup_detail),
+            ("后续轮次后复查超时轮次详情", &detail_after),
         ],
         captures,
         result,

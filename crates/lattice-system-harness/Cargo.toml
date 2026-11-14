@@ -4,7 +4,7 @@ version = "0.1.0"
 license = "Apache-2.0"
 edition = "2024"
 authors = ["Ast Rin"]
-description = "External system tests for the lattice binary (no product crate dependencies)"
+description = "面向已构建 lattice 二进制的全系统黑盒验收套件（零产品 crate 依赖）"
 publish = false
 
 [features]
@@ -27,19 +27,15 @@ toml = "1.1"
 tempfile = "3"
 thiserror = "2"
 
-# PTY support for the one or two TUI smoke scenarios (RFC #19 decision three:
-# PTY only proves the TUI entrypoint still wires into the same turn chain).
-# `portable-pty` is a general test library, not a product crate, so it
-# satisfies `cargo xtask harness-boundary`.
+# 为 TUI 冒烟场景提供伪终端支持（PTY 仅用于验证 TUI 入口仍接入同一条轮次链路）。
+# `portable-pty` 是通用测试库而非产品 crate，满足 `cargo xtask harness-boundary` 要求。
 #
-# `libc` delivers process-group signals through `killpg`/`getpgid` instead of
-# spawning `kill(1)` with a negative pgid argument (#105). The version is
-# spelled out rather than inherited from the workspace: `cargo xtask
-# harness-boundary` rejects workspace dependency inheritance in this manifest.
+# `libc` 通过 `killpg`/`getpgid` 直接投递进程组信号，替代派生带负进程组号参数的 `kill(1)`（#105）。
+# 此处显式声明版本号而不从工作区继承：`cargo xtask harness-boundary` 禁止本清单使用工作区依赖继承。
 portable-pty = "0.9"
 libc = "0.2"
 
-# fake provider 与真实 provider 一样跑 TLS + HTTP/2；都是通用网络库，版本已在锁文件里。
+# 假 provider 与真实 provider 一样运行 TLS + HTTP/2；均属通用网络库，版本已在锁文件中固定。
 bytes = "1"
 h2 = "0.4"
 http = "1"

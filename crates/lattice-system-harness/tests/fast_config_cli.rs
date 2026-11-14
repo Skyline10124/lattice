@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 经后台查询候选，保护凭据过滤、脱敏和失败说明。
-//! 元数据合并、废弃模型与缺失 catalog 的合并规则由 lattice-llm 的
+//! 元数据合并、废弃模型与缺失目录的合并规则由 `lattice-llm` 的
 //! `candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs` 覆盖；
 //! 这里只核对 `lattice models` 显示了合并结果。
 mod support;
@@ -44,13 +44,13 @@ fn backend_startup_observably_skips_disabled_automatic_metadata_refresh() {
             .record_json("automatic refresh skipped", &json!({"log":log}))
             .unwrap();
         let stop = cli(&world, &spec, &["daemon", "stop"]);
-        evidence.record_command("stop disabled refresh backend", &stop);
+        evidence.record_command("停止禁用自动刷新的后台", &stop);
         assert!(stop.is_clean_exit(0));
         world.daemon_departed().unwrap();
         let stopped = world
             .take_daemon_outcome()
             .expect("回收禁用刷新后台的退出结果");
-        evidence.record_command("disabled refresh backend", &stopped);
+        evidence.record_command("禁用自动刷新的后台进程退出", &stopped);
         assert!(stopped.is_clean_exit(0));
         assert!(!world.home().join(".lattice/cache/models.json").exists());
     }));
@@ -76,7 +76,7 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
             .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let refresh = cli(&world, &spec, &["--json", "models", "refresh"]);
-        evidence.record_command("refresh without roots", &refresh);
+        evidence.record_command("无可用信任根时的 models refresh（JSON）", &refresh);
         assert!(refresh.is_clean_exit(2));
         let error: Value = serde_json::from_slice(&refresh.stdout).unwrap();
         assert_eq!(error["kind"], "bad_request");
@@ -87,7 +87,7 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
                 .contains("no usable TLS root certificates")
         );
         let refresh = cli(&world, &spec, &["models", "refresh"]);
-        evidence.record_command("refresh failure text", &refresh);
+        evidence.record_command("无可用信任根时的 models refresh（文本）", &refresh);
         assert!(refresh.is_clean_exit(2));
         assert!(
             String::from_utf8_lossy(&refresh.stderr).contains("no usable TLS root certificates")
@@ -97,7 +97,7 @@ fn refresh_without_tls_roots_reports_the_reason_and_preserves_cached_candidates(
             &spec,
             &["--json", "models", "--provider", "anthropic"],
         );
-        evidence.record_command("candidates after failed refresh", &models);
+        evidence.record_command("刷新失败后查询模型候选缓存", &models);
         assert!(models.is_clean_exit(0));
         let models: Value = serde_json::from_slice(&models.stdout).unwrap();
         assert_eq!(models["models"][0]["model"], "cached-model");
@@ -188,50 +188,53 @@ catalog = "arbitrary-entry"
     .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let local = cli(&world, &spec, &["--json", "models", "--provider", "local"]);
-        evidence.record_command("models merged metadata", &local);
-        assert!(local.is_clean_exit(0), "merged metadata query failed");
+        evidence.record_command("查询合并元数据后的模型列表（JSON）", &local);
+        assert!(local.is_clean_exit(0), "合并元数据模型查询失败");
         let local: Value = serde_json::from_slice(&local.stdout).unwrap();
         let models = local["models"].as_array().unwrap();
         let current = models
             .iter()
             .find(|model| model["model"] == "current")
-            .expect("merged: current model listed");
-        assert_eq!(current["context"], 999, "merged: handwritten context wins");
-        assert_eq!(current["output"], 200, "merged: output from metadata");
+            .expect("合并结果应列出 current 模型");
+        assert_eq!(
+            current["context"], 999,
+            "手写 context 配置应优先于目录元数据"
+        );
+        assert_eq!(current["output"], 200, "output 应取自目录元数据");
         assert_eq!(current["supported_efforts"], json!(["off", "high"]));
         assert_eq!(
             current["cost"],
             json!({"input":1.2,"output":3.4,"cache_read":0.1,"cache_write":0.2}),
-            "merged: cost from metadata"
+            "价格信息应取自目录元数据"
         );
         assert!(
             !models.iter().any(|model| model["model"] == "retired"),
-            "deprecated: retired model must be hidden, got {models:?}"
+            "已弃用的 retired 模型必须隐藏，实际返回：{models:?}"
         );
         let text = cli(&world, &spec, &["models", "--provider", "local"]);
-        evidence.record_command("models merged metadata text", &text);
-        assert!(text.is_clean_exit(0), "merged text query failed");
+        evidence.record_command("查询合并元数据后的模型列表（文本）", &text);
+        assert!(text.is_clean_exit(0), "合并元数据文本查询失败");
         let text = String::from_utf8(text.stdout).unwrap();
         assert_eq!(
             text.lines().next(),
             Some(
                 "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
             ),
-            "merged text: price columns"
+            "文本表头必须包含价格与凭据列"
         );
         assert_eq!(
             text.lines()
                 .find(|line| line.starts_with("local/current\t")),
             Some("local/current\t999\t200\toff,high\t1.2/3.4/0.1/0.2\tready"),
-            "merged text: model limits, prices and credential status"
+            "文本行必须包含模型限额、价格与凭据状态"
         );
         assert!(
             !text.contains("retired"),
-            "deprecated text: retired model shown in {text}"
+            "已弃用的 retired 模型不得出现在文本输出中：{text}"
         );
         let empty = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
-        evidence.record_command("models missing catalog", &empty);
-        assert!(empty.is_clean_exit(0), "missing catalog query failed");
+        evidence.record_command("查询缺失目录元数据的 provider 模型", &empty);
+        assert!(empty.is_clean_exit(0), "缺失目录模型查询失败");
         let empty: Value = serde_json::from_slice(&empty.stdout).unwrap();
         assert_eq!(empty["models"][0]["supported_efforts"], json!([]));
         assert!(
@@ -242,10 +245,10 @@ catalog = "arbitrary-entry"
                 .any(|warning| warning["message"]
                     .as_str()
                     .is_some_and(|message| message.contains("no metadata"))),
-            "no metadata: missing catalog warning absent, got {empty}"
+            "缺少目录元数据时应给出 no metadata 告警，实际返回：{empty}"
         );
         let empty_text = cli(&world, &spec, &["models", "--provider", "empty"]);
-        evidence.record_command("empty model efforts text", &empty_text);
+        evidence.record_command("查询无档位模型的文本输出", &empty_text);
         assert!(empty_text.is_clean_exit(0));
         assert!(
             String::from_utf8_lossy(&empty_text.stdout)
@@ -253,7 +256,7 @@ catalog = "arbitrary-entry"
                 .any(|line| line == "empty/listed\t-\t-\t-\t-/-/-/-\tready")
         );
         let ordered = cli(&world, &spec, &["--json", "models"]);
-        evidence.record_command("candidate provider and model order", &ordered);
+        evidence.record_command("查询候选 provider 与模型的排序结果", &ordered);
         assert!(ordered.is_clean_exit(0));
         let ordered: Value = serde_json::from_slice(&ordered.stdout).unwrap();
         let names: Vec<_> = ordered["models"]
@@ -342,7 +345,7 @@ catalog = "arbitrary-entry"
         );
         for provider in ["pending-responses", "pending-interactions"] {
             let output = cli(&world, &spec, &["--json", "models", "--provider", provider]);
-            evidence.record_command("protocol model list", &output);
+            evidence.record_command("查询指定协议 provider 的模型列表", &output);
             assert!(output.is_clean_exit(0));
             let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
             assert_eq!(listed["models"].as_array().unwrap().len(), 1);
@@ -438,7 +441,7 @@ catalog = "arbitrary-entry"
             &spec,
             &["--json", "models", "--provider", "pending-interactions"],
         );
-        evidence.record_command("Interactions model-level effort error", &output);
+        evidence.record_command("查询 Interactions 模型级非法档位配置", &output);
         assert!(output.is_clean_exit(0));
         let listed: Value = serde_json::from_slice(&output.stdout).unwrap();
         let models = listed["models"].as_array().unwrap();
@@ -497,7 +500,7 @@ catalog = "arbitrary-entry"
         std::fs::write(&providers_path, configuration).unwrap();
         // 手写档位无效只拒绝该模型：列表成功，好模型照常列出，坏模型标出配置错误。
         let invalid = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
-        evidence.record_command("invalid handwritten effort model list", &invalid);
+        evidence.record_command("查询含无效手写档位的模型列表（JSON）", &invalid);
         assert!(invalid.is_clean_exit(0), "{}", invalid.summary());
         let invalid: Value = serde_json::from_slice(&invalid.stdout).unwrap();
         let models = invalid["models"].as_array().unwrap();
@@ -538,7 +541,7 @@ catalog = "arbitrary-entry"
             }
         }
         let text = cli(&world, &spec, &["models", "--provider", "empty"]);
-        evidence.record_command("invalid handwritten effort model text", &text);
+        evidence.record_command("查询含无效手写档位的模型列表（文本）", &text);
         assert!(text.is_clean_exit(0), "{}", text.summary());
         let stdout = String::from_utf8(text.stdout).unwrap();
         assert!(
@@ -560,7 +563,7 @@ catalog = "arbitrary-entry"
         );
         // 已弃用模型先被滤掉，其无效配置既不出现也不让列表失败。
         let local = cli(&world, &spec, &["--json", "models", "--provider", "local"]);
-        evidence.record_command("deprecated model with invalid handwritten effort", &local);
+        evidence.record_command("查询带无效手写档位的已弃用模型过滤结果", &local);
         assert!(local.is_clean_exit(0), "{}", local.summary());
         let local: Value = serde_json::from_slice(&local.stdout).unwrap();
         let local = local["models"].as_array().unwrap();
@@ -617,19 +620,19 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
     .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let missing = cli(&world, &spec, &["--json", "models", "--provider", "local"]);
-        evidence.record_command("models missing key", &missing);
-        assert!(missing.is_clean_exit(0), "missing key query failed");
+        evidence.record_command("录入密钥前查询模型列表", &missing);
+        assert!(missing.is_clean_exit(0), "未配置密钥时的模型查询失败");
         let list: Value = serde_json::from_slice(&missing.stdout).unwrap();
         let current = list["models"]
             .as_array()
             .unwrap()
             .iter()
             .find(|model| model["model"] == "current")
-            .expect("handwritten local model");
+            .expect("应列出手写的 local 模型");
         assert_eq!(
             current["availability"],
             json!({"status":"unconfigured", "requirement":"api_key"}),
-            "bearer provider without a key"
+            "未配置密钥的 bearer provider 应标为 unconfigured"
         );
         assert!(
             list["warnings"]
@@ -637,27 +640,27 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
                 .unwrap()
                 .iter()
                 .any(|warning| warning["provider"] == "local"),
-            "unfiltered provider query should report missing catalog warning"
+            "未过滤凭据的 provider 查询应报告缺失目录告警"
         );
         let filtered = cli(
             &world,
             &spec,
             &["--json", "models", "--auth", "--provider", "local"],
         );
-        evidence.record_command("models missing key filtered", &filtered);
-        assert!(filtered.is_clean_exit(0), "auth filter failed");
+        evidence.record_command("录入密钥前按 --auth 过滤指定 provider", &filtered);
+        assert!(filtered.is_clean_exit(0), "--auth 过滤查询失败");
         let filtered: Value = serde_json::from_slice(&filtered.stdout).unwrap();
         assert!(
             filtered["models"].as_array().unwrap().is_empty(),
-            "missing bearer credential stayed in --auth"
+            "缺少 bearer 凭据的模型不应留在 --auth 结果中"
         );
         assert!(
             filtered["warnings"].as_array().unwrap().is_empty(),
-            "skipped provider warning leaked into --auth --provider: {filtered}"
+            "被跳过的 provider 告警泄漏到了 --auth --provider 结果中：{filtered}"
         );
         let auth_before_key = cli(&world, &spec, &["--json", "models", "--auth"]);
-        evidence.record_command("models --auth before key json", &auth_before_key);
-        assert!(auth_before_key.is_clean_exit(0), "auth list failed");
+        evidence.record_command("录入密钥前查询 --auth 模型列表（JSON）", &auth_before_key);
+        assert!(auth_before_key.is_clean_exit(0), "--auth 列表查询失败");
         let auth_before_key: Value = serde_json::from_slice(&auth_before_key.stdout).unwrap();
         assert!(
             auth_before_key["models"]
@@ -665,7 +668,7 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
                 .unwrap()
                 .iter()
                 .all(|model| model["provider"] == "empty"),
-            "skipped providers leaked into --auth models: {auth_before_key}"
+            "被跳过的 provider 泄漏到了 --auth 模型列表中：{auth_before_key}"
         );
         assert!(
             auth_before_key["warnings"]
@@ -673,11 +676,11 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
                 .unwrap()
                 .iter()
                 .all(|warning| warning["provider"] == "empty"),
-            "skipped providers leaked into --auth warnings: {auth_before_key}"
+            "被跳过的 provider 泄漏到了 --auth 告警列表中：{auth_before_key}"
         );
         let auth_text = cli(&world, &spec, &["models", "--auth"]);
-        evidence.record_command("models --auth before key text", &auth_text);
-        assert!(auth_text.is_clean_exit(0), "auth text list failed");
+        evidence.record_command("录入密钥前查询 --auth 模型列表（文本）", &auth_text);
+        assert!(auth_text.is_clean_exit(0), "--auth 文本列表查询失败");
         let auth_stdout = String::from_utf8_lossy(&auth_text.stdout);
         let auth_stderr = String::from_utf8_lossy(&auth_text.stderr);
         assert!(auth_stdout.contains("empty/listed"), "{auth_stdout}");
@@ -685,11 +688,11 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
         for skipped in ["local", "anthropic", "lmstudio", "ollama"] {
             assert!(
                 !auth_stdout.contains(&format!("{skipped}/")),
-                "skipped provider {skipped} in stdout: {auth_stdout}"
+                "被跳过的 provider {skipped} 出现在标准输出中：{auth_stdout}"
             );
             assert!(
                 !auth_stderr.contains(&format!("{skipped}:")),
-                "skipped provider {skipped} in stderr warnings: {auth_stderr}"
+                "被跳过的 provider {skipped} 出现在标准错误告警中：{auth_stderr}"
             );
         }
         world
@@ -703,8 +706,8 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
             &spec,
             &["--json", "models", "--auth", "--provider", "local"],
         );
-        evidence.record_command("models ready", &ready);
-        assert!(ready.is_clean_exit(0), "ready query failed");
+        evidence.record_command("录入密钥后查询就绪 provider 模型", &ready);
+        assert!(ready.is_clean_exit(0), "就绪模型查询失败");
         let ready: Value = serde_json::from_slice(&ready.stdout).unwrap();
         assert!(
             ready["models"]
@@ -712,24 +715,24 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
                 .unwrap()
                 .iter()
                 .all(|model| model["availability"] == json!({"status":"ready"})),
-            "stored key did not mark local ready: {ready}"
+            "录入密钥后未将 local provider 标记为 ready：{ready}"
         );
         let mixed = cli(&world, &spec, &["--json", "models", "--auth"]);
-        evidence.record_command("models mixed credentials", &mixed);
-        assert!(mixed.is_clean_exit(0), "mixed auth query failed");
+        evidence.record_command("混合凭据状态下查询 --auth 模型列表", &mixed);
+        assert!(mixed.is_clean_exit(0), "混合凭据状态查询失败");
         let mixed: Value = serde_json::from_slice(&mixed.stdout).unwrap();
         let models = mixed["models"].as_array().unwrap();
         assert!(
             models.iter().any(|model| model["provider"] == "empty"),
-            "auth=none provider missing from --auth"
+            "--auth 结果缺少 auth=none provider"
         );
         assert!(
             models.iter().any(|model| model["provider"] == "local"),
-            "ready bearer provider missing from --auth"
+            "--auth 结果缺少已就绪的 bearer provider"
         );
         assert!(
             !models.iter().any(|model| model["provider"] == "anthropic"),
-            "unready builtin provider leaked into --auth"
+            "未就绪的内置 provider 泄漏到了 --auth 结果中"
         );
         assert!(
             mixed["warnings"]
@@ -737,13 +740,13 @@ fn models_hide_unready_credentials_and_keep_auth_none_ready() {
                 .unwrap()
                 .iter()
                 .all(|warning| warning["provider"] == "empty" || warning["provider"] == "local"),
-            "unready provider warning leaked into --auth: {mixed}"
+            "未就绪 provider 的告警泄漏到了 --auth 结果中：{mixed}"
         );
         assert!(
             models
                 .iter()
                 .all(|model| model["availability"] == json!({"status":"ready"})),
-            "--auth listed a provider that is not ready"
+            "--auth 列出了未就绪的模型"
         );
     }));
     finish_recorded(evidence, result);
@@ -770,8 +773,8 @@ fn models_text_lists_the_selected_provider_without_the_key() {
     .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let text = cli(&world, &spec, &["models", "--provider", "local"]);
-        evidence.record_command("models text", &text);
-        assert!(text.is_clean_exit(0), "text models failed");
+        evidence.record_command("查询模型文本输出与密钥不泄漏", &text);
+        assert!(text.is_clean_exit(0), "模型文本列表查询失败");
         let public = format!(
             "{}{}",
             String::from_utf8_lossy(&text.stdout),
@@ -779,15 +782,12 @@ fn models_text_lists_the_selected_provider_without_the_key() {
         );
         assert!(
             public.contains("local/current"),
-            "text output omitted the model: {public}"
+            "文本输出缺少目标模型：{public}"
         );
-        assert!(
-            public.contains("ready"),
-            "text output omitted credential status: {public}"
-        );
+        assert!(public.contains("ready"), "文本输出缺少凭据状态：{public}");
         assert!(
             !public.contains(FAKE_API_KEY),
-            "text output included the provider key"
+            "文本输出泄漏了 provider 密钥"
         );
     }));
     finish_recorded(evidence, result);
@@ -826,8 +826,8 @@ fn models_redact_catalog_ids_that_match_a_known_credential() {
             vec!["models", "--provider", "empty"],
         ] {
             let warning = cli(&world, &spec, &args);
-            evidence.record_command("models catalog credential redaction", &warning);
-            assert!(warning.is_clean_exit(0), "catalog warning query failed");
+            evidence.record_command("查询目录告警中的已知凭据脱敏", &warning);
+            assert!(warning.is_clean_exit(0), "目录告警查询失败");
             let public = format!(
                 "{}{}",
                 String::from_utf8_lossy(&warning.stdout),
@@ -835,12 +835,9 @@ fn models_redact_catalog_ids_that_match_a_known_credential() {
             );
             assert!(
                 !public.contains(CATALOG_KEY),
-                "catalog id equal to a known credential was printed"
+                "与已知凭据同值的目录标识被原样输出"
             );
-            assert!(
-                public.contains("[REDACTED]"),
-                "known credential was not redacted: {public}"
-            );
+            assert!(public.contains("[REDACTED]"), "已知凭据未被脱敏：{public}");
         }
         world
             .register_key(ProviderFixture::chat_completions("unused"), Some("EMPTY"))
@@ -852,16 +849,13 @@ fn models_redact_catalog_ids_that_match_a_known_credential() {
         )
         .unwrap();
         let short = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
-        evidence.record_command("short credential does not mask catalog", &short);
-        assert!(
-            short.is_clean_exit(0),
-            "short credential catalog query failed"
-        );
+        evidence.record_command("短凭据不应误遮蔽更长的目录标识", &short);
+        assert!(short.is_clean_exit(0), "短凭据下的目录查询失败");
         let short: Value = serde_json::from_slice(&short.stdout).unwrap();
         let message = short["warnings"][0]["message"].as_str().unwrap();
         assert!(
             message.contains("EMPTY-catalog"),
-            "short credential masked a longer catalog id: {message}"
+            "短凭据误遮蔽了更长的目录标识：{message}"
         );
     }));
     finish_recorded(evidence, result);
@@ -880,12 +874,11 @@ fn models_report_unreadable_credentials() {
             .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let started = cli(&world, &spec, &["--json", "models", "--provider", "empty"]);
-        evidence.record_command("models before credential failure", &started);
-        assert!(started.is_clean_exit(0), "initial models query failed");
-        for (label, unavailable_directory) in [
-            ("malformed auth file", false),
-            ("broad directory permissions", true),
-        ] {
+        evidence.record_command("凭据损坏前的初始模型查询", &started);
+        assert!(started.is_clean_exit(0), "初始模型查询失败");
+        for (label, unavailable_directory) in
+            [("凭据文件格式错误", false), ("凭据目录权限过宽", true)]
+        {
             if unavailable_directory {
                 std::fs::write(
                     directory.join("auth.json"),
@@ -901,19 +894,19 @@ fn models_report_unreadable_credentials() {
                 std::fs::write(directory.join("auth.json"), "invalid auth").unwrap();
             }
             let unavailable = cli(&world, &spec, &["--json", "models"]);
-            evidence.record_command("models unreadable credential availability", &unavailable);
-            assert!(unavailable.is_clean_exit(0), "{label}: models exited");
+            evidence.record_command("凭据不可读时查询模型可用性（JSON）", &unavailable);
+            assert!(unavailable.is_clean_exit(0), "{label}：models 命令非零退出");
             let unavailable: Value = serde_json::from_slice(&unavailable.stdout).unwrap();
             let warnings = unavailable["warnings"].as_array().unwrap();
             assert!(
                 !warnings.iter().any(|warning| warning["provider"].is_null()),
-                "{label}: unexpected global warning {warnings:?}"
+                "{label}：出现了预期之外的全局告警：{warnings:?}"
             );
             let models = unavailable["models"].as_array().unwrap();
             let local = models
                 .iter()
                 .find(|model| model["provider"] == "local" && model["model"] == "current")
-                .expect("declared bearer model listed");
+                .expect("已声明的 bearer 模型应出现在列表中");
             assert_eq!(local["availability"]["status"], "invalid", "{local}");
             let reason = local["availability"]["reason"].as_str().unwrap();
             let expected = if unavailable_directory {
@@ -921,29 +914,32 @@ fn models_report_unreadable_credentials() {
             } else {
                 "auth.json"
             };
-            assert!(reason.contains(expected), "{label}: reason was {reason}");
+            assert!(reason.contains(expected), "{label}：实际原因为 {reason}");
             let empty = models
                 .iter()
                 .find(|model| model["provider"] == "empty" && model["model"] == "listed")
-                .expect("auth=none model listed");
+                .expect("auth=none 模型应出现在列表中");
             assert_eq!(empty["availability"], json!({"status":"ready"}), "{empty}");
             let text = cli(&world, &spec, &["models"]);
-            evidence.record_command("models unreadable credential text", &text);
-            assert!(text.is_clean_exit(0), "{label}: text models exited");
+            evidence.record_command("凭据不可读时查询模型列表（文本）", &text);
+            assert!(
+                text.is_clean_exit(0),
+                "{label}：文本模式 models 命令非零退出"
+            );
             let stderr = String::from_utf8_lossy(&text.stderr);
             assert!(
                 !stderr.contains("provider credentials are not ready"),
-                "{label}: removed global warning still printed: {stderr}"
+                "{label}：已移除的全局凭据告警仍被打印：{stderr}"
             );
             assert!(
                 stderr
                     .lines()
                     .any(|line| line.starts_with("local/current: ") && line.contains(expected)),
-                "{label}: stderr was {stderr}"
+                "{label}：标准错误输出为 {stderr}"
             );
             let ready_only = cli(&world, &spec, &["--json", "models", "--auth"]);
-            evidence.record_command("models unreadable credential ready-only", &ready_only);
-            assert!(ready_only.is_clean_exit(0), "{label}: --auth exited");
+            evidence.record_command("凭据不可读时查询 --auth 就绪模型", &ready_only);
+            assert!(ready_only.is_clean_exit(0), "{label}：--auth 查询非零退出");
             let ready_only: Value = serde_json::from_slice(&ready_only.stdout).unwrap();
             assert!(
                 !ready_only["models"]
@@ -951,7 +947,7 @@ fn models_report_unreadable_credentials() {
                     .unwrap()
                     .iter()
                     .any(|model| model["provider"] == "local"),
-                "{label}: invalid bearer provider leaked into --auth: {ready_only}"
+                "{label}：凭据无效的 bearer provider 泄漏到了 --auth 结果中：{ready_only}"
             );
         }
         std::fs::set_permissions(
@@ -975,8 +971,8 @@ fn models_name_available_providers_when_the_requested_one_is_absent() {
             .unwrap();
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let missing = cli(&world, &spec, &["--json", "models", "--provider", "absent"]);
-        evidence.record_command("models unknown provider", &missing);
-        assert!(missing.is_clean_exit(2), "unknown provider was accepted");
+        evidence.record_command("查询未知 provider 应报错拒绝", &missing);
+        assert!(missing.is_clean_exit(2), "未知 provider 不应被接受");
         let missing: Value = serde_json::from_slice(&missing.stdout).unwrap();
         let message = missing["message"].as_str().unwrap();
         for value in [
@@ -989,7 +985,7 @@ fn models_name_available_providers_when_the_requested_one_is_absent() {
         ] {
             assert!(
                 message.contains(value),
-                "unknown provider message omitted {value}: {message}"
+                "未知 provider 报错信息缺少 `{value}`：{message}"
             );
         }
     }));

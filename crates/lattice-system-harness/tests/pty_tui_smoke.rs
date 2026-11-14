@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 通过真实 PTY 验证 TUI 与后台的选择、执行、重连和取消接线。
-//! 场景使用正式配置与 fake TLS provider，核对请求 JSON 和公开会话事实。
+//! 场景使用正式配置与假 TLS provider，核对请求 JSON 和公开会话事实。
 //! 门控窗口和完整帧用于同步及检查可观察状态；颜色与可读性留给真实终端人工检查。
 
 use std::time::Duration;
@@ -14,8 +14,8 @@ use lattice_system_harness::{
     LatticeDriver, ProviderFixture, PtyTuiDriver, ScenarioLayer, ScenarioWorld,
 };
 
-/// TUI smoke 的项目 profile；工具目录由 `LATTICE_TEST_TOOLS` 注入，调用顺序由 `two_step_script` 决定。
-/// 手写 TOML，不用 serde，因为 harness 边界禁止依赖 `lattice-profile`。
+/// TUI 冒烟场景的项目配置；工具目录由 `LATTICE_TEST_TOOLS` 注入，调用顺序由 `two_step_script` 决定。
+/// 手写 TOML 而不使用 `serde`，因为测试框架边界禁止依赖 `lattice-profile`。
 #[cfg(feature = "fake-tools")]
 fn agent_toml() -> String {
     let model = ProviderFixture::chat_completions("tui-smoke")
@@ -34,7 +34,7 @@ system = "You are a concise test agent. Reply briefly."
     )
 }
 
-/// 一个 Turn 两个 Step：先调用假工具 `record_note`，再输出三行最终回答。
+/// 一个 Turn 两个 `Step`：先调用假工具 `record_note`，再输出三行最终回答。
 #[cfg(feature = "fake-tools")]
 fn two_step_script() -> lattice_system_harness::SseScript {
     use lattice_system_harness::SseScript;
@@ -57,7 +57,7 @@ fn two_step_script() -> lattice_system_harness::SseScript {
 }
 
 fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
+    LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的 lattice 二进制")
 }
 
 #[cfg(feature = "fake-tools")]
@@ -71,15 +71,15 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         step_timeout_secs: 120,
         total_timeout_secs: Some(300),
     };
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
     world.set_env("LATTICE_TEST_TOOLS", "record_note");
     let budget = world.budget(&spec);
-    world.init_git_project().expect("init git project");
+    world.init_git_project().expect("初始化 Git 项目失败");
     budget.check(&spec.name);
     world.start_daemon().expect("显式启动带测试工具的后台");
 
-    let server =
-        lattice_system_harness::FakeLlmServer::start(two_step_script()).expect("start fake llm");
+    let server = lattice_system_harness::FakeLlmServer::start(two_step_script())
+        .expect("启动假模型服务失败");
     world
         .wire_provider(
             ProviderFixture::chat_completions("tui-smoke"),
@@ -98,50 +98,49 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         budget.check(&spec.name);
-        let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").expect("spawn tui");
+        let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-smoke").expect("启动 TUI 失败");
 
-        // Wait for the TUI to enter the alternate screen. Ready recognition
-        // lives inside the driver (`wait_for_ready`); the scenario never matches
-        // display bytes itself (RFC #41 decision three).
+        // 等待 TUI 进入备用屏幕。就绪识别封装在驱动层（`wait_for_ready`）内，
+        // 场景自身不直接匹配终端控制字节（见 RFC #41 第三项决定）。
         tui.wait_for_ready(Duration::from_secs(30))
-            .expect("tui entered alternate screen");
-        // session 与 agent 只在状态行显示，启动横幅不重复；启动起就显示会话短标识。
+            .expect("TUI 未在时限内进入备用屏幕");
+        // 会话与智能体只在状态行显示，启动横幅不重复；启动起就显示会话短标识。
         tui.wait_for(Duration::from_secs(30), |s| s.contains("显示命令"))
-            .expect("startup banner appeared");
+            .expect("未等到启动横幅出现");
         let listed = session
             .run_command(&["--json", "session", "list"])
-            .expect("list sessions");
+            .expect("查询会话列表失败");
         assert!(listed.is_clean_exit(0), "{}", listed.summary());
         let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
         let sid = list[0]["session_id"].as_str().unwrap();
         let start = tui
             .redraw_text(Duration::from_secs(10))
-            .expect("startup frame");
+            .expect("读取启动完整帧失败");
         let status_prefix = format!("{} · tui-smoke · tui-smoke · local", &sid[..8]);
         assert!(
             start.matches(&sid[..8]).count() == 1
                 && start.matches("tui-smoke").count() == 2
                 && start.contains(&status_prefix)
                 && !start.contains("未接受"),
-            "session and agent must appear only in the status line: {start}"
+            "会话与智能体信息必须仅出现在状态行中：{start}"
         );
 
-        // Send a prompt. The Turn runs a Tool Step and then a three-line text Step.
+        // 发送提示词：该轮次依次执行一个工具步骤与一个三行文本步骤。
         budget.check(&spec.name);
-        tui.send_line("ping").expect("send prompt");
+        tui.send_line("ping").expect("发送提示词失败");
 
         // Turn 关闭后，持久正文装入会替换实时块；实时事件积压被丢弃时，正文只经由这次装入到达。
         // 装入在屏幕上没有标志，整行移位后终端只重写变化的字符格，输出流里拼不出连续的文字，
         // 所以等它落定后取整帧判断。
-        // 完成是 Info 级结局，直接进对话记录，不占 Dock；随后的 `/quit` 仍能输入。
+        // 完成是 `Info` 级结局，直接进对话记录，不占停靠栏；随后的 `/quit` 仍能输入。
         tui.wait_for(Duration::from_secs(60), |s| s.contains("完成"))
-            .expect("turn summary appeared");
+            .expect("未等到轮次完成摘要出现");
         let frame = wait_pty_frame(
             &mut tui,
             budget.cap_timeout(Duration::from_secs(10)),
             |frame| frame.contains("mock line 03"),
         );
-        // 假工具返回 `{"note":"smoke"}`（canonical JSON 16 字节），工具块在启动横幅与最终回答之间折叠显示。
+        // 假工具返回 `{"note":"smoke"}`（规范 JSON 共 16 字节），工具块在启动横幅与最终回答之间折叠显示。
         let banner = frame.find("显示命令");
         let tool_block = frame.find("▸ ✓ record_note · 16 B");
         let answer = frame.find("mock line 03");
@@ -150,26 +149,26 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
                 && answer.is_some()
                 && banner.is_none_or(|n| Some(n) < tool_block)
                 && tool_block < answer,
-            "tool block and final answer must stay in order below the startup banner: {frame}"
+            "工具块与最终回答必须按顺序位于启动横幅下方：{frame}"
         );
-        // 两个 Step 同属一个 Turn：助手标题线只出现一次。状态行也显示 agent 与模型名，不计入。
+        // 两个 `Step` 同属一个 Turn：助手标题线只出现一次。状态行也显示智能体与模型名，不计入。
         assert_eq!(
             frame.matches("── tui-smoke ─").count(),
             1,
-            "one assistant header per Turn: {frame}"
+            "每个轮次只应显示一行助手标题线：{frame}"
         );
         // 首次提交在接受事务里才创建会话库；接受前不应有订阅，也就不应出现“库不可用”。
         let shown = String::from_utf8_lossy(tui.output()).into_owned();
         assert!(
             !shown.contains("store unavailable"),
-            "first submission must not report a missing session store"
+            "首次提交不得报错提示缺少会话库"
         );
 
         let caps = server.captured_requests();
         assert!(
             caps.iter()
                 .any(|c| c.model == "tui-smoke" && c.message_roles.iter().any(|r| r == "user")),
-            "fake LLM did not receive the expected request; captures: {caps:?}"
+            "假模型服务未收到预期请求；已捕获：{caps:?}"
         );
         assert_eq!(
             support::tool_result_value(&caps[1]),
@@ -177,7 +176,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             "假工具结果应投影进第二步模型请求：{caps:?}"
         );
 
-        // 首次接受消费启动 agent；删去源 profile 后第二次提交仍继承副本。
+        // 首次接受消费启动智能体；删去源配置后第二次提交仍继承副本。
         std::fs::remove_dir_all(world.project_dir().join(".lattice/agents/tui-smoke")).unwrap();
         tui.send_line("ping from copy").unwrap();
         tui.wait_for(Duration::from_secs(30), |screen| {
@@ -196,28 +195,25 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
             }
         }
 
-        // `/quit` must exit the TUI **by itself**. Observe the child's own exit
-        // before `Drop` runs: Drop kills the process group, so a survivor check
-        // alone would pass even if `/quit` did nothing at all — it would only
-        // prove SIGKILL works.
-        tui.send_line("/quit").expect("send /quit");
+        // `/quit` 必须让 TUI 自行退出。必须在 `Drop` 执行前观察子进程自行退出：
+        // `Drop` 会强杀进程组，若只做残留检查，即使 `/quit` 完全无效也只会证明 `SIGKILL` 有效。
+        tui.send_line("/quit").expect("发送 /quit 失败");
         tui.wait_for_exit(Duration::from_secs(15))
-            .expect("/quit must exit the TUI without being killed");
+            .expect("/quit 必须在无外部强杀的情况下让 TUI 退出");
 
         evidence.record_pty(tui.output());
-        // The backend has a separate group owned by ScenarioWorld; only the
-        // frontend group must be empty here. Drop would kill residual children
-        // and conceal an orphan, so inspect before handing cleanup to Drop.
-        let pgid = tui.pgid().expect("TUI has a frontend process group");
+        // 后台运行在由 `ScenarioWorld` 持有的独立进程组中；此处仅要求前端进程组清空。
+        // `Drop` 会强杀残留子进程从而掩盖孤儿进程，因此必须在交给 `Drop` 前完成检查。
+        let pgid = tui.pgid().expect("TUI 应拥有前端进程组标识");
         let deadline = std::time::Instant::now() + budget.cap_timeout(Duration::from_secs(2));
         loop {
-            let survivors = processes_in_pgid(pgid).expect("inspect TUI process group");
+            let survivors = processes_in_pgid(pgid).expect("检查 TUI 进程组失败");
             if survivors.is_empty() {
                 break;
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "TUI process group {pgid} still has live members after /quit before Drop: {survivors:?}"
+                "/quit 后、Drop 前 TUI 进程组 {pgid} 仍有存活成员：{survivors:?}"
             );
             std::thread::sleep(Duration::from_millis(20));
         }
@@ -226,21 +222,21 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         let session =
             lattice_system_harness::SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
         let out = session.run_command(&["--json", "session", "list"]).unwrap();
-        evidence.record_command("--json session list", &out);
+        evidence.record_command("查询会话列表（--json session list）", &out);
         assert!(out.is_clean_exit(0));
         let list: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
         let sid = list[0]["session_id"].as_str().unwrap();
         let log_out = session
             .run_command(&["--json", "session", "log", sid])
             .unwrap();
-        evidence.record_command("--json session log (first turn check)", &log_out);
+        evidence.record_command("检查首轮会话树（--json session log）", &log_out);
         assert!(log_out.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&log_out.stdout).unwrap();
         let first_tid = log["nodes"][1]["turn_start"]["turn_id"].as_str().unwrap();
         let turn_out = session
             .run_command(&["--json", "session", "turn", first_tid])
             .unwrap();
-        evidence.record_command("--json session turn (first turn)", &turn_out);
+        evidence.record_command("查询首轮轮次详情（--json session turn）", &turn_out);
         assert!(turn_out.is_clean_exit(0));
         let first_detail: serde_json::Value = serde_json::from_slice(&turn_out.stdout).unwrap();
         assert_eq!(first_detail["summary"]["outcome"], "completed");
@@ -281,7 +277,7 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         args: &[&str],
     ) -> Value {
         let out = session.run_command(args).unwrap();
-        evidence.record_command(args.join(" "), &out);
+        evidence.record_command(format!("查询会话状态（{}）", args.join(" ")), &out);
         assert!(out.is_clean_exit(0), "{}", out.summary());
         serde_json::from_slice(&out.stdout).unwrap()
     }
@@ -422,7 +418,7 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
             "record_usage"
         );
         let middle = detail["steps"][0]["node"].as_u64().unwrap().to_string();
-        // 释放重试的 Warn，再正常退出；后台也停止，重开只能读取已保存计量。
+        // 释放重试的 `Warn`，再正常退出；后台也停止，重开只能读取已保存计量。
         tui.send_keys(b" ").unwrap();
         tui.send_line("/quit").unwrap();
         tui.wait_for_exit(step()).unwrap();
@@ -434,7 +430,7 @@ fn pty_statusline_usage_survives_reopening_and_follows_rewind() {
         let mut reopened = PtyTuiDriver::reconnect(&driver, &world, sid).unwrap();
         let reload = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             reopened.wait_for_ready(step()).unwrap();
-            // 备用屏幕先于终端尺寸初始化；等初始内容绘出后再 resize，才能触发清屏重绘。
+            // 备用屏幕先于终端尺寸初始化；等初始内容绘出后再调整窗口大小，才能触发清屏重绘。
             reopened
                 .wait_for(step(), |text| {
                     text.contains("saved usage answer") && text.contains("完成")
@@ -517,7 +513,7 @@ fn finish_pty(
             .downcast_ref::<String>()
             .cloned()
             .or_else(|| error.downcast_ref::<&str>().map(|text| text.to_string()))
-            .unwrap_or_else(|| "PTY scenario panicked with a non-text payload".into())
+            .unwrap_or_else(|| "PTY 场景以非文本载荷触发了 panic".into())
     });
     evidence.finish_report(primary)
 }
@@ -525,8 +521,8 @@ fn finish_pty(
 #[test]
 fn pty_failure_report_preserves_redacted_panic_reason() {
     for (index, payload) in [
-        Box::new("specific PTY wait failure FAKE_SECRET") as Box<dyn std::any::Any + Send>,
-        Box::new(String::from("specific PTY result failure FAKE_SECRET")),
+        Box::new("特定 PTY 等待失败 FAKE_SECRET") as Box<dyn std::any::Any + Send>,
+        Box::new(String::from("特定 PTY 结果失败 FAKE_SECRET")),
     ]
     .into_iter()
     .enumerate()
@@ -540,7 +536,7 @@ fn pty_failure_report_preserves_redacted_panic_reason() {
         .unwrap();
         let report = finish_pty(evidence, Err(payload)).unwrap_err();
         let rendered = report.to_string();
-        assert!(rendered.contains("specific PTY"), "{rendered}");
+        assert!(rendered.contains("特定 PTY"), "{rendered}");
         assert!(!rendered.contains("FAKE_SECRET"), "{rendered}");
         assert!(rendered.contains("[REDACTED]"), "{rendered}");
         println!("{rendered}");
@@ -570,7 +566,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
         gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
         let listed = session.run_command(&["--json", "session", "list"]).unwrap();
-        evidence.record_command("accepted TUI Session", &listed);
+        evidence.record_command("查询已接受轮次的 TUI 会话列表", &listed);
         assert!(listed.is_clean_exit(0));
         let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
         assert_eq!(list.as_array().unwrap().len(), 1);
@@ -628,7 +624,7 @@ fn pty_detach_reloads_pending_and_result_without_cancelling() {
     support::finish_recorded(evidence, result);
 }
 
-/// 真实模型段已开始后换前端：新后缀必须在终态 gate 放行前可见。
+/// 真实模型段已开始后切换前端：新后缀必须在终态门闩放行前可见。
 #[test]
 fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     use lattice_system_harness::{FakeLlmServer, SessionSendDriver, SseScript};
@@ -674,13 +670,13 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let session = SessionSendDriver::new(&driver, &world, &spec, "tui-smoke");
         let seed = session.spawn("seed history").unwrap();
-        // 第一请求的正文、finish、DONE；第二请求仍独立停在下一帧 gate。
+        // 第一请求的正文、`finish`、`[DONE]`；第二请求仍独立停在下一帧门闩。
         for frame in 1..=3 {
             gate.wait_until_stalled(frame, step()).unwrap();
             gate.release_next(step()).unwrap();
         }
         let seed = session.wait_spawned(seed).unwrap();
-        evidence.record_command("seed durable prefix", &seed.command);
+        evidence.record_command("建立持久历史前缀", &seed.command);
         support::assert_clean_send(&seed).unwrap();
         assert!(seed.command.is_clean_exit(0));
         support::assert_accepted_and_closed(&seed.parsed).unwrap();
@@ -705,7 +701,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
             old_frame.contains(OLD) && !old_frame.contains(NEW),
             "{old_frame}"
         );
-        println!("PTY window: old token delivered and visible; new token withheld");
+        println!("PTY 观察窗口：旧片段已交付并可见，新片段仍暂扣在门闩后");
 
         let owners = world.daemon_pids().unwrap();
         assert_eq!(owners.len(), 1);
@@ -715,7 +711,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
             .unwrap();
         assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
         assert_eq!(world.daemon_pids().unwrap(), owners);
-        println!("PTY window: original frontend exited; same backend remains");
+        println!("PTY 观察窗口：原前端已退出，同一后台保持运行");
 
         // 重连读取不依赖当前凭据，且不得触发第二次模型执行。
         world
@@ -739,7 +735,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         );
         assert_eq!(resumed.matches(PREFIX).count(), 1, "{resumed}");
         assert!(resumed.contains(OLD) && !resumed.contains(NEW), "{resumed}");
-        println!("PTY window: replacement frontend subscribed and loaded durable prefix once");
+        println!("PTY 观察窗口：接替前端已订阅且仅加载一次持久前缀");
 
         gate.release_next(step()).unwrap();
         gate.wait_until_stalled(6, step()).unwrap();
@@ -756,28 +752,25 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         let pending = session
             .run_command(&["--json", "session", "log", session.session_id().unwrap()])
             .unwrap();
-        evidence.record_command("new suffix visible before durable completion", &pending);
+        evidence.record_command("持久完成前已可见新后缀时的会话日志", &pending);
         assert!(pending.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&pending.stdout).unwrap();
-        assert!(
-            !log["unclosed_turn"].is_null(),
-            "current Turn still running"
-        );
+        assert!(!log["unclosed_turn"].is_null(), "当前轮次仍应处于运行中");
         assert_eq!(log["nodes"].as_array().unwrap().len(), 5);
         assert_eq!(server.captured_requests().len(), 2);
-        println!("PTY window: complete prefix and new suffix visible; terminal frame withheld");
+        println!("PTY 观察窗口：完整前缀与新后缀均已可见，终态帧仍暂扣");
 
         gate.release(step()).unwrap();
         tui.wait_for(step(), |text| text.contains(OLD)).unwrap();
         let sent = session.wait_spawned(in_flight).unwrap();
-        evidence.record_command("original CLI submission completed", &sent.command);
+        evidence.record_command("原 CLI 提交已完成", &sent.command);
         support::assert_clean_send(&sent).unwrap();
         assert!(sent.command.is_clean_exit(0));
         support::assert_accepted_and_closed(&sent.parsed).unwrap();
         let closed = session
             .run_command(&["--json", "session", "log", session.session_id().unwrap()])
             .unwrap();
-        evidence.record_command("original Turn completed after terminal release", &closed);
+        evidence.record_command("终态帧放行后原轮次完成", &closed);
         assert!(closed.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&closed.stdout).unwrap();
         let nodes = log["nodes"].as_array().unwrap();
@@ -795,7 +788,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         let log_text = session
             .run_command(&["session", "log", session.session_id().unwrap()])
             .unwrap();
-        evidence.record_command("session log", &log_text);
+        evidence.record_command("查询会话日志（session log）", &log_text);
         assert!(log_text.is_clean_exit(0), "{}", log_text.summary());
         let turn_out = session
             .run_command(&[
@@ -805,7 +798,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
                 sent.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("--json session turn", &turn_out);
+        evidence.record_command("查询轮次详情（--json session turn）", &turn_out);
         assert!(turn_out.is_clean_exit(0), "{}", turn_out.summary());
         let detail: serde_json::Value = serde_json::from_slice(&turn_out.stdout).unwrap();
         assert_eq!(detail["session_id"], session.session_id().unwrap());
@@ -866,9 +859,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         server
             .shutdown(budget.cap_timeout(Duration::from_secs(3)))
             .unwrap();
-        println!(
-            "PTY window: original Turn completed; replacement quit cleanly; provider requests stayed at two"
-        );
+        println!("PTY 观察窗口：原轮次已完成，接替前端干净退出，provider 请求数保持为两次");
     }));
     for tui in [original.as_ref(), replacement.as_ref()]
         .into_iter()
@@ -877,7 +868,7 @@ fn pty_mid_model_reconnect_shows_new_suffix_before_completion() {
         evidence.record_pty(tui.output());
     }
     evidence.record_captures(server.captured_requests());
-    // 失败时先解除 provider/PTY，再让 evidence 按既有预算停止自有后台。
+    // 失败时先解除假 provider 与 PTY，再让场景证据按既有预算停止自有后台。
     drop(server);
     drop(replacement);
     drop(original);
@@ -908,7 +899,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
         gate.wait_until_stalled(1, budget.cap_timeout(spec.step_timeout()))
             .unwrap();
         let listed = session.run_command(&["--json", "session", "list"]).unwrap();
-        evidence.record_command("accepted cancellation Session", &listed);
+        evidence.record_command("查询待取消轮次所在的会话列表", &listed);
         assert!(listed.is_clean_exit(0));
         let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
         let sid = list[0]["session_id"].as_str().unwrap();
@@ -921,7 +912,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             let log = session
                 .run_command(&["--json", "session", "log", sid])
                 .unwrap();
-            evidence.record_command("query cancellation after TUI exit", &log);
+            evidence.record_command("TUI 退出后轮询取消收尾日志", &log);
             assert!(log.is_clean_exit(0));
             let value: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
             if value["unclosed_turn"].is_null() {
@@ -931,7 +922,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             }
             assert!(
                 std::time::Instant::now() < deadline,
-                "cancelled Turn did not close"
+                "已取消的轮次未在截止时间前关闭"
             );
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -949,7 +940,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
     support::finish_recorded(evidence, result);
 }
 
-/// 每次读取本次 resize 产生的完整帧，不从累计输出推断当前面板。
+/// 每次读取本次窗口尺寸调整产生的完整帧，不从累计输出推断当前面板。
 #[cfg(feature = "fake-tools")]
 #[track_caller]
 fn wait_pty_frame(
@@ -988,7 +979,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         args: &[&str],
     ) -> Value {
         let result = session.run_command(args).unwrap();
-        evidence.record_command(args.join(" "), &result);
+        evidence.record_command(format!("查询会话状态（{}）", args.join(" ")), &result);
         assert!(result.is_clean_exit(0), "{}", result.summary());
         serde_json::from_slice(&result.stdout).unwrap()
     }
@@ -1117,7 +1108,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             text.contains("MODEL") && text.matches("local/preview").count() == 2
         });
         assert!(!restored.contains("ignored"));
-        // 一轮执行中用 `/model` 选定新模型：屏幕上出现 Warn 说明执行中不能修改设置，会话头不变。
+        // 一轮执行中用 `/model` 选定新模型：屏幕上出现 `Warn` 说明执行中不能修改设置，会话头不变。
         tui.send_keys(b"\r").unwrap();
         wait_pty_frame(&mut tui, step(), |text| {
             !text.contains("MODEL")
@@ -1183,7 +1174,7 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             text.contains("gpt-6-luna") && text.contains("off") && text.contains("idle")
         });
         assert_eq!(server.captured_requests().len(), 4);
-        // 轮次结束后切换到不支持当前档位 `off` 的模型：出现档位调整 Info，statusline 显示新模型与档位。
+        // 轮次结束后切换到不支持当前档位 `off` 的模型：出现档位调整 `Info`，状态行显示新模型与档位。
         tui.send_line("/model").unwrap();
         wait_pty_frame(&mut tui, step(), |text| text.contains("MODEL"));
         tui.send_keys(b"local/preview").unwrap();

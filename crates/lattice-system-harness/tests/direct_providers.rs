@@ -3,7 +3,7 @@
 
 //! 已实现协议的工具往返、缓存请求与尝试计量。
 //!
-//! 场景经统一入口配置 endpoint、模型与凭据，fake provider 按请求协议回复流。
+//! 场景经统一入口配置端点、模型与凭据，假 provider 按请求协议回复流。
 //! 工具用例通过 `LATTICE_TEST_TOOLS` 注册确定性假工具，校验工具定义投影、调用与结果往返。
 
 mod support;
@@ -129,7 +129,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let first = send.send("read both files").unwrap();
-        evidence.record_command("Interactions tool turn", &first.command);
+        evidence.record_command("Interactions 工具调用轮次发送", &first.command);
         assert!(first.has_completed() && first.command.is_clean_exit(0));
         assert_eq!(first.slots().len(), 2);
         assert!(
@@ -149,7 +149,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
                 first.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Interactions saved turn", &detail);
+        evidence.record_command("查询 Interactions 已保存轮次详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         for step in turn["steps"].as_array().unwrap() {
             let attempt = &step["attempts"][0];
@@ -223,12 +223,12 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
             }
         }
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
-        evidence.record_command("stop before Interactions replay", &stopped);
+        evidence.record_command("Interactions 重放前停止后台", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.daemon_departed().unwrap();
         world.start_daemon().expect("显式重启后台");
         let second = send.send("continue after restart").unwrap();
-        evidence.record_command("Interactions restarted append", &second.command);
+        evidence.record_command("后台重启后追加 Interactions 轮次", &second.command);
         assert!(second.has_completed() && second.command.is_clean_exit(0));
         let captures = server.captured_requests();
         assert_eq!(captures.len(), 3);
@@ -259,7 +259,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         let usage = send
             .run_command(&["--json", "session", "usage", sid])
             .unwrap();
-        evidence.record_command("Interactions usage after append", &usage);
+        evidence.record_command("查询追加后的 Interactions 用量", &usage);
         let usage: Value = serde_json::from_slice(&usage.stdout).unwrap();
         assert_eq!(usage["path_total"]["attempts"], 3);
     }));
@@ -332,7 +332,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         assert!(!running.has_exited().unwrap());
         assert_eq!(server.captured_requests().len(), 1);
         let list = send.run_command(&["--json", "session", "list"]).unwrap();
-        evidence.record_command("Interactions in-flight session", &list);
+        evidence.record_command("查询 Interactions 运行中会话列表", &list);
         assert!(list.is_clean_exit(0));
         let sessions: Value = serde_json::from_slice(&list.stdout).unwrap();
         let [session] = sessions.as_array().unwrap().as_slice() else {
@@ -356,7 +356,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         gate.release(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let sent = send.wait_spawned(running).unwrap();
-        evidence.record_command("Interactions failed turn", &sent.command);
+        evidence.record_command("Interactions 失败轮次发送", &sent.command);
         assert!(sent.command.is_clean_exit(1));
         assert!(sent.slots().is_empty());
         let detail = send
@@ -367,7 +367,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
                 sent.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Interactions failed detail", &detail);
+        evidence.record_command("查询 Interactions 失败轮次详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let attempt = &turn["steps"][0]["attempts"][0];
         assert_eq!(attempt["usage"]["input"], 10);
@@ -394,7 +394,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         );
         assert_eq!(server.captured_requests().len(), 1);
         let saved = send.send("save incomplete reply").unwrap();
-        evidence.record_command("Interactions saved incomplete turn", &saved.command);
+        evidence.record_command("Interactions 保存未完成回复轮次发送", &saved.command);
         assert!(saved.has_completed() && saved.command.is_clean_exit(0));
         assert_eq!(saved.reply_text(), "saved incomplete");
         assert!(saved.slots().is_empty());
@@ -406,7 +406,7 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
                 saved.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Interactions saved incomplete detail", &detail);
+        evidence.record_command("查询 Interactions 未完成回复详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
         let attempts = turn["steps"][0]["attempts"].as_array().unwrap();
@@ -415,14 +415,14 @@ fn interactions_failures_preserve_usage_and_incomplete_saves_reply() {
         assert_eq!(attempts[0]["usage"]["input"], 9);
         assert_eq!(attempts[0]["usage"]["output"], 4);
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
-        evidence.record_command("stop after Interactions incomplete", &stopped);
+        evidence.record_command("Interactions 未完成回复后停止后台", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.daemon_departed().unwrap();
         world.start_daemon().expect("显式重启后台");
         let reopened = send
             .run_command(&["--json", "session", "log", send.session_id().unwrap()])
             .unwrap();
-        evidence.record_command("reopen Interactions incomplete reply", &reopened);
+        evidence.record_command("重开后基于 Interactions 未完成回复续发", &reopened);
         assert!(reopened.is_clean_exit(0));
         let mut watcher =
             support::Watcher::open(&world, spec.step_timeout(), send.session_id().unwrap());
@@ -557,7 +557,7 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let first = send.send("read both files").unwrap();
-        evidence.record_command("Responses tool turn", &first.command);
+        evidence.record_command("Responses 工具调用轮次发送", &first.command);
         assert!(first.has_completed() && first.command.is_clean_exit(0));
         assert_eq!(first.slots().len(), 2);
         assert!(
@@ -576,7 +576,7 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
                 first.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Responses saved turn", &detail);
+        evidence.record_command("查询 Responses 已保存轮次详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         for step in turn["steps"].as_array().unwrap() {
             assert_eq!(
@@ -649,12 +649,12 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
             }
         }
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
-        evidence.record_command("stop before replay", &stopped);
+        evidence.record_command("重放前停止后台", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.daemon_departed().unwrap();
         world.start_daemon().expect("显式重启后台");
         let second = send.send("continue after restart").unwrap();
-        evidence.record_command("Responses restarted append", &second.command);
+        evidence.record_command("后台重启后追加 Responses 轮次", &second.command);
         assert!(second.has_completed() && second.command.is_clean_exit(0));
         let captures = server.captured_requests();
         assert_eq!(captures.len(), 3);
@@ -693,7 +693,7 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         let usage = send
             .run_command(&["--json", "session", "usage", sid])
             .unwrap();
-        evidence.record_command("Responses usage after append", &usage);
+        evidence.record_command("查询追加后的 Responses 用量", &usage);
         let usage: Value = serde_json::from_slice(&usage.stdout).unwrap();
         assert_eq!(usage["path_total"]["attempts"], 3);
     }));
@@ -777,7 +777,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
         gate.release(running.remaining_timeout(spec.step_timeout()))
             .unwrap();
         let sent = send.wait_spawned(running).unwrap();
-        evidence.record_command("Responses failed Turn", &sent.command);
+        evidence.record_command("Responses 失败轮次发送", &sent.command);
         assert!(sent.command.is_clean_exit(1));
         assert!(sent.slots().is_empty());
         let detail = send
@@ -788,7 +788,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 sent.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Responses failed detail", &detail);
+        evidence.record_command("查询 Responses 失败轮次详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         let attempt = &turn["steps"][0]["attempts"][0];
         assert_eq!(attempt["usage"]["input"], 8);
@@ -815,7 +815,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
         assert_eq!(server.captured_requests().len(), 1);
 
         let saved = send.send("save incomplete reply").unwrap();
-        evidence.record_command("Responses saved incomplete Turn", &saved.command);
+        evidence.record_command("Responses 保存未完成回复轮次发送", &saved.command);
         assert!(saved.has_completed() && saved.command.is_clean_exit(0));
         assert_eq!(saved.reply_text(), "saved incomplete");
         assert!(saved.slots().is_empty());
@@ -827,7 +827,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 saved.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Responses saved incomplete detail", &detail);
+        evidence.record_command("查询 Responses 未完成回复详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
         assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
@@ -837,12 +837,15 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
         assert_eq!(server.captured_requests().len(), 2);
 
         let stopped = send.run_command(&["daemon", "stop"]).unwrap();
-        evidence.record_command("stop after saved incomplete reply", &stopped);
+        evidence.record_command("保存未完成回复后停止后台", &stopped);
         assert!(stopped.is_clean_exit(0));
         world.daemon_departed().unwrap();
         world.start_daemon().expect("显式重启后台");
         let rejected = send.send("reject truncated arguments").unwrap();
-        evidence.record_command("Responses incomplete invalid tool Turn", &rejected.command);
+        evidence.record_command(
+            "Responses 含无效工具调用的未完成轮次发送",
+            &rejected.command,
+        );
         assert!(rejected.command.is_clean_exit(1));
         assert!(rejected.slots().is_empty());
         assert!(
@@ -860,7 +863,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 rejected.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Responses incomplete invalid tool detail", &detail);
+        evidence.record_command("查询 Responses 无效工具未完成轮次详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
         assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
@@ -879,7 +882,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                     && item["content"][0]["text"] == "saved incomplete")
         );
         let malformed = send.send("reject missing call_id").unwrap();
-        evidence.record_command("Responses missing call_id Turn", &malformed.command);
+        evidence.record_command("Responses 缺少 call_id 的轮次发送", &malformed.command);
         assert!(malformed.command.is_clean_exit(1));
         assert!(malformed.slots().is_empty());
         let steps = malformed
@@ -897,7 +900,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
                 malformed.accepted_turn_id().unwrap(),
             ])
             .unwrap();
-        evidence.record_command("Responses missing call_id detail", &detail);
+        evidence.record_command("查询 Responses 缺少 call_id 的轮次详情", &detail);
         let turn: Value = serde_json::from_slice(&detail.stdout).unwrap();
         assert_eq!(turn["steps"].as_array().unwrap().len(), 1);
         assert_eq!(turn["steps"][0]["attempts"].as_array().unwrap().len(), 1);
@@ -920,7 +923,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
 struct Provider {
     name: &'static str,
     fixture: ProviderFixture<'static>,
-    /// 该协议在 wire 上表示助手轮次的 role。
+    /// 该协议在线上载荷中表示助手轮次的角色名。
     assistant_role: &'static str,
 }
 
@@ -958,7 +961,7 @@ const PROVIDERS: [Provider; 3] = [
 #[cfg(feature = "fake-tools")]
 fn provider_world(provider: &Provider) -> (ScenarioWorld, ScenarioSpec) {
     let spec = ScenarioSpec::direct_local(format!("direct-provider-{}", provider.name));
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界");
     let model = provider.fixture.model_ref().unwrap();
     let toml = format!(
         "schema_version = 1\n\n\
@@ -971,8 +974,8 @@ fn provider_world(provider: &Provider) -> (ScenarioWorld, ScenarioSpec) {
             &format!(".lattice/agents/{}/agent.toml", provider.name),
             &toml,
         )
-        .expect("write agent.toml");
-    world.init_git_project().expect("init git");
+        .expect("写入 agent.toml");
+    world.init_git_project().expect("初始化 Git 项目");
     (world, spec)
 }
 
@@ -989,7 +992,7 @@ fn projected_tool_result(
     let last = last
         .and_then(|items| items.last())
         .ok_or_else(|| AssertError::StdoutMissing {
-            expected: format!("{list} in second request"),
+            expected: format!("第二次请求中应包含 {list}"),
         })?;
     require(
         last["role"]
@@ -998,7 +1001,7 @@ fn projected_tool_result(
             } else {
                 "user"
             },
-        format!("工具结果轮次的 role 不匹配: {last}"),
+        format!("工具结果轮次的角色字段不匹配：{last}"),
     )?;
     let block = match provider.name {
         "openai" => last["content"].clone(),
@@ -1103,7 +1106,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
             .map(|script| with_usage(provider, script))
             .collect(),
         ))
-        .expect("fake provider");
+        .expect("启动假 provider");
         server.expect_api_key(&key);
         world
             .wire_provider(provider.fixture, &server, &key)
@@ -1120,7 +1123,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
         };
         std::fs::write(&configuration, format!("{source}\n[providers.{id}.models.\"{model}\"]\neffort=['off']\n[providers.{id}.models.\"{model}\".cost]\ninput = 2\noutput = 10\ncache_read = 0.5\n{write_price}", model=provider.fixture.model)).unwrap();
         let cached = match provider.name {
-            // Chat 的 off 来自 effort 元数据，避免按 provider 的 toggle features 推导。
+            // Chat 协议的 `off` 档位来自 `effort` 元数据，避免按 provider 的开关特性推导。
             "openai" => Some(serde_json::json!({"alibaba":{"models":{
                 provider.fixture.model:{"id":provider.fixture.model,"reasoning_options":[{"type":"effort","values":["none"]}]}
             }}})),
@@ -1139,7 +1142,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
             .unwrap();
         }
         let scenario_evidence =
-            ScenarioEvidence::new(&world, &spec.name, [key.clone()]).expect("evidence");
+            ScenarioEvidence::new(&world, &spec.name, [key.clone()]).expect("创建场景证据收集器");
 
         let send = SessionSendDriver::new(&driver, &world, &spec, provider.name);
         let target = provider.fixture.model_ref().unwrap();
@@ -1156,7 +1159,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 "--effort",
                 "off",
             ])
-            .expect("turn");
+            .expect("执行轮次发送");
         let parsed = support::parse_send_stdout(&command.stdout, command.exit_code());
         let outcome = SendExecution { command, parsed };
         let captures = server.captured_requests();
@@ -1174,7 +1177,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
         let result: Result<(), AssertError> = (|| {
             assert_clean_send(&outcome)?;
             require(tool_ok(&outcome.parsed, "read_note"), "read_note 执行成功")?;
-            require(outcome.has_completed(), "turn 已完成")?;
+            require(outcome.has_completed(), "轮次应已完成")?;
             let stdout = String::from_utf8_lossy(&outcome.command.stdout);
             require(
                 stdout.contains(&format!("answer-{}", provider.name)),
@@ -1301,7 +1304,7 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
                 };
                 require(
                     disabled,
-                    format!("CLI off 必须传到每次 {} 请求", provider.name),
+                    format!("CLI 传入的 off 档位必须送达每次 {} 请求", provider.name),
                 )?;
             }
             require(
@@ -1334,10 +1337,10 @@ fn protocols_cache_and_usage_survive_tool_round_trip_and_backend_restart() {
         finish_scenario(
             scenario_evidence,
             &[
-                ("provider turn", &outcome.command),
-                ("turn detail", &detail),
-                ("stop backend", &stopped),
-                ("reopened turn", &reopened),
+                ("多协议工具轮次发送", &outcome.command),
+                ("查询轮次详情", &detail),
+                ("停止后台", &stopped),
+                ("后台重开后查询轮次详情", &reopened),
             ],
             captures,
             result,
@@ -1412,7 +1415,7 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let outcome = send.send("blocked prompt").unwrap();
-            evidence.record_command("prompt block", &outcome.command);
+            evidence.record_command("触发提示词拦截轮次发送", &outcome.command);
             assert_clean_send(&outcome).unwrap();
             support::assert_accepted_and_closed(&outcome).unwrap();
             assert!(outcome.command.is_clean_exit(1));
@@ -1424,7 +1427,7 @@ fn gemini_prompt_block_stops_without_retry_and_preserves_usage() {
                     outcome.accepted_turn_id().unwrap(),
                 ])
                 .unwrap();
-            evidence.record_command("blocked turn detail", &detail);
+            evidence.record_command("查询被拦截轮次详情", &detail);
             assert!(detail.is_clean_exit(0));
             let turn: serde_json::Value = serde_json::from_slice(&detail.stdout).unwrap();
             assert_eq!(turn["summary"]["outcome"], "failed");
@@ -1524,7 +1527,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
         let mut evidence = support::evidence(&world, &spec);
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             let sent = send.send("builtin").unwrap();
-            evidence.record_command("builtin tool Turn", &sent.command);
+            evidence.record_command("内建协议工具轮次发送", &sent.command);
             assert!(sent.command.is_clean_exit(0) && sent.has_completed());
             assert_eq!(sent.slots().len(), 1);
             assert!(tool_ok(&sent.parsed, "read_note"));
@@ -1538,12 +1541,12 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
             }
             let sid = send.session_id().unwrap();
             let stop = send.run_command(&["daemon", "stop"]).unwrap();
-            evidence.record_command("stop builtin backend", &stop);
+            evidence.record_command("停止内建协议测试后台", &stop);
             assert!(stop.is_clean_exit(0));
             world.daemon_departed().unwrap();
             world.start_daemon().expect("显式重启后台");
             let reopened = send.send("continue builtin after restart").unwrap();
-            evidence.record_command("builtin reopened append", &reopened.command);
+            evidence.record_command("内建协议后台重开后追加发送", &reopened.command);
             assert!(reopened.command.is_clean_exit(0) && reopened.has_completed());
             assert_eq!(
                 support::live_turn(&reopened.parsed)["steps"][0]["attempts"][0]["origin"],
@@ -1630,7 +1633,7 @@ fn implemented_builtin_protocols_accept_and_record_the_protocol_actually_sent() 
                         "xai/fixture-model",
                     ])
                     .unwrap();
-                evidence.record_command("builtin Responses provider switch", &switched);
+                evidence.record_command("切换内建 Responses provider 后发送", &switched);
                 assert!(switched.is_clean_exit(0), "{}", switched.summary());
                 let parsed = support::parse_send_stdout(&switched.stdout, switched.exit_code());
                 assert_eq!(
@@ -1712,7 +1715,7 @@ fn builtin_text_history_projects_across_protocols() {
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let legacy = send.send("legacy input").unwrap();
-        evidence.record_command("legacy Chat text source", &legacy.command);
+        evidence.record_command("旧版 Chat 文本源轮次发送", &legacy.command);
         assert!(legacy.command.is_clean_exit(0) && legacy.has_completed());
         assert!(legacy.slots().is_empty());
         assert_eq!(legacy.reply_text(), "legacy chat answer");
@@ -1737,7 +1740,7 @@ fn builtin_text_history_projects_across_protocols() {
             parsed: support::parse_send_stdout(&command.stdout, command.exit_code()),
             command,
         };
-        evidence.record_command("builtin text source", &first.command);
+        evidence.record_command("内建协议文本源轮次发送", &first.command);
         assert!(first.command.is_clean_exit(0) && first.has_completed());
         assert!(first.slots().is_empty());
         assert_eq!(first.reply_text(), "first answer");
@@ -1750,7 +1753,7 @@ fn builtin_text_history_projects_across_protocols() {
         let before = send
             .run_command(&["--json", "session", "turn", first_turn])
             .unwrap();
-        evidence.record_command("source before text projection", &before);
+        evidence.record_command("文本跨协议投影前查询源轮次详情", &before);
         for (model, protocol, text) in [
             ("google/current", "interactions", "second input"),
             ("xai/current", "responses", "third input"),
@@ -1767,7 +1770,7 @@ fn builtin_text_history_projects_across_protocols() {
                     model,
                 ])
                 .unwrap();
-            evidence.record_command(format!("builtin text target {model}"), &output);
+            evidence.record_command(format!("跨协议投影发送到内建目标模型 {model}"), &output);
             assert!(output.is_clean_exit(0), "{}", output.summary());
             let parsed = support::parse_send_stdout(&output.stdout, output.exit_code());
             assert_eq!(
@@ -1826,7 +1829,7 @@ fn builtin_text_history_projects_across_protocols() {
         let after = send
             .run_command(&["--json", "session", "turn", first_turn])
             .unwrap();
-        evidence.record_command("source after text projection", &after);
+        evidence.record_command("文本跨协议投影后复查源轮次详情", &after);
         assert_eq!(
             serde_json::from_slice::<Value>(&before.stdout).unwrap(),
             serde_json::from_slice::<Value>(&after.stdout).unwrap()
@@ -1929,7 +1932,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
     let mut evidence = support::evidence(&world, &spec);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let first = send.send("read notes").unwrap();
-        evidence.record_command("first provider with Tool", &first.command);
+        evidence.record_command("首个 provider 工具轮次发送", &first.command);
         assert!(first.has_completed() && first.command.is_clean_exit(0));
         assert!(first.parsed.malformed_lines.is_empty());
         let sid = send.session_id().unwrap();
@@ -1954,7 +1957,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             let mut watcher = support::Watcher::open(&world, wait, sid);
             watcher.until(
                 std::time::Instant::now() + wait,
-                "selected model closes",
+                "切换模型后的轮次收束并释放占有方",
                 |view| {
                     support::turn_closed(view, id)
                         && view.head.as_ref().is_some_and(|head| !head.owner)
@@ -1983,15 +1986,15 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             "google-generate/third",
         );
         let rewind = support::cli(&world, &spec, &["--json", "session", "rewind", sid, "2"]);
-        evidence.record_command("rewind to the original Tool step", &rewind);
+        evidence.record_command("回退到最初的工具步骤节点", &rewind);
         assert!(rewind.is_clean_exit(0), "{}", rewind.summary());
         let stop = support::cli(&world, &spec, &["daemon", "stop"]);
-        evidence.record_command("stop before reopening", &stop);
+        evidence.record_command("重开会话前停止后台", &stop);
         assert!(stop.is_clean_exit(0));
         world.daemon_departed().unwrap();
         world.start_daemon().expect("显式重启后台");
         let reopened = support::cli(&world, &spec, &["--json", "session", "log", sid]);
-        evidence.record_command("reopen persisted Session before IPC selection", &reopened);
+        evidence.record_command("经 IPC 切换模型前重开持久化会话", &reopened);
         assert!(reopened.is_clean_exit(0), "{}", reopened.summary());
         choose(
             &mut evidence,
@@ -2026,7 +2029,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         ] {
             assert!(
                 !cross_wire.contains(material),
-                "cross protocol leaked {material}"
+                "跨协议投影泄露了私有字段 {material}"
             );
         }
         let parts: Vec<_> = captures[3].raw["contents"]
@@ -2061,14 +2064,14 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         ] {
             assert!(
                 !restored.to_string().contains(excluded),
-                "rewound history includes {excluded}"
+                "回退后的历史仍包含已旁路内容 {excluded}"
             );
         }
         let source_turn = first.accepted_turn_id().unwrap();
         let before = send
             .run_command(&["--json", "session", "turn", source_turn])
             .unwrap();
-        evidence.record_command("source history before Interactions projection", &before);
+        evidence.record_command("向 Interactions 投影前查询源轮次详情", &before);
         for (index, model) in [
             "interactions-fixture/interactions-model",
             "openai/current",
@@ -2092,10 +2095,7 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
                     model,
                 ],
             );
-            evidence.record_command(
-                format!("{model} sends original call IDs across protocols"),
-                &sent,
-            );
+            evidence.record_command(format!("跨协议向 {model} 发送并保留原始调用标识"), &sent);
             assert!(sent.is_clean_exit(0), "{model}: {}", sent.summary());
             let parsed = support::parse_send_stdout(&sent.stdout, sent.exit_code());
             assert_eq!(parsed.closed_result().unwrap().2, "completed");
@@ -2129,14 +2129,14 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
             ] {
                 assert!(
                     !capture.raw.to_string().contains(material),
-                    "{model}: leaked {material}"
+                    "{model}：跨协议投影泄露了私有字段 {material}"
                 );
             }
         }
         let after = send
             .run_command(&["--json", "session", "turn", source_turn])
             .unwrap();
-        evidence.record_command("source history after Interactions projection", &after);
+        evidence.record_command("向 Interactions 投影后复查源轮次详情", &after);
         assert_eq!(
             serde_json::from_slice::<serde_json::Value>(&before.stdout).unwrap(),
             serde_json::from_slice::<serde_json::Value>(&after.stdout).unwrap()

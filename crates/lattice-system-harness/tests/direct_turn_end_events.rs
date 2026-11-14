@@ -1,8 +1,8 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 连续观察真实 Turn 时，中途以 `Continue` 关闭的 Step 与带结局的最后一步都交付到条目中，
-//! 重试提示是 Step 条目的一部分，实时观察与重新打开会话看到的条目相同。
+//! 连续观察真实轮次时，中途以 `Continue` 关闭的步骤与带结局的最后一步都交付到条目中，
+//! 重试提示作为步骤条目的一部分给出，实时观察与重新打开会话看到的条目一致。
 mod support;
 
 #[cfg(feature = "fake-tools")]
@@ -25,24 +25,27 @@ fn only_seven_records(outcome: &lattice_system_harness::SendOutcome) -> Result<(
             .any(|record| matches!(record, SendRecord::Unknown { .. }))
             && outcome.sending().is_some()
             && matches!(outcome.records.first(), Some(SendRecord::Submit(_))),
-        format!("unexpected record types: {:?}", outcome.type_sequence()),
+        format!(
+            "出现了预期之外的记录类型序列：{:?}",
+            outcome.type_sequence()
+        ),
     )
 }
 
 /// 关闭后重新打开会话：新观察者开头给出的条目与 CLI 实时持有的逐字段相同。
-/// 只比较条目：`Closed` 已足够让命令结束，Owner 在独立收尾后才移除，立即重开可能仍有 Owner。
+/// 只比较条目：`Closed` 已足够让命令结束，占有方在独立收尾后才移除，立即重开时可能仍在场。
 fn reopened_entries_match(
     world: &lattice_system_harness::ScenarioWorld,
     spec: &lattice_system_harness::ScenarioSpec,
     outcome: &lattice_system_harness::SendOutcome,
 ) -> Result<(), AssertError> {
-    let (sid, _, _) = outcome.closed_result().expect("closed result");
+    let (sid, _, _) = outcome.closed_result().expect("轮次应已有收束结果");
     let mut watcher = Watcher::open(world, spec.step_timeout(), sid);
     let reopened = watcher.initial();
     let live: Vec<&Value> = outcome.entries().iter().map(|entry| &entry.raw).collect();
     require(
         reopened.raw_entries() == live,
-        "reopened entries must equal the live ones, retry notices included",
+        "重开会话读到的条目（含重试提示）必须与实时流完全一致",
     )
 }
 
@@ -66,7 +69,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
     let send = SessionSendDriver::new(&driver, &world, &spec, "end-events");
     let outcome = send
         .send("observe the workspace then answer")
-        .expect("turn");
+        .expect("执行轮次发送");
     let detail = send
         .run_command(&[
             "--json",
@@ -74,7 +77,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
             "turn",
             outcome.accepted_turn_id().unwrap_or_default(),
         ])
-        .expect("turn detail");
+        .expect("查询轮次详情");
     let captures = server.captured_requests();
     println!("{}: {:?}", spec.name, outcome.type_sequence());
 
@@ -82,10 +85,13 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         assert_clean_send(&outcome)?;
         only_seven_records(&outcome)?;
         assert_accepted_and_closed(&outcome)?;
-        require(outcome.command.is_clean_exit(0), "completed Turn exits 0")?;
-        require(captures.len() == 2, "exactly two provider requests")?;
+        require(
+            outcome.command.is_clean_exit(0),
+            "正常完成的轮次退出码应为 0",
+        )?;
+        require(captures.len() == 2, "应当恰好发起两次 provider 请求")?;
         require(tool_ok(&outcome, "read_note"), "假工具调用成功")?;
-        // 第一步以 Continue 关闭后不再带结局；结局只随最后一步给出。
+        // 第一步以 `Continue` 关闭后不再带结局；结局只随最后一步给出。
         let entries = outcome.entries();
         let steps: Vec<_> = entries.iter().filter_map(|entry| entry.step()).collect();
         require(
@@ -101,7 +107,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
                     .summary
                     .as_ref()
                     .is_some_and(|summary| summary.outcome.as_str() == "completed"),
-            format!("expected user, continued step and final step with summary: {entries:?}"),
+            format!("应依次包含用户条目、继续执行的步骤与带结局摘要的末步：{entries:?}"),
         )?;
         require(
             detail.is_clean_exit(0)
@@ -109,15 +115,15 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
                     &live_turn(&outcome),
                     &serde_json::from_slice::<Value>(&detail.stdout).unwrap(),
                 ),
-            "live Step entries equal the reloaded Turn detail",
+            "实时步骤条目应与重新加载的轮次详情一致",
         )?;
         reopened_entries_match(&world, &spec, &outcome)
     })();
     finish_scenario(
         evidence,
         &[
-            ("two-step Turn", &outcome.command),
-            ("turn detail", &detail),
+            ("两步轮次发送", &outcome.command),
+            ("查询轮次详情", &detail),
         ],
         captures,
         result,
@@ -144,7 +150,7 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
     );
     let evidence = evidence(&world, &spec);
     let send = SessionSendDriver::new(&driver, &world, &spec, "end-errors");
-    let outcome = send.send("exhaust provider retries").expect("turn");
+    let outcome = send.send("exhaust provider retries").expect("执行轮次发送");
     let captures = server.captured_requests();
     println!("{}: {:?}", spec.name, outcome.type_sequence());
 
@@ -152,38 +158,35 @@ fn direct_turn_end_events_exhausted_retries_deliver_last_retry_and_turn_failed()
         assert_clean_send(&outcome)?;
         only_seven_records(&outcome)?;
         assert_accepted_and_closed(&outcome)?;
-        require(outcome.command.is_clean_exit(1), "failed Turn exits 1")?;
-        require(captures.len() == 3, "exactly three HTTP 500 requests")?;
+        require(outcome.command.is_clean_exit(1), "失败轮次的退出码应为 1")?;
+        require(captures.len() == 3, "应当恰好收到三次 HTTP 500 请求")?;
         let entries = outcome.entries();
         let last = entries
             .iter()
             .rev()
             .find(|entry| entry.step().is_some())
-            .expect("final Step entry");
+            .expect("应存在最终步骤条目");
         let step = last.step().unwrap();
         let attempts = last.raw["step"]["attempts"].as_array().unwrap();
-        // 前两次尝试安排过重试，提示随 Step 条目给出，不再有单独的事件。
+        // 前两次尝试安排过重试，提示随步骤条目给出，不再有单独的事件。
         require(
             step.retries.iter().map(|r| r.attempt).collect::<Vec<_>>() == [0, 1]
                 && attempts.len() == 3,
-            format!(
-                "expected retry notices for attempts [0, 1]: {:?}",
-                step.retries
-            ),
+            format!("应包含第 0、1 次尝试的重试提示：{:?}", step.retries),
         )?;
-        let summary = step.summary.as_ref().expect("final step summary");
+        let summary = step.summary.as_ref().expect("最终步骤应带有摘要");
         require(
             summary.outcome.as_str() == "failed"
                 && summary.notice.as_ref().is_some_and(|notice| {
                     notice.level == "error" && attempts[2]["end"]["diagnostic"] == notice.text
                 }),
-            "terminal notice must equal the final attempt diagnostic",
+            "终态提示文本必须与最后一次尝试的诊断信息一致",
         )?;
         reopened_entries_match(&world, &spec, &outcome)
     })();
     finish_scenario(
         evidence,
-        &[("exhausted retries", &outcome.command)],
+        &[("重试耗尽轮次发送", &outcome.command)],
         captures,
         result,
     );

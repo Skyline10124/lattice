@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! Fast binary black-box: CLI help surface and HOME isolation.
+//! 快速二进制黑盒测试：CLI 帮助表面与 `HOME` 隔离。
 
 use lattice_system_harness::{
     LatticeCommand, LatticeDriver, ScenarioSpec, ScenarioWorld, assert_exit_code,
@@ -10,7 +10,7 @@ use lattice_system_harness::{
 };
 
 fn driver() -> LatticeDriver {
-    LatticeDriver::from_env().expect("LATTICE_BIN must point to a built lattice binary")
+    LatticeDriver::from_env().expect("LATTICE_BIN 必须指向已构建的 lattice 二进制")
 }
 
 /// `lattice --help` 必须列出的公开子命令。
@@ -39,7 +39,7 @@ fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
                     },
                 )
                 .unwrap();
-            evidence.record_command("models help", &output);
+            evidence.record_command("查询 models 帮助", &output);
             assert_exit_code(&output, 0).map_err(|error| error.to_string())?;
             assert_stdout_contains_all(&output, &["refresh"]).map_err(|error| error.to_string())?;
         }
@@ -55,12 +55,12 @@ fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
                 },
             )
             .unwrap();
-        evidence.record_command("models refresh filters rejected", &output);
+        evidence.record_command("拒绝带过滤参数的 models refresh", &output);
         assert_exit_code(&output, 2).map_err(|error| error.to_string())?;
         let error: serde_json::Value =
             serde_json::from_slice(&output.stdout).map_err(|error| error.to_string())?;
         if error["kind"] != "bad_request" {
-            return Err("refresh filters must be a usage error".into());
+            return Err("带过滤参数的 refresh 必须返回参数用法错误".into());
         }
         Ok(())
     })();
@@ -69,27 +69,25 @@ fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
 
 #[test]
 fn fast_home_xdg_isolated_from_developer_home() {
-    let world = ScenarioWorld::new("lattice-harness-home").expect("world");
+    let world = ScenarioWorld::new("lattice-harness-home").expect("创建场景世界失败");
     world
         .real_home_leak_check()
-        .expect("scenario must not use developer HOME");
+        .expect("场景不得复用开发者的真实 HOME");
     assert!(world.home().starts_with(world.root()));
     assert!(world.session_store_dir().starts_with(world.home()));
-    // OS-assigned ephemeral port (non-zero means the OS reserved one).
-    assert!(world.port() != 0, "scenario must hold an OS-assigned port");
+    // 操作系统分配的临时端口（非零代表系统已预留）。
+    assert!(world.port() != 0, "场景必须持有操作系统分配的端口");
 }
 
 #[test]
 fn fast_cli_help_lists_public_commands() {
-    let spec = ScenarioSpec::load_fixture("cli_help_surface.json").expect("fixture");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let spec = ScenarioSpec::load_fixture("cli_help_surface.json").expect("加载场景夹具失败");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
     let driver = driver();
-    let output = driver.help(&world, &spec).expect("run --help");
+    let output = driver.help(&world, &spec).expect("执行 --help 失败");
 
-    // Combine the exit-success and semantic (public-commands) checks into one
-    // Result so a semantic failure also triggers failure-artifact capture —
-    // previously only the exit-success branch was wired to capture, and the
-    // public-commands loop below panicked without writing any artifacts.
+    // 将退出码检查与公开子命令语义检查合并进同一个 `Result`，使语义断言失败同样落盘失败产物——
+    // 避免只在进程非零退出时保留产物而在子命令缺失时裸 panic。
     let result = assert_exit_success(&output)
         .and_then(|_| assert_stdout_contains_all(&output, EXPECTED_PUBLIC_COMMANDS))
         .and_then(|_| {
@@ -104,7 +102,7 @@ fn fast_cli_help_lists_public_commands() {
             Ok(())
         });
     finalize_with_failure_artifacts(&world, &spec.name, "lattice --help", &output, &[], result)
-        .unwrap_or_else(|report| panic!("help exits 0 and lists all public commands\n{report}"));
+        .unwrap_or_else(|report| panic!("--help 应以退出码 0 列出全部公开子命令\n{report}"));
 
     for (args, expected) in [
         (vec!["session", "--help"], vec!["usage"]),
@@ -151,7 +149,7 @@ fn fast_cli_help_lists_public_commands() {
         let result = assert_exit_code(&output, 0)
             .and_then(|_| assert_stdout_contains_all(&output, &expected));
         finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
-            .unwrap_or_else(|report| panic!("session usage help\n{report}"));
+            .unwrap_or_else(|report| panic!("session usage 帮助输出不符合预期\n{report}"));
     }
     for args in [vec!["session", "usage"], vec!["session", "usage", "--json"]] {
         let output = driver
@@ -174,7 +172,7 @@ fn fast_cli_help_lists_public_commands() {
             }
         });
         finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
-            .unwrap_or_else(|report| panic!("usage requires a session ID\n{report}"));
+            .unwrap_or_else(|report| panic!("session usage 缺少会话标识时应报错退出\n{report}"));
     }
     for command in [vec!["run"], vec!["session", "send"]] {
         for json in [false, true] {
@@ -221,19 +219,21 @@ fn fast_cli_help_lists_public_commands() {
 #[test]
 fn fast_bare_lattice_prints_help_and_exits_zero() {
     let spec = ScenarioSpec::fast("lattice-harness-bare");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
-    let output = driver().bare_invoke(&world, &spec).expect("bare invoke");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
+    let output = driver()
+        .bare_invoke(&world, &spec)
+        .expect("裸调用 lattice 失败");
 
     let result = assert_exit_success(&output)
         .and_then(|_| assert_stdout_contains_all(&output, &["session"]));
     finalize_with_failure_artifacts(&world, &spec.name, "lattice", &output, &[], result)
-        .unwrap_or_else(|report| panic!("bare lattice exits 0 and mentions session\n{report}"));
+        .unwrap_or_else(|report| panic!("裸调用 lattice 应以退出码 0 提及 session\n{report}"));
 }
 
 #[test]
 fn fast_unknown_command_rejected() {
     let spec = ScenarioSpec::fast("lattice-harness-unknown");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
     let output = driver()
         .run(
             &world,
@@ -242,7 +242,7 @@ fn fast_unknown_command_rejected() {
                 timeout: Some(spec.step_timeout()),
             },
         )
-        .expect("run unknown");
+        .expect("执行未知子命令失败");
 
     let result = assert_exit_code(&output, 2)
         .and_then(|_| assert_stderr_contains(&output, "unrecognized subcommand"));
@@ -255,14 +255,14 @@ fn fast_unknown_command_rejected() {
         result,
     )
     .unwrap_or_else(|report| {
-        panic!("unknown command exits 2 with 'unrecognized subcommand'\n{report}")
+        panic!("未知子命令应以退出码 2 报告 unrecognized subcommand\n{report}")
     });
 }
 
 #[test]
 fn fast_daemon_serve_invalid_drain_timeout_exits_two() {
     let spec = ScenarioSpec::fast("lattice-harness-invalid-drain-timeout");
-    let world = ScenarioWorld::new(&spec.name).expect("world");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
     let output = driver()
         .run(
             &world,
@@ -276,7 +276,7 @@ fn fast_daemon_serve_invalid_drain_timeout_exits_two() {
                 timeout: Some(spec.step_timeout()),
             },
         )
-        .expect("run invalid drain-timeout");
+        .expect("执行无效 --drain-timeout 命令失败");
 
     let result = assert_exit_code(&output, 2)
         .and_then(|_| assert_stderr_contains(&output, "invalid value '1h'"));
@@ -289,6 +289,6 @@ fn fast_daemon_serve_invalid_drain_timeout_exits_two() {
         result,
     )
     .unwrap_or_else(|report| {
-        panic!("invalid --drain-timeout 应以退出码 2 报告参数值校验错误\n{report}")
+        panic!("无效的 --drain-timeout 应以退出码 2 报告参数值校验错误\n{report}")
     });
 }

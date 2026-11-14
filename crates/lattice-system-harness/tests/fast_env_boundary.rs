@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 //! 通过公开 CLI 验证工作区 `.env` 不提供凭据、模型、LATTICE 配置，
-//! 也不能改变 endpoint、TLS 信任或状态根。
+//! 也不能改变端点、TLS 信任或状态根。
 
 use lattice_system_harness::cli::run;
 use lattice_system_harness::{
@@ -158,7 +158,7 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
                     &spec,
                     &["--json", "run", "boundary", "--agent", "boundary"],
                 );
-                evidence.record_command("missing key rejection", &missing);
+                evidence.record_command("未录入正式密钥时拒绝发送", &missing);
                 assert_exit_code(&missing, 2)?;
                 let sent =
                     lattice_system_harness::parse_send_stdout(&missing.stdout, missing.exit_code());
@@ -179,7 +179,7 @@ fn process_environment_and_dotenv_cannot_supply_credentials_or_endpoints() {
                     &spec,
                     &["--json", "run", "boundary", "--agent", "boundary"],
                 );
-                evidence.record_command("formal key accepted", &sent);
+                evidence.record_command("录入正式密钥后接受发送", &sent);
                 assert_exit_success(&sent)?;
                 let captures = server.captured_requests();
                 require(captures.len() == 1, "正式凭据应恰好发出一笔请求")?;
@@ -236,7 +236,7 @@ fn project_providers_are_ignored_and_old_model_syntax_is_configuration_rejection
                 &spec,
                 &["--json", "run", "boundary", "--agent", "boundary"],
             );
-            evidence.record_command(format!("reject {model}"), &out);
+            evidence.record_command(format!("拒绝无效模型引用 {model}"), &out);
             assert_exit_code(&out, 2)?;
             let sent = lattice_system_harness::parse_send_stdout(&out.stdout, out.exit_code());
             require(
@@ -259,15 +259,15 @@ fn project_providers_are_ignored_and_old_model_syntax_is_configuration_rejection
             &spec,
             &["--json", "run", "boundary", "--agent", "boundary"],
         );
-        evidence.record_command("accept formal provider", &out);
+        evidence.record_command("接受正式注册的 provider 模型", &out);
         assert_exit_success(&out)?;
         require(
             server.captured_requests().len() == 1,
-            "正式提供方应收到一笔请求",
+            "正式 provider 应收到一笔请求",
         )?;
         require(
             hostile.captured_requests().is_empty(),
-            "项目目录中的提供方配置不得生效",
+            "项目目录中的 provider 配置不得生效",
         )
     })();
     evidence.record_captures(server.captured_requests());
@@ -311,7 +311,7 @@ fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
     let result = (|| -> Result<(), AssertError> {
         let args = &["--json", "run", "TLS boundary", "--agent", "boundary"];
         let failed = run(&world, &spec, args);
-        evidence.record_command("untrusted startup certificate", &failed);
+        evidence.record_command("启动信任链不信任目标证书时失败", &failed);
         assert_exit_code(&failed, 1)?;
         let sent = lattice_system_harness::parse_send_stdout(&failed.stdout, failed.exit_code());
         require(sent.accepted_turn_id().is_some(), "轮次应在连接前已获接受")?;
@@ -326,7 +326,7 @@ fn dotenv_cannot_add_tls_trust_and_startup_environment_requires_restart() {
             )
             .expect("以目标证书环境显式重启后台");
         let accepted = run(&world, &spec, args);
-        evidence.record_command("restarted target certificate", &accepted);
+        evidence.record_command("按目标证书重启后台后接受请求", &accepted);
         assert_exit_success(&accepted)?;
         require(
             server.captured_requests().len() == 1,
@@ -382,11 +382,11 @@ fn agents_use_backend_home_and_project_precedence() {
     let result = (|| -> Result<(), AssertError> {
         let args = &["--json", "run", "profile sources", "--agent", "boundary"];
         let global_out = run(&world, &spec, args);
-        evidence.record_command("global profile", &global_out);
+        evidence.record_command("使用后台 HOME 下的全局配置发送", &global_out);
         assert_exit_success(&global_out)?;
         std::fs::write(&project_profile, &source).unwrap();
         let project_out = run(&world, &spec, args);
-        evidence.record_command("project profile", &project_out);
+        evidence.record_command("使用覆盖全局的项目级配置发送", &project_out);
         assert_exit_success(&project_out)?;
         let captures = server.captured_requests();
         require(captures.len() == 2, "每次获接受的提交应各发出一笔请求")?;
@@ -400,7 +400,7 @@ fn agents_use_backend_home_and_project_precedence() {
         )?;
         std::fs::write(&project_profile, "schema_version=@invalid").unwrap();
         let rejected = run(&world, &spec, args);
-        evidence.record_command("invalid project profile", &rejected);
+        evidence.record_command("拒绝损坏的项目级配置", &rejected);
         assert_exit_code(&rejected, 2)?;
         let sent =
             lattice_system_harness::parse_send_stdout(&rejected.stdout, rejected.exit_code());
@@ -444,7 +444,7 @@ fn fast_dotenv_cannot_redirect_state_root() {
             &spec,
             &["--json", "run", "initialize state", "--agent", "boundary"],
         );
-        evidence.record_command("initialize state", &started);
+        evidence.record_command("初始化后台会话存储状态", &started);
         assert_exit_success(&started)?;
         let hostile_home = world.root().join("hostile-home");
         world
@@ -460,7 +460,7 @@ fn fast_dotenv_cannot_redirect_state_root() {
         // 前端环境移除 `XDG_STATE_HOME` 后应回退到前端 `HOME`，忽略工作区 `.env` 中的重定向并命中已运行的后台。
         world.unset_env("XDG_STATE_HOME");
         let status = run(&world, &spec, &["--json", "daemon", "status"]);
-        evidence.record_command("daemon status without XDG_STATE_HOME", &status);
+        evidence.record_command("移除 XDG_STATE_HOME 后查询后台状态", &status);
         assert_exit_success(&status)?;
         require(
             world.session_store_dir().join("lattice.redb").is_file(),
