@@ -39,26 +39,39 @@ for arg in "$@"; do
     fi
 done
 printf '%s\n' "$line" >> "$FAKE_SYSTEMCTL_LOG"
-case "$line" in
-    "--user|daemon-reload")
-        if [ "${FAKE_SYSTEMCTL_FAIL_RELOAD:-0}" = "1" ]; then
-            printf '%s\n' "模拟 daemon-reload 失败" >&2
+if [ "$#" -eq 2 ] && [ "$1" = "--user" ] && [ "$2" = "daemon-reload" ]; then
+    if [ "${FAKE_SYSTEMCTL_FAIL_RELOAD:-0}" = "1" ]; then
+        printf '%s\n' "模拟 daemon-reload 失败" >&2
+        exit 1
+    fi
+    exit 0
+fi
+if [ "$#" -eq 4 ] && [ "$1" = "--user" ] && [ "$2" = "enable" ] && [ "$3" = "--now" ]; then
+    if [ "${FAKE_SYSTEMCTL_FAIL_ENABLE:-0}" = "1" ]; then
+        printf '%s\n' "模拟 enable --now 失败" >&2
+        exit 1
+    fi
+    # 模拟运行中的 user manager：按名称启用时只在它自己的配置目录中查找 unit；
+    # 按绝对路径启用时文件存在即可，真实的 systemd 会先把它链接进该目录。
+    case "$4" in
+        /*)
+            if [ -f "$4" ]; then
+                exit 0
+            fi
+            printf 'Failed to enable unit: Unit file %s does not exist\n' "$4" >&2
             exit 1
-        fi
-        exit 0
-        ;;
-    "--user|enable|--now|lattice")
-        if [ "${FAKE_SYSTEMCTL_FAIL_ENABLE:-0}" = "1" ]; then
-            printf '%s\n' "模拟 enable --now 失败" >&2
+            ;;
+        *)
+            if [ -f "$FAKE_SYSTEMCTL_MANAGER_UNIT_DIR/$4.service" ]; then
+                exit 0
+            fi
+            printf 'Failed to enable unit: Unit %s.service does not exist\n' "$4" >&2
             exit 1
-        fi
-        exit 0
-        ;;
-    *)
-        printf '未知 systemctl 参数：%s\n' "$line" >&2
-        exit 99
-        ;;
-esac
+            ;;
+    esac
+fi
+printf '未知 systemctl 参数：%s\n' "$line" >&2
+exit 99
 "#;
 
 struct InstallRig {
@@ -115,6 +128,18 @@ impl InstallRig {
         world.set_env("PATH", fake_sys_dir.display().to_string());
         world.set_env("XDG_CONFIG_HOME", xdg_config_home.display().to_string());
         world.set_env("FAKE_SYSTEMCTL_LOG", systemctl_log.display().to_string());
+        // 运行中的 user manager 按它自己的环境查找 unit：这里固定为隔离 `HOME` 下的默认配置目录，
+        // 与上面为命令行设置的 `XDG_CONFIG_HOME` 不同。
+        world.set_env(
+            "FAKE_SYSTEMCTL_MANAGER_UNIT_DIR",
+            world
+                .home()
+                .join(".config")
+                .join("systemd")
+                .join("user")
+                .display()
+                .to_string(),
+        );
         world.unset_env("FAKE_SYSTEMCTL_FAIL_RELOAD");
         world.unset_env("FAKE_SYSTEMCTL_FAIL_ENABLE");
 
@@ -353,7 +378,13 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
                 String::from_utf8_lossy(&out.stderr)
             ));
         }
-        if rig.systemctl_calls() != ["--user|daemon-reload", "--user|enable|--now|lattice"] {
+        // unit 写在与 manager 不同的 `XDG_CONFIG_HOME` 下；按名称启用会报 unit 不存在，
+        // 必须按 unit 文件的绝对路径启用。
+        let expected_calls = [
+            "--user|daemon-reload".to_string(),
+            format!("--user|enable|--now|{}", unit_path.display()),
+        ];
+        if rig.systemctl_calls() != expected_calls {
             return Err(format!(
                 "systemctl 调用顺序不符合预期：{:?}",
                 rig.systemctl_calls()
@@ -392,7 +423,7 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
         )?;
         evidence.record_command("执行 300ms 排空上限的 lattice daemon install", &ms_out);
         assert_exit_code(&ms_out, 0).map_err(|e| e.to_string())?;
-        if rig.systemctl_calls() != ["--user|daemon-reload", "--user|enable|--now|lattice"] {
+        if rig.systemctl_calls() != expected_calls {
             return Err(format!(
                 "300ms 安装的 systemctl 调用顺序不符合预期：{:?}",
                 rig.systemctl_calls()
@@ -435,6 +466,17 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
             return Err(format!(
                 "回退路径下未写出 unit 文件：{}",
                 home_unit_path.display()
+            ));
+        }
+        // unit 已在 manager 的配置目录中时，按路径启用同样成功。
+        let expected_home_calls = [
+            "--user|daemon-reload".to_string(),
+            format!("--user|enable|--now|{}", home_unit_path.display()),
+        ];
+        if rig.systemctl_calls() != expected_home_calls {
+            return Err(format!(
+                "回退路径安装的 systemctl 调用顺序不符合预期：{:?}",
+                rig.systemctl_calls()
             ));
         }
 
@@ -664,7 +706,12 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
         assert_stderr_contains(&enable_no_daemon, &unit_str).map_err(|e| e.to_string())?;
         assert_stderr_contains(&enable_no_daemon, "systemctl --user status lattice")
             .map_err(|e| e.to_string())?;
-        if rig.systemctl_calls() != ["--user|daemon-reload", "--user|enable|--now|lattice"] {
+        if rig.systemctl_calls()
+            != [
+                "--user|daemon-reload".to_string(),
+                format!("--user|enable|--now|{unit_str}"),
+            ]
+        {
             return Err(format!(
                 "enable 失败时应按顺序调用两条命令：{:?}",
                 rig.systemctl_calls()

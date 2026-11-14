@@ -4,7 +4,7 @@
 //! `lattice daemon install`：写出 `lattice.service` 并通过 `systemctl --user` 启用与启动后台。
 
 use std::{
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     fs::{self, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -95,7 +95,7 @@ async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError>
 
     write_unit_atomically(&unit_path, &unit_contents)?;
 
-    if let Err(reason) = run_systemctl(&["--user", "daemon-reload"]).await {
+    if let Err(reason) = run_systemctl(vec!["--user".into(), "daemon-reload".into()]).await {
         return Err(LocalError::new(
             LocalErrorKind::Internal,
             &format!(
@@ -105,7 +105,16 @@ async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError>
         ));
     }
 
-    if let Err(reason) = run_systemctl(&["--user", "enable", "--now", "lattice"]).await {
+    // 按 unit 文件的绝对路径启用：运行中的 user manager 按它自己的环境确定 unit 搜索路径，
+    // 命令行的 `XDG_CONFIG_HOME` 与之不同时，写出的 unit 不在搜索路径里，按名称启用会报 unit 不存在。
+    // 按路径启用时，systemd 先把文件链接进 manager 的配置目录再启用；文件已在搜索路径里时与按名称启用相同。
+    let enable_args = vec![
+        "--user".into(),
+        "enable".into(),
+        "--now".into(),
+        OsString::from(unit_path.as_os_str()),
+    ];
+    if let Err(reason) = run_systemctl(enable_args).await {
         let client = LocalClient::new(StateLayout::in_state_root(&state_root));
         let probe = probe_running_backend(&client, STATUS_PROBE_TIMEOUT).await;
         let message = format_enable_failure_diagnostic(&unit_path, &reason, probe);
@@ -432,10 +441,9 @@ fn write_unit_atomically(unit_path: &Path, contents: &str) -> Result<(), LocalEr
     Ok(())
 }
 
-async fn run_systemctl(args: &[&'static str]) -> Result<(), String> {
-    let args_owned: Vec<String> = args.iter().map(|s| (*s).to_owned()).collect();
+async fn run_systemctl(args: Vec<OsString>) -> Result<(), String> {
     let output =
-        tokio::task::spawn_blocking(move || Command::new("systemctl").args(&args_owned).output())
+        tokio::task::spawn_blocking(move || Command::new("systemctl").args(&args).output())
             .await
             .map_err(|_| "等待 `systemctl` 子进程的工作线程异常退出".to_owned())?
             .map_err(|error| format!("无法执行 `systemctl`：{error}"))?;
@@ -493,16 +501,16 @@ fn format_enable_failure_diagnostic(
 ) -> String {
     match probe {
         BackendProbe::Running { peer_pid } => format!(
-            "已写入 unit 文件 {}，但执行 `systemctl --user enable --now lattice` 失败（{systemctl_reason}）：状态根上已有后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `systemctl --user start lattice`",
+            "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable --now` 失败（{systemctl_reason}）：状态根上已有后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `systemctl --user start lattice`",
             unit_path.display(),
             format_peer_pid(peer_pid)
         ),
         BackendProbe::Incompatible { diagnostic } => format!(
-            "已写入 unit 文件 {}，但执行 `systemctl --user enable --now lattice` 失败（{systemctl_reason}）：{diagnostic}；停止原有后台后再执行 `systemctl --user start lattice`",
+            "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable --now` 失败（{systemctl_reason}）：{diagnostic}；停止原有后台后再执行 `systemctl --user start lattice`",
             unit_path.display()
         ),
         BackendProbe::Unreachable => format!(
-            "已写入 unit 文件 {}，但执行 `systemctl --user enable --now lattice` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情",
+            "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable --now` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情",
             unit_path.display()
         ),
     }

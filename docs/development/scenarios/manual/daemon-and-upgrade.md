@@ -55,7 +55,7 @@ lattice --json daemon status
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `lattice daemon install` 退出 `0` | 已原子写入 `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lattice.service`（`TimeoutStopSec` 为排空上限加 30 秒），并完成 `systemctl --user daemon-reload` 与 `enable --now lattice` |
+| `lattice daemon install` 退出 `0` | 已原子写入 `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lattice.service`（`TimeoutStopSec` 为排空上限加 30 秒），并完成 `systemctl --user daemon-reload` 与按该文件绝对路径的 `enable --now`；unit 不在运行中的 user manager 的搜索路径里（例如命令行的 `XDG_CONFIG_HOME` 与 manager 不同）时，systemd 会先把它链接进 manager 的配置目录 |
 | `lattice daemon install` 退出 `2` | 同目录缺失当前有效用户可执行的普通文件 `lattice-daemon`、传入了不支持的 `--json`、`--drain-timeout` 无效或加 30 秒后溢出，或可执行路径 / 状态根含无法写入 systemd unit 的字符；未写 unit 且未调用 `systemctl` |
 | `lattice daemon install` 退出 `1`（写入 unit 失败） | 创建 `systemd/user` 目录、创建临时文件、写入、同步或重命名失败，unit 不一定写出，且未调用 `systemctl`；核对目录权限与磁盘空间后重试 |
 | `lattice daemon install` 退出 `1`（`daemon-reload` 失败） | unit 已写出，但 `systemctl --user daemon-reload` 失败；不执行 `enable --now`，也不探测后台；核对用户级 systemd 会话与错误输出后重试 |

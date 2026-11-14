@@ -25,7 +25,7 @@ status: active
 | 入口 | 与后台的关系 |
 | --- | --- |
 | `lattice` 的 `run`、`session`、`tui`、`auth`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台） |
-| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload` 与 `systemctl --user enable --now lattice`（不支持 `--json`） |
+| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload` 与按该文件绝对路径的 `systemctl --user enable --now`（不支持 `--json`） |
 | `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT` 或 IPC `stop` 停机并在排空开始时发出 `STOPPING=1` |
 
 ## 判读结果
