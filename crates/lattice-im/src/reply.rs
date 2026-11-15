@@ -152,6 +152,16 @@ impl ChatDraftThrottleMap {
         *guard = Some(now + DRAFT_THROTTLE_INTERVAL);
         Ok(())
     }
+
+    async fn record_completed(&self, chat: &ChatKey, completed_at: tokio::time::Instant) {
+        let bucket = self.bucket(chat);
+        let mut guard = bucket.lock().await;
+        let cooldown_until = completed_at + DRAFT_THROTTLE_INTERVAL;
+        *guard = Some(match *guard {
+            Some(existing) if existing > cooldown_until => existing,
+            _ => cooldown_until,
+        });
+    }
 }
 
 pub(crate) async fn wait_stop_signal(stop: &mut watch::Receiver<bool>) {
@@ -165,13 +175,10 @@ pub(crate) async fn wait_stop_signal(stop: &mut watch::Receiver<bool>) {
     }
 }
 
-enum DraftPaceStep {
-    Stopped,
-    ContinueNow,
-    WaitUntil(Option<tokio::time::Instant>),
-}
-
 /// 单轮草稿节流与 25 秒保活状态机。
+///
+/// 保活计时以最近一次草稿请求**返回时刻**为基准（请求失败或慢超时后不立即紧循环重试，等待下一轮保活或新快照），
+/// 且驱动循环在每次发送前后及请求在途期间持续监听轮次终态，绝不因慢草稿请求阻塞最终回复。
 struct DraftPacer<'a> {
     chat: &'a ChatKey,
     draft_id: i64,
@@ -201,20 +208,18 @@ impl<'a> DraftPacer<'a> {
     }
 
     fn record_snapshot(&mut self, text: String) {
-        self.latest_text = Some(text);
-        self.dirty = true;
+        if text.is_empty() {
+            self.latest_text = None;
+            self.dirty = false;
+        } else if self.latest_text.as_deref() != Some(text.as_str()) {
+            self.latest_text = Some(text);
+            self.dirty = true;
+        }
     }
 
-    async fn poll_send_step(
-        &mut self,
-        io: &dyn TelegramIo,
-        stop: &mut watch::Receiver<bool>,
-    ) -> DraftPaceStep {
-        if *stop.borrow() {
-            return DraftPaceStep::Stopped;
-        }
-
-        let want_send_at = if self.dirty {
+    async fn next_deadline(&self) -> Option<tokio::time::Instant> {
+        self.latest_text.as_ref()?;
+        if self.dirty {
             Some(self.throttles.earliest_allowed(self.chat).await)
         } else if let Some(sent_at) = self.last_sent_at {
             let keepalive_at = sent_at + DRAFT_KEEPALIVE_INTERVAL;
@@ -222,45 +227,52 @@ impl<'a> DraftPacer<'a> {
             Some(keepalive_at.max(allowed_at))
         } else {
             None
-        };
-
-        if let Some(deadline) = want_send_at
-            && tokio::time::Instant::now() >= deadline
-        {
-            match self.throttles.try_claim_now(self.chat).await {
-                Ok(()) => {
-                    let preview = truncate_draft_tail(self.latest_text.as_deref().unwrap_or(""));
-                    self.dirty = false;
-                    self.last_sent_at = Some(tokio::time::Instant::now());
-                    tokio::select! {
-                        _ = wait_stop_signal(stop) => return DraftPaceStep::Stopped,
-                        res = io.send_message_draft(self.chat, self.draft_id, &preview, true) => {
-                            if let Err(err) = res {
-                                tracing::debug!(
-                                    chat = %self.chat,
-                                    draft_id = self.draft_id,
-                                    diagnostic = %err.diagnostic(),
-                                    "推送 Telegram 草稿失败，等待后续刷新"
-                                );
-                            }
-                        }
-                    }
-                    return DraftPaceStep::ContinueNow;
-                }
-                Err(_) => {
-                    // 同一 chat 下的并发轮次刚占用了当前秒配额，下一轮循环重新按最新时间等待并继续合并。
-                    return DraftPaceStep::ContinueNow;
-                }
-            }
         }
+    }
 
-        DraftPaceStep::WaitUntil(want_send_at)
+    async fn prepare_send(&mut self) -> Option<String> {
+        let text = self.latest_text.as_deref()?;
+        self.throttles.try_claim_now(self.chat).await.ok()?;
+        let preview = truncate_draft_tail(text);
+        self.dirty = false;
+        Some(preview)
+    }
+
+    async fn finish_send(&mut self, res: Result<(), TelegramApiError>) {
+        let completed_at = tokio::time::Instant::now();
+        self.last_sent_at = Some(completed_at);
+        self.throttles
+            .record_completed(self.chat, completed_at)
+            .await;
+        if let Err(err) = res {
+            tracing::debug!(
+                chat = %self.chat,
+                draft_id = self.draft_id,
+                diagnostic = %err.diagnostic(),
+                "推送 Telegram 草稿失败，等待后续刷新"
+            );
+        }
+    }
+}
+
+/// 非阻塞排空 `turn` 当前已就绪的全部草稿快照；若轮次已收尾或会话库停写则返回 `false`。
+fn drain_ready_turn_updates(turn: &mut InProcessTurn, pacer: &mut DraftPacer<'_>) -> bool {
+    let waker = std::task::Waker::noop();
+    let mut cx = std::task::Context::from_waker(waker);
+    loop {
+        let mut fut = std::pin::pin!(turn.next_draft());
+        match fut.as_mut().poll(&mut cx) {
+            std::task::Poll::Ready(Some(text)) => pacer.record_snapshot(text),
+            std::task::Poll::Ready(None) => return false,
+            std::task::Poll::Pending => return true,
+        }
     }
 }
 
 /// 驱动单轮流式草稿推送：合并节流窗口内的中间快照，并在无新增量时每 25 秒保活刷新。
 ///
-/// 草稿发送失败仅记录调试日志且不重试，等待下一次正文更新或保活周期刷新。
+/// 草稿发送失败仅记录调试日志且不重试，等待下一次正文更新或保活周期刷新；
+/// 一旦轮次进入终态，立即结束草稿循环（含取消在途慢草稿请求），确保最终回复不被阻塞。
 pub(crate) async fn drive_turn_drafts(
     turn: &mut InProcessTurn,
     initial_draft: Option<String>,
@@ -273,33 +285,51 @@ pub(crate) async fn drive_turn_drafts(
     let mut pacer = DraftPacer::new(initial_draft, chat, draft_id, throttles);
 
     loop {
-        match pacer.poll_send_step(io, &mut stop).await {
-            DraftPaceStep::Stopped => return,
-            DraftPaceStep::ContinueNow => continue,
-            DraftPaceStep::WaitUntil(Some(deadline)) => {
-                tokio::select! {
-                    _ = wait_stop_signal(&mut stop) => return,
-                    next = turn.next_draft() => {
-                        match next {
-                            Some(text) => pacer.record_snapshot(text),
-                            None => return,
-                        }
-                    }
-                    _ = tokio::time::sleep_until(deadline) => {}
-                }
-            }
-            DraftPaceStep::WaitUntil(None) => {
-                tokio::select! {
-                    _ = wait_stop_signal(&mut stop) => return,
-                    next = turn.next_draft() => {
-                        match next {
-                            Some(text) => pacer.record_snapshot(text),
-                            None => return,
-                        }
-                    }
-                }
-            }
+        if *stop.borrow() || !drain_ready_turn_updates(turn, &mut pacer) {
+            return;
         }
+
+        let Some(deadline) = pacer.next_deadline().await else {
+            tokio::select! {
+                _ = wait_stop_signal(&mut stop) => return,
+                next = turn.next_draft() => match next {
+                    Some(text) => pacer.record_snapshot(text),
+                    None => return,
+                },
+            }
+            continue;
+        };
+
+        if tokio::time::Instant::now() < deadline {
+            tokio::select! {
+                _ = wait_stop_signal(&mut stop) => return,
+                next = turn.next_draft() => match next {
+                    Some(text) => pacer.record_snapshot(text),
+                    None => return,
+                },
+                _ = tokio::time::sleep_until(deadline) => {}
+            }
+            continue;
+        }
+
+        let Some(preview) = pacer.prepare_send().await else {
+            continue;
+        };
+
+        let mut send_fut = std::pin::pin!(io.send_message_draft(chat, draft_id, &preview, true));
+        let send_res = loop {
+            tokio::select! {
+                biased;
+                _ = wait_stop_signal(&mut stop) => return,
+                next = turn.next_draft() => match next {
+                    Some(text) => pacer.record_snapshot(text),
+                    None => return,
+                },
+                res = &mut send_fut => break res,
+            }
+        };
+
+        pacer.finish_send(send_res).await;
     }
 }
 
@@ -720,29 +750,51 @@ mod tests {
         let driver = tokio::spawn(async move {
             let mut pacer = DraftPacer::new(None, &chat_clone, 42, &throttles_clone);
             loop {
-                match pacer.poll_send_step(io_clone.as_ref(), &mut stop_rx).await {
-                    DraftPaceStep::Stopped => return,
-                    DraftPaceStep::ContinueNow => continue,
-                    DraftPaceStep::WaitUntil(Some(deadline)) => {
-                        tokio::select! {
-                            _ = wait_stop_signal(&mut stop_rx) => return,
-                            next = rx.recv() => match next {
-                                Some(text) => pacer.record_snapshot(text),
-                                None => return,
-                            },
-                            _ = tokio::time::sleep_until(deadline) => {}
-                        }
-                    }
-                    DraftPaceStep::WaitUntil(None) => {
-                        tokio::select! {
-                            _ = wait_stop_signal(&mut stop_rx) => return,
-                            next = rx.recv() => match next {
-                                Some(text) => pacer.record_snapshot(text),
-                                None => return,
-                            },
-                        }
+                loop {
+                    match rx.try_recv() {
+                        Ok(text) => pacer.record_snapshot(text),
+                        Err(mpsc::error::TryRecvError::Empty) => break,
+                        Err(mpsc::error::TryRecvError::Disconnected) => return,
                     }
                 }
+                let Some(deadline) = pacer.next_deadline().await else {
+                    tokio::select! {
+                        _ = wait_stop_signal(&mut stop_rx) => return,
+                        next = rx.recv() => match next {
+                            Some(text) => pacer.record_snapshot(text),
+                            None => return,
+                        },
+                    }
+                    continue;
+                };
+                if tokio::time::Instant::now() < deadline {
+                    tokio::select! {
+                        _ = wait_stop_signal(&mut stop_rx) => return,
+                        next = rx.recv() => match next {
+                            Some(text) => pacer.record_snapshot(text),
+                            None => return,
+                        },
+                        _ = tokio::time::sleep_until(deadline) => {}
+                    }
+                    continue;
+                }
+                let Some(preview) = pacer.prepare_send().await else {
+                    continue;
+                };
+                let mut send_fut =
+                    std::pin::pin!(io_clone.send_message_draft(&chat_clone, 42, &preview, true));
+                let send_res = loop {
+                    tokio::select! {
+                        biased;
+                        _ = wait_stop_signal(&mut stop_rx) => return,
+                        res = &mut send_fut => break res,
+                        next = rx.recv() => match next {
+                            Some(text) => pacer.record_snapshot(text),
+                            None => return,
+                        },
+                    }
+                };
+                pacer.finish_send(send_res).await;
             }
         });
 

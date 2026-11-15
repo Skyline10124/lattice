@@ -355,33 +355,7 @@ impl TelegramIo for TelegramHttpClient {
         let payload_bytes = self
             .post_and_read_success_bytes("getUpdates", poll_timeout, &body)
             .await?;
-        let envelope: RawUpdateEnvelope =
-            serde_json::from_slice(&payload_bytes).map_err(|_| TelegramApiError::Retryable {
-                diagnostic: "解析 Telegram getUpdates 响应 JSON 失败".into(),
-            })?;
-        if !envelope.ok {
-            let desc = envelope
-                .description
-                .as_deref()
-                .map(|d| self.redactor.sanitize_single_line(d))
-                .unwrap_or_else(|| "ok=false".into());
-            return Err(TelegramApiError::Retryable {
-                diagnostic: format!("Telegram getUpdates 返回非成功包：{desc}"),
-            });
-        }
-
-        {
-            let mut offsets = self.offsets.lock().expect("Telegram offset 锁不应中毒");
-            for raw in &envelope.result {
-                offsets.record_received(raw.update_id);
-            }
-        }
-
-        Ok(envelope
-            .result
-            .into_iter()
-            .map(|u| u.into_domain())
-            .collect())
+        decode_and_filter_updates(&payload_bytes, &self.offsets, &self.redactor)
     }
 
     fn acknowledge(&self, inbound_id: &InboundId) {
@@ -389,6 +363,13 @@ impl TelegramIo for TelegramHttpClient {
             .lock()
             .expect("Telegram offset 锁不应中毒")
             .ack_inbound(inbound_id);
+    }
+
+    fn is_acknowledged(&self, inbound_id: &InboundId) -> bool {
+        self.offsets
+            .lock()
+            .expect("Telegram offset 锁不应中毒")
+            .is_acked_inbound(inbound_id)
     }
 
     async fn send_message(&self, chat: &ChatKey, text: &str) -> Result<(), TelegramApiError> {
@@ -432,6 +413,36 @@ impl TelegramIo for TelegramHttpClient {
             let _ = handle.await;
         }
     }
+}
+
+fn decode_and_filter_updates(
+    payload_bytes: &[u8],
+    offsets: &StdMutex<OffsetTracker>,
+    redactor: &ImRedactor,
+) -> Result<Vec<TelegramUpdate>, TelegramApiError> {
+    let envelope: RawUpdateEnvelope =
+        serde_json::from_slice(payload_bytes).map_err(|_| TelegramApiError::Retryable {
+            diagnostic: "解析 Telegram getUpdates 响应 JSON 失败".into(),
+        })?;
+    if !envelope.ok {
+        let desc = envelope
+            .description
+            .as_deref()
+            .map(|d| redactor.sanitize_single_line(d))
+            .unwrap_or_else(|| "ok=false".into());
+        return Err(TelegramApiError::Retryable {
+            diagnostic: format!("Telegram getUpdates 返回非成功包：{desc}"),
+        });
+    }
+
+    let mut tracker = offsets.lock().expect("Telegram offset 锁不应中毒");
+    let mut seen_in_batch = std::collections::BTreeSet::new();
+    Ok(envelope
+        .result
+        .into_iter()
+        .filter(|raw| seen_in_batch.insert(raw.update_id) && tracker.record_received(raw.update_id))
+        .map(|u| u.into_domain())
+        .collect())
 }
 
 #[cfg(test)]
@@ -578,5 +589,49 @@ mod tests {
         release_tx.send(()).unwrap();
         let saw_finished = drain_task.await.expect("drain 任务不应 panic");
         assert!(saw_finished, "drain() 返回时阻塞任务必须已完成");
+    }
+
+    #[test]
+    fn decode_and_filter_updates_drops_acknowledged_commands_redelivered_behind_blocked_head() {
+        let token = ImToken::parse("123:test-token").unwrap();
+        let redactor = ImRedactor::new([token]);
+        let offsets = StdMutex::new(OffsetTracker::default());
+
+        let batch1 = r#"{
+            "ok": true,
+            "result": [
+                {"update_id": 50, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "排队中的普通消息"}},
+                {"update_id": 51, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/help"}},
+                {"update_id": 52, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/cancel"}}
+            ]
+        }"#;
+        let first = decode_and_filter_updates(batch1.as_bytes(), &offsets, &redactor).unwrap();
+        assert_eq!(first.len(), 3);
+
+        // 模拟 50 仍在排队未确认，51（/help）与 52（/cancel）收到即确认：offset 仍为 None
+        {
+            let mut guard = offsets.lock().unwrap();
+            guard.ack_inbound(&first[1].inbound_id);
+            guard.ack_inbound(&first[2].inbound_id);
+            assert_eq!(guard.next_offset(), None);
+        }
+
+        // 下一轮 getUpdates 重投 [50, 51, 52] 并附带新到达的 53：已确认的 51、52 必须在返回前被过滤掉
+        let batch2 = r#"{
+            "ok": true,
+            "result": [
+                {"update_id": 50, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "排队中的普通消息"}},
+                {"update_id": 51, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/help"}},
+                {"update_id": 52, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/cancel"}},
+                {"update_id": 53, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/status"}}
+            ]
+        }"#;
+        let second = decode_and_filter_updates(batch2.as_bytes(), &offsets, &redactor).unwrap();
+        let ids: Vec<String> = second.iter().map(|u| u.inbound_id.to_string()).collect();
+        assert_eq!(
+            ids,
+            vec!["tg:50".to_string(), "tg:53".to_string()],
+            "前序更新挡住 offset 时，已确认的 /help 与 /cancel 重投不得再次进入网关分发"
+        );
     }
 }

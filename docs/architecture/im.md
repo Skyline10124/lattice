@@ -99,9 +99,9 @@ sequenceDiagram
     SV-->>IM: Ok(InProcessTurn)
     IM->>LG: 原子更新为 Accepted
     IM->>IM: 分配随机正整数 draft_id 登记 TurnId，推进单对话队列处理下一条
-    loop 轮次执行期间
-        SV-->>IM: InProcessTurn::next_draft() 纯文本快照
-        IM->>TG: sendMessageDraft（单 chat 1 秒节流、25 秒保活、末尾 4096 字符、can_stop=true）
+    loop 轮次执行期间（发送前后及请求在途均持续监听终态）
+        SV-->>IM: InProcessTurn::next_draft() 纯文本快照（终态立即中断在途慢草稿）
+        IM->>TG: sendMessageDraft（单 chat 1 秒节流、按请求完成时刻计 25 秒保活、末尾 4096 字符、can_stop=true）
     end
     SV-->>IM: InProcessTurn::outcome()
     IM->>IM: 拼接非 Completed 结局说明并按 4096 字符三级切分
@@ -123,7 +123,7 @@ sequenceDiagram
    - 最终回复取 `InProcessTurnOutcome.assistant_text`；若终态不是 `Completed`，在末尾附一行脱敏后的中文结局说明（正文与结局均为空时用简短兜底文本避免空消息）。总长度超过 4096 个 Unicode 字符时，优先按段落边界（保留 `\n\n`）、次按行边界（保留 `\n`）、最后按 4096 字符边界无损切分为多条消息按序发送（拼接严格还原原文），不切碎多字节字符。
    - `sendMessage` 与 `getUpdates` 遇到 HTTP `429` 时完整遵守服务端 `retry_after`（本地指数退避上限仅约束无 `retry_after` 或 `5xx`/网络传输错误）并带停止监听退避重试；遇到 HTTP `400` 或 `403` 视为平台拒收终态，记录告警日志、不再重试，并将关联台账条目标记为 `Delivered`。
 6. **确认游标与优雅收尾**：
-   - 写台账事件（普通消息、`/new`）在台账落盘后确认；其余事件收到即确认。`OffsetTracker` 仅弹出队首连续已确认前缀并将下一轮 offset 设为最后弹出 `update_id + 1`；若前序同 chat 入站事件仍在排队等待准入，后续已确认更新不会越过它推进 offset，重投时在途 `InboundId` 直接跳过、已落账 `InboundId` 直接确认。
+   - 写台账事件（普通消息、`/new`）在台账落盘后确认；其余事件收到即确认。`OffsetTracker` 仅弹出队首连续已确认前缀并将下一轮 offset 设为最后弹出 `update_id + 1`；若前序入站事件仍在排队未确认而挡住 offset，`getUpdates` 在分发前直接过滤本实例 `OffsetTracker` 已确认的重投更新（防止 `/help`、`/cancel` 等不写台账命令被重复执行或误取消后续新轮次），未确认的在途 `InboundId` 则由在途去重集合跳过、跨实例重启后的重投由台账去重确认。
    - 收到外部 `stop` 或 `Service::stopping()` 通知时，广播内部停止信号中断所有长轮询与退避等待，等待轮询循环、`JoinSet` 中全部恢复/准入/草稿/台账写入子任务以及 `TelegramIo::drain` 中的在途阻塞解析任务完全退出后 `run` 才返回；即使 `run` 被宿主强制中止，生命周期守卫 `LedgerPublicationGuard` 也会在丢弃时同步封闭发布门闩，阻止阻塞线程池中滞留的旧台账写入覆盖新实例数据。若轮询或任一受监督子任务发生 panic，先广播停止并排空同代子任务，再向宿主重新抛出 panic 供组件层隔离。
 
 ## 状态

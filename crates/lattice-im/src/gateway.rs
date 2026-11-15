@@ -703,6 +703,9 @@ impl GatewayRuntime {
 
     async fn dispatch_update(self: &Arc<Self>, update: TelegramUpdate) {
         let inbound_id = update.inbound_id;
+        if self.io.is_acknowledged(&inbound_id) {
+            return;
+        }
 
         match update.payload {
             TelegramUpdatePayload::Ignored => {

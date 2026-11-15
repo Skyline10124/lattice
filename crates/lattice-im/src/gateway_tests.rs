@@ -74,6 +74,9 @@ struct FakeTelegramIo {
     panic_on_next_poll: std::sync::atomic::AtomicBool,
     send_entered_count: std::sync::atomic::AtomicUsize,
     send_entered_notify: Notify,
+    slow_draft_behavior: StdMutex<Option<(Duration, Result<(), TelegramApiError>)>>,
+    draft_entered_count: std::sync::atomic::AtomicUsize,
+    draft_entered_notify: Notify,
 }
 
 impl Default for FakeTelegramIo {
@@ -97,6 +100,9 @@ impl Default for FakeTelegramIo {
             panic_on_next_poll: std::sync::atomic::AtomicBool::new(false),
             send_entered_count: std::sync::atomic::AtomicUsize::new(0),
             send_entered_notify: Notify::new(),
+            slow_draft_behavior: StdMutex::new(None),
+            draft_entered_count: std::sync::atomic::AtomicUsize::new(0),
+            draft_entered_notify: Notify::new(),
         }
     }
 }
@@ -218,6 +224,29 @@ impl FakeTelegramIo {
         .await
     }
 
+    fn set_slow_draft_behavior(&self, delay: Duration, result: Result<(), TelegramApiError>) {
+        *self.slow_draft_behavior.lock().unwrap() = Some((delay, result));
+    }
+
+    fn draft_entered_count(&self) -> usize {
+        self.draft_entered_count
+            .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    async fn wait_draft_entered(&self, min_count: usize) {
+        tokio::time::timeout(Duration::from_secs(120), async {
+            loop {
+                let notified = self.draft_entered_notify.notified();
+                if self.draft_entered_count() >= min_count {
+                    return;
+                }
+                notified.await;
+            }
+        })
+        .await
+        .expect("等待 send_message_draft 进入超时");
+    }
+
     async fn wait_send_entered(&self, min_count: usize) {
         bounded(async {
             loop {
@@ -262,13 +291,17 @@ impl TelegramIo for FakeTelegramIo {
             }
             let notified = self.batch_notify.notified();
             if let Some(batch) = self.batches.lock().unwrap().pop_front() {
-                if let Ok(ref updates) = batch {
+                return batch.map(|updates| {
                     let mut offsets = self.offsets.lock().unwrap();
-                    for update in updates {
-                        offsets.record_received_inbound(&update.inbound_id);
-                    }
-                }
-                return batch;
+                    let mut seen_in_batch = std::collections::BTreeSet::new();
+                    updates
+                        .into_iter()
+                        .filter(|update| {
+                            seen_in_batch.insert(update.inbound_id.clone())
+                                && offsets.record_received_inbound(&update.inbound_id)
+                        })
+                        .collect()
+                });
             }
             notified.await;
         }
@@ -277,6 +310,10 @@ impl TelegramIo for FakeTelegramIo {
     fn acknowledge(&self, inbound_id: &InboundId) {
         self.offsets.lock().unwrap().ack_inbound(inbound_id);
         self.offset_notify.notify_waiters();
+    }
+
+    fn is_acknowledged(&self, inbound_id: &InboundId) -> bool {
+        self.offsets.lock().unwrap().is_acked_inbound(inbound_id)
     }
 
     async fn send_message(&self, chat: &ChatKey, text: &str) -> Result<(), TelegramApiError> {
@@ -320,6 +357,14 @@ impl TelegramIo for FakeTelegramIo {
         text: &str,
         can_stop: bool,
     ) -> Result<(), TelegramApiError> {
+        self.draft_entered_count
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.draft_entered_notify.notify_waiters();
+        let slow = self.slow_draft_behavior.lock().unwrap().clone();
+        if let Some((delay, result)) = slow {
+            tokio::time::sleep(delay).await;
+            result?;
+        }
         self.draft_timestamps
             .lock()
             .unwrap()
@@ -889,6 +934,24 @@ async fn deduplicates_inbound_id_preserves_single_session_and_handles_new_and_no
 
     let _ = gw_stop.send(());
     bounded(gw_task).await.unwrap().unwrap();
+
+    // 重新挂载新实例（全新 OffsetTracker）并重投旧普通消息 210 与旧 /new（220）：验证跨实例台账去重同样不重跑、不清掉新绑定
+    let io_remount = Arc::new(FakeTelegramIo::default());
+    let (gw_stop_remount, gw_task_remount) = harness.spawn_gateway(Arc::clone(&io_remount));
+    io_remount.push_updates(vec![
+        private_text_update(210, PRIVATE_CHAT_ID, ALLOWED_UID, "第一问"),
+        private_text_update(220, PRIVATE_CHAT_ID, ALLOWED_UID, "/new"),
+        private_text_update(224, PRIVATE_CHAT_ID, ALLOWED_UID, "/status"),
+    ]);
+    let remount_msgs = io_remount.wait_message_count(1).await;
+    assert!(
+        remount_msgs[0].1.contains("会话："),
+        "跨重启重投已落账的 /new 必须命中台账去重并保留新绑定: {}",
+        remount_msgs[0].1
+    );
+    io_remount.wait_offset(Some(225)).await;
+    let _ = gw_stop_remount.send(());
+    bounded(gw_task_remount).await.unwrap().unwrap();
 
     let ledger = Ledger::open_and_prune(
         harness.layout.clone(),
@@ -2453,5 +2516,298 @@ async fn abort_before_chat_worker_first_poll_cleans_queue_and_drops_runtime_with
 
     let _ = gw_stop2.send(());
     bounded(gw_task2).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 17：前序普通消息排队挡住 offset 时，后续已确认的 /help、/cancel 被重投不得重复执行或误取消后来启动的新轮次（ADR §10）
+#[tokio::test]
+async fn acknowledged_commands_redelivered_behind_blocked_head_are_not_reexecuted() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID, OTHER_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    // 1. 先让 chat_a 建立稳定会话绑定 session_a
+    io.push_updates(vec![private_text_update(
+        1398,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "建立初始会话",
+    )]);
+    let (mut sock_init, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_init).await;
+    write_sse_complete(&mut sock_init, None, "初始完成", None).await;
+    let init_msgs = io.wait_message_count(1).await;
+    assert_eq!(init_msgs[0].1, "初始完成");
+    io.wait_offset(Some(1399)).await;
+
+    let chat_a = chat_key_from_id(PRIVATE_CHAT_ID);
+    let session_a = {
+        let snap = Ledger::open_and_prune(
+            harness.layout.clone(),
+            Utc::now(),
+            TELEGRAM_REDELIVERY_WINDOW,
+        )
+        .await
+        .unwrap();
+        snap.bound_session(&chat_a)
+            .await
+            .expect("chat_a 应已绑定 session_a")
+    };
+
+    // 2. 在 session_a 上武装 before_accept 闸门，使 1399 停在准入途中（占住 chat_a 的单对话准入队列），
+    //    随后到达的普通消息 1400 便真实排在 chat_a 队列中尚未落账确认，从而将 offset 卡在 1400！
+    let (entered_1399, release_1399) = harness.service.arm_before_accept_for_test(session_a);
+    io.push_updates(vec![private_text_update(
+        1399,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "准入途中占住队列的消息",
+    )]);
+    bounded(entered_1399)
+        .await
+        .expect("1399 应停在 before_accept 闸门");
+    io.wait_offset(Some(1400)).await;
+
+    // 3. 投递 [1400（chat_a 普通消息，排队未确认挡住 offset）, 1401（chat_a /help）, 1402（chat_b /cancel）]
+    io.push_updates(vec![
+        private_text_update(
+            1400,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "排队挡住 offset 的普通消息",
+        ),
+        private_text_update(1401, PRIVATE_CHAT_ID, ALLOWED_UID, "/help"),
+        private_text_update(1402, OTHER_UID, OTHER_UID, "/cancel"),
+    ]);
+
+    let after_cmds = io.wait_message_count(3).await;
+    assert_eq!(
+        after_cmds.iter().filter(|(_, t)| t == HELP_REPLY).count(),
+        1,
+        "首次 /help 应回复 1 次"
+    );
+    assert!(
+        after_cmds.iter().any(|(_, t)| t == "没有进行中的轮"),
+        "chat_b 尚无轮次时首次 /cancel 应回复没有进行中的轮: {after_cmds:?}"
+    );
+    assert_eq!(
+        io.offsets.lock().unwrap().next_offset(),
+        Some(1400),
+        "1400 仍排队未确认时，offset 必须停在 1400"
+    );
+
+    // 4. chat_b 随后启动一轮真正的在途长轮次（1403），保持流式挂起
+    io.push_updates(vec![private_text_update(
+        1403,
+        OTHER_UID,
+        OTHER_UID,
+        "chat_b 启动新轮次",
+    )]);
+    let (mut sock_b, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_b).await;
+    sock_b
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let b_chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"chat_b 流式输出中\"},\"finish_reason\":null}]}\n\n";
+    sock_b
+        .write_all(format!("{:X}\r\n{b_chunk}\r\n", b_chunk.len()).as_bytes())
+        .await
+        .unwrap();
+    sock_b.flush().await.unwrap();
+    let _ = io.wait_draft_count(1).await;
+
+    // 5. 因 1400 仍挡住 offset，Telegram 连续两轮重投 [1400, 1401(/help), 1402(chat_b /cancel), 1403]，并在第二轮末尾附带 1404(chat_b /status)
+    io.push_updates(vec![
+        private_text_update(
+            1400,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "排队挡住 offset 的普通消息",
+        ),
+        private_text_update(1401, PRIVATE_CHAT_ID, ALLOWED_UID, "/help"),
+        private_text_update(1402, OTHER_UID, OTHER_UID, "/cancel"),
+        private_text_update(1403, OTHER_UID, OTHER_UID, "chat_b 启动新轮次"),
+    ]);
+    io.push_updates(vec![
+        private_text_update(
+            1400,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "排队挡住 offset 的普通消息",
+        ),
+        private_text_update(1401, PRIVATE_CHAT_ID, ALLOWED_UID, "/help"),
+        private_text_update(1402, OTHER_UID, OTHER_UID, "/cancel"),
+        private_text_update(1403, OTHER_UID, OTHER_UID, "chat_b 启动新轮次"),
+        private_text_update(1404, OTHER_UID, OTHER_UID, "/status"),
+    ]);
+
+    // 若 1401 或 1402 被重复执行，在 1404 之前就会多出额外的 /help 或 /cancel 回复，且 chat_b 的新轮次会被误取消！
+    let after_redeliveries = io.wait_message_count(4).await;
+    assert_eq!(
+        after_redeliveries
+            .iter()
+            .filter(|(_, t)| t == HELP_REPLY)
+            .count(),
+        1,
+        "连续重投两次后，已确认的 /help 仍只应回复 1 次（不得回复 3 次）: {after_redeliveries:?}"
+    );
+    assert!(
+        after_redeliveries[3].1.contains("执行中（轮次 "),
+        "旧 /cancel (1402) 重投绝不能取消后来启动的轮次 1403，/status 必须显示仍在执行中: {}",
+        after_redeliveries[3].1
+    );
+
+    // 6. 放行 1399：1399 进入流式执行，排队的 1400 随即命中 Busy 并确认，offset 一次性推进到 1405
+    release_1399.send(()).unwrap();
+    let (mut sock_1399, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_1399).await;
+    io.wait_offset(Some(1405)).await;
+
+    write_sse_complete(&mut sock_1399, None, "1399 最终回复", None).await;
+    let done_frame =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sock_b
+        .write_all(format!("{:X}\r\n{done_frame}\r\n0\r\n\r\n", done_frame.len()).as_bytes())
+        .await
+        .unwrap();
+    sock_b.flush().await.unwrap();
+
+    let final_msgs = io.wait_message_count(7).await;
+    assert_eq!(
+        final_msgs.iter().filter(|(_, t)| t == HELP_REPLY).count(),
+        1,
+        "全流程结束时 /help 总回复数必须严格为 1"
+    );
+    let final_texts: Vec<&str> = final_msgs.iter().map(|(_, t)| t.as_str()).collect();
+    assert!(final_texts.contains(&"正在忙，可发 /cancel"));
+    assert!(final_texts.contains(&"1399 最终回复"));
+    assert!(final_texts.contains(&"chat_b 流式输出中"));
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 18：使用真实 Service 模拟 30 秒慢草稿超时（超过 25 秒保活间隔），验证草稿循环绝不陷入紧循环且轮次结束立即发送最终回复（ADR §13）
+#[tokio::test(start_paused = true)]
+async fn slow_30s_draft_requests_never_livelock_or_block_final_reply_delivery() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    io.set_slow_draft_behavior(
+        Duration::from_secs(30),
+        Err(TelegramApiError::Retryable {
+            diagnostic: "模拟 30 秒 sendMessageDraft 请求超时".into(),
+        }),
+    );
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    io.push_updates(vec![private_text_update(
+        1500,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "验证 30 秒慢草稿不阻塞最终回复",
+    )]);
+
+    let (mut sock1, _) = tokio::time::timeout(Duration::from_secs(120), harness.listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = read_http_request(&mut sock1).await;
+    sock1
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let chunk1 = "data: {\"choices\":[{\"delta\":{\"content\":\"慢草稿下的完整回复\"},\"finish_reason\":null}]}\n\n";
+    sock1
+        .write_all(format!("{:X}\r\n{chunk1}\r\n", chunk1.len()).as_bytes())
+        .await
+        .unwrap();
+    sock1.flush().await.unwrap();
+
+    let sse_ping = ": keepalive\n\n";
+    let ping_wire = format!("{:X}\r\n{sse_ping}\r\n", sse_ping.len());
+
+    // 1. 首次草稿请求已发出并将耗时 30 秒（超过 25 秒保活间隔）
+    io.wait_draft_entered(1).await;
+
+    // 2. 分段推进虚拟时间 30 秒（每 15 秒向模型流写入 SSE 注释帧防止模型侧空闲超时），让第 1 次草稿超时返回，
+    //    再额外推进 5 秒（共 35 秒）：
+    //    修复前：因发送前记录时间（now=30s >= 0+25s），返回瞬间立即紧循环发起第 2 次 30s 草稿且永不检查终态；
+    //    修复后：以返回时刻为保活基准（下一次保活在 30s+25s=55s），在 35s 时绝不会紧循环重发第 2 次草稿！
+    for _ in 0..2 {
+        tokio::time::advance(Duration::from_secs(15)).await;
+        sock1.write_all(ping_wire.as_bytes()).await.unwrap();
+        sock1.flush().await.unwrap();
+        for _ in 0..20 {
+            tokio::task::yield_now().await;
+        }
+    }
+    tokio::time::advance(Duration::from_secs(5)).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        io.draft_entered_count(),
+        1,
+        "30 秒草稿超时返回后不得立即紧循环重发，应等待返回后满 25 秒保活周期"
+    );
+
+    // 3. 再推进 20 秒到达 55 秒保活点，触发第 2 次 30 秒慢草稿请求进入在途状态
+    tokio::time::advance(Duration::from_secs(10)).await;
+    sock1.write_all(ping_wire.as_bytes()).await.unwrap();
+    sock1.flush().await.unwrap();
+    tokio::time::advance(Duration::from_secs(10)).await;
+    io.wait_draft_entered(2).await;
+
+    // 4. 在第 2 次 30 秒草稿请求刚进行了 2 秒（尚余 28 秒真实在途阻塞）时，恢复真实时钟并完成模型流：
+    //    若草稿循环未持续监听终态，此处将被阻塞整整 28 秒真实时间！
+    tokio::time::advance(Duration::from_secs(2)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+    let wall_finish_start = std::time::Instant::now();
+    let done_frame =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sock1
+        .write_all(format!("{:X}\r\n{done_frame}\r\n0\r\n\r\n", done_frame.len()).as_bytes())
+        .await
+        .unwrap();
+    sock1.flush().await.unwrap();
+
+    let msgs = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let notified = io.message_notify.notified();
+            {
+                let guard = io.sent_messages.lock().unwrap();
+                if !guard.is_empty() {
+                    return guard.clone();
+                }
+            }
+            notified.await;
+        }
+    })
+    .await
+    .expect("轮次结束后最终回复必须立即送达，不得被慢草稿请求阻塞");
+
+    let wall_elapsed = wall_finish_start.elapsed();
+    assert!(
+        wall_elapsed < Duration::from_secs(2),
+        "轮次结束后应立即中断尚余 28 秒的在途慢草稿并发送最终回复，实际真实耗时: {wall_elapsed:?}"
+    );
+    assert_eq!(msgs[0].1, "慢草稿下的完整回复");
+    assert_eq!(
+        io.draft_entered_count(),
+        2,
+        "轮次进入终态后不得再发起任何新的草稿请求"
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
     harness.shutdown().await;
 }

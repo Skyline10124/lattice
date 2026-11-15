@@ -171,12 +171,26 @@ impl OffsetTracker {
         self.next_offset
     }
 
-    /// 登记一批新收到的 `update_id`；重投的未弹出条目保留已有确认标记，已弹出条目直接忽略。
-    pub(crate) fn record_received(&mut self, update_id: i64) {
+    /// 登记收到的一条 `update_id`，并返回该更新在本实例中是否尚未确认（`true` 表示需分发，`false` 表示本实例已确认过，重投应直接过滤）。
+    pub(crate) fn record_received(&mut self, update_id: i64) -> bool {
         if self.next_offset.is_some_and(|offset| update_id < offset) {
-            return;
+            return false;
         }
-        self.pending.entry(update_id).or_insert(false);
+        match self.pending.entry(update_id) {
+            std::collections::btree_map::Entry::Occupied(entry) => !*entry.get(),
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(false);
+                true
+            }
+        }
+    }
+
+    /// 判断指定 `update_id` 在本实例中是否已完成本地确认。
+    pub(crate) fn is_acked(&self, update_id: i64) -> bool {
+        if self.next_offset.is_some_and(|offset| update_id < offset) {
+            return true;
+        }
+        self.pending.get(&update_id).copied().unwrap_or(false)
     }
 
     /// 标记指定 `update_id` 已完成本地确认，并从队首起尽可能推进连续已确认前缀。
@@ -189,19 +203,26 @@ impl OffsetTracker {
             if !acked {
                 break;
             }
+            let Some(advanced) = front_id.checked_add(1) else {
+                break;
+            };
             self.pending.pop_first();
-            if let Some(advanced) = front_id.checked_add(1) {
-                self.next_offset = Some(advanced);
-            }
+            self.next_offset = Some(advanced);
         }
     }
 
-    /// 按平台入站身份键登记已接收事件。
+    /// 按平台入站身份键登记已接收事件，返回是否尚未确认。
     #[cfg(test)]
-    pub(crate) fn record_received_inbound(&mut self, inbound_id: &InboundId) {
-        if let Some(update_id) = update_id_from_inbound_id(inbound_id) {
-            self.record_received(update_id);
+    pub(crate) fn record_received_inbound(&mut self, inbound_id: &InboundId) -> bool {
+        match update_id_from_inbound_id(inbound_id) {
+            Some(update_id) => self.record_received(update_id),
+            None => true,
         }
+    }
+
+    /// 判断指定入站身份键在本实例中是否已完成本地确认。
+    pub(crate) fn is_acked_inbound(&self, inbound_id: &InboundId) -> bool {
+        update_id_from_inbound_id(inbound_id).is_some_and(|id| self.is_acked(id))
     }
 
     /// 按平台入站身份键标记本地确认，并推进连续前缀。
@@ -247,6 +268,12 @@ pub(crate) trait TelegramIo: Send + Sync {
 
     /// 通知平台模块该入站身份键已完成本地确认，推进平台内部连续前缀 `offset`。
     fn acknowledge(&self, inbound_id: &InboundId);
+
+    /// 查询该入站身份键在本实例中是否已完成本地确认，供分发前兜底过滤重投。
+    fn is_acknowledged(&self, inbound_id: &InboundId) -> bool {
+        let _ = inbound_id;
+        false
+    }
 
     async fn send_message(&self, chat: &ChatKey, text: &str) -> Result<(), TelegramApiError>;
 
@@ -355,17 +382,27 @@ mod tests {
             "队首 10 未确认时仍不得越过它推进 offset"
         );
 
-        // 下一次重投再次收到 10、11、12，不应冲掉 11 和 12 的已确认状态
-        tracker.record_received(10);
-        tracker.record_received(11);
-        tracker.record_received(12);
+        // 下一次重投再次收到 10、11、12：10 仍未确认应保留分发（返回 true），11 与 12 已确认应过滤（返回 false）且不冲掉确认状态
+        assert!(tracker.record_received(10), "未确认的队首 10 仍应返回 true");
+        assert!(
+            !tracker.record_received(11),
+            "本实例已确认的 11 重投时必须返回 false 过滤"
+        );
+        assert!(
+            !tracker.record_received(12),
+            "本实例已确认的 12 重投时必须返回 false 过滤"
+        );
+        assert!(!tracker.is_acked(10));
+        assert!(tracker.is_acked(11));
+        assert!(tracker.is_acked(12));
 
         // 一旦 10 确认，10..=12 形成连续前缀，直接推进到 13
         tracker.ack(10);
         assert_eq!(tracker.next_offset(), Some(13));
+        assert!(tracker.is_acked(10));
 
-        // 已弹出范围之前的旧重投不会倒退 offset
-        tracker.record_received(11);
+        // 已弹出范围之前的旧重投直接返回 false，不会倒退 offset
+        assert!(!tracker.record_received(11));
         tracker.ack(11);
         assert_eq!(tracker.next_offset(), Some(13));
     }
