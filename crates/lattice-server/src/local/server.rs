@@ -210,6 +210,7 @@ pub(super) struct Backend {
     gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, ConfigRejection>,
     fallback_tls_roots: Vec<Vec<u8>>,
     metadata: Arc<super::metadata::MetadataRefresh>,
+    components: Arc<super::components::ComponentManager>,
     tools: Arc<dyn ToolExecutor>,
     lifecycle: Arc<dyn HostLifecycle>,
     epoch: String,
@@ -335,6 +336,7 @@ impl Backend {
             self.stopping.send_replace(true);
         }
         self.lifecycle.on_stopping();
+        self.components.begin_stop();
         self.metadata.stop();
         if let Ok(gateway) = &self.gateway {
             gateway.chatgpt_auth().stop_logins();
@@ -422,6 +424,7 @@ impl Backend {
             layout,
             home,
             metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
+            components: super::components::ComponentManager::new(Vec::new()),
             gateway,
             fallback_tls_roots,
             tools,
@@ -457,6 +460,7 @@ impl Backend {
             stopping: state.stop.is_stopping(),
             owners: state.owners.len(),
             unconfirmed_operations: state.unconfirmed_operations,
+            components: self.components.statuses(),
         }
     }
     fn status(&self) -> DaemonStatus {
@@ -1217,6 +1221,65 @@ impl Backend {
                 })
                 .await
             }
+            Request::ImAuthSet { platform, token } => {
+                let dir = im_config_dir(self.home.as_deref())?;
+                blocking(move || {
+                    crate::im_auth::ImAuthStore::new(dir)
+                        .set(&platform, token.as_str())
+                        .map_err(im_auth_error)
+                })
+                .await?;
+                self.components.bind_backend(self);
+                let mount = match self.components.remount("im").await {
+                    Ok(mount) => mount,
+                    Err(err) if err.kind == LocalErrorKind::Stopping => ImMountResult::Unmounted {
+                        reason: "后台正在停止，未重新挂载；新凭据将在下次启动时生效".into(),
+                    },
+                    Err(err) => return Err(err),
+                };
+                Ok(Response::ImAuthSet(ImAuthSetReply { mount }))
+            }
+            Request::ImAuthRemove { platform } => {
+                let dir = im_config_dir(self.home.as_deref())?;
+                let removed = blocking(move || {
+                    crate::im_auth::ImAuthStore::new(dir)
+                        .remove(&platform)
+                        .map_err(im_auth_error)
+                })
+                .await?;
+                self.components.bind_backend(self);
+                let mount = match self.components.remount("im").await {
+                    Ok(mount) => mount,
+                    Err(err) if err.kind == LocalErrorKind::Stopping => ImMountResult::Unmounted {
+                        reason: "后台正在停止，未重新挂载；凭据变更将在下次启动时生效".into(),
+                    },
+                    Err(err) => return Err(err),
+                };
+                Ok(Response::ImAuthRemove(ImAuthRemoveReply { removed, mount }))
+            }
+            Request::ImAuthStatus {} => {
+                let dir = im_config_dir(self.home.as_deref())?;
+                let state = blocking(move || {
+                    crate::im_auth::ImAuthStore::new(dir)
+                        .status(crate::im_auth::TELEGRAM_PLATFORM)
+                        .map_err(im_auth_error)
+                })
+                .await?;
+                Ok(Response::ImAuthStatus(ImAuthStatus {
+                    platforms: vec![ImPlatformAuthStatus {
+                        platform: crate::im_auth::TELEGRAM_PLATFORM.to_owned(),
+                        credential: im_credential_status(state),
+                    }],
+                }))
+            }
+            Request::ImReload {} => {
+                if self.is_stopping() {
+                    return Err(LocalError::new(LocalErrorKind::Stopping, "后台正在停止"));
+                }
+                self.components.bind_backend(self);
+                let mount = self.components.remount("im").await?;
+                Ok(Response::ImReload(mount))
+            }
             Request::Models { query } => {
                 let llm_query = super::presentation::model_query(&query);
                 let directory = super::auth::directory(self.home.as_deref())?;
@@ -1610,25 +1673,34 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
                     "backend is stopping",
                 ))
             } else {
-                backend.chatgpt_auth()
+                let providers_path =
+                    super::auth::directory(backend.home.as_deref())?.join("providers.toml");
+                backend.chatgpt_auth().map(|auth| (auth, providers_path))
             }
         });
         return match auth {
-            Ok(auth) => {
+            Ok((auth, providers_path)) => {
                 let metadata = backend.metadata.clone();
-                super::auth::login::exchange(stream, auth.start_login(), move || {
-                    let metadata = metadata.clone();
-                    Box::pin(async move {
-                        match metadata.refresh_chatgpt().await {
-                            Ok(model_count) => {
-                                super::auth::login::AuthCatalogOutcome::Refreshed { model_count }
+                super::auth::login::exchange(
+                    stream,
+                    &providers_path,
+                    auth.start_login(),
+                    move || {
+                        let metadata = metadata.clone();
+                        Box::pin(async move {
+                            match metadata.refresh_chatgpt().await {
+                                Ok(model_count) => {
+                                    super::auth::login::AuthCatalogOutcome::Refreshed {
+                                        model_count,
+                                    }
+                                }
+                                Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
+                                    warning: error.message,
+                                },
                             }
-                            Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
-                                warning: error.message,
-                            },
-                        }
-                    })
-                })
+                        })
+                    },
+                )
                 .await
             }
             Err(error) => writer.write(&mut stream, &Response::Error(error)).await,
@@ -1671,7 +1743,45 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     }
     write_result
 }
-/// 实例锁唯一持有者；按统一停机顺序执行有界排空、收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
+fn im_config_dir(home: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
+    match home {
+        Some(home) if home.is_absolute() => Ok(home.join(".lattice")),
+        Some(_) => Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "后台环境中的 HOME 必须是绝对路径",
+        )),
+        None => Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "后台环境中未设置 HOME",
+        )),
+    }
+}
+
+fn im_auth_error(error: crate::im_auth::ImAuthError) -> LocalError {
+    use crate::im_auth::ImAuthError;
+    let kind = match &error {
+        ImAuthError::UnsupportedPlatform
+        | ImAuthError::InvalidToken
+        | ImAuthError::InvalidFile(_) => LocalErrorKind::BadRequest,
+        ImAuthError::Io {
+            kind: std::io::ErrorKind::PermissionDenied,
+            ..
+        } => LocalErrorKind::Permission,
+        ImAuthError::Io { .. } | ImAuthError::Internal(_) => LocalErrorKind::Internal,
+    };
+    LocalError::new(kind, &error.to_string())
+}
+
+fn im_credential_status(state: crate::im_auth::ImPlatformCredentialState) -> ImCredentialStatus {
+    use crate::im_auth::ImPlatformCredentialState;
+    match state {
+        ImPlatformCredentialState::Present => ImCredentialStatus::Present,
+        ImPlatformCredentialState::Missing => ImCredentialStatus::Missing,
+        ImPlatformCredentialState::Invalid { reason } => ImCredentialStatus::Invalid { reason },
+    }
+}
+
+/// 实例锁唯一持有者；按统一停机顺序执行有界排空、组件收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(
     layout: StateLayout,
@@ -1679,15 +1789,17 @@ pub async fn serve(
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
     lifecycle: impl HostLifecycle,
+    components: Vec<super::components::ComponentRegistration>,
 ) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
     let lifecycle: Arc<dyn HostLifecycle> = Arc::new(lifecycle);
+    let component_manager = super::components::ComponentManager::new(components);
     serve_with_backend(layout, drain_timeout, stop_requests, move || {
         let mut backend = Backend::with_tools(backend_layout, home, tools);
-        Arc::get_mut(&mut backend)
-            .expect("独占构造的后台实例")
-            .lifecycle = lifecycle;
+        let inner = Arc::get_mut(&mut backend).expect("独占构造的后台实例");
+        inner.lifecycle = lifecycle;
+        inner.components = component_manager;
         backend
     })
     .await
@@ -1701,7 +1813,7 @@ pub async fn serve_for_test(
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<ServeExit> {
-    serve_test_backend(layout, home, drain_timeout, stop_requests, None).await
+    serve_test_backend(layout, home, drain_timeout, stop_requests, None, Vec::new()).await
 }
 
 /// 启动测试后台，并在监听就绪后通过 `service_tx` 交出同一后台实例的进程内 [`super::service::Service`]。
@@ -1713,7 +1825,27 @@ pub async fn serve_for_test_with_service(
     stop_requests: tokio::sync::mpsc::Receiver<()>,
     service_tx: oneshot::Sender<super::service::Service>,
 ) -> Result<ServeExit> {
-    serve_test_backend(layout, home, drain_timeout, stop_requests, Some(service_tx)).await
+    serve_test_backend(
+        layout,
+        home,
+        drain_timeout,
+        stop_requests,
+        Some(service_tx),
+        Vec::new(),
+    )
+    .await
+}
+
+/// 启动携带注册组件的测试后台（以空动作替代自动与手动元数据刷新）。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test_with_components(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    components: Vec<super::components::ComponentRegistration>,
+) -> Result<ServeExit> {
+    serve_test_backend(layout, home, drain_timeout, stop_requests, None, components).await
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -1723,9 +1855,11 @@ async fn serve_test_backend(
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
     service_tx: Option<oneshot::Sender<super::service::Service>>,
+    components: Vec<super::components::ComponentRegistration>,
 ) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
+    let component_manager = super::components::ComponentManager::new(components);
     serve_with_backend_and_service(
         layout,
         drain_timeout,
@@ -1733,9 +1867,9 @@ async fn serve_test_backend(
         service_tx,
         move || {
             let mut backend = Backend::with_tools(backend_layout, home, tools);
-            Arc::get_mut(&mut backend)
-                .expect("unshared test backend")
-                .metadata = super::metadata::MetadataRefresh::without_network();
+            let inner = Arc::get_mut(&mut backend).expect("unshared test backend");
+            inner.metadata = super::metadata::MetadataRefresh::without_network();
+            inner.components = component_manager;
             backend
         },
     )
@@ -1839,6 +1973,7 @@ async fn serve_with_backend_and_service(
             .await);
         }
     };
+    backend.components.bind_backend(&backend);
     {
         let mut state = lock(&backend.admission);
         if matches!(state.stop, StopPhase::Running) {
@@ -1875,6 +2010,9 @@ async fn serve_with_backend_and_service(
             Some(backend),
         )
         .await);
+    }
+    if !backend.is_stopping() {
+        backend.components.start_initial_mount();
     }
     if let Some(tx) = service_tx {
         let _ = tx.send(backend.service());
@@ -1941,7 +2079,7 @@ async fn serve_with_backend_and_service(
         }
     };
 
-    // 排空超时停写与元数据、认证尾段期间继续接受连接，服务 status 与重复 IPC stop。
+    // 排空超时停写、第 3 步组件收尾与第 4 步元数据/认证尾段期间继续接受连接，服务 status 与重复 IPC stop。
     let tail_failure = {
         let tail_backend = backend.clone();
         let post_drain = async move {
@@ -1953,7 +2091,10 @@ async fn serve_with_backend_and_service(
                 tail_backend.changed.send_modify(|v| *v += 1);
             }
 
-            // 尾段 1：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
+            // 第 3 步：等待全部运行中及正在收尾的组件任务结束，共用单一 10 秒上限（无活动组件时立即跳过）。
+            tail_backend.components.shutdown().await;
+
+            // 第 4 步（尾段 1）：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
             // 三项各自以同一期限包裹：到期只停止等待尚未结束的一项，已经返回的错误照常记录。
             let tail_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             let auth = tail_backend.chatgpt_auth().ok();

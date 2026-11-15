@@ -87,42 +87,46 @@ impl TelegramHttpClient {
 
         let (tx, rx) = oneshot::channel();
         let handle = tokio::task::spawn_blocking(move || {
-            #[cfg(test)]
-            if let Some(hook) = test_hook {
-                hook();
-            }
-            let result = (|| -> Result<reqwest::Client, TelegramApiError> {
-                net_guard::validate_base_url(TELEGRAM_API_BASE_URL).map_err(|err| {
-                    TelegramApiError::Retryable {
-                        diagnostic: format!(
-                            "Telegram 端点地址校验未通过：{}",
-                            redactor.sanitize_single_line(&err.to_string())
-                        ),
-                    }
-                })?;
-                let pinned =
-                    net_guard::resolve_public_socket_addrs(TELEGRAM_API_HOST, TELEGRAM_API_PORT)
-                        .map_err(|err| TelegramApiError::Retryable {
+            lattice_server::with_component_panic_scope(|| {
+                #[cfg(test)]
+                if let Some(hook) = test_hook {
+                    hook();
+                }
+                let result = (|| -> Result<reqwest::Client, TelegramApiError> {
+                    net_guard::validate_base_url(TELEGRAM_API_BASE_URL).map_err(|err| {
+                        TelegramApiError::Retryable {
                             diagnostic: format!(
-                                "Telegram 端点公网地址解析失败：{}",
+                                "Telegram 端点地址校验未通过：{}",
                                 redactor.sanitize_single_line(&err.to_string())
                             ),
-                        })?;
-                reqwest::Client::builder()
-                    .no_proxy()
-                    .redirect(reqwest::redirect::Policy::none())
-                    .tls_certs_only(roots)
-                    .connect_timeout(CONNECT_TIMEOUT)
-                    .resolve_to_addrs(TELEGRAM_API_HOST, &pinned)
-                    .build()
+                        }
+                    })?;
+                    let pinned = net_guard::resolve_public_socket_addrs(
+                        TELEGRAM_API_HOST,
+                        TELEGRAM_API_PORT,
+                    )
                     .map_err(|err| TelegramApiError::Retryable {
                         diagnostic: format!(
-                            "构造 Telegram HTTPS 客户端失败：{}",
-                            redactor.redact_reqwest_error(err)
+                            "Telegram 端点公网地址解析失败：{}",
+                            redactor.sanitize_single_line(&err.to_string())
                         ),
-                    })
-            })();
-            let _ = tx.send(result);
+                    })?;
+                    reqwest::Client::builder()
+                        .no_proxy()
+                        .redirect(reqwest::redirect::Policy::none())
+                        .tls_certs_only(roots)
+                        .connect_timeout(CONNECT_TIMEOUT)
+                        .resolve_to_addrs(TELEGRAM_API_HOST, &pinned)
+                        .build()
+                        .map_err(|err| TelegramApiError::Retryable {
+                            diagnostic: format!(
+                                "构造 Telegram HTTPS 客户端失败：{}",
+                                redactor.redact_reqwest_error(err)
+                            ),
+                        })
+                })();
+                let _ = tx.send(result);
+            });
         });
 
         {

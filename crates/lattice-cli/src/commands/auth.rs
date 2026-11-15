@@ -1,23 +1,22 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
+#[cfg(test)]
 use std::{
-    io::{self, IsTerminal, Read, Write},
+    io::{self, Read, Write},
     os::fd::AsRawFd,
 };
 
 use clap::Subcommand;
-use lattice_local::{
-    Availability, LocalClient, LocalError, LocalErrorKind, RevocationStatus, StateLayout,
-};
+use lattice_local::{Availability, LocalClient, RevocationStatus, StateLayout};
 use zeroize::Zeroizing;
 
 pub(super) mod login;
-mod terminal;
-use terminal::TerminalInput;
+use super::secret_input::{SecretReadError, read_secret_from_stdin};
+#[cfg(test)]
+use super::secret_input::{TerminalInput, finish_secret_bytes, read_terminal_line};
 
-// 读取预算保留 CRLF 和一个超限字节，key 的规则由后台统一校验。
-const MAX_INPUT_BYTES: usize = 16 * 1024 + 3;
+const INVALID_UTF8_MESSAGE: &str = "API key input must be valid UTF-8";
 
 #[derive(Subcommand)]
 pub enum AuthAction {
@@ -110,10 +109,7 @@ pub async fn run(action: AuthAction, json: bool) -> anyhow::Result<std::process:
                     if let Some(expiry) = row.expires_at {
                         print!(" expires_at={expiry}");
                     }
-                    if let Some(diagnostic) = row
-                        .availability
-                        .diagnostic(&row.provider, &status.providers_path)
-                    {
+                    if let Some(diagnostic) = row.diagnostic {
                         print!(": {diagnostic}");
                     }
                     println!();
@@ -138,53 +134,19 @@ fn show_revocation(status: RevocationStatus) {
     }
 }
 
-pub(super) fn finish_key(mut bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
-    // 管道常用一行传入 key；只移除一个行结束符，不裁剪 key 两侧的空格。
-    if bytes.last() == Some(&b'\n') {
-        bytes.pop();
-        if bytes.last() == Some(&b'\r') {
-            bytes.pop();
-        }
-    }
-    let key = std::str::from_utf8(&bytes).map_err(|_| {
-        LocalError::new(
-            LocalErrorKind::BadRequest,
-            "API key input must be valid UTF-8",
-        )
-    })?;
-    Ok(key.to_owned())
+#[cfg(test)]
+pub(super) fn finish_key(bytes: Zeroizing<Vec<u8>>) -> anyhow::Result<String> {
+    finish_secret_bytes(bytes, INVALID_UTF8_MESSAGE).map_err(Into::into)
 }
 
 fn read_key() -> anyhow::Result<String> {
-    let stdin = io::stdin();
-    let mut input = stdin.lock();
-    if !stdin.is_terminal() {
-        let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_INPUT_BYTES + 1));
-        input.take(MAX_INPUT_BYTES as u64).read_to_end(&mut bytes)?;
-        return finish_key(bytes);
-    }
-    let mut terminal = TerminalInput::new(input.as_raw_fd())?;
-    eprint!("API key: ");
-    io::stderr().flush()?;
-    let result = read_terminal(&mut input);
-    terminal.restore()?;
-    eprintln!();
-    result
+    read_secret_from_stdin(Some("API key: "), INVALID_UTF8_MESSAGE)
+        .map_err(SecretReadError::into_anyhow)
 }
 
+#[cfg(test)]
 fn read_terminal(input: &mut impl Read) -> anyhow::Result<String> {
-    let mut bytes = Zeroizing::new(Vec::with_capacity(MAX_INPUT_BYTES + 1));
-    let mut input = input.take(MAX_INPUT_BYTES as u64);
-    loop {
-        let mut byte = [0];
-        if input.read(&mut byte)? == 0 {
-            return finish_key(bytes);
-        }
-        bytes.push(byte[0]);
-        if byte[0] == b'\n' {
-            return finish_key(bytes);
-        }
-    }
+    read_terminal_line(input, INVALID_UTF8_MESSAGE).map_err(SecretReadError::into_anyhow)
 }
 
 #[cfg(test)]

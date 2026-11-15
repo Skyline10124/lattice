@@ -14,14 +14,18 @@ use tokio::{
 
 const URL: &str =
     "https://auth.openai.com/authorize?state=private-state&id_token_hint=private-hint";
+const TEST_PROVIDERS_PATH: &str = "/tmp/test-home/.lattice/providers.toml";
 
 async fn exchange<A: LoginAttempt>(
     stream: UnixStream,
     start: impl std::future::Future<Output = std::result::Result<A, LoginError>>,
 ) -> Result<()> {
-    super::exchange(stream, start, || {
-        Box::pin(async { AuthCatalogOutcome::Refreshed { model_count: 0 } })
-    })
+    super::exchange(
+        stream,
+        std::path::Path::new(TEST_PROVIDERS_PATH),
+        start,
+        || Box::pin(async { AuthCatalogOutcome::Refreshed { model_count: 0 } }),
+    )
     .await
 }
 
@@ -52,6 +56,7 @@ fn signed_in() -> ProviderAuthStatus {
         availability: Availability::Ready,
         email: Some("user@example.com".into()),
         expires_at: None,
+        diagnostic: None,
     }
 }
 
@@ -205,7 +210,10 @@ fn login_failure_preserves_configuration_and_transport_classes() {
             LocalErrorKind::Transport,
         ),
     ] {
-        let LoginResponse::Error(error) = outcome(Err(LoginError::Failed(error))) else {
+        let LoginResponse::Error(error) = outcome(
+            std::path::Path::new(TEST_PROVIDERS_PATH),
+            Err(LoginError::Failed(error)),
+        ) else {
             panic!("失败必须交付错误")
         };
         assert_eq!(error.kind, expected);
@@ -284,18 +292,23 @@ async fn saved_login_waits_for_the_directory_result_and_directory_failure_keeps_
         let (entered, mut calls) = mpsc::unbounded_channel();
         let release = Arc::new(tokio::sync::Semaphore::new(0));
         let result = expected.clone();
-        let task = tokio::spawn(super::exchange(server, async { Ok(attempt) }, {
-            let release = release.clone();
-            move || {
-                entered.send(()).unwrap();
+        let task = tokio::spawn(super::exchange(
+            server,
+            std::path::Path::new(TEST_PROVIDERS_PATH),
+            async { Ok(attempt) },
+            {
                 let release = release.clone();
-                let result = result.clone();
-                Box::pin(async move {
-                    release.acquire().await.unwrap().forget();
-                    result
-                })
-            }
-        }));
+                move || {
+                    entered.send(()).unwrap();
+                    let release = release.clone();
+                    let result = result.clone();
+                    Box::pin(async move {
+                        release.acquire().await.unwrap().forget();
+                        result
+                    })
+                }
+            },
+        ));
         authorization(&mut login).await;
         assert!(calls.try_recv().is_err(), "保存成功之前不刷新目录");
         saved.send_replace(Some(Ok(llm_signed_in())));
@@ -430,6 +443,7 @@ async fn login_success_frame_converts_provider_auth_status_variants_and_fields()
                 availability: Availability::Ready,
                 email: Some("dev@example.com".into()),
                 expires_at: Some("2026-12-01T00:00:00Z".into()),
+                diagnostic: None,
             },
         ),
         (
@@ -448,6 +462,28 @@ async fn login_success_frame_converts_provider_auth_status_variants_and_fields()
                 },
                 email: None,
                 expires_at: None,
+                diagnostic: Some("ChatGPT is not signed in; run lattice auth login chatgpt".into()),
+            },
+        ),
+        (
+            lattice_llm::auth::ProviderAuthStatus {
+                provider: "custom".into(),
+                availability: lattice_llm::Availability::Unconfigured {
+                    requirement: lattice_llm::ConfigurationRequirement::Declaration,
+                },
+                email: None,
+                expires_at: None,
+            },
+            ProviderAuthStatus {
+                provider: "custom".into(),
+                availability: Availability::Unconfigured {
+                    requirement: ConfigurationRequirement::Declaration,
+                },
+                email: None,
+                expires_at: None,
+                diagnostic: Some(format!(
+                    "provider \"custom\" is not declared; add [providers.custom] in {TEST_PROVIDERS_PATH}"
+                )),
             },
         ),
         (
@@ -466,6 +502,7 @@ async fn login_success_frame_converts_provider_auth_status_variants_and_fields()
                 },
                 email: Some("stale@example.com".into()),
                 expires_at: None,
+                diagnostic: Some("expired token".into()),
             },
         ),
     ] {

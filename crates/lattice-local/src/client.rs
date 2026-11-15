@@ -7,10 +7,11 @@ use std::time::Duration;
 
 use lattice_ipc::{
     Acceptance, AuthKey, AuthRemoval, AuthStatus, ConfigureReply, ConfigureRequest, DaemonStatus,
-    HISTORY_TURNS, LocalError, LocalErrorKind, LocalHistory, ModelCandidateQuery, ModelCandidates,
-    NodeId, RecoveryCause, Request, Response, Result, RevocationStatus, SessionHead, SessionId,
-    SessionListRow, SessionLog, SessionRecord, SessionUsage, TurnDetail, TurnId, TurnLookup,
-    TurnRequest, ViewUpdate, ipc, require_chatgpt,
+    HISTORY_TURNS, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus, ImMountResult, LocalError,
+    LocalErrorKind, LocalHistory, ModelCandidateQuery, ModelCandidates, NodeId, RecoveryCause,
+    Request, Response, Result, RevocationStatus, SessionHead, SessionId, SessionListRow,
+    SessionLog, SessionRecord, SessionUsage, TurnDetail, TurnId, TurnLookup, TurnRequest,
+    ViewUpdate, ipc, require_chatgpt,
 };
 use lattice_store::StateLayout;
 use tokio::net::UnixStream;
@@ -178,6 +179,49 @@ impl LocalClient {
     pub async fn auth_status(&self) -> Result<AuthStatus> {
         match self.call(Request::AuthStatus {}).await? {
             Response::AuthStatus(status) => Ok(status),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 写入指定 IM 平台的凭据，并触发后台重新挂载 IM 组件。
+    pub async fn im_auth_set(&self, platform: &str, token: &str) -> Result<ImAuthSetReply> {
+        match self
+            .call(Request::ImAuthSet {
+                platform: platform.into(),
+                token: AuthKey::new(token.to_owned()),
+            })
+            .await?
+        {
+            Response::ImAuthSet(reply) => Ok(reply),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 删除指定 IM 平台的凭据，并触发后台重新挂载 IM 组件。
+    pub async fn im_auth_remove(&self, platform: &str) -> Result<ImAuthRemoveReply> {
+        match self
+            .call(Request::ImAuthRemove {
+                platform: platform.into(),
+            })
+            .await?
+        {
+            Response::ImAuthRemove(reply) => Ok(reply),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 查询全部受支持 IM 平台的本地凭据状态。
+    pub async fn im_auth_status(&self) -> Result<ImAuthStatus> {
+        match self.call(Request::ImAuthStatus {}).await? {
+            Response::ImAuthStatus(status) => Ok(status),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 请求后台重新读取配置与凭据并重新挂载 IM 组件。
+    pub async fn im_reload(&self) -> Result<ImMountResult> {
+        match self.call(Request::ImReload {}).await? {
+            Response::ImReload(result) => Ok(result),
             _ => Err(protocol()),
         }
     }
@@ -529,5 +573,159 @@ mod tests {
         })
         .await
         .expect("观察流半帧读取超时");
+    }
+
+    #[tokio::test]
+    async fn im_client_methods_roundtrip_wire_payloads_and_propagate_backend_errors() {
+        use lattice_ipc::{ImCredentialStatus, ImPlatformAuthStatus};
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        use tokio::net::UnixListener;
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = TempDir(PathBuf::from("/tmp").join(format!(
+            "ltc-cli-im-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        fs::create_dir_all(&temp.0).unwrap();
+        let layout = StateLayout::in_state_root(&temp.0);
+        let local_dir = layout.lattice_root().join("local");
+        fs::create_dir_all(&local_dir).unwrap();
+        fs::set_permissions(layout.lattice_root(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let sock_path = local_dir.join("api.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let server = tokio::spawn(async move {
+            // 1. ImAuthSet
+            let (mut s1, _) = listener.accept().await.unwrap();
+            match ipc::read_request::<Request>(&mut s1).await.unwrap() {
+                Request::ImAuthSet { platform, token } => {
+                    assert_eq!(platform, "telegram");
+                    assert_eq!(token.as_str(), "123456:BotSecretToken");
+                }
+                _ => panic!("预期 Request::ImAuthSet"),
+            }
+            ipc::ResponseWriter::default()
+                .write(
+                    &mut s1,
+                    &Response::ImAuthSet(ImAuthSetReply {
+                        mount: ImMountResult::Mounted,
+                    }),
+                )
+                .await
+                .unwrap();
+
+            // 2. ImAuthStatus
+            let (mut s2, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                ipc::read_request::<Request>(&mut s2).await.unwrap(),
+                Request::ImAuthStatus {}
+            ));
+            ipc::ResponseWriter::default()
+                .write(
+                    &mut s2,
+                    &Response::ImAuthStatus(ImAuthStatus {
+                        platforms: vec![ImPlatformAuthStatus {
+                            platform: "telegram".into(),
+                            credential: ImCredentialStatus::Present,
+                        }],
+                    }),
+                )
+                .await
+                .unwrap();
+
+            // 3. ImReload
+            let (mut s3, _) = listener.accept().await.unwrap();
+            assert!(matches!(
+                ipc::read_request::<Request>(&mut s3).await.unwrap(),
+                Request::ImReload {}
+            ));
+            ipc::ResponseWriter::default()
+                .write(
+                    &mut s3,
+                    &Response::ImReload(ImMountResult::UsingPreviousConfiguration {
+                        reason: "im/config.toml 解析失败".into(),
+                    }),
+                )
+                .await
+                .unwrap();
+
+            // 4. ImAuthRemove
+            let (mut s4, _) = listener.accept().await.unwrap();
+            match ipc::read_request::<Request>(&mut s4).await.unwrap() {
+                Request::ImAuthRemove { platform } => assert_eq!(platform, "telegram"),
+                _ => panic!("预期 Request::ImAuthRemove"),
+            }
+            ipc::ResponseWriter::default()
+                .write(
+                    &mut s4,
+                    &Response::ImAuthRemove(ImAuthRemoveReply {
+                        removed: true,
+                        mount: ImMountResult::Unmounted {
+                            reason: "缺少 Telegram 平台凭据（im/auth.json）".into(),
+                        },
+                    }),
+                )
+                .await
+                .unwrap();
+
+            // 5. Response::Error 传播
+            let (mut s5, _) = listener.accept().await.unwrap();
+            let _ = ipc::read_request::<Request>(&mut s5).await.unwrap();
+            ipc::ResponseWriter::default()
+                .write(
+                    &mut s5,
+                    &Response::Error(LocalError::new(
+                        LocalErrorKind::BadRequest,
+                        "不支持的 IM 平台",
+                    )),
+                )
+                .await
+                .unwrap();
+        });
+
+        let client = LocalClient::new(layout);
+        let set_reply = client
+            .im_auth_set("telegram", "123456:BotSecretToken")
+            .await
+            .unwrap();
+        assert_eq!(set_reply.mount, ImMountResult::Mounted);
+
+        let status = client.im_auth_status().await.unwrap();
+        assert_eq!(status.platforms.len(), 1);
+        assert_eq!(status.platforms[0].platform, "telegram");
+        assert_eq!(status.platforms[0].credential, ImCredentialStatus::Present);
+
+        let reload = client.im_reload().await.unwrap();
+        assert_eq!(
+            reload,
+            ImMountResult::UsingPreviousConfiguration {
+                reason: "im/config.toml 解析失败".into()
+            }
+        );
+
+        let remove_reply = client.im_auth_remove("telegram").await.unwrap();
+        assert!(remove_reply.removed);
+        assert!(matches!(
+            remove_reply.mount,
+            ImMountResult::Unmounted { .. }
+        ));
+
+        let bad = client.im_auth_remove("discord").await.unwrap_err();
+        assert_eq!(bad.kind, LocalErrorKind::BadRequest);
+        assert_eq!(bad.message, "不支持的 IM 平台");
+
+        server.await.unwrap();
     }
 }

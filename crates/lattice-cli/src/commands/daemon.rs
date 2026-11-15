@@ -8,7 +8,9 @@ mod install;
 use std::{io::Write, process::ExitCode};
 
 use clap::{ArgAction, Args, Subcommand};
-use lattice_local::{DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout};
+use lattice_local::{
+    ComponentState, DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout,
+};
 
 pub(crate) use install::InstallArgs;
 
@@ -239,6 +241,32 @@ fn render_daemon_status(
             "后台状态：{state_label}（代次：{}，在途执行者：{}，未确认收尾操作：{}）",
             status.epoch, status.owners, status.unconfirmed_operations
         )?;
+        if status.components.is_empty() {
+            writeln!(out, "组件：无")?;
+        } else {
+            writeln!(out, "组件：")?;
+            for component in &status.components {
+                match &component.state {
+                    ComponentState::Mounted {
+                        configuration_error: None,
+                    } => {
+                        writeln!(out, "  {}：已挂载", component.name)?;
+                    }
+                    ComponentState::Mounted {
+                        configuration_error: Some(reason),
+                    } => {
+                        writeln!(
+                            out,
+                            "  {}：已挂载；仍按上一份配置运行；{reason}",
+                            component.name
+                        )?;
+                    }
+                    ComponentState::Unmounted { reason } => {
+                        writeln!(out, "  {}：未挂载；{reason}", component.name)?;
+                    }
+                }
+            }
+        }
     }
     if is_stop && status.unconfirmed_operations != 0 {
         writeln!(
@@ -253,7 +281,7 @@ fn render_daemon_status(
 #[cfg(test)]
 mod tests {
     use super::render_daemon_status;
-    use lattice_local::DaemonStatus;
+    use lattice_local::{ComponentState, ComponentStatus, DaemonStatus};
 
     #[test]
     fn daemon_stop_warns_on_stderr_when_operations_are_unconfirmed_while_status_stays_silent() {
@@ -262,6 +290,7 @@ mod tests {
             stopping: true,
             owners: 2,
             unconfirmed_operations: 2,
+            components: vec![],
         };
         let mut out = Vec::new();
         let mut err = Vec::new();
@@ -295,8 +324,9 @@ mod tests {
             status_stdout.contains("后台状态：停机中")
                 && status_stdout.contains("代次：7")
                 && status_stdout.contains("在途执行者：2")
-                && status_stdout.contains("未确认收尾操作：2"),
-            "人类可读的 daemon status 应输出中文状态行，实际：{status_stdout:?}"
+                && status_stdout.contains("未确认收尾操作：2")
+                && status_stdout.contains("组件：无"),
+            "人类可读的 daemon status 应输出中文状态行与无组件行，实际：{status_stdout:?}"
         );
         assert!(
             status_err.is_empty(),
@@ -309,6 +339,7 @@ mod tests {
             stopping: false,
             owners: 0,
             unconfirmed_operations: 0,
+            components: vec![],
         };
         let mut human_stop_out = Vec::new();
         let mut human_stop_err = Vec::new();
@@ -327,5 +358,69 @@ mod tests {
             "人类可读的 daemon stop 应输出中文已停止提示，实际：{human_stop_stdout:?}"
         );
         assert!(human_stop_err.is_empty());
+    }
+
+    #[test]
+    fn daemon_status_renders_component_states_in_text_and_json_while_preserving_exit_code() {
+        let with_components = DaemonStatus {
+            epoch: "12".into(),
+            stopping: false,
+            owners: 1,
+            unconfirmed_operations: 0,
+            components: vec![
+                ComponentStatus {
+                    name: "alpha".into(),
+                    state: ComponentState::Mounted {
+                        configuration_error: None,
+                    },
+                },
+                ComponentStatus {
+                    name: "beta".into(),
+                    state: ComponentState::Mounted {
+                        configuration_error: Some("workspace 不是绝对路径".into()),
+                    },
+                },
+                ComponentStatus {
+                    name: "im".into(),
+                    state: ComponentState::Unmounted {
+                        reason: "缺少 Telegram 平台凭据（im/auth.json）".into(),
+                    },
+                },
+            ],
+        };
+
+        let mut text_out = Vec::new();
+        let mut text_err = Vec::new();
+        let code =
+            render_daemon_status(&with_components, false, false, &mut text_out, &mut text_err)
+                .unwrap();
+        assert_eq!(
+            code,
+            std::process::ExitCode::SUCCESS,
+            "可选组件未挂载不应改变 daemon status 的退出码 0"
+        );
+        assert!(text_err.is_empty());
+        assert_eq!(
+            String::from_utf8(text_out).unwrap(),
+            concat!(
+                "后台状态：运行中（代次：12，在途执行者：1，未确认收尾操作：0）\n",
+                "组件：\n",
+                "  alpha：已挂载\n",
+                "  beta：已挂载；仍按上一份配置运行；workspace 不是绝对路径\n",
+                "  im：未挂载；缺少 Telegram 平台凭据（im/auth.json）\n",
+            )
+        );
+
+        let mut json_out = Vec::new();
+        let mut json_err = Vec::new();
+        let json_code =
+            render_daemon_status(&with_components, false, true, &mut json_out, &mut json_err)
+                .unwrap();
+        assert_eq!(json_code, std::process::ExitCode::SUCCESS);
+        assert!(json_err.is_empty());
+        assert_eq!(
+            serde_json::from_slice::<DaemonStatus>(&json_out).unwrap(),
+            with_components
+        );
     }
 }

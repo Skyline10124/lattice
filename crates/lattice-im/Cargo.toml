@@ -28,3 +28,4 @@ lattice-local = { workspace = true }
 lattice-server = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util"] }
+tracing-subscriber = { workspace = true }

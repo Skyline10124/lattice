@@ -112,14 +112,19 @@ pub(super) fn auth_status(status: lattice_llm::auth::AuthStatus) -> lattice_ipc:
         providers,
         error,
     } = status;
+    let providers = providers
+        .into_iter()
+        .map(|provider| provider_auth_status(&providers_path, provider))
+        .collect();
     lattice_ipc::AuthStatus {
         providers_path,
-        providers: providers.into_iter().map(provider_auth_status).collect(),
+        providers,
         error,
     }
 }
 
 pub(super) fn provider_auth_status(
+    providers_path: &std::path::Path,
     status: lattice_llm::auth::ProviderAuthStatus,
 ) -> lattice_ipc::ProviderAuthStatus {
     let lattice_llm::auth::ProviderAuthStatus {
@@ -128,11 +133,13 @@ pub(super) fn provider_auth_status(
         email,
         expires_at,
     } = status;
+    let diagnostic = status_availability.diagnostic(&provider, providers_path);
     lattice_ipc::ProviderAuthStatus {
         provider,
         availability: availability(status_availability),
         email,
         expires_at,
+        diagnostic,
     }
 }
 
@@ -149,40 +156,8 @@ pub(super) fn revocation_status(
 }
 
 #[cfg(test)]
-fn llm_availability(value: &lattice_ipc::Availability) -> lattice_llm::Availability {
-    match value {
-        lattice_ipc::Availability::Ready => lattice_llm::Availability::Ready,
-        lattice_ipc::Availability::Unconfigured { requirement } => {
-            lattice_llm::Availability::Unconfigured {
-                requirement: llm_configuration_requirement(*requirement),
-            }
-        }
-        lattice_ipc::Availability::Invalid { reason } => lattice_llm::Availability::Invalid {
-            reason: reason.clone(),
-        },
-    }
-}
-
-#[cfg(test)]
-fn llm_configuration_requirement(
-    value: lattice_ipc::ConfigurationRequirement,
-) -> lattice_llm::ConfigurationRequirement {
-    match value {
-        lattice_ipc::ConfigurationRequirement::Declaration => {
-            lattice_llm::ConfigurationRequirement::Declaration
-        }
-        lattice_ipc::ConfigurationRequirement::ApiKey => {
-            lattice_llm::ConfigurationRequirement::ApiKey
-        }
-        lattice_ipc::ConfigurationRequirement::ChatgptLogin => {
-            lattice_llm::ConfigurationRequirement::ChatgptLogin
-        }
-    }
-}
-
-#[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::Path;
 
     use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
 
@@ -248,11 +223,6 @@ mod tests {
                 expected_ipc_req,
                 "{label} llm 到 IPC 配置要求转换结果不符"
             );
-            assert_eq!(
-                llm_configuration_requirement(expected_ipc_req),
-                llm_req,
-                "{label} IPC 到 llm 配置要求转换结果不符"
-            );
         }
 
         for (label, llm_avail, expected_ipc_avail) in [
@@ -299,14 +269,9 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                availability(llm_avail.clone()),
+                availability(llm_avail),
                 expected_ipc_avail,
                 "{label} llm 到 IPC 可用性转换结果不符"
-            );
-            assert_eq!(
-                llm_availability(&expected_ipc_avail),
-                llm_avail,
-                "{label} IPC 到 llm 可用性转换结果不符"
             );
         }
 
@@ -515,13 +480,14 @@ mod tests {
             "model_candidates/minimal 转换结果不符"
         );
 
-        let provider_status_full = lattice_llm::auth::ProviderAuthStatus {
+        let providers_path = Path::new("/home/dev/.lattice/providers.toml");
+        let provider_status_ready = lattice_llm::auth::ProviderAuthStatus {
             provider: "chatgpt".to_owned(),
             availability: lattice_llm::Availability::Ready,
             email: Some("dev@example.com".to_owned()),
             expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
         };
-        let provider_status_minimal = lattice_llm::auth::ProviderAuthStatus {
+        let provider_status_unconfigured = lattice_llm::auth::ProviderAuthStatus {
             provider: "openai".to_owned(),
             availability: lattice_llm::Availability::Unconfigured {
                 requirement: lattice_llm::ConfigurationRequirement::ApiKey,
@@ -529,18 +495,27 @@ mod tests {
             email: None,
             expires_at: None,
         };
+        let provider_status_declaration = lattice_llm::auth::ProviderAuthStatus {
+            provider: "lmstudio".to_owned(),
+            availability: lattice_llm::Availability::Unconfigured {
+                requirement: lattice_llm::ConfigurationRequirement::Declaration,
+            },
+            email: None,
+            expires_at: None,
+        };
         assert_eq!(
-            provider_auth_status(provider_status_full.clone()),
+            provider_auth_status(providers_path, provider_status_ready.clone()),
             lattice_ipc::ProviderAuthStatus {
                 provider: "chatgpt".to_owned(),
                 availability: lattice_ipc::Availability::Ready,
                 email: Some("dev@example.com".to_owned()),
                 expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
+                diagnostic: None,
             },
-            "provider_auth_status/full 转换结果不符"
+            "provider_auth_status/ready 转换结果不符"
         );
         assert_eq!(
-            provider_auth_status(provider_status_minimal.clone()),
+            provider_auth_status(providers_path, provider_status_unconfigured.clone()),
             lattice_ipc::ProviderAuthStatus {
                 provider: "openai".to_owned(),
                 availability: lattice_ipc::Availability::Unconfigured {
@@ -548,30 +523,55 @@ mod tests {
                 },
                 email: None,
                 expires_at: None,
+                diagnostic: Some(
+                    "provider \"openai\" has no API key configured; run lattice auth set openai"
+                        .to_owned()
+                ),
             },
-            "provider_auth_status/minimal 转换结果不符"
+            "provider_auth_status/unconfigured_api_key 转换结果不符"
+        );
+        assert_eq!(
+            provider_auth_status(providers_path, provider_status_declaration.clone()),
+            lattice_ipc::ProviderAuthStatus {
+                provider: "lmstudio".to_owned(),
+                availability: lattice_ipc::Availability::Unconfigured {
+                    requirement: lattice_ipc::ConfigurationRequirement::Declaration,
+                },
+                email: None,
+                expires_at: None,
+                diagnostic: Some(
+                    "provider \"lmstudio\" is not declared; add [providers.lmstudio] in /home/dev/.lattice/providers.toml"
+                        .to_owned()
+                ),
+            },
+            "provider_auth_status/unconfigured_declaration 转换结果不符"
         );
 
         let auth_status_full = lattice_llm::auth::AuthStatus {
-            providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
-            providers: vec![provider_status_full, provider_status_minimal],
+            providers_path: providers_path.to_path_buf(),
+            providers: vec![
+                provider_status_ready,
+                provider_status_unconfigured,
+                provider_status_declaration,
+            ],
             error: Some("auth.json: permissions are too open".to_owned()),
         };
         let auth_status_minimal = lattice_llm::auth::AuthStatus {
-            providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
+            providers_path: providers_path.to_path_buf(),
             providers: Vec::new(),
             error: None,
         };
         assert_eq!(
             auth_status(auth_status_full),
             lattice_ipc::AuthStatus {
-                providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
+                providers_path: providers_path.to_path_buf(),
                 providers: vec![
                     lattice_ipc::ProviderAuthStatus {
                         provider: "chatgpt".to_owned(),
                         availability: lattice_ipc::Availability::Ready,
                         email: Some("dev@example.com".to_owned()),
                         expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
+                        diagnostic: None,
                     },
                     lattice_ipc::ProviderAuthStatus {
                         provider: "openai".to_owned(),
@@ -580,6 +580,22 @@ mod tests {
                         },
                         email: None,
                         expires_at: None,
+                        diagnostic: Some(
+                            "provider \"openai\" has no API key configured; run lattice auth set openai"
+                                .to_owned()
+                        ),
+                    },
+                    lattice_ipc::ProviderAuthStatus {
+                        provider: "lmstudio".to_owned(),
+                        availability: lattice_ipc::Availability::Unconfigured {
+                            requirement: lattice_ipc::ConfigurationRequirement::Declaration,
+                        },
+                        email: None,
+                        expires_at: None,
+                        diagnostic: Some(
+                            "provider \"lmstudio\" is not declared; add [providers.lmstudio] in /home/dev/.lattice/providers.toml"
+                                .to_owned()
+                        ),
                     },
                 ],
                 error: Some("auth.json: permissions are too open".to_owned()),
@@ -589,84 +605,11 @@ mod tests {
         assert_eq!(
             auth_status(auth_status_minimal),
             lattice_ipc::AuthStatus {
-                providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
+                providers_path: providers_path.to_path_buf(),
                 providers: Vec::new(),
                 error: None,
             },
             "auth_status/minimal 转换结果不符"
         );
-    }
-
-    #[test]
-    fn availability_diagnostic_matches_llm_diagnostic_for_every_variant() {
-        let providers_path = Path::new("/tmp/custom-home/.lattice/providers.toml");
-        for (provider, llm_avail, ipc_avail) in [
-            (
-                "openai",
-                lattice_llm::Availability::Ready,
-                lattice_ipc::Availability::Ready,
-            ),
-            (
-                "lmstudio",
-                lattice_llm::Availability::Unconfigured {
-                    requirement: lattice_llm::ConfigurationRequirement::Declaration,
-                },
-                lattice_ipc::Availability::Unconfigured {
-                    requirement: lattice_ipc::ConfigurationRequirement::Declaration,
-                },
-            ),
-            (
-                "anthropic",
-                lattice_llm::Availability::Unconfigured {
-                    requirement: lattice_llm::ConfigurationRequirement::ApiKey,
-                },
-                lattice_ipc::Availability::Unconfigured {
-                    requirement: lattice_ipc::ConfigurationRequirement::ApiKey,
-                },
-            ),
-            (
-                "chatgpt",
-                lattice_llm::Availability::Unconfigured {
-                    requirement: lattice_llm::ConfigurationRequirement::ChatgptLogin,
-                },
-                lattice_ipc::Availability::Unconfigured {
-                    requirement: lattice_ipc::ConfigurationRequirement::ChatgptLogin,
-                },
-            ),
-            (
-                "custom",
-                lattice_llm::Availability::Invalid {
-                    reason: "auth.json: invalid credential structure".to_owned(),
-                },
-                lattice_ipc::Availability::Invalid {
-                    reason: "auth.json: invalid credential structure".to_owned(),
-                },
-            ),
-        ] {
-            match &llm_avail {
-                lattice_llm::Availability::Ready => {}
-                lattice_llm::Availability::Unconfigured { requirement } => match requirement {
-                    lattice_llm::ConfigurationRequirement::Declaration
-                    | lattice_llm::ConfigurationRequirement::ApiKey
-                    | lattice_llm::ConfigurationRequirement::ChatgptLogin => {}
-                },
-                lattice_llm::Availability::Invalid { reason: _ } => {}
-            }
-            match &ipc_avail {
-                lattice_ipc::Availability::Ready => {}
-                lattice_ipc::Availability::Unconfigured { requirement } => match requirement {
-                    lattice_ipc::ConfigurationRequirement::Declaration
-                    | lattice_ipc::ConfigurationRequirement::ApiKey
-                    | lattice_ipc::ConfigurationRequirement::ChatgptLogin => {}
-                },
-                lattice_ipc::Availability::Invalid { reason: _ } => {}
-            }
-            assert_eq!(availability(llm_avail.clone()), ipc_avail);
-            assert_eq!(
-                ipc_avail.diagnostic(provider, providers_path),
-                llm_avail.diagnostic(provider, providers_path),
-                "provider={provider} avail={llm_avail:?}"
-            );
-        }
     }
 }

@@ -35,6 +35,7 @@ status: active
 | [后台崩溃与执行者消失](harness/crash-and-vanished-executor.md) | Turn 推进的各提交点崩溃后，重开不经写入即可读到结局 |
 | [配置来源与运行时重读](harness/configuration-sources.md) | 后台按启动时的配置目录与 TLS 根读取配置，显式指定 agent 时刷新 profile 快照 |
 | [会话设置与草稿会话](harness/session-settings-and-drafts.md) | 选择经 `configure` 持久保存，草稿会话跨重启保留，`SettingsVersion`、项目绑定与档位调整生效 |
+| [IM 组件托管、自动重载与 CLI 凭据管理](harness/im-component-and-cli.md) | 守护进程启动准备 `0700` `im/`、`inotify` 配置热重载、旧配置回退、`im/` 重建恢复、`lattice im` 退出码与秘密零回显 |
 
 ## 手动操作
 
@@ -49,6 +50,7 @@ status: active
 | [取消与执行者消失后继续](manual/cancel-and-continue.md) | 取消正在执行的一轮；执行者消失后继续发送 |
 | [后台与升级](manual/daemon-and-upgrade.md) | 安装用户级服务、查询与停止后台、手动运行后台；升级与输出字段适配 |
 | [凭据与模型元数据](manual/auth-and-models.md) | 录入 key、登录 ChatGPT、查看与刷新模型候选 |
+| [Telegram 私聊接入与运维](manual/im-telegram.md) | 配置 `im/config.toml`、录入/删除 Telegram Bot Token、热重载与私聊命令验收 |
 | [运行测试](manual/run-tests.md) | 运行 crate 测试、默认 harness 场景与显式 feature 目标 |
 | [本地 CI、远程工作流与 rollout](manual/ci-and-rollout.md) | 运行本地 CI 与 alpha rollout，了解远程门禁的差异 |
 | [查看证据](manual/evidence.md) | 查看失败 bundle、rollout 记录与 CI 产物 |

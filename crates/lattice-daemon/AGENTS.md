@@ -1,12 +1,13 @@
 # lattice-daemon 工作指引
 
-提供 LATTICE 本地后台的独立宿主二进制 `lattice-daemon`：解析 `--state-root` 与 `--drain-timeout`，初始化 `tracing-subscriber` 日志与 Tokio 运行时，注册 `SIGTERM` 与 `SIGINT`，对接 systemd `$NOTIFY_SOCKET`（`READY=1` 与 `STOPPING=1`），调用 `lattice_server::serve` 并按托管合同映射进程退出码，同时将实例锁保持至进程退出。
+提供 LATTICE 本地后台的独立宿主二进制 `lattice-daemon`：解析 `--state-root` 与 `--drain-timeout`，初始化 `tracing-subscriber` 日志与 Tokio 运行时，注册 `SIGTERM` 与 `SIGINT`，组装内置 `im` 受托管组件与 `rustix::fs::inotify` 配置目录监视，对接 systemd `$NOTIFY_SOCKET`（`READY=1` 与 `STOPPING=1`），调用 `lattice_server::serve` 并按托管合同映射进程退出码，同时将实例锁保持至进程退出。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/main.rs` | 中文命令行参数解析与校验、日志与异步运行时初始化、`SIGTERM` / `SIGINT` 信号监听、状态根占用时的 `SO_PEERCRED` 对端进程号诊断、`ServeExit` 退出码映射与实例锁生命周期保持 |
+| `src/main.rs` | 中文命令行参数解析与校验、日志与异步运行时初始化、`SIGTERM` / `SIGINT` 信号监听、内置组件注册与 `HostLifecycle` 衔接、状态根占用时的 `SO_PEERCRED` 对端进程号诊断、`ServeExit` 退出码映射与实例锁生命周期保持 |
+| `src/im.rs`、`src/im_watch.rs` | 内置 `im` 组件组装器 `ImHost`（调用 `lattice_im::prepare_im_gateway` 转化为 `ComponentRegistration`）、基于 `PrivateDirectory` 的 `~/.lattice/im` `0700` 创建与核验、基于 `rustix::fs::inotify`（`AsyncFd`）仅针对 `config.toml` `CLOSE_WRITE` / `MOVED_TO` 事件触发重新挂载（忽略 `auth.json`、临时文件与删除事件）以及目录移除时按代次标记失效、待显式 `reload` / `auth` 操作恢复监视 |
 | `src/notify.rs` | 基于 `rustix::net` 的 systemd `$NOTIFY_SOCKET` 非阻塞数据报发送（支持文件系统路径与 `@` 抽象命名空间地址，保留原始字节） |
 
 ## 先读
@@ -15,13 +16,14 @@
 | --- | --- |
 | 任何改动 | [Crate 职责与依赖边界](../../docs/architecture/crates.md)、[工程规范](../../docs/development/engineering.md) |
 | 启动参数、`$NOTIFY_SOCKET`、退出码与锁释放时序 | [实现模块与公开操作](../../docs/architecture/session/operations.md)、[重开、取消与未完成状态](../../docs/architecture/session/recovery.md)、[私有存储与持久化](../../docs/architecture/storage.md#本地后台与访问边界) |
+| 内置 IM 组件组装与 `inotify` 目录监视 | [IM 网关](../../docs/architecture/im.md) |
 
 ## 约束
 
-- 只提供二进制目标 `lattice-daemon`，不公开库目标或内部模块；后台业务、准入控制与存储协调仍在 `lattice-server`。
-- `Cargo.toml` 的内部依赖仅限 `lattice-server`、`lattice-ipc`、`lattice-store`（由 `cargo xtask crate-boundary` 门禁检查），不得依赖 `lattice-local`、`lattice-cli` 或 `lattice-tui`。
+- 只提供二进制目标 `lattice-daemon`，不公开库目标或内部模块；后台业务、准入控制、组件生命周期编排与存储协调仍在 `lattice-server`，IM 网关实现仍在 `lattice-im`。
+- `Cargo.toml` 的内部依赖仅限 `lattice-server`、`lattice-im`、`lattice-ipc`、`lattice-store`（由 `cargo xtask crate-boundary` 门禁检查），不得依赖 `lattice-local`、`lattice-cli` 或 `lattice-tui`。
 - 不定义测试转发 feature；需要假工具或崩溃屏障时直接以 `--features lattice-server/test-fake-tools,lattice-server/test-crash-barriers` 构建 `lattice-daemon`。
-- 帮助与用户可见输出使用中文；系统调用统一经 `rustix` 并以 `std::io::Error::from(errno)` 转换错误。
+- 帮助与用户可见输出使用中文；系统调用（含 `inotify` 与 `$NOTIFY_SOCKET`）统一经 `rustix` 并以 `std::io::Error::from(errno)` 转换错误；私有配置子目录新建固定为 `0700`，已有路径属主或权限违规绝不自动修复。
 
 ## 验证
 
