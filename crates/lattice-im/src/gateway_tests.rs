@@ -2811,3 +2811,177 @@ async fn slow_30s_draft_requests_never_livelock_or_block_final_reply_delivery() 
     bounded(gw_task).await.unwrap().unwrap();
     harness.shutdown().await;
 }
+
+// 场景 19：模型输出半截正文后断流重试时，必须向 Telegram 发送空草稿清除失败尝试的旧内容，随后更新为第二次尝试正文并送达最终回复
+#[tokio::test]
+async fn clears_failed_attempt_draft_with_empty_snapshot_on_model_retry() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    io.push_updates(vec![private_text_update(
+        1600,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "测试模型断流重试清除失败草稿",
+    )]);
+
+    // 1. 第一次模型尝试输出半截正文后未发 [DONE] 即直接断开连接，触发后台自动重试
+    let (mut sock_attempt1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_attempt1).await;
+    sock_attempt1
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let partial_chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"半截失败尝试草稿\"},\"finish_reason\":null}]}\n\n";
+    sock_attempt1
+        .write_all(format!("{:X}\r\n{partial_chunk}\r\n", partial_chunk.len()).as_bytes())
+        .await
+        .unwrap();
+    sock_attempt1.flush().await.unwrap();
+
+    let drafts_first = io.wait_draft_count(1).await;
+    let active_draft_id = drafts_first[0].1;
+    assert_eq!(drafts_first[0].2, "半截失败尝试草稿");
+    assert!(drafts_first[0].3);
+
+    // 突然关闭第一次尝试的 TCP 流以模拟中途断流
+    drop(sock_attempt1);
+
+    // 2. 接受第二次模型尝试连接并暂不返回正文：等待第二次正文期间，网关必须已向 Telegram 发送空字符串草稿清空旧内容！
+    let (mut sock_attempt2, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_attempt2).await;
+
+    let drafts_cleared = io.wait_draft_count(2).await;
+    assert_eq!(drafts_cleared[1].1, active_draft_id);
+    assert_eq!(
+        drafts_cleared[1].2, "",
+        "模型断流进入重试等待期间，必须发送空草稿清除上一轮失败尝试的半截内容"
+    );
+    assert!(drafts_cleared[1].3);
+
+    // 3. 第二次模型尝试流式输出新正文并完成，草稿更新为新正文，最终回复送达新正文
+    sock_attempt2
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let retry_chunk = "data: {\"choices\":[{\"delta\":{\"content\":\"第二次尝试完整回复\"},\"finish_reason\":null}]}\n\n";
+    sock_attempt2
+        .write_all(format!("{:X}\r\n{retry_chunk}\r\n", retry_chunk.len()).as_bytes())
+        .await
+        .unwrap();
+    sock_attempt2.flush().await.unwrap();
+
+    let drafts_retried = io.wait_draft_count(3).await;
+    assert_eq!(drafts_retried[2].1, active_draft_id);
+    assert_eq!(drafts_retried[2].2, "第二次尝试完整回复");
+
+    let done_frame =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sock_attempt2
+        .write_all(format!("{:X}\r\n{done_frame}\r\n0\r\n\r\n", done_frame.len()).as_bytes())
+        .await
+        .unwrap();
+    sock_attempt2.flush().await.unwrap();
+
+    let final_msgs = io.wait_message_count(1).await;
+    assert_eq!(final_msgs[0].1, "第二次尝试完整回复");
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 20：成功慢草稿请求（每次耗时 6 秒）按发起时刻计算 25 秒保活，连续投递间隔严格保持 25 秒（不超过 Telegram 30 秒有效期，ADR §13）
+#[tokio::test(start_paused = true)]
+async fn slow_6s_successful_draft_requests_keep_25s_interval_within_30s_ttl() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    io.set_slow_draft_behavior(Duration::from_secs(6), Ok(()));
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    io.push_updates(vec![private_text_update(
+        1700,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "测试 6 秒成功慢请求保活间隔不超过 30 秒",
+    )]);
+
+    let (mut sock1, _) = tokio::time::timeout(Duration::from_secs(120), harness.listener.accept())
+        .await
+        .unwrap()
+        .unwrap();
+    let _ = read_http_request(&mut sock1).await;
+    sock1
+        .write_all(
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+        )
+        .await
+        .unwrap();
+    let chunk1 = "data: {\"choices\":[{\"delta\":{\"content\":\"长思考期间的草稿预览\"},\"finish_reason\":null}]}\n\n";
+    sock1
+        .write_all(format!("{:X}\r\n{chunk1}\r\n", chunk1.len()).as_bytes())
+        .await
+        .unwrap();
+    sock1.flush().await.unwrap();
+
+    let sse_ping = ": keepalive\n\n";
+    let ping_wire = format!("{:X}\r\n{sse_ping}\r\n", sse_ping.len());
+
+    // 1. 第 1 次草稿请求在 t=0 发起，耗时 6 秒在 t=6s 成功完成
+    io.wait_draft_entered(1).await;
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let _ = io.wait_draft_count(1).await;
+    let t1 = io.draft_timestamps.lock().unwrap()[0];
+
+    // 2. 从 t=6s 再推进 19 秒到达 t=25s（距第 1 次发起满 25 秒），第 2 次保活请求必须准时发起（而非等到 t=31s），并在 t=31s 完成
+    tokio::time::advance(Duration::from_secs(10)).await;
+    sock1.write_all(ping_wire.as_bytes()).await.unwrap();
+    sock1.flush().await.unwrap();
+    tokio::time::advance(Duration::from_secs(9)).await;
+    io.wait_draft_entered(2).await;
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    sock1.write_all(ping_wire.as_bytes()).await.unwrap();
+    sock1.flush().await.unwrap();
+    let _ = io.wait_draft_count(2).await;
+    let t2 = io.draft_timestamps.lock().unwrap()[1];
+    let interval_1_2 = t2.duration_since(t1);
+    assert_eq!(
+        interval_1_2,
+        Duration::from_secs(25),
+        "每次成功请求耗时 6 秒时，两次草稿投递间隔必须为 25 秒（小于 30 秒有效期），不得叠加为 31 秒"
+    );
+
+    // 3. 再推进 19 秒到达 t=50s，第 3 次保活请求准时发起并在 t=56s 完成，投递间隔同样为 25 秒
+    tokio::time::advance(Duration::from_secs(10)).await;
+    sock1.write_all(ping_wire.as_bytes()).await.unwrap();
+    sock1.flush().await.unwrap();
+    tokio::time::advance(Duration::from_secs(9)).await;
+    io.wait_draft_entered(3).await;
+
+    tokio::time::advance(Duration::from_secs(6)).await;
+    let _ = io.wait_draft_count(3).await;
+    let t3 = io.draft_timestamps.lock().unwrap()[2];
+    assert_eq!(t3.duration_since(t2), Duration::from_secs(25));
+
+    tokio::time::resume();
+    let done_frame =
+        "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sock1
+        .write_all(format!("{:X}\r\n{done_frame}\r\n0\r\n\r\n", done_frame.len()).as_bytes())
+        .await
+        .unwrap();
+    sock1.flush().await.unwrap();
+
+    let final_msgs = io.wait_message_count(1).await;
+    assert_eq!(final_msgs[0].1, "长思考期间的草稿预览");
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+    harness.shutdown().await;
+}

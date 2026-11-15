@@ -153,13 +153,12 @@ impl ChatDraftThrottleMap {
         Ok(())
     }
 
-    async fn record_completed(&self, chat: &ChatKey, completed_at: tokio::time::Instant) {
+    async fn record_rate_limit(&self, chat: &ChatKey, retry_until: tokio::time::Instant) {
         let bucket = self.bucket(chat);
         let mut guard = bucket.lock().await;
-        let cooldown_until = completed_at + DRAFT_THROTTLE_INTERVAL;
         *guard = Some(match *guard {
-            Some(existing) if existing > cooldown_until => existing,
-            _ => cooldown_until,
+            Some(existing) if existing > retry_until => existing,
+            _ => retry_until,
         });
     }
 }
@@ -175,10 +174,11 @@ pub(crate) async fn wait_stop_signal(stop: &mut watch::Receiver<bool>) {
     }
 }
 
-/// 单轮草稿节流与 25 秒保活状态机。
+/// 单轮草稿节流、重试清空与 25 秒保活状态机。
 ///
-/// 保活计时以最近一次草稿请求**返回时刻**为基准（请求失败或慢超时后不立即紧循环重试，等待下一轮保活或新快照），
-/// 且驱动循环在每次发送前后及请求在途期间持续监听轮次终态，绝不因慢草稿请求阻塞最终回复。
+/// - **清空更新**：模型重试或步骤切换产生空快照 `""` 时，若此前已有草稿快照则作为清空更新发往 Telegram，消除失败尝试残留正文。
+/// - **成功保活与失败退避分离**：成功请求按**发起时刻** `started_at` 计算 25 秒保活（避免慢请求把耗时叠加到刷新周期而越过 Telegram 30 秒草稿有效期）；
+///   失败请求不立即重试，按指数退避（及 429 `retry_after`）延迟后续发送，并在保活窗口已过时以失败完成时刻起算下一轮保活，避免慢超时后紧循环。
 struct DraftPacer<'a> {
     chat: &'a ChatKey,
     draft_id: i64,
@@ -186,32 +186,29 @@ struct DraftPacer<'a> {
     latest_text: Option<String>,
     dirty: bool,
     last_sent_at: Option<tokio::time::Instant>,
+    consecutive_failures: u32,
+    backoff_until: Option<tokio::time::Instant>,
 }
 
 impl<'a> DraftPacer<'a> {
-    fn new(
-        initial_draft: Option<String>,
-        chat: &'a ChatKey,
-        draft_id: i64,
-        throttles: &'a ChatDraftThrottleMap,
-    ) -> Self {
-        let latest_text = initial_draft.filter(|s| !s.is_empty());
-        let dirty = latest_text.is_some();
+    fn new(chat: &'a ChatKey, draft_id: i64, throttles: &'a ChatDraftThrottleMap) -> Self {
         Self {
             chat,
             draft_id,
             throttles,
-            latest_text,
-            dirty,
+            latest_text: None,
+            dirty: false,
             last_sent_at: None,
+            consecutive_failures: 0,
+            backoff_until: None,
         }
     }
 
     fn record_snapshot(&mut self, text: String) {
-        if text.is_empty() {
-            self.latest_text = None;
-            self.dirty = false;
-        } else if self.latest_text.as_deref() != Some(text.as_str()) {
+        if text.is_empty() && self.latest_text.is_none() {
+            return;
+        }
+        if self.latest_text.as_deref() != Some(text.as_str()) {
             self.latest_text = Some(text);
             self.dirty = true;
         }
@@ -219,38 +216,80 @@ impl<'a> DraftPacer<'a> {
 
     async fn next_deadline(&self) -> Option<tokio::time::Instant> {
         self.latest_text.as_ref()?;
+        let allowed_at = self.throttles.earliest_allowed(self.chat).await;
+        let floor = match self.backoff_until {
+            Some(until) => allowed_at.max(until),
+            None => allowed_at,
+        };
         if self.dirty {
-            Some(self.throttles.earliest_allowed(self.chat).await)
+            Some(floor)
         } else if let Some(sent_at) = self.last_sent_at {
             let keepalive_at = sent_at + DRAFT_KEEPALIVE_INTERVAL;
-            let allowed_at = self.throttles.earliest_allowed(self.chat).await;
-            Some(keepalive_at.max(allowed_at))
+            Some(keepalive_at.max(floor))
         } else {
             None
         }
     }
 
-    async fn prepare_send(&mut self) -> Option<String> {
+    async fn prepare_send(&mut self) -> Option<(String, tokio::time::Instant)> {
         let text = self.latest_text.as_deref()?;
+        if let Some(until) = self.backoff_until
+            && tokio::time::Instant::now() < until
+        {
+            return None;
+        }
         self.throttles.try_claim_now(self.chat).await.ok()?;
+        let started_at = tokio::time::Instant::now();
         let preview = truncate_draft_tail(text);
         self.dirty = false;
-        Some(preview)
+        Some((preview, started_at))
     }
 
-    async fn finish_send(&mut self, res: Result<(), TelegramApiError>) {
-        let completed_at = tokio::time::Instant::now();
-        self.last_sent_at = Some(completed_at);
-        self.throttles
-            .record_completed(self.chat, completed_at)
-            .await;
-        if let Err(err) = res {
-            tracing::debug!(
-                chat = %self.chat,
-                draft_id = self.draft_id,
-                diagnostic = %err.diagnostic(),
-                "推送 Telegram 草稿失败，等待后续刷新"
-            );
+    async fn finish_send(
+        &mut self,
+        started_at: tokio::time::Instant,
+        res: Result<(), TelegramApiError>,
+    ) {
+        match res {
+            Ok(()) => {
+                self.last_sent_at = Some(started_at);
+                self.consecutive_failures = 0;
+                self.backoff_until = None;
+            }
+            Err(err) => {
+                let completed_at = tokio::time::Instant::now();
+                if self
+                    .last_sent_at
+                    .is_none_or(|sent_at| completed_at >= sent_at + DRAFT_KEEPALIVE_INTERVAL)
+                {
+                    self.last_sent_at = Some(completed_at);
+                }
+                let shift = self.consecutive_failures.min(5);
+                self.consecutive_failures = self.consecutive_failures.saturating_add(1);
+                let exp_backoff = DRAFT_THROTTLE_INTERVAL
+                    .saturating_mul(1u32 << shift)
+                    .min(DRAFT_KEEPALIVE_INTERVAL);
+                let wait = match &err {
+                    TelegramApiError::RateLimited {
+                        retry_after: Some(ra),
+                        ..
+                    } => {
+                        self.throttles
+                            .record_rate_limit(self.chat, completed_at + *ra)
+                            .await;
+                        (*ra).max(exp_backoff)
+                    }
+                    _ => exp_backoff,
+                };
+                self.backoff_until = Some(completed_at + wait);
+                tracing::debug!(
+                    chat = %self.chat,
+                    draft_id = self.draft_id,
+                    wait_ms = wait.as_millis() as u64,
+                    diagnostic = %err.diagnostic(),
+                    "推送 Telegram 草稿失败，退避后等待后续刷新"
+                );
+            }
         }
     }
 }
@@ -275,14 +314,13 @@ fn drain_ready_turn_updates(turn: &mut InProcessTurn, pacer: &mut DraftPacer<'_>
 /// 一旦轮次进入终态，立即结束草稿循环（含取消在途慢草稿请求），确保最终回复不被阻塞。
 pub(crate) async fn drive_turn_drafts(
     turn: &mut InProcessTurn,
-    initial_draft: Option<String>,
     chat: &ChatKey,
     draft_id: i64,
     io: &dyn TelegramIo,
     throttles: &ChatDraftThrottleMap,
     mut stop: watch::Receiver<bool>,
 ) {
-    let mut pacer = DraftPacer::new(initial_draft, chat, draft_id, throttles);
+    let mut pacer = DraftPacer::new(chat, draft_id, throttles);
 
     loop {
         if *stop.borrow() || !drain_ready_turn_updates(turn, &mut pacer) {
@@ -312,7 +350,7 @@ pub(crate) async fn drive_turn_drafts(
             continue;
         }
 
-        let Some(preview) = pacer.prepare_send().await else {
+        let Some((preview, started_at)) = pacer.prepare_send().await else {
             continue;
         };
 
@@ -329,7 +367,7 @@ pub(crate) async fn drive_turn_drafts(
             }
         };
 
-        pacer.finish_send(send_res).await;
+        pacer.finish_send(started_at, send_res).await;
     }
 }
 
@@ -748,7 +786,7 @@ mod tests {
         let throttles_clone = Arc::clone(&throttles);
         let chat_clone = chat.clone();
         let driver = tokio::spawn(async move {
-            let mut pacer = DraftPacer::new(None, &chat_clone, 42, &throttles_clone);
+            let mut pacer = DraftPacer::new(&chat_clone, 42, &throttles_clone);
             loop {
                 loop {
                     match rx.try_recv() {
@@ -778,7 +816,7 @@ mod tests {
                     }
                     continue;
                 }
-                let Some(preview) = pacer.prepare_send().await else {
+                let Some((preview, started_at)) = pacer.prepare_send().await else {
                     continue;
                 };
                 let mut send_fut =
@@ -787,14 +825,14 @@ mod tests {
                     tokio::select! {
                         biased;
                         _ = wait_stop_signal(&mut stop_rx) => return,
-                        res = &mut send_fut => break res,
                         next = rx.recv() => match next {
                             Some(text) => pacer.record_snapshot(text),
                             None => return,
                         },
+                        res = &mut send_fut => break res,
                     }
                 };
-                pacer.finish_send(send_res).await;
+                pacer.finish_send(started_at, send_res).await;
             }
         });
 
@@ -847,6 +885,30 @@ mod tests {
                 "无新增量的在途轮次应在 25 秒时保活刷新草稿"
             );
             assert_eq!(recorded[2].0.duration_since(start), Duration::from_secs(26));
+        }
+
+        // 模型重试或步骤切换发出空快照 "" 时，必须发送空草稿清除先前残留正文，随后新尝试正文正常发出
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tx.send(String::new()).unwrap();
+        tokio::task::yield_now().await;
+        {
+            let recorded = io.drafts.lock().unwrap();
+            assert_eq!(
+                recorded.len(),
+                4,
+                "重试产生空快照时必须向 Telegram 发送空草稿"
+            );
+            assert_eq!(recorded[3].3, "");
+            assert!(recorded[3].4);
+        }
+
+        tokio::time::advance(Duration::from_secs(1)).await;
+        tx.send("重试后新正文".into()).unwrap();
+        tokio::task::yield_now().await;
+        {
+            let recorded = io.drafts.lock().unwrap();
+            assert_eq!(recorded.len(), 5);
+            assert_eq!(recorded[4].3, "重试后新正文");
         }
 
         drop(tx);

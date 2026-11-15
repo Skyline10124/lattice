@@ -101,7 +101,7 @@ sequenceDiagram
     IM->>IM: 分配随机正整数 draft_id 登记 TurnId，推进单对话队列处理下一条
     loop 轮次执行期间（发送前后及请求在途均持续监听终态）
         SV-->>IM: InProcessTurn::next_draft() 纯文本快照（终态立即中断在途慢草稿）
-        IM->>TG: sendMessageDraft（单 chat 1 秒节流、按请求完成时刻计 25 秒保活、末尾 4096 字符、can_stop=true）
+        IM->>TG: sendMessageDraft（单 chat 1 秒节流、重试清空、成功按发起时刻 25 秒保活与失败退避分离、末尾 4096 字符、can_stop=true）
     end
     SV-->>IM: InProcessTurn::outcome()
     IM->>IM: 拼接非 Completed 结局说明并按 4096 字符三级切分

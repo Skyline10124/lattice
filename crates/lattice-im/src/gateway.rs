@@ -1145,13 +1145,8 @@ impl GatewayRuntime {
         mut turn: InProcessTurn,
         draft_lease: DraftLease,
     ) {
-        let initial_draft = {
-            let text = turn.draft_text();
-            (!text.is_empty()).then_some(text)
-        };
         drive_turn_drafts(
             &mut turn,
-            initial_draft,
             &chat,
             draft_lease.draft_id(),
             self.io.as_ref(),
