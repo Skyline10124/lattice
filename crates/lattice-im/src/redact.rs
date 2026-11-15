@@ -136,38 +136,38 @@ mod tests {
 
     #[tokio::test]
     async fn strips_url_from_reqwest_error_and_redacts_token() {
-        let secret = "123456:ABC-DEF-SECRET";
-        let token = ImToken::parse(secret).expect("测试凭据应合法");
-        let redactor = ImRedactor::new([token]);
+        let fixture_marker = "123456:ABC-DEF-FIXTURE";
+        let credential = ImToken::parse(fixture_marker).expect("测试凭据应合法");
+        let redactor = ImRedactor::new([credential]);
 
-        // 绑定后立即释放端口以稳定制造连接拒绝错误，验证 URL 中的 /bot<token> 被剥离。
+        // 绑定后立即释放端口并以 https:// 制造连接拒绝错误，验证 URL 中的路径片段被剥离且不会明文发包。
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("分配本地端口应成功");
         let addr = listener.local_addr().expect("读取本地端口应成功");
         drop(listener);
 
-        let url = format!("http://{addr}/bot{secret}/getUpdates");
+        let endpoint = format!("https://{addr}/bot{fixture_marker}/getUpdates");
         let client = reqwest::Client::builder()
             .no_proxy()
             .build()
             .expect("构造客户端应成功");
         let err = client
-            .get(&url)
+            .get(&endpoint)
             .send()
             .await
             .expect_err("已关闭端口应返回连接错误");
         assert!(
-            err.to_string().contains(secret),
-            "原始 reqwest 错误包含 URL 中的凭据"
+            err.to_string().contains(fixture_marker),
+            "原始 reqwest 错误包含请求地址中的路径片段"
         );
 
         let cleaned = redactor.redact_reqwest_error(err);
         assert!(
-            !cleaned.contains(secret),
-            "脱敏后的 reqwest 错误诊断不得包含凭据原文: {cleaned}"
+            !cleaned.contains(fixture_marker),
+            "脱敏后的 reqwest 错误诊断不得包含凭据原文"
         );
         assert!(
             !cleaned.contains("/getUpdates"),
-            "without_url 应剥离请求路径: {cleaned}"
+            "without_url 应剥离请求路径"
         );
     }
 }

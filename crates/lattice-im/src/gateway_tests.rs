@@ -1005,11 +1005,7 @@ async fn rebuilds_cleaned_draft_session_with_same_id_and_serves_status_usage_and
     let usage_reply = &query_msgs[4].1;
 
     let usage_lines: Vec<&str> = usage_reply.lines().collect();
-    assert_eq!(
-        usage_lines.len(),
-        4,
-        "/usage 端到端回复必须严格四行: {usage_reply}"
-    );
+    assert_eq!(usage_lines.len(), 4, "/usage 端到端回复必须严格四行");
     assert_eq!(
         usage_lines[0],
         format!("会话：{preset_session_id}；当前路径：1 轮")

@@ -210,7 +210,7 @@ mod tests {
 
         let text = format_session_usage(&usage);
         let lines: Vec<&str> = text.lines().collect();
-        assert_eq!(lines.len(), 4, "/usage 回复必须严格为四行: {text}");
+        assert_eq!(lines.len(), 4, "/usage 回复必须严格为四行");
         assert_eq!(lines[0], format!("会话：{sid}；当前路径：3 轮"));
         assert_eq!(lines[1], "模型：openai/gpt-5、anthropic/claude-sonnet-4");
         assert_eq!(
