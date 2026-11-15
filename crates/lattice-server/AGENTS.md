@@ -1,19 +1,20 @@
 # lattice-server 工作指引
 
-提供本地后台协调入口（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`），内部跨领域协调会话库、请求网关、profile、模型元数据与工具执行器，被独立守护进程 `lattice-daemon` 调用。
+提供本地后台协调入口（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`）、进程内服务门面（`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`）与 IM 平台凭据文件存储（`ImAuthStore`、`ImToken`、`ImPlatformCredentialState`、`ImAuthError`、`TELEGRAM_PLATFORM`），内部跨领域协调会话库、请求网关、profile、模型元数据与工具执行器，被独立守护进程 `lattice-daemon` 与进程内 IM 网关 `lattice-im` 调用。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs`、`src/root.rs` | 根模块生产公开面五项重导出（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
+| `src/lib.rs`、`src/root.rs` | 根模块生产公开面重导出（后台宿主入口、进程内 `Service` 接口与 `im_auth` 凭据存储接口）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
+| `src/im_auth.rs` | 配置目录下私有文件 `im/auth.json` 的严格权限核验与原子读写（`ImAuthStore`）、零化秘密包装 `ImToken`（不实现 `Debug` 或 `Display`）、平台状态查询 `ImPlatformCredentialState` 及零秘密回显的 `ImAuthError` |
 | `src/session.rs` | 内部会话库异步门面 `SessionApi`（`spawn_blocking` 封装、写异常上报、`SessionId` 精确/前缀解析与 `usage` 查询；类型本身与 `from_store` 仅在 `test` 或 `test-utils` 下对外导出） |
 | `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
 | `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写与关闭重开、以及排空超时停写终态（`disable_writes`） |
 | `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地后台宿主入口与不透明 `InstanceLock` 重导出、模块内部类型别名，以及基于 `rustix::fs::flock` 的实例锁持有与 socket 绑定/残留核验/清理（分帧、目录权限与对端 UID 核验委托 `lattice-ipc`） |
 | `src/local/error.rs`、`src/local/presentation.rs` | `ApiError` 到 `LocalError` 的分类与安全存储诊断映射；后台边界 `lattice-llm` 与 `lattice-ipc` 模型查询、模型候选及凭据状态的逐字段无通配符转换，以及测试中 `Availability::diagnostic` 的逐变体配对对照 |
 | `src/local/server.rs` | `serve`（及测试入口 `serve_for_test`、`serve_for_test_with_service`）实例资源与元数据任务启动、`Backend` 会话配置（`configure`）与草稿清理（`cleanup_drafts`）、提交准入、基于 `rustix::net::recv`（`PEEK \| DONTWAIT`）的 IPC 提交连接存活探测、无条件委托 `Service` 完成共享操作分发、视图推送、`Owner` 独立监督，以及信号与 IPC `stop` 共用的有界停机顺序（返回 `ServeExit`） |
-| `src/local/service.rs` | 进程内服务门面 `Service`（`configure`、`submit`、`observe`、`cancel`、`head`、`turn`、`usage`、`stopping` 与内部 IPC 桥接辅助）、固定轮次只读观察句柄 `InProcessTurn` / 终态快照 `InProcessTurnOutcome`（剔除推理的流式助手正文快照与同事务读取最后一步助手正文）及状态感知停机通知 `StopNotification` |
+| `src/local/service.rs` | 进程内服务门面 `Service`（`configure`、`submit`、`observe`、`cancel`、`head`、`turn`、`usage`、`stopping`、`tls_roots_der` 与内部 IPC 桥接辅助）、固定轮次只读观察句柄 `InProcessTurn` / 终态快照 `InProcessTurnOutcome`（剔除推理的流式助手正文快照与同事务读取最后一步助手正文）及状态感知停机通知 `StopNotification` |
 | `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令存储调用、错误映射，以及后台同连接 SIWC 登录交换（登录成功帧经 `presentation` 转换 `ProviderAuthStatus`，授权链接以 `AuthKey` 发送） |
 | `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
 | `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、后台生产执行入口 `start_execution`、测试入口 `start_turn` 及仅限内部单元测试（`#[cfg(test)]`）的 `run_turn` |
@@ -27,6 +28,7 @@
 | 修改的内容 | 读取 |
 | --- | --- |
 | 任何改动 | [Crate 职责与依赖边界](../../docs/architecture/crates.md)、[会话与 Turn](../../docs/architecture/session/README.md)、[实现模块与公开操作](../../docs/architecture/session/operations.md)、[工程规范](../../docs/development/engineering.md) |
+| IM 凭据存储或进程内 `Service` 接口 | [IM 网关](../../docs/architecture/im.md)、[私有存储与持久化](../../docs/architecture/storage.md) |
 | 提交准入、配置冻结、脱敏与重试预算 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md)、[会话设置](../../docs/architecture/session/settings.md) |
 | Step 事务、调用槽位、锁与故障停写 | [Step 执行与结果保存](../../docs/architecture/session/steps.md)、[会话存储与并发](../../docs/architecture/session/concurrency.md)、[私有存储与持久化](../../docs/architecture/storage.md#锁与并发语义) |
 | 找回、视图观察、取消与后台 `stop` | [重开、取消与未完成状态](../../docs/architecture/session/recovery.md) |
@@ -35,8 +37,9 @@
 
 ## 约束
 
-- 内部子模块全部私有；生产公开面仅由根模块导出 `serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`（不透明句柄，内部字段私有）五项，不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；`serve_for_test`、`serve_for_test_with_service`、`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
-- `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 禁止引入 `lattice-local`（仅允许在 `dev-dependencies` 中用于后台与客户端端到端协议测试），由 `cargo xtask crate-boundary` 检查；系统调用统一经 `rustix` 完成并直接以 `std::io::Error::from(errno)` 转换错误。崩溃屏障是唯一例外：停点经 `libc::raise(SIGSTOP)` 只向调用线程发信号，`libc` 作为可选依赖只随 `test-crash-barriers` 引入。`rustix` 的常规接口只能向整个进程或进程组发信号；进程级的 `SIGSTOP` 可能先由其他线程处理，调用线程会在进程停住前越过停点继续执行。
+- 内部子模块全部私有；生产公开面由根模块导出后台宿主入口（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`）、进程内服务门面（`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`）与 IM 平台凭据存储（`ImAuthStore`、`ImAuthError`、`ImToken`、`ImPlatformCredentialState`、`TELEGRAM_PLATFORM`），不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；`serve_for_test`、`serve_for_test_with_service`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
+- `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 禁止引入 `lattice-local`（仅允许在 `dev-dependencies` 中用于后台与客户端端到端协议测试），且禁止在任何依赖段引入 `lattice-im`，由 `cargo xtask crate-boundary` 检查；系统调用统一经 `rustix` 完成并直接以 `std::io::Error::from(errno)` 转换错误。崩溃屏障是唯一例外：停点经 `libc::raise(SIGSTOP)` 只向调用线程发信号，`libc` 作为可选依赖只随 `test-crash-barriers` 引入。`rustix` 的常规接口只能向整个进程或进程组发信号；进程级的 `SIGSTOP` 可能先由其他线程处理，调用线程会在进程停住前越过停点继续执行。
+- `im_auth.rs` 经 `lattice_store::PrivateDirectory` 访问配置目录下的 `im/auth.json`：只读查询遇到缺失目录或文件返回缺失状态而不创建路径，但属主不符、符号链接、过宽权限、超大文件或 JSON 格式违规必须返回类型化错误，不自动 `chmod` 修复；写入由进程内互斥锁串行执行“重读 → 修改 → `0600` 原子替换”；`ImToken` 不实现 `Debug` 或 `Display`，并在释放时清零，任何错误诊断不得回显平台名入参或密钥原文。
 - `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的模型驱动与工具分发路径；阻塞式会话库访问放入 `spawn_blocking`，写事务内不等待模型、工具执行器或网络。
 - 本地 IPC（`local/server.rs` 的 `connection` 与 `dispatch`）与进程内调用无条件共用 `local/service.rs` 的同一套 `configure`、`submit`、`cancel`、`head`、`turn`、`usage` 实现：IPC 提交保留连接存活 `PEEK` 探测并在线上返回 `Acceptance::ConfirmationUnknown`，进程内 `Service::submit` 在接受确认不明时返回带 `RecoveryNeed` 的 `Err(LocalError)`，找回统一走按 `TurnId` 查询；`InProcessTurn` 持有会话 `ObserverLease` 只读观察固定 `(SessionId, TurnId)`（不登记 IPC 视图游标、不占用外部 IPC `watch` 信号量许可、丢弃时不取消执行），并在同一读事务内读取 `TurnDetail` 与最后一步 `Node::Step` 的纯文本回复；`observer.rs` 为每个观察者维护最新待推条目与文字游标并以非阻塞通知解耦观察背压、实时排空与持久提交；Step 重试提示与 `TurnSummary` notice 按[模型请求与执行预算](../../docs/architecture/session/acceptance.md#模型请求与执行预算)生成，接受与观察交接见[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)与[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。
 - `configure(New)` 在 IPC 路径于尝试写回响应后触发受后台监督的草稿会话清理（无论请求成功或被拒、响应写出成功或失败），在进程内 `Service::configure` 路径于返回前触发同一草稿清理，并在准入锁边界与观察者登记串行，见[会话状态与草稿清理](../../docs/architecture/session/concurrency.md#会话状态与草稿清理)；`serve_with_backend` 作为唯一的停机执行点处理信号与 IPC `stop`、在准入锁内同步置位 `StopNotification`、执行单次持锁排空判定、超时停写、尾段连接服务与收尾及阻塞线程最终释放（最终释放与撤下 socket 共用第 6 步期限，经 `ServeExit` 把实例锁与该期限交给进程入口），见[取消与退出](../../docs/architecture/session/recovery.md#取消与退出)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
@@ -45,13 +48,14 @@
 - 调用分发前先检查取消与本轮 deadline，提交 `start_invocation` 后调用 `TurnTools::execute` 并传入同一取消标志与 deadline：`ToolOutcome::Deadline` 不调用 `finish_invocation`，直接以 `DispatchStop::Deadline` 关闭 Step（槽位保持 `Started`，读出 `Indeterminate(NoResult)`）；其余四种结果映射为 `ToolReply` 写入终态。写事务提交失败时经 `stores.rs` 停写并排空重开，排空超时停机时经 `StoreManager::disable_writes` 停写并保留库句柄至最终释放，见[调用槽位](../../docs/architecture/session/steps.md#调用槽位)、[事务与一致性](../../docs/architecture/session/concurrency.md#事务与一致性)与[停止后台](../../docs/architecture/session/recovery.md#停止后台)。
 - 执行者消失后的 Turn 保留原持久状态，`rewind` 只将当前节点指针移到目标 `NodeId` 并保留原分叉、工作区文件与会话设置，见[执行者消失后的 Turn](../../docs/architecture/session/recovery.md#执行者消失后的-turn)与[会话设置](../../docs/architecture/session/settings.md#设置与一轮的配置)。
 - `session.rs` 解析 `SessionId` 时先精确匹配再按已存前缀匹配，歧义时最多列出 5 个候选并拒绝空白输入，内部与持久层始终使用 32 位十六进制规范 `SessionId`。
-- 本 crate 之外：客户端句柄、观察流、登录客户端与日志初始化由 `lattice-local` 负责；IPC 协议定义、模型与凭据展示类型、版本魔数、单帧编解码、目录权限与对端 UID 核验及线上形状快照由 `lattice-ipc` 负责；profile 字段与目录权限校验由 `lattice-profile` 负责；会话库表与事务原语由 `lattice-session` 负责；provider wire 协议与认证生命周期由 `lattice-llm` 负责；终端与命令行呈现由 `lattice-tui` 和 `lattice-cli` 负责。
+- 本 crate 之外：客户端句柄、观察流、登录客户端与日志初始化由 `lattice-local` 负责；IPC 协议定义、模型与凭据展示类型、版本魔数、单帧编解码、目录权限与对端 UID 核验及线上形状快照由 `lattice-ipc` 负责；IM 协议轮询、台账与回复切分由 `lattice-im` 负责；profile 字段与目录权限校验由 `lattice-profile` 负责；会话库表与事务原语由 `lattice-session` 负责；provider wire 协议与认证生命周期由 `lattice-llm` 负责；终端与命令行呈现由 `lattice-tui` 和 `lattice-cli` 负责。
 
 ## 验证
 
 | 改动 | 运行 |
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-server` 与 `cargo test -p lattice-server --features test-utils,test-fake-tools,test-crash-barriers`（含提交、取消交接、视图切点、库级故障、执行者消失、假工具执行及 `tests/session_without_workspace_history.rs`） |
+| 修改 `im_auth` 或进程内 `Service` 接口 | `cargo test -p lattice-im` |
 | 修改 `Cargo.toml` 依赖 | `cargo xtask crate-boundary` |
 | 修改 Turn 协调、流消费或工具接线 | `cargo test -p lattice-agent`、`cargo test -p lattice-session` |
 | 联动修改 `lattice-ipc` 请求、响应、登录帧或展示类型 | `env -u LATTICE_UPDATE_WIRE_SHAPE cargo test -p lattice-ipc wire_shape`（见 [`crates/lattice-ipc/AGENTS.md`](../lattice-ipc/AGENTS.md)） |

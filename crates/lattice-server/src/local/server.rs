@@ -110,7 +110,6 @@ enum DrainDecision {
 
 pub(super) enum SubmitSource {
     Ipc(UnixStream),
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     InProcess,
 }
 
@@ -144,7 +143,6 @@ pub(super) enum SubmitOutcome {
     ConfirmationUnknown {
         turn_id: TurnId,
         session_id: SessionId,
-        #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
         cause: RecoveryCause,
     },
 }
@@ -210,6 +208,7 @@ pub(super) struct Backend {
     layout: StateLayout,
     home: Option<std::path::PathBuf>,
     gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, ConfigRejection>,
+    fallback_tls_roots: Vec<Vec<u8>>,
     metadata: Arc<super::metadata::MetadataRefresh>,
     tools: Arc<dyn ToolExecutor>,
     lifecycle: Arc<dyn HostLifecycle>,
@@ -383,6 +382,13 @@ impl Backend {
         }
     }
 
+    pub(super) fn tls_roots_der(&self) -> &[Vec<u8>] {
+        match &self.gateway {
+            Ok(gateway) => gateway.tls_roots_der(),
+            Err(_) => &self.fallback_tls_roots,
+        }
+    }
+
     fn with_tools(
         layout: StateLayout,
         home: Option<std::path::PathBuf>,
@@ -399,13 +405,17 @@ impl Backend {
     ) -> Arc<Self> {
         let directory = super::auth::directory(home.as_deref())
             .map_err(|error| ConfigRejection::new(&error.message, None));
-        let gateway = directory.clone().and_then(|directory| {
-            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-            // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
-            lattice_llm::RequestGateway::new(directory, roots)
-                .map(Arc::new)
-                .map_err(|error| ConfigRejection::new(&error.to_string(), Some(&auth)))
-        });
+        let (gateway, fallback_tls_roots) = match directory.clone() {
+            Ok(directory) => {
+                let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
+                let gateway = lattice_llm::RequestGateway::new(directory, roots)
+                    .map(Arc::new)
+                    .map_err(|error| ConfigRejection::new(&error.to_string(), Some(&auth)));
+                (gateway, Vec::new())
+            }
+            Err(error) => (Err(error), lattice_llm::usable_tls_roots_der(roots)),
+        };
         let stores = crate::stores::StoreManager::new(layout.clone());
         Arc::new(Self {
             #[cfg(test)]
@@ -413,6 +423,7 @@ impl Backend {
             home,
             metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
             gateway,
+            fallback_tls_roots,
             tools,
             lifecycle: Arc::new(NoopLifecycle),
             stores,

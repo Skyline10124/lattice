@@ -264,7 +264,7 @@ async fn execute_owned(
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         let gate = observer
             .before_accept
@@ -324,7 +324,7 @@ async fn execute_owned(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.as_secs());
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(&coordinator.io, turn_id, "turn_accepted", None, None).await?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     let fail_read = {
         let gate = observer
             .accepted_read_failure
@@ -342,7 +342,7 @@ async fn execute_owned(
     let turn = coordinator
         .io
         .read(move |read| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             if fail_read {
                 return Err(StoreError::Corruption {
                     table: "test".into(),

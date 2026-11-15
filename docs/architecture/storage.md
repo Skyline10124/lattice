@@ -12,7 +12,7 @@ status: active
 
 本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供状态布局、私有目录与单分量私有文件的严格打开/限量读取/同目录临时文件原子替换、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
 
-私有状态目录下的存储是会话库 `lattice.redb`：全局一份，保存 Session、会话树（Step 节点内含调用槽位）、会话设置、配置表与各索引，由 `lattice-session` 维护。
+私有状态目录下的存储包括全局会话库 `lattice.redb`（保存 Session、会话树、会话设置、配置表与各索引，由 `lattice-session` 维护）以及 IM 台账 `im/ledger`（保存会话绑定与入站事件相位，由 `lattice-im` 维护，见[IM 网关](im.md)）。
 
 会话记录与事务序列见[会话合同](session/README.md)，调用槽位推进与结果载荷见[调用槽位](session/steps.md#调用槽位)。
 
@@ -26,6 +26,7 @@ status: active
 | --- | --- |
 | `lattice.redb` | `lattice-session`，全局会话库 |
 | `locks/sessions/<SessionId>.lock` | 会话操作锁 |
+| `im/ledger` | `lattice-im`，IM 会话绑定与入站事件相位台账，见[IM 网关](im.md) |
 
 打开会话库时，若 `lattice/` 下存在 `sessions.git` 或 `projects/*/invocations.git`，打开失败并在错误中列出这些路径，由人删除或存档。
 

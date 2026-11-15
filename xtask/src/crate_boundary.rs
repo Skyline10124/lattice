@@ -31,6 +31,13 @@ pub struct NormalClosureRule {
     pub forbidden_packages: &'static [&'static str],
 }
 
+/// 限制某个内部成员只能被指定的 workspace 成员依赖（同时覆盖普通、build 与 dev 依赖）。
+#[derive(Clone, Copy, Debug)]
+pub struct ExclusiveConsumerRule {
+    pub target_package: &'static str,
+    pub allowed_consumers: &'static [&'static str],
+}
+
 pub const RULES: &[DirectDependencyRule] = &[
     DirectDependencyRule {
         package: "lattice-ipc",
@@ -62,6 +69,16 @@ pub const RULES: &[DirectDependencyRule] = &[
             "lattice-server",
             "lattice-ipc",
             "lattice-store",
+            "lattice-im",
+        ]),
+    },
+    DirectDependencyRule {
+        package: "lattice-im",
+        policy: WorkspaceDependencyPolicy::AllowOnly(&[
+            "lattice-server",
+            "lattice-ipc",
+            "lattice-store",
+            "net-guard",
         ]),
     },
     DirectDependencyRule {
@@ -69,6 +86,11 @@ pub const RULES: &[DirectDependencyRule] = &[
         policy: WorkspaceDependencyPolicy::Forbid(&["lattice-local"]),
     },
 ];
+
+pub const EXCLUSIVE_CONSUMER_RULES: &[ExclusiveConsumerRule] = &[ExclusiveConsumerRule {
+    target_package: "lattice-im",
+    allowed_consumers: &["lattice-daemon"],
+}];
 
 pub const CLOSURE_RULES: &[NormalClosureRule] = &[
     NormalClosureRule {
@@ -105,24 +127,37 @@ pub const CLOSURE_RULES: &[NormalClosureRule] = &[
 
 pub fn run() -> anyhow::Result<()> {
     let root = repo_root::repo_root()?;
-    let direct_hits = check_workspace_rules(&root, RULES)?;
+    let metadata = workspace_metadata::load_no_deps(&root)?;
+    let direct_hits = check_metadata_rules(&metadata, RULES)?;
+    let consumer_hits = check_metadata_exclusive_consumers(&metadata, EXCLUSIVE_CONSUMER_RULES)?;
     let closure_hits = check_workspace_normal_closure(&root, CLOSURE_RULES)?;
     boundary_report::run_groups(
         "crate 依赖边界检查通过",
         "crate 依赖边界检查失败",
         &[
             ("内部直接依赖", direct_hits),
+            ("内部独占消费限制", consumer_hits),
             ("普通依赖闭包", closure_hits),
         ],
     )
 }
 
+#[cfg(test)]
 pub fn check_workspace_rules(
     repo_root: &Path,
     rules: &[DirectDependencyRule],
 ) -> anyhow::Result<Vec<String>> {
     let metadata = workspace_metadata::load_no_deps(repo_root)?;
     check_metadata_rules(&metadata, rules)
+}
+
+#[cfg(test)]
+pub fn check_workspace_exclusive_consumers(
+    repo_root: &Path,
+    rules: &[ExclusiveConsumerRule],
+) -> anyhow::Result<Vec<String>> {
+    let metadata = workspace_metadata::load_no_deps(repo_root)?;
+    check_metadata_exclusive_consumers(&metadata, rules)
 }
 
 pub fn check_workspace_normal_closure(
@@ -133,15 +168,17 @@ pub fn check_workspace_normal_closure(
     check_metadata_normal_closure(&metadata, rules)
 }
 
-pub fn check_metadata_rules(
-    metadata: &Metadata,
-    rules: &[DirectDependencyRule],
-) -> anyhow::Result<Vec<String>> {
+struct WorkspaceMemberIndex<'a> {
+    by_dir: BTreeMap<PathBuf, &'a Package>,
+    by_name: BTreeMap<&'a str, &'a Package>,
+}
+
+fn index_workspace_members(metadata: &Metadata) -> anyhow::Result<WorkspaceMemberIndex<'_>> {
     let packages_by_id: BTreeMap<&PackageId, &Package> =
         metadata.packages.iter().map(|p| (&p.id, p)).collect();
 
-    let mut members_by_dir: BTreeMap<PathBuf, &Package> = BTreeMap::new();
-    let mut members_by_name: BTreeMap<&str, &Package> = BTreeMap::new();
+    let mut by_dir: BTreeMap<PathBuf, &Package> = BTreeMap::new();
+    let mut by_name: BTreeMap<&str, &Package> = BTreeMap::new();
 
     for member_id in &metadata.workspace_members {
         let pkg = packages_by_id.get(member_id).copied().ok_or_else(|| {
@@ -156,9 +193,96 @@ pub fn check_metadata_rules(
             )
         })?;
         let norm_dir = normpath(manifest_dir.as_std_path());
-        members_by_dir.insert(norm_dir, pkg);
-        members_by_name.insert(pkg.name.as_str(), pkg);
+        by_dir.insert(norm_dir, pkg);
+        by_name.insert(pkg.name.as_str(), pkg);
     }
+
+    Ok(WorkspaceMemberIndex { by_dir, by_name })
+}
+
+fn resolve_workspace_dependency<'a>(
+    checked_pkg: &Package,
+    dep: &cargo_metadata::Dependency,
+    members_by_dir: &BTreeMap<PathBuf, &'a Package>,
+) -> anyhow::Result<Option<&'a str>> {
+    if dep.name.trim().is_empty() {
+        anyhow::bail!(
+            "crate 依赖边界：{}: dependencies 条目的包名为空",
+            checked_pkg.name
+        );
+    }
+
+    match (dep.path.as_ref(), dep.source.as_deref()) {
+        (Some(dep_path), _) => {
+            let norm_dep_dir = normpath(dep_path.as_std_path());
+            if let Some(member_pkg) = members_by_dir.get(&norm_dep_dir).copied() {
+                if member_pkg.name.as_str() != dep.name.as_str() {
+                    anyhow::bail!(
+                        "crate 依赖边界：{}: 依赖路径 '{}' 解析到内部成员 '{}'，与声明的包名 '{}' 不一致",
+                        checked_pkg.name,
+                        dep_path,
+                        member_pkg.name,
+                        dep.name
+                    );
+                }
+                Ok(Some(member_pkg.name.as_str()))
+            } else {
+                if !norm_dep_dir.join("Cargo.toml").is_file() {
+                    anyhow::bail!(
+                        "crate 依赖边界：{}: 无法识别位于 '{}' 的路径依赖 '{}'",
+                        checked_pkg.name,
+                        dep_path,
+                        dep.name
+                    );
+                }
+                Ok(None)
+            }
+        }
+        (None, Some(_)) => Ok(None),
+        (None, None) => {
+            anyhow::bail!(
+                "crate 依赖边界：{}: 无法识别依赖 '{}'（metadata 中同时缺少 path 与 source）",
+                checked_pkg.name,
+                dep.name
+            );
+        }
+    }
+}
+
+fn format_dependency_hit(
+    checked_pkg_name: &str,
+    section: &str,
+    dep: &cargo_metadata::Dependency,
+    workspace_dep_name: &str,
+    detail: &str,
+) -> String {
+    let mut qualifiers = vec![format!("[{section}]")];
+    if let Some(target) = &dep.target {
+        qualifiers.push(format!("target '{target}'"));
+    }
+    if dep.optional {
+        qualifiers.push("optional".to_owned());
+    }
+    let identity = match dep.rename.as_deref() {
+        Some(alias) if alias != workspace_dep_name => {
+            format!("'{workspace_dep_name}'（改名为 '{alias}'）")
+        }
+        _ => format!("'{workspace_dep_name}'"),
+    };
+    format!(
+        "{checked_pkg_name}: {} 出现不允许的内部依赖 {identity}；{detail}",
+        qualifiers.join(" ")
+    )
+}
+
+pub fn check_metadata_rules(
+    metadata: &Metadata,
+    rules: &[DirectDependencyRule],
+) -> anyhow::Result<Vec<String>> {
+    let WorkspaceMemberIndex {
+        by_dir: members_by_dir,
+        by_name: members_by_name,
+    } = index_workspace_members(metadata)?;
 
     let mut hits = Vec::new();
     for rule in rules {
@@ -183,50 +307,9 @@ pub fn check_metadata_rules(
                 }
             };
 
-            if dep.name.trim().is_empty() {
-                anyhow::bail!(
-                    "crate 依赖边界：{}: dependencies 条目的包名为空",
-                    checked_pkg.name
-                );
-            }
-
-            let workspace_dep_name = match (dep.path.as_ref(), dep.source.as_deref()) {
-                (Some(dep_path), _) => {
-                    let norm_dep_dir = normpath(dep_path.as_std_path());
-                    if let Some(member_pkg) = members_by_dir.get(&norm_dep_dir).copied() {
-                        if member_pkg.name.as_str() != dep.name.as_str() {
-                            anyhow::bail!(
-                                "crate 依赖边界：{}: 依赖路径 '{}' 解析到内部成员 '{}'，与声明的包名 '{}' 不一致",
-                                checked_pkg.name,
-                                dep_path,
-                                member_pkg.name,
-                                dep.name
-                            );
-                        }
-                        Some(member_pkg.name.as_str())
-                    } else {
-                        if !norm_dep_dir.join("Cargo.toml").is_file() {
-                            anyhow::bail!(
-                                "crate 依赖边界：{}: 无法识别位于 '{}' 的路径依赖 '{}'",
-                                checked_pkg.name,
-                                dep_path,
-                                dep.name
-                            );
-                        }
-                        None
-                    }
-                }
-                (None, Some(_)) => None,
-                (None, None) => {
-                    anyhow::bail!(
-                        "crate 依赖边界：{}: 无法识别依赖 '{}'（metadata 中同时缺少 path 与 source）",
-                        checked_pkg.name,
-                        dep.name
-                    );
-                }
-            };
-
-            let Some(workspace_dep_name) = workspace_dep_name else {
+            let Some(workspace_dep_name) =
+                resolve_workspace_dependency(checked_pkg, dep, &members_by_dir)?
+            else {
                 continue;
             };
 
@@ -245,26 +328,86 @@ pub fn check_metadata_rules(
             };
 
             if let Some(detail) = policy_detail {
-                let mut qualifiers = vec![format!("[{section}]")];
-                if let Some(target) = &dep.target {
-                    qualifiers.push(format!("target '{target}'"));
-                }
-                if dep.optional {
-                    qualifiers.push("optional".to_owned());
-                }
-                let identity = match dep.rename.as_deref() {
-                    Some(alias) if alias != workspace_dep_name => {
-                        format!("'{workspace_dep_name}'（改名为 '{alias}'）")
-                    }
-                    _ => format!("'{workspace_dep_name}'"),
-                };
-                hits.push(format!(
-                    "{}: {} 出现不允许的内部依赖 {}；{}",
-                    checked_pkg.name,
-                    qualifiers.join(" "),
-                    identity,
-                    detail
+                hits.push(format_dependency_hit(
+                    &checked_pkg.name,
+                    section,
+                    dep,
+                    workspace_dep_name,
+                    &detail,
                 ));
+            }
+        }
+    }
+
+    Ok(hits)
+}
+
+pub fn check_metadata_exclusive_consumers(
+    metadata: &Metadata,
+    rules: &[ExclusiveConsumerRule],
+) -> anyhow::Result<Vec<String>> {
+    let WorkspaceMemberIndex {
+        by_dir: members_by_dir,
+        by_name: members_by_name,
+    } = index_workspace_members(metadata)?;
+
+    let mut hits = Vec::new();
+    for rule in rules {
+        if !members_by_name.contains_key(rule.target_package) {
+            anyhow::bail!(
+                "crate 依赖边界：受保护的目标包 '{}' 未出现在 workspace_members 中",
+                rule.target_package
+            );
+        }
+        for &consumer in rule.allowed_consumers {
+            if !members_by_name.contains_key(consumer) {
+                anyhow::bail!(
+                    "crate 依赖边界：允许的消费方 '{}' 未出现在 workspace_members 中",
+                    consumer
+                );
+            }
+        }
+
+        for (&pkg_name, &checked_pkg) in &members_by_name {
+            if pkg_name == rule.target_package {
+                continue;
+            }
+            for dep in &checked_pkg.dependencies {
+                let section = match dep.kind {
+                    DependencyKind::Normal => "dependencies",
+                    DependencyKind::Build => "build-dependencies",
+                    DependencyKind::Development => "dev-dependencies",
+                    DependencyKind::Unknown => {
+                        anyhow::bail!(
+                            "crate 依赖边界：{}: 无法识别依赖 '{}' 的 kind",
+                            checked_pkg.name,
+                            dep.name
+                        );
+                    }
+                };
+
+                let Some(workspace_dep_name) =
+                    resolve_workspace_dependency(checked_pkg, dep, &members_by_dir)?
+                else {
+                    continue;
+                };
+
+                if workspace_dep_name == rule.target_package
+                    && !rule.allowed_consumers.contains(&pkg_name)
+                {
+                    let detail = format!(
+                        "仅允许以下内部成员依赖 '{}'：[{}]",
+                        rule.target_package,
+                        rule.allowed_consumers.join(", ")
+                    );
+                    hits.push(format_dependency_hit(
+                        &checked_pkg.name,
+                        section,
+                        dep,
+                        workspace_dep_name,
+                        &detail,
+                    ));
+                }
             }
         }
     }
@@ -410,6 +553,7 @@ mod tests {
         "lattice-ipc",
         "lattice-cli",
         "lattice-daemon",
+        "lattice-im",
         "lattice-tui",
         "lattice-local",
         "lattice-server",
@@ -419,6 +563,7 @@ mod tests {
         "lattice-llm",
         "lattice-profile",
         "lattice-agent",
+        "net-guard",
         "plain-helper",
     ];
 
@@ -457,6 +602,14 @@ mod tests {
                 "lattice-server = { path = \"../lattice-server\" }\n",
                 "lattice-ipc = { path = \"../lattice-ipc\" }\n",
                 "lattice-store = { path = \"../lattice-store\" }\n",
+                "lattice-im = { path = \"../lattice-im\" }\n",
+                "outside-util = { path = \"../../../outside-util\" }\n",
+            )),
+            "lattice-im" => CrateSpec::with_deps(concat!(
+                "lattice-server = { path = \"../lattice-server\" }\n",
+                "lattice-ipc = { path = \"../lattice-ipc\" }\n",
+                "lattice-store = { path = \"../lattice-store\" }\n",
+                "net-guard = { path = \"../net-guard\" }\n",
                 "outside-util = { path = \"../../../outside-util\" }\n",
             )),
             "lattice-tui" => CrateSpec::with_deps(concat!(
@@ -820,8 +973,14 @@ mod tests {
             baseline_hits.is_empty(),
             "基线状态下每个受检包只依赖允许成员与外部 path crate，结果应为空：{baseline_hits:?}"
         );
+        let baseline_consumer_hits =
+            check_workspace_exclusive_consumers(&ws.ws_root, EXCLUSIVE_CONSUMER_RULES).unwrap();
+        assert!(
+            baseline_consumer_hits.is_empty(),
+            "基线状态下只有 lattice-daemon 依赖 lattice-im，独占消费检查结果应为空：{baseline_consumer_hits:?}"
+        );
 
-        // 白名单成员可以改名或设为可选；禁用成员只出现在 `[dev-dependencies]` 时，每条生产规则都不报错。
+        // 白名单成员可以改名或设为可选；非独占保护成员只出现在 `[dev-dependencies]` 时，生产规则都不报错。
         let mut ipc_spec = CrateSpec::with_deps(concat!(
             "lattice-session = { path = \"../lattice-session\" }\n",
             "conv_alias = { package = \"lattice-conversation\", path = \"../lattice-conversation\" }\n",
@@ -863,10 +1022,19 @@ mod tests {
         let mut daemon_spec = baseline_spec("lattice-daemon");
         daemon_spec.dev_deps = concat!(
             "lattice-local = { path = \"../lattice-local\" }\n",
+            "lattice-im = { path = \"../lattice-im\" }\n",
             "plain-helper = { path = \"../plain-helper\" }\n",
         )
         .to_owned();
         ws.write_member("lattice-daemon", &daemon_spec);
+
+        let mut im_spec = baseline_spec("lattice-im");
+        im_spec.dev_deps = concat!(
+            "lattice-local = { path = \"../lattice-local\" }\n",
+            "plain-helper = { path = \"../plain-helper\" }\n",
+        )
+        .to_owned();
+        ws.write_member("lattice-im", &im_spec);
 
         let mut server_spec = baseline_spec("lattice-server");
         server_spec.dev_deps = "lattice-local = { path = \"../lattice-local\" }\n".to_owned();
@@ -876,6 +1044,12 @@ mod tests {
         assert!(
             dev_hits.is_empty(),
             "只作 dev 依赖时生产 RULES 不应报错，实际：{dev_hits:?}"
+        );
+        let consumer_hits =
+            check_workspace_exclusive_consumers(&ws.ws_root, EXCLUSIVE_CONSUMER_RULES).unwrap();
+        assert!(
+            consumer_hits.is_empty(),
+            "仅 lattice-daemon 声明 lattice-im（含 dev）且其他包未引入 lattice-im 时不应报错，实际：{consumer_hits:?}"
         );
     }
 
@@ -934,9 +1108,138 @@ mod tests {
             &ws,
             "lattice-daemon",
             "lattice-local",
-            "允许的内部依赖：[lattice-server, lattice-ipc, lattice-store]",
+            "允许的内部依赖：[lattice-server, lattice-ipc, lattice-store, lattice-im]",
         );
         assert_direct_normal_violation(&ws, "lattice-daemon", "plain-helper");
+    }
+
+    #[test]
+    fn direct_rule_lattice_im_rejects_unlisted_workspace_dependencies() {
+        let ws = TestWorkspace::new();
+        assert_direct_rule_rejects_all_forms(
+            &ws,
+            "lattice-im",
+            "lattice-llm",
+            "允许的内部依赖：[lattice-server, lattice-ipc, lattice-store, net-guard]",
+        );
+        assert_direct_normal_violation(&ws, "lattice-im", "lattice-local");
+        assert_direct_normal_violation(&ws, "lattice-im", "plain-helper");
+    }
+
+    #[test]
+    fn exclusive_consumer_rule_lattice_im_rejects_all_non_daemon_forms_including_dev() {
+        let ws = TestWorkspace::new();
+        let policy_fragment = "仅允许以下内部成员依赖 'lattice-im'：[lattice-daemon]";
+
+        // 覆盖受控包（lattice-server、lattice-cli）以及不在 RULES 内的普通 workspace 辅助成员（plain-helper）。
+        for package in ["lattice-server", "lattice-cli", "plain-helper"] {
+            let mut normal_spec = baseline_spec(package);
+            normal_spec
+                .deps
+                .push_str("lattice-im = { path = \"../lattice-im\" }\n");
+
+            let mut build_spec = baseline_spec(package);
+            build_spec.build_deps = "lattice-im = { path = \"../lattice-im\" }\n".to_owned();
+
+            let mut dev_spec = baseline_spec(package);
+            dev_spec.dev_deps = "lattice-im = { path = \"../lattice-im\" }\n".to_owned();
+
+            let mut renamed_spec = baseline_spec(package);
+            renamed_spec
+                .deps
+                .push_str("im_alias = { package = \"lattice-im\", path = \"../lattice-im\" }\n");
+
+            let mut target_opt_spec = baseline_spec(package);
+            target_opt_spec.extra = concat!(
+                "[target.'cfg(windows)'.dependencies]\n",
+                "lattice-im = { path = \"../lattice-im\", optional = true }\n",
+            )
+            .to_owned();
+
+            let cases: &[(&str, CrateSpec, &[&str])] = &[
+                (
+                    "普通依赖",
+                    normal_spec,
+                    &["[dependencies]", "出现不允许的内部依赖 'lattice-im'"],
+                ),
+                (
+                    "build 依赖",
+                    build_spec,
+                    &["[build-dependencies]", "出现不允许的内部依赖 'lattice-im'"],
+                ),
+                (
+                    "dev 依赖",
+                    dev_spec,
+                    &["[dev-dependencies]", "出现不允许的内部依赖 'lattice-im'"],
+                ),
+                (
+                    "改名依赖",
+                    renamed_spec,
+                    &[
+                        "[dependencies]",
+                        "出现不允许的内部依赖 'lattice-im'（改名为 'im_alias'）",
+                    ],
+                ),
+                (
+                    "target 专属 optional 依赖",
+                    target_opt_spec,
+                    &[
+                        "[dependencies]",
+                        "target 'cfg(windows)'",
+                        "optional",
+                        "出现不允许的内部依赖 'lattice-im'",
+                    ],
+                ),
+            ];
+
+            for (label, spec, fragments) in cases {
+                ws.write_member(package, spec);
+                let hits =
+                    check_workspace_exclusive_consumers(&ws.ws_root, EXCLUSIVE_CONSUMER_RULES)
+                        .unwrap();
+                assert_eq!(
+                    hits.len(),
+                    1,
+                    "{package} -> lattice-im（{label}）应被独占消费规则命中且只命中 1 条，实际：{hits:?}"
+                );
+                assert!(
+                    hits[0].starts_with(&format!("{package}: ")),
+                    "{package}（{label}）报错应以违规声明方开头，实际：{hits:?}"
+                );
+                assert!(
+                    hits[0].contains(policy_fragment),
+                    "{package}（{label}）报错应说明允许消费方，实际：{hits:?}"
+                );
+                for fragment in *fragments {
+                    assert!(
+                        hits[0].contains(fragment),
+                        "{package}（{label}）报错缺少片段 '{fragment}'，实际：{hits:?}"
+                    );
+                }
+            }
+
+            ws.reset_member(package);
+        }
+
+        // lattice-im 自身的自引用 dev 依赖被跳过，而 lattice-daemon 仅在 dev-dependencies 声明也允许通过。
+        let mut daemon_dev_only = CrateSpec::with_deps(concat!(
+            "lattice-server = { path = \"../lattice-server\" }\n",
+            "lattice-ipc = { path = \"../lattice-ipc\" }\n",
+            "lattice-store = { path = \"../lattice-store\" }\n",
+        ));
+        daemon_dev_only.dev_deps = "lattice-im = { path = \"../lattice-im\" }\n".to_owned();
+        ws.write_member("lattice-daemon", &daemon_dev_only);
+
+        let mut im_self_dev = baseline_spec("lattice-im");
+        im_self_dev.dev_deps = "lattice-im = { path = \"../lattice-im\" }\n".to_owned();
+        ws.write_member("lattice-im", &im_self_dev);
+
+        let allowed_hits =
+            check_workspace_exclusive_consumers(&ws.ws_root, EXCLUSIVE_CONSUMER_RULES).unwrap();
+        assert!(
+            allowed_hits.is_empty(),
+            "lattice-daemon 声明 dev 依赖或 lattice-im 自引用 dev 依赖时不应命中，实际：{allowed_hits:?}"
+        );
     }
 
     #[test]
@@ -1382,66 +1685,88 @@ mod tests {
 
     #[test]
     fn closure_rule_lattice_cli_rejects_lattice_im() {
-        let metadata = build_graph_metadata(
-            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-im"],
-            &["im-bridge"],
-            &[
-                ("lattice-cli", "im-bridge", &[None]),
-                ("im-bridge", "lattice-im", &[None]),
-            ],
-            true,
+        let ws = TestWorkspace::new();
+        // 清空 lattice-im 自身的依赖，使闭包只检验到达 lattice-im 本身的传递路径。
+        ws.write_member("lattice-im", &CrateSpec::default());
+        ws.write_member(
+            "lattice-cli",
+            &CrateSpec::with_deps("plain-helper = { path = \"../plain-helper\" }\n"),
         );
-        let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
+        ws.write_member(
+            "plain-helper",
+            &CrateSpec::with_deps("lattice-im = { path = \"../lattice-im\" }\n"),
+        );
+
+        let hits = check_workspace_normal_closure(&ws.ws_root, CLOSURE_RULES).unwrap();
         assert_eq!(
             hits,
             vec![
-                "lattice-cli: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-cli -> im-bridge -> lattice-im"
+                "lattice-cli: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-cli -> plain-helper -> lattice-im"
             ],
-            "`lattice-cli` 的普通依赖闭包规则应单独检出可达 `lattice-im` 的路径，实际：{hits:?}"
+            "`lattice-cli` 的普通依赖闭包规则应检出经中间成员可达 `lattice-im` 的路径，实际：{hits:?}"
         );
     }
 
     #[test]
     fn closure_rule_lattice_tui_rejects_lattice_im() {
-        // `lattice-im` 尚未建包；断开 `lattice-tui -> lattice-local`，单独验证 `lattice-tui` 闭包规则拒绝 `lattice-im`。
-        let metadata = build_graph_metadata(
-            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-im"],
-            &["im-bridge"],
-            &[
-                ("lattice-tui", "im-bridge", &[None]),
-                ("im-bridge", "lattice-im", &[None]),
-            ],
-            true,
+        let ws = TestWorkspace::new();
+        ws.write_member("lattice-im", &CrateSpec::default());
+        // 断开 lattice-cli -> lattice-tui，单独验证 lattice-tui 经非默认 feature 可选边到达 lattice-im。
+        ws.write_member(
+            "lattice-cli",
+            &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
         );
-        let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
+        let mut tui_spec = baseline_spec("lattice-tui");
+        tui_spec
+            .deps
+            .push_str("plain-helper = { path = \"../plain-helper\" }\n");
+        ws.write_member("lattice-tui", &tui_spec);
+
+        let helper_spec = CrateSpec {
+            features: "default = []\nextra-im = [\"dep:lattice-im\"]\n".to_owned(),
+            deps: "lattice-im = { path = \"../lattice-im\", optional = true }\n".to_owned(),
+            ..Default::default()
+        };
+        ws.write_member("plain-helper", &helper_spec);
+
+        let hits = check_workspace_normal_closure(&ws.ws_root, CLOSURE_RULES).unwrap();
         assert_eq!(
             hits,
             vec![
-                "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-tui -> im-bridge -> lattice-im"
+                "lattice-tui: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-tui -> plain-helper -> lattice-im"
             ],
-            "`lattice-tui` 的普通依赖闭包规则应单独检出可达 `lattice-im` 的路径，实际：{hits:?}"
+            "`lattice-tui` 的普通依赖闭包规则应检出经非默认 feature 可选边可达 `lattice-im` 的路径，实际：{hits:?}"
         );
     }
 
     #[test]
     fn closure_rule_lattice_local_rejects_lattice_im() {
-        // 断开 `lattice-tui -> lattice-local`，单独验证 `lattice-local` 闭包规则拒绝 `lattice-im`。
-        let metadata = build_graph_metadata(
-            &["lattice-cli", "lattice-tui", "lattice-local", "lattice-im"],
-            &["im-bridge"],
-            &[
-                ("lattice-local", "im-bridge", &[None]),
-                ("im-bridge", "lattice-im", &[None]),
-            ],
-            true,
+        let ws = TestWorkspace::new();
+        ws.write_member("lattice-im", &CrateSpec::default());
+        // 断开 lattice-cli 与 lattice-tui 到 lattice-local 的边，同时在其他包保留纯 dev 依赖，单独验证 lattice-local 闭包。
+        let mut cli_spec =
+            CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n");
+        cli_spec.dev_deps = "lattice-server = { path = \"../lattice-server\" }\n".to_owned();
+        ws.write_member("lattice-cli", &cli_spec);
+        ws.write_member(
+            "lattice-tui",
+            &CrateSpec::with_deps("outside-util = { path = \"../../../outside-util\" }\n"),
         );
-        let hits = check_metadata_normal_closure(&metadata, CLOSURE_RULES).unwrap();
+
+        let mut local_spec = baseline_spec("lattice-local");
+        local_spec.features = "default = []\nextra-im = [\"dep:lattice-im\"]\n".to_owned();
+        local_spec
+            .deps
+            .push_str("lattice-im = { path = \"../lattice-im\", optional = true }\n");
+        ws.write_member("lattice-local", &local_spec);
+
+        let hits = check_workspace_normal_closure(&ws.ws_root, CLOSURE_RULES).unwrap();
         assert_eq!(
             hits,
             vec![
-                "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-local -> im-bridge -> lattice-im"
+                "lattice-local: 普通依赖闭包中可达禁止的包 'lattice-im'，路径：lattice-local -> lattice-im"
             ],
-            "`lattice-local` 的普通依赖闭包规则应单独检出可达 `lattice-im` 的路径，实际：{hits:?}"
+            "`lattice-local` 的普通依赖闭包规则应检出非默认 feature 可选边可达 `lattice-im`，且其他包的纯 dev 依赖不混入结果，实际：{hits:?}"
         );
     }
 }
