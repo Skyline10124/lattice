@@ -17,7 +17,6 @@ use std::sync::{Arc, atomic::Ordering};
 use tokio::{net::UnixStream, sync::watch};
 
 /// 进程内已接受轮次的终态结果快照。
-#[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
 #[derive(Clone, Debug, PartialEq)]
 pub struct InProcessTurnOutcome {
     /// 会话库中该轮次的持久摘要、用量与步骤详情。
@@ -35,19 +34,16 @@ pub struct StopNotification {
 }
 
 impl StopNotification {
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub(super) fn new(rx: watch::Receiver<bool>) -> Self {
         Self { rx }
     }
 
     /// 返回后台当前是否已进入停机阶段。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub fn is_stopping(&self) -> bool {
         *self.rx.borrow()
     }
 
     /// 等待后台进入停机阶段；若订阅或调用时已在停机，或后台已释放，则立即返回。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub async fn wait(&mut self) {
         loop {
             if *self.rx.borrow_and_update() {
@@ -63,7 +59,6 @@ impl StopNotification {
 /// 绑定固定会话与轮次身份的进程内只读观察句柄。
 ///
 /// 丢弃该句柄只释放会话观察租约，不会取消后台正在执行的轮次。
-#[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
 pub struct InProcessTurn {
     backend: Arc<Backend>,
     session_id: SessionId,
@@ -84,7 +79,6 @@ impl std::fmt::Debug for InProcessTurn {
     }
 }
 
-#[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
 impl InProcessTurn {
     pub(super) fn from_owner(
         backend: Arc<Backend>,
@@ -238,6 +232,12 @@ pub struct Service {
     backend: Arc<Backend>,
 }
 
+impl std::fmt::Debug for Service {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Service").finish_non_exhaustive()
+    }
+}
+
 impl Service {
     pub(super) fn new(backend: Arc<Backend>) -> Self {
         Self { backend }
@@ -265,7 +265,6 @@ impl Service {
     }
 
     /// 创建新会话或更新已有会话设置；新建草稿会话结束时异步触发过期草稿清理。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub async fn configure(&self, request: ConfigureRequest) -> Result<ConfigureReply> {
         let (result, cleanup_guard) = self.configure_with_cleanup(request).await;
         if let Some(guard) = cleanup_guard {
@@ -312,7 +311,6 @@ impl Service {
     }
 
     /// 向后台提交新轮次并返回只读观察句柄；若接受确认不明则返回带找回需求的错误。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub async fn submit(&self, request: TurnRequest) -> Result<InProcessTurn> {
         let session_id = request.session;
         let turn_id = request.turn_id;
@@ -333,7 +331,6 @@ impl Service {
     }
 
     /// 重新附着观察已持久接受的轮次（在途或已结束均可）。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub async fn observe(&self, session_id: SessionId, turn_id: TurnId) -> Result<InProcessTurn> {
         let api = self.backend.optional_store().await?.ok_or_else(not_found)?;
         let node = api.read(move |r| r.turn_node(turn_id)).await?;
@@ -390,15 +387,70 @@ impl Service {
     }
 
     /// 查询指定会话的当前路径与全会话用量汇总。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub async fn usage(&self, session_id: SessionId) -> Result<SessionUsage> {
         self.usage_by_prefix(session_id.to_string()).await
     }
 
     /// 返回状态感知的后台停机通知句柄。
-    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
     pub fn stopping(&self) -> StopNotification {
         StopNotification::new(self.backend.stopping.subscribe())
+    }
+
+    /// 返回后台启动时经筛选保留的可用 TLS 信任根 DER 切片。
+    pub fn tls_roots_der(&self) -> &[Vec<u8>] {
+        self.backend.tls_roots_der()
+    }
+
+    /// 供集成测试在指定会话下一轮进入接受事务前挂起（此时 `turn()` 返回 `TurnLookup::InFlight`）。
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn arm_before_accept_for_test(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let lease = self.backend.observer(session_id);
+        let (raw_entered_tx, raw_entered_rx) = tokio::sync::oneshot::channel();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *lease
+            .before_accept
+            .lock()
+            .expect("测试接受前闸门锁不应中毒") = Some((raw_entered_tx, release_rx));
+        tokio::spawn(async move {
+            let _keep_lease = lease;
+            if raw_entered_rx.await.is_ok() {
+                let _ = entered_tx.send(());
+            }
+        });
+        (entered_rx, release_tx)
+    }
+
+    /// 供集成测试在指定会话下一轮接受事务落盘后注入读回失败，使 `submit` 返回带 `recovery` 的确认不明错误。
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn arm_accepted_read_failure_for_test(
+        &self,
+        session_id: SessionId,
+    ) -> (
+        tokio::sync::oneshot::Receiver<()>,
+        tokio::sync::oneshot::Sender<()>,
+    ) {
+        let lease = self.backend.observer(session_id);
+        let (raw_entered_tx, raw_entered_rx) = tokio::sync::oneshot::channel();
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *lease
+            .accepted_read_failure
+            .lock()
+            .expect("测试接受后读回闸门锁不应中毒") = Some((raw_entered_tx, release_rx));
+        tokio::spawn(async move {
+            let _keep_lease = lease;
+            if raw_entered_rx.await.is_ok() {
+                let _ = entered_tx.send(());
+            }
+        });
+        (entered_rx, release_tx)
     }
 }
 
@@ -412,7 +464,6 @@ fn extract_message_text<S: ToolCallState>(message: &NativeMessage<S>) -> String 
     out
 }
 
-#[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
 fn confirmation_unknown_error(
     session_id: SessionId,
     turn_id: TurnId,

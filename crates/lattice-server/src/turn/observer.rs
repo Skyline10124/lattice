@@ -33,7 +33,7 @@ struct ObservationState {
     #[cfg(test)]
     events: Vec<TurnEvent>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 type AcceptedReadFailure = (
     tokio::sync::oneshot::Sender<()>,
     tokio::sync::oneshot::Receiver<()>,
@@ -41,9 +41,9 @@ type AcceptedReadFailure = (
 pub(crate) struct ObserverSink {
     state: Mutex<ObservationState>,
     changed: tokio::sync::watch::Sender<()>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) accepted_read_failure: Mutex<Option<AcceptedReadFailure>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) before_accept: Mutex<Option<AcceptedReadFailure>>,
 }
 impl Default for ObserverSink {
@@ -51,9 +51,9 @@ impl Default for ObserverSink {
         Self {
             state: Mutex::default(),
             changed: tokio::sync::watch::channel(()).0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             accepted_read_failure: Mutex::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             before_accept: Mutex::default(),
         }
     }

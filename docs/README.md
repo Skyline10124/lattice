@@ -17,11 +17,12 @@
 ## 架构
 
 - [宿主平台](architecture/platform.md)：Linux 宿主支持范围。
-- [Crate 职责与依赖边界](architecture/crates.md)：`lattice-ipc`、`lattice-local` 与 `lattice-server` 的职责切分、展示类型转换、直接与普通闭包依赖门禁及线上形状快照门禁。
-- [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、后台单例、锁序与持久性边界。
+- [Crate 职责与依赖边界](architecture/crates.md)：`lattice-ipc`、`lattice-local`、`lattice-server`、`lattice-im` 与 `lattice-daemon` 的职责切分、展示类型转换、直接依赖、独占消费与普通闭包依赖门禁及线上形状快照门禁。
+- [私有存储与持久化](architecture/storage.md)：全局 redb 会话库、IM 台账、后台单例、锁序与持久性边界。
 - [会话与 Turn](architecture/session/README.md)：会话树、Step/Turn 与调用槽位、显式配置、会话设置与草稿会话、提交、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [模型接入](architecture/llm/README.md)：协议适配器、provider 配置与 features、模型引用与元数据、推理档位、用量与费用估算、凭据与 Sign in with ChatGPT。
 - [TUI 交互与视觉](architecture/tui/README.md)：持久对话与临时文字、输入和后台接线、模型与推理档位的选择、重连与取消、工具显示、键位、布局与配色。
+- [IM 网关](architecture/im.md)：Telegram 私聊纯文本接入、`im/config.toml` 与 `im/auth.json` 核验、台账相位与并行恢复、内置命令、流式草稿与 4096 字符回复切分。
 
 ## 开发与验证
 

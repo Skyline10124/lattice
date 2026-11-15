@@ -17,7 +17,6 @@ pub use ipc::InstanceLock;
 pub use server::{DrainOutcome, HostLifecycle, ServeExit, serve};
 #[cfg(any(test, feature = "test-utils"))]
 pub use server::{serve_for_test, serve_for_test_with_service};
-#[cfg(any(test, feature = "test-utils"))]
 pub use service::{InProcessTurn, InProcessTurnOutcome, Service, StopNotification};
 pub(crate) use types::*;
 

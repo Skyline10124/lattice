@@ -2294,6 +2294,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-im"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "lattice-ipc",
+ "lattice-local",
+ "lattice-server",
+ "lattice-store",
+ "net-guard",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
 name = "lattice-ipc"
 version = "0.1.0"
 dependencies = [
@@ -2402,6 +2425,7 @@ dependencies = [
  "toml",
  "tracing",
  "uuid",
+ "zeroize",
 ]
 
 [[package]]
