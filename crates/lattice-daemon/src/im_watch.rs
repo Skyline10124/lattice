@@ -7,10 +7,7 @@ use std::{
     mem::MaybeUninit,
     os::{fd::OwnedFd, unix::fs::MetadataExt},
     path::Path,
-    sync::{
-        Arc, Mutex,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Arc, Mutex},
 };
 
 use lattice_ipc::{ImMountResult, LocalErrorKind};
@@ -25,8 +22,6 @@ const CONFIG_FILE_BYTES: &[u8] = b"config.toml";
 
 struct ActiveWatch {
     generation: u64,
-    identity: (u64, u64),
-    invalidated: Arc<AtomicBool>,
     abort: AbortHandle,
 }
 
@@ -36,7 +31,7 @@ struct WatchSlot {
     active: Option<ActiveWatch>,
 }
 
-/// 按目录身份 `(st_dev, st_ino)` 与单调递增代次维护 `im/` 的 `inotify` 监视任务。
+/// 按单调递增代次维护 `im/` 的 `inotify` 监视任务，并在建立时复核目录身份 `(st_dev, st_ino)`。
 #[derive(Default)]
 pub(crate) struct ImDirectoryWatcher {
     slot: Mutex<WatchSlot>,
@@ -65,27 +60,17 @@ impl ImDirectoryWatcher {
         }
     }
 
-    /// 确保给定 `im/` 目录（由 `(st_dev, st_ino)` 标识）挂有有效的 `inotify` 监视。
+    /// 为给定 `im/` 目录（由 `(st_dev, st_ino)` 标识）建立新代次的 `inotify` 监视并替换旧监视。
     ///
-    /// 若本次准备前目录本就存在、身份未变且当前监视代次未失效，则直接复用现有监视；
-    /// 否则替换旧监视并分配新代次，防止旧监视描述符的迟到事件误清掉新建立的监视。
+    /// 每次 `prepare` 均建立全新 `inotify` 描述符并推进代次（随后在同一轮挂载中读取 `config.toml`，无事件盲窗），
+    /// 从而彻底隔离同 inode 目录被移走再移回时旧描述符队列中尚未被异步循环消费的迟到 `MOVE_SELF` 等失效事件。
     pub(crate) fn ensure_watching(
         self: &Arc<Self>,
         im_dir: &Path,
         identity: (u64, u64),
-        existed_before_prepare: bool,
         remount_handle: &ComponentRemountHandle,
     ) -> Result<(), String> {
         let mut slot = self.slot.lock().expect("im 目录监视锁不应中毒");
-        if existed_before_prepare
-            && let Some(active) = &slot.active
-            && active.identity == identity
-            && !active.invalidated.load(Ordering::Acquire)
-            && !active.abort.is_finished()
-        {
-            return Ok(());
-        }
-
         if let Some(previous) = slot.active.take() {
             previous.abort.abort();
         }
@@ -117,19 +102,15 @@ impl ImDirectoryWatcher {
 
         slot.next_generation += 1;
         let generation = slot.next_generation;
-        let invalidated = Arc::new(AtomicBool::new(false));
-        let task_invalidated = Arc::clone(&invalidated);
         let watcher_weak = Arc::downgrade(self);
         let handle = remount_handle.clone();
 
         let join_handle = rt.spawn(lattice_server::scoped_component_future(async move {
-            run_watch_loop(async_fd, generation, task_invalidated, watcher_weak, handle).await;
+            run_watch_loop(async_fd, generation, watcher_weak, handle).await;
         }));
 
         slot.active = Some(ActiveWatch {
             generation,
-            identity,
-            invalidated,
             abort: join_handle.abort_handle(),
         });
         Ok(())
@@ -140,7 +121,7 @@ impl ImDirectoryWatcher {
         let slot = self.slot.lock().expect("im 目录监视锁不应中毒");
         slot.active
             .as_ref()
-            .filter(|w| !w.invalidated.load(Ordering::Acquire) && !w.abort.is_finished())
+            .filter(|w| !w.abort.is_finished())
             .map(|w| w.generation)
     }
 
@@ -179,7 +160,6 @@ fn verify_watched_directory_identity(im_dir: &Path, expected: (u64, u64)) -> Res
 async fn run_watch_loop(
     async_fd: AsyncFd<OwnedFd>,
     generation: u64,
-    invalidated: Arc<AtomicBool>,
     watcher: std::sync::Weak<ImDirectoryWatcher>,
     remount_handle: ComponentRemountHandle,
 ) {
@@ -188,7 +168,7 @@ async fn run_watch_loop(
             Ok(guard) => guard,
             Err(err) => {
                 tracing::warn!(generation, %err, "im 配置目录监视等待可读事件失败，标记当前监视失效");
-                mark_invalidated(generation, &invalidated, &watcher);
+                mark_invalidated(generation, &watcher);
                 break;
             }
         };
@@ -237,7 +217,7 @@ async fn run_watch_loop(
 
         if let Some(err) = read_failed {
             tracing::warn!(generation, %err, "读取 im 配置目录 inotify 事件失败，标记当前监视失效");
-            mark_invalidated(generation, &invalidated, &watcher);
+            mark_invalidated(generation, &watcher);
             break;
         }
 
@@ -247,7 +227,7 @@ async fn run_watch_loop(
                 generation,
                 "im 配置目录已被移除或替换，当前 inotify 监视代次失效"
             );
-            mark_invalidated(generation, &invalidated, &watcher);
+            mark_invalidated(generation, &watcher);
             break;
         }
 
@@ -260,12 +240,7 @@ async fn run_watch_loop(
     }
 }
 
-fn mark_invalidated(
-    generation: u64,
-    invalidated: &AtomicBool,
-    watcher: &std::sync::Weak<ImDirectoryWatcher>,
-) {
-    invalidated.store(true, Ordering::Release);
+fn mark_invalidated(generation: u64, watcher: &std::sync::Weak<ImDirectoryWatcher>) {
     if let Some(strong) = watcher.upgrade() {
         strong.invalidate_generation(generation);
     }

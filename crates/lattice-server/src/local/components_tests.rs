@@ -1450,3 +1450,119 @@ async fn old_driver_exit_guard_never_clobbers_new_driver_running_state() {
     let _ = pass3_gate_tx.send(());
     assert!(exit.failure.is_none());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn component_never_launches_after_backend_stopping_takes_effect() {
+    struct BlockingStopLifecycle {
+        entered: Arc<Notify>,
+        release: Mutex<Option<std::sync::mpsc::Receiver<()>>>,
+    }
+
+    impl super::HostLifecycle for BlockingStopLifecycle {
+        fn on_ready(&self) -> super::types::Result<()> {
+            Ok(())
+        }
+
+        fn on_stopping(&self) {
+            self.entered.notify_one();
+            if let Some(rx) = self.release.lock().unwrap().take() {
+                tokio::task::block_in_place(|| {
+                    let _ = rx.recv();
+                });
+            }
+        }
+    }
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = StateLayout::in_state_root(dir.path());
+    let (stop_tx, stop_rx) = mpsc::channel(4);
+
+    let on_stopping_entered = Arc::new(Notify::new());
+    let (on_stopping_release_tx, on_stopping_release_rx) = std::sync::mpsc::channel::<()>();
+    let lifecycle = BlockingStopLifecycle {
+        entered: on_stopping_entered.clone(),
+        release: Mutex::new(Some(on_stopping_release_rx)),
+    };
+
+    let pass = Arc::new(AtomicUsize::new(0));
+    let build_entered = Arc::new(Notify::new());
+    let (build_release_tx, build_release_rx) = oneshot::channel::<()>();
+    let build_release = Arc::new(Mutex::new(Some(build_release_rx)));
+    let spawned_count = Arc::new(AtomicUsize::new(0));
+    let observed_stopping_on_start = Arc::new(AtomicBool::new(false));
+
+    let pass_cl = pass.clone();
+    let build_entered_cl = build_entered.clone();
+    let build_release_cl = build_release.clone();
+    let spawned_cl = spawned_count.clone();
+    let observed_cl = observed_stopping_on_start.clone();
+    let reg = ComponentRegistration::new("im", move |service| {
+        let n = pass_cl.fetch_add(1, Ordering::SeqCst) + 1;
+        if n == 1 {
+            return ComponentBuildOutcome::Disabled;
+        }
+        build_entered_cl.notify_one();
+        if let Some(rx) = build_release_cl.lock().unwrap().take() {
+            let _ = rx.blocking_recv();
+        }
+        let spawned_cl = spawned_cl.clone();
+        let observed_cl = observed_cl.clone();
+        ComponentBuildOutcome::Component(PreparedComponent::new(move |stop| async move {
+            spawned_cl.fetch_add(1, Ordering::SeqCst);
+            observed_cl.store(service.stopping().is_stopping(), Ordering::SeqCst);
+            stop.await;
+            Ok(())
+        }))
+    });
+    let remount_handle = reg.remount_handle();
+
+    let serve_layout = layout.clone();
+    let home = Some(dir.path().to_path_buf());
+    let handle = tokio::spawn(async move {
+        super::serve(
+            serve_layout,
+            home,
+            Duration::from_secs(60),
+            stop_rx,
+            lifecycle,
+            vec![reg],
+        )
+        .await
+    });
+
+    let client = LocalClient::new(layout);
+    wait_ready(&client).await;
+    remount_handle.wait_idle_for_test().await;
+
+    // 发起重新挂载并使其停在 build 阶段。
+    let client_reload = client.clone();
+    let reload_task = tokio::spawn(async move { client_reload.im_reload().await });
+    build_entered.notified().await;
+
+    // 触发后台停机并等待进入 lifecycle.on_stopping()：此时 Backend 停机状态与 Service::stopping() 已生效。
+    stop_tx.send(()).await.unwrap();
+    on_stopping_entered.notified().await;
+
+    // 放行 build 完成构造：后台已进入停机后，绝不能再启动新组件实例或返回 Mounted。
+    let _ = build_release_tx.send(());
+    let reload_res = tokio::time::timeout(Duration::from_secs(1), reload_task)
+        .await
+        .expect("停机生效后在途 ImReload 应立即以 Stopping 结束")
+        .unwrap();
+    let _ = on_stopping_release_tx.send(());
+
+    let reload_err = reload_res.expect_err("停机生效后 ImReload 不得返回成功 Mounted");
+    assert_eq!(reload_err.kind, LocalErrorKind::Stopping);
+    assert_eq!(
+        spawned_count.load(Ordering::SeqCst),
+        0,
+        "后台停机状态生效后绝不能再启动新的受托管组件实例"
+    );
+    assert!(
+        !observed_stopping_on_start.load(Ordering::SeqCst),
+        "新组件绝不能在启动瞬间观察到后台已处于 stopping 状态"
+    );
+
+    let exit = handle.await.unwrap().unwrap();
+    assert!(exit.failure.is_none());
+}

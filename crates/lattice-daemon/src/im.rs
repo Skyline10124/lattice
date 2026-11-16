@@ -77,14 +77,6 @@ impl ImHost {
             }
         };
 
-        let existed_before = match root_dir.child(OsStr::new(IM_SUBDIR_NAME), false) {
-            Ok(existing) => existing.is_some(),
-            Err(err) => {
-                self.watcher.clear();
-                return Err(map_prepare_private_error(PrepareRole::ImDir, err));
-            }
-        };
-
         if let Err(err) = root_dir.child(OsStr::new(IM_SUBDIR_NAME), true) {
             self.watcher.clear();
             return Err(map_prepare_private_error(PrepareRole::ImDir, err));
@@ -99,9 +91,9 @@ impl ImHost {
             }
         };
 
-        if let Err(reason) =
-            self.watcher
-                .ensure_watching(&im_dir, identity, existed_before, remount_handle)
+        if let Err(reason) = self
+            .watcher
+            .ensure_watching(&im_dir, identity, remount_handle)
         {
             self.watcher.clear();
             return Err(reason);
@@ -562,8 +554,8 @@ mod tests {
         );
         assert_eq!(
             host.active_watch_generation(),
-            Some(2),
-            "ImReload 恢复监视后代次应递增为 2"
+            Some(4),
+            "启动(1) -> CLOSE_WRITE(2) -> MOVED_TO(3) -> 删除失效 -> ImReload 恢复后代次应递增为 4"
         );
 
         {
@@ -587,6 +579,110 @@ mod tests {
                 )
             },
             "恢复监视后保存 config.toml 再次自动触发重新挂载",
+        )
+        .await;
+
+        stop_tx.send(()).await.unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn reload_after_same_inode_move_roundtrip_keeps_watch_alive_against_pending_move_self() {
+        let temp = tempfile::Builder::new()
+            .prefix("ltc-im-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let home = temp.path().join("home");
+        let workspace = temp.path().join("workspace");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&workspace).unwrap();
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let state_root = temp.path().join("state");
+        fs::create_dir(&state_root).unwrap();
+        fs::set_permissions(&state_root, fs::Permissions::from_mode(0o700)).unwrap();
+        let layout = StateLayout::in_state_root(&state_root);
+        let host = ImHost::new(layout.clone(), Some(home.clone()));
+        let (stop_tx, stop_rx) = mpsc::channel(4);
+        let serve_layout = layout.clone();
+        let serve_home = Some(home.clone());
+        let captured_handle = Arc::new(std::sync::OnceLock::new());
+        let captured_for_prep = captured_handle.clone();
+        let prep_host = host.clone();
+        let build_host = host.clone();
+        let reg = ComponentRegistration::new("im", move |service| build_host.build(service))
+            .with_prepare(move |handle| {
+                let _ = captured_for_prep.set(handle.clone());
+                prep_host.prepare(handle)
+            });
+        let task = tokio::spawn(async move {
+            lattice_server::serve(
+                serve_layout,
+                serve_home,
+                Duration::from_secs(5),
+                stop_rx,
+                TestLifecycle,
+                vec![reg],
+            )
+            .await
+        });
+
+        let _ = wait_daemon_ready(&layout).await;
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        while host.active_watch_generation() != Some(1) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "启动后应在期限内建立第 1 代 inotify 监视"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let remount_handle = captured_handle.get().expect("初始挂载已捕获句柄").clone();
+
+        let im_dir = home.join(".lattice/im");
+        let moved_dir = home.join(".lattice/im.bak");
+        let config_path = im_dir.join("config.toml");
+
+        // 将 `im/` 移走再移回原路径（保持相同 `(st_dev, st_ino)`），并在异步 I/O 反应器轮询消费挂起的
+        // `MOVE_SELF` 之前让重新挂载的阻塞池 `prepare` 先行完成。
+        fs::rename(&im_dir, &moved_dir).unwrap();
+        fs::rename(&moved_dir, &im_dir).unwrap();
+        let remount_task = tokio::spawn(async move { remount_handle.remount().await });
+        tokio::task::yield_now().await;
+        tokio::task::yield_now().await;
+        std::thread::sleep(Duration::from_millis(30));
+        let reload_res = remount_task.await.unwrap().unwrap();
+        assert_eq!(reload_res, ImMountResult::Disabled);
+
+        // 让异步运行时充分排空任何挂起的旧 `inotify` 事件。
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        assert_eq!(
+            host.active_watch_generation(),
+            Some(2),
+            "reload 成功后应建立第 2 代监视，迟到的旧 MOVE_SELF 事件绝不能将其撤销"
+        );
+
+        // 随后保存 `im/config.toml` 必须仍能自动触发重新挂载。
+        {
+            let mut f = OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&config_path)
+                .unwrap();
+            fs::set_permissions(&config_path, fs::Permissions::from_mode(0o600)).unwrap();
+            f.write_all(valid_config_toml(&workspace).as_bytes())
+                .unwrap();
+        }
+        wait_until_component_matches(
+            &layout,
+            |components| {
+                matches!(
+                    components,
+                    [c] if c.name == "im"
+                        && matches!(&c.state, ComponentState::Unmounted { reason } if reason.contains("缺少 Telegram 平台凭据"))
+                )
+            },
+            "同 inode 移走移回并 reload 后保存 config.toml 仍应自动触发重新挂载",
         )
         .await;
 

@@ -197,6 +197,10 @@ impl Default for Admission {
     }
 }
 impl Admission {
+    pub(super) fn is_stopping(&self) -> bool {
+        self.stop.is_stopping()
+    }
+
     fn count_unconfirmed(&mut self, operation: &OperationRecord) {
         if !operation.counted.swap(true, Ordering::Relaxed) {
             self.unconfirmed_operations += 1;
@@ -322,8 +326,8 @@ impl Backend {
             .map_err(|error| ApiError::Configuration(error.clone()).into())
     }
 
-    fn begin_stop(&self) {
-        {
+    pub(super) fn begin_stop(&self) {
+        let pending_component_waiters = {
             let mut state = lock(&self.admission);
             if !matches!(state.stop, StopPhase::Running) {
                 return;
@@ -333,10 +337,17 @@ impl Backend {
                 .checked_add(state.drain_timeout)
                 .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
             state.stop = StopPhase::Draining { deadline };
+            let waiters = self.components.begin_stop_locked();
             self.stopping.send_replace(true);
+            waiters
+        };
+        for tx in pending_component_waiters {
+            let _ = tx.send(Err(LocalError::new(
+                LocalErrorKind::Stopping,
+                "后台正在停止",
+            )));
         }
         self.lifecycle.on_stopping();
-        self.components.begin_stop();
         self.metadata.stop();
         if let Ok(gateway) = &self.gateway {
             gateway.chatgpt_auth().stop_logins();

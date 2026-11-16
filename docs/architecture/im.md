@@ -16,7 +16,7 @@ status: active
 | --- | --- | --- | --- |
 | 托管组件槽位 | 后台按组件名（`"im"`）维护的挂载状态、运行实例句柄、停止通知与合并重新挂载协调器 | `lattice-server`（`local/components.rs`） | 随 `lattice_server::serve` 启动完成初始挂载，运行期响应 IPC 或 `inotify` 重新挂载，停机第 3 步统一收尾 |
 | IM 网关实例 | 经只读配置与凭据检查后构造并运行的平台接入循环（`PreparedImGateway`） | `lattice-im`（`gateway.rs`） | 构造阶段只读本地文件；运行阶段驱动轮询、恢复与回复，收到停止通知或后台进入停机时排空全部子任务后退出 |
-| IM 配置目录监视 | 针对 `<config_dir>/im` 目录的异步 `inotify` 监视器与目录 `(st_dev, st_ino)` 代次状态 | `lattice-daemon`（`im.rs`、`im_watch.rs`） | 在 `ImHost::prepare` 成功确认私有目录后建立或按 inode/失效状态重建；目录被删时标记失效，待下次重新挂载恢复 |
+| IM 配置目录监视 | 针对 `<config_dir>/im` 目录的异步 `inotify` 监视器与递增代次状态 | `lattice-daemon`（`im.rs`、`im_watch.rs`） | 每次 `ImHost::prepare` 成功确认私有目录后建立新代次监视并替换旧描述符；目录被删除或移走时按代次标记失效，待下次重新挂载恢复 |
 | IM 配置文件 | 配置目录下的 `im/config.toml`，声明平台启用表、白名单、默认工作区与默认 agent | 用户维护，`prepare_im_gateway` 只读解析 | 在构造 `PreparedImGateway` 时读取并校验，运行实例内部保持不变 |
 | 平台凭据存储 | 配置目录下的私有文件 `im/auth.json`，保存各平台访问密钥（`ImToken`） | `lattice-server`（`ImAuthStore`） | 按需打开读取、进程内串行写锁加 `0600` 原子替换更新；内存缓冲用后清零 |
 | 身份键 | 带小写平台前缀的强类型标识：`SenderKey`、`ChatKey`、`InboundId`（如 `tg:12345`） | `lattice-im`（`identity.rs`） | 平台原始数值标识在平台模块边界转换为身份键，贯穿授权、绑定、台账与草稿映射 |
@@ -28,8 +28,8 @@ status: active
 
 | 组件 | 持有的状态 | 执行的规则 | 对外接口 |
 | --- | --- | --- | --- |
-| [`components.rs`](../../crates/lattice-server/src/local/components.rs)（`lattice-server`） | 已注册组件的运行句柄、当前公开状态（`Disabled` / `Mounted` / `Unmounted`）、正在进行与排队的重新挂载槽位 | 在后台就绪后并发启动初始挂载并与后续合并重新挂载串行；旧实例未退出前不启动新实例，单实例收尾上限 10 秒（超时 `abort`）；配置无效且旧实例仍存活时保留旧实例并报告 `UsingPreviousConfiguration`；以线程局部组件 panic 作用域抑制原始 panic 载荷进入 `stderr` 日志并经监督任务隔离错误与 panic；停机第 1 步唤醒在途重新挂载返回 `Stopping`，第 3 步在严格共享 10 秒上限内并行等待全部组件任务退出 | `ComponentRegistration`、`ComponentBuildOutcome`、`PreparedComponent`、`ComponentStop`、`ComponentRemountHandle`、`ScopedComponentFuture`、`install_component_panic_hook`、`scoped_component_future`、`with_component_panic_scope`；IPC `ImAuthSet`、`ImAuthRemove`、`ImAuthStatus`、`ImReload` 及 `DaemonStatus.components` |
-| [`im.rs`](../../crates/lattice-daemon/src/im.rs)、[`im_watch.rs`](../../crates/lattice-daemon/src/im_watch.rs)（`lattice-daemon`） | `ImHost`（`StateLayout`、启动期 `HOME` 快照、当前 `inotify` 监视状态与递增代次） | `prepare` 核验 `HOME` 为绝对路径，经 `PrivateDirectory` 以 `0700` 创建缺失的 `~/.lattice` 与 `~/.lattice/im`（已有路径权限或类型不合规绝不自动修改），按目录 `(st_dev, st_ino)` 建立或替换 `rustix::fs::inotify` 异步监视；仅当 `config.toml` 触发 `CLOSE_WRITE` 或 `MOVED_TO` 时调用 `ComponentRemountHandle::remount`；收到 `DELETE_SELF` / `MOVE_SELF` / `IGNORED` 时按代次标记当前监视失效，不自动重建被删目录 | 向 `lattice_server::serve` 注册 `"im"` 组件 |
+| [`components.rs`](../../crates/lattice-server/src/local/components.rs)（`lattice-server`） | 已注册组件的运行句柄、当前公开状态（`Disabled` / `Mounted` / `Unmounted`）、正在进行与排队的重新挂载槽位 | 在后台就绪后并发启动初始挂载并与后续合并重新挂载串行；旧实例未退出前不启动新实例，单实例收尾上限 10 秒（超时 `abort`）；配置无效且旧实例仍存活时保留旧实例并报告 `UsingPreviousConfiguration`；以线程局部组件 panic 作用域抑制原始 panic 载荷进入 `stderr` 日志并经监督任务隔离错误与 panic；与 `Backend::begin_stop` 共享准入停机锁边界，停机第 1 步原子阻断新实例启动并唤醒在途重新挂载返回 `Stopping`，第 3 步在严格共享 10 秒上限内并行等待全部组件任务退出 | `ComponentRegistration`、`ComponentBuildOutcome`、`PreparedComponent`、`ComponentStop`、`ComponentRemountHandle`、`ScopedComponentFuture`、`install_component_panic_hook`、`scoped_component_future`、`with_component_panic_scope`；IPC `ImAuthSet`、`ImAuthRemove`、`ImAuthStatus`、`ImReload` 及 `DaemonStatus.components` |
+| [`im.rs`](../../crates/lattice-daemon/src/im.rs)、[`im_watch.rs`](../../crates/lattice-daemon/src/im_watch.rs)（`lattice-daemon`） | `ImHost`（`StateLayout`、启动期 `HOME` 快照、当前 `inotify` 监视状态与递增代次） | `prepare` 核验 `HOME` 为绝对路径，经 `PrivateDirectory` 以 `0700` 创建缺失的 `~/.lattice` 与 `~/.lattice/im`（已有路径权限或类型不合规绝不自动修改），每次成功准备时建立新代次的 `rustix::fs::inotify` 异步监视并复核目录 `(st_dev, st_ino)` 身份以替换旧描述符；仅当 `config.toml` 触发 `CLOSE_WRITE` 或 `MOVED_TO` 时调用 `ComponentRemountHandle::remount`；收到 `DELETE_SELF` / `MOVE_SELF` / `IGNORED` 时按代次标记当前监视失效，不自动重建被删目录 | 向 `lattice_server::serve` 注册 `"im"` 组件 |
 | [`im_auth.rs`](../../crates/lattice-server/src/im_auth.rs)（`lattice-server`） | 配置目录路径句柄 `ImAuthStore`、零化秘密包装 `ImToken` 与平台状态 `ImPlatformCredentialState` | 经 `PrivateDirectory` 核验配置目录、`im/`（`0700`）与 `auth.json`（`0600`、1 MiB 上限）；严格解析 `version == 1`、拒绝未知字段/重复键/尾随字节；校验 `"telegram"` 平台名与 `1..=16_384` 字节无控制字符密钥；进程内写锁保护重读与原子替换；错误消息零秘密回显 | `ImAuthStore`（`new`、`get`、`status`、`set`、`remove`）、`ImToken`（`as_str`，不实现 `Debug` 或 `Display`）、`ImPlatformCredentialState`、`ImAuthError`、`TELEGRAM_PLATFORM` |
 | [`commands/im.rs`](../../crates/lattice-cli/src/commands/im.rs)、[`commands/daemon.rs`](../../crates/lattice-cli/src/commands/daemon.rs)（`lattice-cli`） | 无持久状态 | 提供全中文 `lattice im` 命令组（`auth set <平台>`、`auth remove <平台>`、`auth status`、`reload`）与 `lattice daemon status` 组件区块；`im auth set` 先本地校验平台名（不回显非法值）再经无回显终端或限长管道读取凭据；在 `main.rs` 拦截 `im` 命令解析错误，杜绝命令行误传秘密被回显 | CLI `lattice im ...`、`lattice daemon status`（文本与 `--json`） |
 | [`config.rs`](../../crates/lattice-im/src/config.rs) | 已校验的 `TelegramGatewayConfig`（白名单集合、规范化工作区路径、`AgentName`、`ImToken`） | 只读读取 `im/config.toml` 与 `ImAuthStore`，区分未启用（`Disabled`）、缺凭据（`Unavailable`）、配置或文件违规（`InvalidConfiguration`）与就绪实例（`Prepared`）；构造阶段不启动任务、不解析 DNS、不联网、不访问台账 | `prepare_im_gateway`、`ImBuildOutcome` |
@@ -42,7 +42,7 @@ status: active
 
 1. **启动目录准备与 `inotify` 监视**：
    - 守护进程绑定监听并宣告就绪后，同步占位并并发启动已注册组件的初始挂载驱动（不阻塞 `api.sock` 连接接受与停机信号处理；初始挂载进行期间到达的重新挂载请求排入同一槽位合并队列）。`ImHost::prepare` 检查 `HOME` 为绝对路径后，确保 `<config_dir>`（`$HOME/.lattice`）与 `<config_dir>/im` 存在（缺失新建为 `0700`；已存在但属主、非符号链接真实目录或 `mode & 0o077 == 0` 不满足时拒绝自动修改权限并返回安全中文原因，使 `"im"` 列为 `Unmounted`）。
-   - 目录核验通过后，若尚未建立监视、原监视已失效或 `<config_dir>/im` 的 `(st_dev, st_ino)` 已变化，`ImHost::prepare` 建立基于 `rustix::fs::inotify`（`NONBLOCK | CLOEXEC`）与 `AsyncFd` 的目录监视。
+   - 目录核验通过后，`ImHost::prepare` 每次均建立新代次的基于 `rustix::fs::inotify`（`NONBLOCK | CLOEXEC`）与 `AsyncFd` 的目录监视（建立后复核目录 `(st_dev, st_ino)` 与 `0700` 私有属性，并替换旧代次监视，防止同 inode 移走移回后旧描述符队列中迟到的失效事件撤销新监视）。
    - 仅当文件名恰好为 `config.toml` 且事件包含 `CLOSE_WRITE` 或 `MOVED_TO` 时自动请求重新挂载 `"im"`；`auth.json`、临时文件、尚未关闭的写入以及删除 `config.toml`（`DELETE` / `MOVED_FROM`）均不触发自动重新挂载。若 `<config_dir>/im` 被删除或移走（收到 `DELETE_SELF` / `MOVE_SELF` / `IGNORED`），按代次标记当前监视失效，不自动重建目录；后续执行 `lattice im reload` 或 `lattice im auth set|remove` 调用 `prepare` 时重建 `0700` 目录并恢复监视。
 2. **合并重新挂载、保留旧实例与故障隔离**：
    - 每次挂载先在阻塞池调用 `prepare`（失败直接按 `InvalidConfiguration` 处理），再调用只读 `build`（`prepare_im_gateway`）。
@@ -51,7 +51,7 @@ status: active
    - 同一组件重新挂载进行期间到达的后续重新挂载请求不会并发执行，而是合并为当前轮结束后的同一次重新挂载，共享那一次重新读取磁盘配置与凭据后的回执。
    - 组件构造阶段或运行中的网关及其子任务若返回 `Err(reason)` 或发生 panic，宿主通过组件 panic 作用域抑制原始 panic 载荷进入 `stderr` 日志，并由监督任务捕获异常将组件状态原子切换为 `Unmounted { reason }`（绝不拼入原始 panic 载荷），后台进程继续正常服务；此后经 `lattice im reload` 或配置修复即可重新挂载。
 3. **后台停机收尾**：
-   - 后台进入停机第 1 步时同步通知组件管理器：向所有运行中组件发出停止信号，并唤醒正在等待旧实例退出的重新挂载及合并等待者立即返回 `Stopping` 错误，不再启动任何新实例。
+   - 后台进入停机第 1 步时在 `Backend::admission` 同一锁临界区内同步推进组件管理器停机转换（先于 `HostLifecycle::on_stopping` 与对外停机通知）：向所有运行中组件发出停止信号，唤醒正在等待旧实例退出的重新挂载及合并等待者立即返回 `Stopping` 错误，并与组件最终启动/状态提交共享该锁边界，确保停机生效后绝不再启动任何新实例。
    - 在途轮次排空（第 2 步）结束后，停机第 3 步在单一共享 10 秒截止时间内并行等待所有仍在运行或退场中的组件任务结束（无活跃组件任务时零等待），超时对剩余任务调用 `abort()` 后不再额外计时等待。
 4. **IPC、状态展示与 `lattice im` 退出码**：
    - `DaemonStatus.components` 按 `name` 字典序返回非 `Disabled` 组件列表；IM 未启用（`Disabled`）时不包含 `"im"` 条目，`lattice daemon status` 文本模式在无活跃/未挂载组件时输出 `组件：无`，非空时逐行缩进渲染 `im：已挂载`、`im：已挂载；仍按上一份配置运行；<原因>` 或 `im：未挂载；<原因>`。

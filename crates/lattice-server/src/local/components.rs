@@ -559,11 +559,8 @@ impl ComponentManager {
         let _ = self.backend.set(Arc::downgrade(backend));
     }
 
-    fn service(&self) -> Option<Service> {
-        self.backend
-            .get()
-            .and_then(Weak::upgrade)
-            .map(|backend| backend.service())
+    fn backend(&self) -> Option<Arc<Backend>> {
+        self.backend.get().and_then(Weak::upgrade)
     }
 
     pub(super) fn is_stopping(&self) -> bool {
@@ -590,14 +587,19 @@ impl ComponentManager {
 
     /// 在后台监听就绪后并发启动全部已注册组件的初始挂载驱动（不阻塞连接接受与停机信号处理）。
     ///
+    /// 与 `Backend::begin_stop` 共享 `backend.admission` 锁边界，确保停机状态生效后绝不启动新驱动；
     /// 启动前先同步标记槽位 `running = true`，保证紧随其后到达的 `remount` 请求必然排在初始挂载之后合并执行。
     pub(super) fn start_initial_mount(self: &Arc<Self>) {
-        if self.is_stopping() {
+        let Some(backend) = self.backend() else {
+            return;
+        };
+        let admission = lock(&backend.admission);
+        if admission.is_stopping() || self.is_stopping() {
             return;
         }
         for slot in self.slots.values() {
             let mut queue = lock(&slot.queue);
-            if self.is_stopping() || queue.running {
+            if queue.running {
                 continue;
             }
             queue.driver_generation += 1;
@@ -611,7 +613,10 @@ impl ComponentManager {
 
     /// 重新挂载指定名称的组件；未注册该组件时返回 `Disabled`，后台停机时返回 `Stopping`。
     pub(super) async fn remount(self: &Arc<Self>, name: &str) -> Result<ImMountResult> {
-        if self.is_stopping() {
+        let Some(backend) = self.backend() else {
+            return Err(stopping_error());
+        };
+        if self.is_stopping() || lock(&backend.admission).is_stopping() {
             return Err(stopping_error());
         }
         let Some(slot) = self.slots.get(name).cloned() else {
@@ -620,10 +625,11 @@ impl ComponentManager {
         let mut stop_rx = self.subscribe_stopping();
         let (tx, mut rx) = oneshot::channel();
         {
-            let mut queue = lock(&slot.queue);
-            if self.is_stopping() {
+            let admission = lock(&backend.admission);
+            if admission.is_stopping() || self.is_stopping() {
                 return Err(stopping_error());
             }
+            let mut queue = lock(&slot.queue);
             if queue.running {
                 queue.pending_waiters.push(tx);
                 slot.pending_waiters_tx
@@ -639,12 +645,18 @@ impl ComponentManager {
         }
         tokio::select! {
             biased;
-            res = &mut rx => match res {
-                Ok(result) => result,
-                Err(_) if self.is_stopping() => Err(stopping_error()),
-                Err(_) => Err(internal()),
-            },
             () = wait_stop(&mut stop_rx) => Err(stopping_error()),
+            res = &mut rx => {
+                if self.is_stopping() {
+                    Err(stopping_error())
+                } else {
+                    match res {
+                        Ok(result) => result,
+                        Err(_) if self.is_stopping() => Err(stopping_error()),
+                        Err(_) => Err(internal()),
+                    }
+                }
+            }
         }
     }
 
@@ -669,8 +681,12 @@ impl ComponentManager {
                     let _ = tx.send(result.clone());
                 }
                 let next_batch = {
+                    let backend = manager.backend();
+                    let admission = backend.as_ref().map(|b| lock(&b.admission));
                     let mut queue = lock(&slot.queue);
-                    if manager.is_stopping() {
+                    if manager.is_stopping()
+                        || admission.as_ref().is_none_or(|adm| adm.is_stopping())
+                    {
                         let pending = std::mem::take(&mut queue.pending_waiters);
                         slot.pending_waiters_tx.send_replace(0);
                         if queue.driver_generation == driver_gen {
@@ -678,6 +694,8 @@ impl ComponentManager {
                             queue.driver_abort = None;
                             slot.driver_state_tx.send_replace((driver_gen, false));
                         }
+                        drop(queue);
+                        drop(admission);
                         for tx in pending {
                             let _ = tx.send(Err(stopping_error()));
                         }
@@ -712,11 +730,15 @@ impl ComponentManager {
         slot: &Arc<ComponentSlot>,
         is_initial: bool,
     ) -> Result<ImMountResult> {
-        if self.is_stopping() {
+        let Some(backend) = self.backend() else {
             return Err(stopping_error());
-        }
-        let Some(service) = self.service() else {
-            return Err(stopping_error());
+        };
+        let service = {
+            let admission = lock(&backend.admission);
+            if admission.is_stopping() || self.is_stopping() {
+                return Err(stopping_error());
+            }
+            backend.service()
         };
 
         let prepare = slot.prepare.clone();
@@ -770,23 +792,31 @@ impl ComponentManager {
 
         // 配置无效且当前有存活运行实例：保留旧实例继续运行，并附加配置错误原因。
         if let ComponentBuildOutcome::InvalidConfiguration { reason } = &outcome {
-            let mut state = lock(&slot.state);
-            if self.is_stopping() {
-                return Err(stopping_error());
-            }
-            if state
-                .active
-                .as_ref()
-                .is_some_and(|inst| !inst.is_finished())
-            {
+            let kept_previous = {
+                let admission = lock(&backend.admission);
+                if admission.is_stopping() || self.is_stopping() {
+                    return Err(stopping_error());
+                }
+                let mut state = lock(&slot.state);
+                if state
+                    .active
+                    .as_ref()
+                    .is_some_and(|inst| !inst.is_finished())
+                {
+                    state.public_state = Some(ComponentState::Mounted {
+                        configuration_error: Some(reason.clone()),
+                    });
+                    true
+                } else {
+                    false
+                }
+            };
+            if kept_previous {
                 tracing::warn!(
                     component = %slot.name,
                     %reason,
                     "重新挂载组件配置无效，保留上一份运行中的实例"
                 );
-                state.public_state = Some(ComponentState::Mounted {
-                    configuration_error: Some(reason.clone()),
-                });
                 return Ok(ImMountResult::UsingPreviousConfiguration {
                     reason: reason.clone(),
                 });
@@ -795,10 +825,11 @@ impl ComponentManager {
 
         // 其他情况：若存在存活旧实例，先通知其停止并等待至多 10 秒（后台停机交错时交给停机第 3 步统一收尾）。
         let to_retire = {
-            let mut state = lock(&slot.state);
-            if self.is_stopping() {
+            let admission = lock(&backend.admission);
+            if admission.is_stopping() || self.is_stopping() {
                 return Err(stopping_error());
             }
+            let mut state = lock(&slot.state);
             if let Some(old) = state.active.take() {
                 old.retired.store(true, Ordering::Release);
                 let _ = old.stop_tx.send(true);
@@ -852,10 +883,14 @@ impl ComponentManager {
             }
         }
 
-        let mut state = lock(&slot.state);
-        if self.is_stopping() {
+        // 最终提交与实例启动与 `Backend::begin_stop` 共享 `backend.admission` 锁：
+        // 一旦后台停机状态生效，绝不再启动新组件实例；若先于停机提交启动，则新实例已登记在 `state.active`
+        // 中，随后进入的 `begin_stop_locked` 必然会向其发出停止信号。
+        let admission = lock(&backend.admission);
+        if admission.is_stopping() || self.is_stopping() {
             return Err(stopping_error());
         }
+        let mut state = lock(&slot.state);
         state.retiring = None;
 
         match outcome {
@@ -865,6 +900,8 @@ impl ComponentManager {
                 state.public_state = Some(ComponentState::Mounted {
                     configuration_error: None,
                 });
+                drop(state);
+                drop(admission);
                 if is_initial {
                     tracing::info!(component = %slot.name, "后台组件已完成初始挂载");
                 } else {
@@ -874,18 +911,22 @@ impl ComponentManager {
             }
             ComponentBuildOutcome::Unavailable { reason }
             | ComponentBuildOutcome::InvalidConfiguration { reason } => {
+                state.public_state = Some(ComponentState::Unmounted {
+                    reason: reason.clone(),
+                });
+                drop(state);
+                drop(admission);
                 tracing::warn!(
                     component = %slot.name,
                     %reason,
                     "后台组件未挂载"
                 );
-                state.public_state = Some(ComponentState::Unmounted {
-                    reason: reason.clone(),
-                });
                 Ok(ImMountResult::Unmounted { reason })
             }
             ComponentBuildOutcome::Disabled => {
                 state.public_state = None;
+                drop(state);
+                drop(admission);
                 if !is_initial {
                     tracing::info!(component = %slot.name, "后台组件已切换为未启用");
                 }
@@ -926,12 +967,14 @@ impl ComponentManager {
         }
     }
 
-    /// 停机第 1 步：标记进入停机，向全部运行中/正在退休的组件实例发出停止信号，并唤醒合并等待队列。
-    pub(super) fn begin_stop(&self) {
+    /// 在调用方已持有 `backend.admission` 锁时同步执行停机第 1 步转换：
+    /// 标记进入停机、向全部运行中/正在退休的组件实例发出停止信号，并取出待回复的合并等待者。
+    pub(super) fn begin_stop_locked(&self) -> Vec<oneshot::Sender<Result<ImMountResult>>> {
         if self.stopping.swap(true, Ordering::AcqRel) {
-            return;
+            return Vec::new();
         }
         self.stopping_tx.send_replace(true);
+        let mut waiters = Vec::new();
         for slot in self.slots.values() {
             {
                 let state = lock(&slot.state);
@@ -942,23 +985,26 @@ impl ComponentManager {
                     let _ = retiring.stop_tx.send(true);
                 }
             }
-            let pending = {
+            {
                 let mut queue = lock(&slot.queue);
-                let taken = std::mem::take(&mut queue.pending_waiters);
+                waiters.append(&mut queue.pending_waiters);
                 slot.pending_waiters_tx.send_replace(0);
-                taken
-            };
-            for tx in pending {
-                let _ = tx.send(Err(stopping_error()));
             }
         }
+        waiters
     }
 
     /// 停机第 3 步：在排空结束后，以单一共享 10 秒上限等待全部组件任务与在途挂载驱动收尾；
     /// 若当前无任何活动组件任务或驱动任务则立即返回（零额外等待）。
     /// 到期后仅触发 `abort()` 并让出一次调度，不再开启任何额外计时等待。
     pub(super) async fn shutdown(&self) {
-        self.begin_stop();
+        if let Some(backend) = self.backend() {
+            backend.begin_stop();
+        } else {
+            for tx in self.begin_stop_locked() {
+                let _ = tx.send(Err(stopping_error()));
+            }
+        }
 
         let mut instances = Vec::new();
         let mut driver_watches = Vec::new();
