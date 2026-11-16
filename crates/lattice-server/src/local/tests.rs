@@ -154,6 +154,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
                 events: events_clone,
                 fail_ready: false,
             },
+            Vec::new(),
         )
         .await
     });
@@ -191,6 +192,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
             events: events_pre.clone(),
             fail_ready: false,
         },
+        Vec::new(),
     )
     .await
     .unwrap();
@@ -213,6 +215,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
             events: events_fail.clone(),
             fail_ready: true,
         },
+        Vec::new(),
     )
     .await
     .unwrap();

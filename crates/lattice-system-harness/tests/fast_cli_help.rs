@@ -19,7 +19,8 @@ fn daemon_driver() -> LatticeDaemonDriver {
 }
 
 /// `lattice --help` 必须列出的公开子命令。
-const EXPECTED_PUBLIC_COMMANDS: &[&str] = &["run", "daemon", "auth", "models", "session", "tui"];
+const EXPECTED_PUBLIC_COMMANDS: &[&str] =
+    &["run", "daemon", "im", "auth", "models", "session", "tui"];
 const REMOVED_PUBLIC_COMMANDS: &[&str] = &["audit", "lancet"];
 
 #[test]
@@ -139,6 +140,27 @@ fn fast_cli_help_lists_public_commands() {
         daemon_help_result,
     )
     .unwrap_or_else(|report| panic!("lattice daemon --help 不符合预期\n{report}"));
+
+    let im_help = driver
+        .run(
+            &world,
+            &LatticeCommand {
+                args: vec!["im".into(), "--help".into()],
+                timeout: Some(spec.step_timeout()),
+            },
+        )
+        .unwrap();
+    let im_help_result = assert_exit_code(&im_help, 0)
+        .and_then(|_| assert_stdout_contains_all(&im_help, &["auth", "reload"]));
+    finalize_with_failure_artifacts(
+        &world,
+        &spec.name,
+        "lattice im --help",
+        &im_help,
+        &[],
+        im_help_result,
+    )
+    .unwrap_or_else(|report| panic!("lattice im --help 不符合预期\n{report}"));
 
     for (args, expected) in [
         (vec!["session", "--help"], vec!["usage"]),
@@ -676,6 +698,196 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
                 return Err(format!(
                     "{label}: 期望中文错误包含 `{expected_msg}` 且不含英文回退，实际：{msg}"
                 ));
+            }
+        }
+
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
+}
+
+#[test]
+fn fast_lattice_im_group_chinese_help_and_argument_validation() {
+    let spec = ScenarioSpec::fast("lattice-im-chinese-help");
+    let world = ScenarioWorld::new(&spec.name).unwrap();
+    let cli = driver();
+    let mut evidence = lattice_system_harness::ScenarioEvidence::new(
+        &world,
+        &spec.name,
+        vec![FAKE_API_KEY.to_owned()],
+    )
+    .unwrap();
+
+    let result = (|| -> Result<(), String> {
+        let forbidden_english = [
+            "Usage:",
+            "Commands:",
+            "Arguments:",
+            "Options:",
+            "Print help",
+            "Verbose logging",
+            "Emit JSONL",
+            "[default:",
+            "Manage built-in IM",
+        ];
+
+        for flag in ["--help", "-h"] {
+            for (args, expected_snippets) in [
+                (
+                    vec!["im", flag],
+                    &[
+                        "管理内置 IM 网关的平台凭据与配置重载。",
+                        "用法：lattice im <命令>",
+                        "命令：",
+                        "auth",
+                        "reload",
+                        "选项：",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    vec!["im", "auth", flag],
+                    &[
+                        "管理 IM 平台凭据",
+                        "用法：lattice im auth <命令>",
+                        "命令：",
+                        "set",
+                        "remove",
+                        "status",
+                        "选项：",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    vec!["im", "auth", "set", flag],
+                    &[
+                        "用法：lattice im auth set <平台> [--json]",
+                        "参数：",
+                        "<平台>",
+                        "选项：",
+                        "--json",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    vec!["im", "auth", "remove", flag],
+                    &[
+                        "用法：lattice im auth remove <平台> [--json]",
+                        "参数：",
+                        "<平台>",
+                        "选项：",
+                        "--json",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    vec!["im", "auth", "status", flag],
+                    &[
+                        "用法：lattice im auth status [--json]",
+                        "选项：",
+                        "--json",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    vec!["im", "reload", flag],
+                    &[
+                        "用法：lattice im reload [--json]",
+                        "选项：",
+                        "--json",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+            ] {
+                let label = args.join(" ");
+                let out = cli
+                    .run(
+                        &world,
+                        &LatticeCommand {
+                            args: args.into_iter().map(String::from).collect(),
+                            timeout: Some(spec.step_timeout()),
+                        },
+                    )
+                    .map_err(|e| e.to_string())?;
+                evidence.record_command(format!("查询 {label}"), &out);
+                assert_exit_code(&out, 0).map_err(|e| format!("{label}: {e}"))?;
+                assert_stdout_contains_all(&out, expected_snippets)
+                    .map_err(|e| format!("{label}: {e}"))?;
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                for forbidden in forbidden_english {
+                    if stdout.contains(forbidden) {
+                        return Err(format!(
+                            "`lattice {label}` 不应残留英文 `{forbidden}`：{stdout}"
+                        ));
+                    }
+                }
+            }
+        }
+
+        for (label, args) in [
+            ("im 缺少子命令", vec!["im"]),
+            ("im auth 缺少子命令", vec!["im", "auth"]),
+            ("im auth set 缺少平台", vec!["im", "auth", "set"]),
+            (
+                "im auth set 多余秘密参数",
+                vec!["im", "auth", "set", "telegram", FAKE_API_KEY],
+            ),
+            ("im reload 未知参数", vec!["im", "reload", FAKE_API_KEY]),
+        ] {
+            let out = cli
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: args.into_iter().map(String::from).collect(),
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            evidence.record_command(format!("校验 im 文本参数错误（{label}）"), &out);
+            assert_exit_code(&out, 2).map_err(|e| format!("{label}: {e}"))?;
+            assert_no_secret(&out, FAKE_API_KEY).map_err(|e| format!("{label}: {e}"))?;
+        }
+
+        for (label, args) in [
+            ("JSON im 缺少子命令", vec!["--json", "im"]),
+            ("JSON im auth 缺少子命令", vec!["--json", "im", "auth"]),
+            (
+                "JSON im auth set 多余秘密参数",
+                vec!["--json", "im", "auth", "set", "telegram", FAKE_API_KEY],
+            ),
+            (
+                "JSON help im auth 含秘密参数",
+                vec!["--json", "help", "im", "auth", FAKE_API_KEY],
+            ),
+        ] {
+            let out = cli
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: args.into_iter().map(String::from).collect(),
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .map_err(|e| e.to_string())?;
+            evidence.record_command(format!("校验 im JSON 参数错误（{label}）"), &out);
+            assert_exit_code(&out, 2).map_err(|e| format!("{label}: {e}"))?;
+            assert_no_secret(&out, FAKE_API_KEY).map_err(|e| format!("{label}: {e}"))?;
+            if !out.stderr.is_empty() {
+                return Err(format!(
+                    "{label}: JSON 模式参数错误不应写标准错误：{}",
+                    String::from_utf8_lossy(&out.stderr)
+                ));
+            }
+            let parsed: serde_json::Value = serde_json::from_slice(&out.stdout)
+                .map_err(|e| format!("{label}: 非合法 JSON：{e}"))?;
+            if parsed["type"] != "error" || parsed["kind"] != "bad_request" {
+                return Err(format!("{label}: JSON 错误 type/kind 不符：{parsed}"));
             }
         }
 

@@ -3,6 +3,8 @@
 
 //! LATTICE 本地后台守护进程入口。
 
+mod im;
+mod im_watch;
 mod notify;
 
 use std::{
@@ -205,6 +207,7 @@ fn main() -> ExitCode {
     };
 
     init_logging();
+    lattice_server::install_component_panic_hook();
     let notifier = Notifier::from_env();
     let runtime = match tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -236,12 +239,15 @@ fn main() -> ExitCode {
                 }
             }
         });
+        let home_dir = std::env::var_os("HOME").map(PathBuf::from);
+        let im_host = im::ImHost::new(serve_layout.clone(), home_dir.clone());
         let result = lattice_server::serve(
             serve_layout,
-            std::env::var_os("HOME").map(PathBuf::from),
+            home_dir,
             drain_timeout,
             stop_rx,
             DaemonLifecycle { notifier },
+            vec![im_host.registration()],
         )
         .await;
         signal_task.abort();

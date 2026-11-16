@@ -465,11 +465,74 @@ pub enum Acceptance {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImMountResult {
+    Mounted,
+    UsingPreviousConfiguration { reason: String },
+    Unmounted { reason: String },
+    Disabled,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImAuthSetReply {
+    pub mount: ImMountResult,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImAuthRemoveReply {
+    pub removed: bool,
+    pub mount: ImMountResult,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ImCredentialStatus {
+    Present,
+    Missing,
+    Invalid { reason: String },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImPlatformAuthStatus {
+    pub platform: String,
+    pub credential: ImCredentialStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ImAuthStatus {
+    pub platforms: Vec<ImPlatformAuthStatus>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComponentState {
+    Mounted {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        configuration_error: Option<String>,
+    },
+    Unmounted {
+        reason: String,
+    },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ComponentStatus {
+    pub name: String,
+    pub state: ComponentState,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStatus {
     pub epoch: String,
     pub stopping: bool,
     pub owners: usize,
     pub unconfirmed_operations: usize,
+    pub components: Vec<ComponentStatus>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -492,6 +555,15 @@ pub enum Request {
     },
     // 空结构让 serde 拒绝额外字段，避免静默忽略误发给查询的 key。
     AuthStatus {},
+    ImAuthSet {
+        platform: String,
+        token: AuthKey,
+    },
+    ImAuthRemove {
+        platform: String,
+    },
+    ImAuthStatus {},
+    ImReload {},
     Models {
         query: ModelCandidateQuery,
     },
@@ -548,6 +620,10 @@ pub enum Response {
     AuthRemoved(AuthRemoval),
     AuthLoggedOut(AuthLoggedOut),
     AuthStatus(AuthStatus),
+    ImAuthSet(ImAuthSetReply),
+    ImAuthRemove(ImAuthRemoveReply),
+    ImAuthStatus(ImAuthStatus),
+    ImReload(ImMountResult),
     Models(ModelCandidates),
     ModelsRefreshed,
     Session(SessionRecord),
@@ -785,5 +861,72 @@ mod tests {
         ] {
             assert_eq!(reason.to_string(), text);
         }
+    }
+
+    #[test]
+    fn im_and_component_wire_types_reject_unknown_fields() {
+        for bad_request in [
+            serde_json::json!({"operation":"im_auth_set","platform":"telegram","token":"1:abc","extra":1}),
+            serde_json::json!({"operation":"im_auth_remove","platform":"telegram","extra":1}),
+            serde_json::json!({"operation":"im_auth_status","extra":1}),
+            serde_json::json!({"operation":"im_reload","extra":1}),
+        ] {
+            assert!(
+                serde_json::from_value::<Request>(bad_request.clone()).is_err(),
+                "IM 请求必须拒绝未知字段：{bad_request}"
+            );
+        }
+        assert!(
+            serde_json::from_value::<ImMountResult>(
+                serde_json::json!({"status":"unmounted","reason":"x","extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ImMountResult>(
+                serde_json::json!({"status":"using_previous_configuration","reason":"x","extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ImAuthSetReply>(
+                serde_json::json!({"mount":{"status":"mounted"},"extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ImAuthRemoveReply>(
+                serde_json::json!({"removed":true,"mount":{"status":"disabled"},"extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ImCredentialStatus>(
+                serde_json::json!({"status":"invalid","reason":"x","extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ImPlatformAuthStatus>(
+                serde_json::json!({"platform":"telegram","credential":{"status":"missing"},"extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ImAuthStatus>(serde_json::json!({"platforms":[],"extra":1}))
+                .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ComponentState>(
+                serde_json::json!({"status":"mounted","extra":1})
+            )
+            .is_err()
+        );
+        assert!(
+            serde_json::from_value::<ComponentStatus>(
+                serde_json::json!({"name":"im","state":{"status":"mounted"},"extra":1})
+            )
+            .is_err()
+        );
     }
 }

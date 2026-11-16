@@ -90,27 +90,43 @@ pub(super) fn model_candidates_minimal() -> ModelCandidates {
 pub(super) fn provider_auth_status_full() -> ProviderAuthStatus {
     ProviderAuthStatus {
         provider: "chatgpt".to_owned(),
-        availability: Availability::Ready,
+        availability: Availability::Invalid {
+            reason: "expired refresh token".to_owned(),
+        },
         email: Some("dev@example.com".to_owned()),
         expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
+        diagnostic: Some("expired refresh token".to_owned()),
     }
 }
 
 pub(super) fn provider_auth_status_minimal() -> ProviderAuthStatus {
     ProviderAuthStatus {
         provider: "openai".to_owned(),
-        availability: Availability::Unconfigured {
-            requirement: ConfigurationRequirement::ApiKey,
-        },
+        availability: Availability::Ready,
         email: None,
         expires_at: None,
+        diagnostic: None,
+    }
+}
+
+pub(super) fn provider_auth_status_signed_in() -> ProviderAuthStatus {
+    ProviderAuthStatus {
+        provider: "chatgpt".to_owned(),
+        availability: Availability::Ready,
+        email: Some("dev@example.com".to_owned()),
+        expires_at: Some("2026-06-01T00:00:00Z".to_owned()),
+        diagnostic: None,
     }
 }
 
 pub(super) fn auth_status_full() -> AuthStatus {
     AuthStatus {
         providers_path: PathBuf::from("/home/dev/.config/lattice/providers.toml"),
-        providers: vec![provider_auth_status_full(), provider_auth_status_minimal()],
+        providers: vec![
+            provider_auth_status_signed_in(),
+            provider_auth_status_full(),
+            provider_auth_status_minimal(),
+        ],
         error: Some("auth.json: permissions are too open".to_owned()),
     }
 }

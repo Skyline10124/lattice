@@ -138,6 +138,7 @@ pub enum TurnAcceptance {
     ConfirmationUnknown {
         turn_id: lattice_conversation::TurnId,
         session_id: SessionId,
+        cause: lattice_ipc::RecoveryCause,
     },
 }
 

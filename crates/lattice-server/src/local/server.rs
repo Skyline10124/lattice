@@ -34,6 +34,9 @@ mod configure_tests;
 #[cfg(test)]
 #[path = "server_models_tests.rs"]
 mod models_tests;
+#[cfg(test)]
+#[path = "server_service_tests.rs"]
+mod service_tests;
 
 /// 后台宿主的生命周期回调，只包含就绪与开始停机两个事件。
 /// 调用点位于准入锁之外，实现不得阻塞异步运行时。
@@ -105,31 +108,78 @@ enum DrainDecision {
     Decided(DrainOutcome),
 }
 
-struct Owner {
+pub(super) enum SubmitSource {
+    Ipc(UnixStream),
+    InProcess,
+}
+
+impl SubmitSource {
+    fn stream(&self) -> Option<&UnixStream> {
+        match self {
+            Self::Ipc(stream) => Some(stream),
+            Self::InProcess => None,
+        }
+    }
+}
+
+pub(super) enum BackendOperation {
+    Submit {
+        request: TurnRequest,
+        source: SubmitSource,
+    },
+    Configure {
+        request: ConfigureRequest,
+    },
+    Rewind {
+        session_id: SessionId,
+        target: lattice_session::store::NodeId,
+        workspace: std::path::PathBuf,
+    },
+}
+
+#[derive(Clone)]
+pub(super) enum SubmitOutcome {
+    Accepted(Box<lattice_session::store::TurnDetail>),
+    ConfirmationUnknown {
+        turn_id: TurnId,
+        session_id: SessionId,
+        cause: RecoveryCause,
+    },
+}
+
+#[derive(Clone)]
+pub(super) enum OwnerReply {
+    Submit(SubmitOutcome),
+    Configure(ConfigureReply),
+    Rewind(lattice_session::store::SessionRecord),
+    Error(LocalError),
+}
+
+pub(super) struct Owner {
     identity: Option<TurnRequest>,
-    session: Option<SessionId>,
-    reply: watch::Sender<Option<Response>>,
-    done: watch::Sender<Option<Result<()>>>,
+    pub(super) session: Option<SessionId>,
+    reply: watch::Sender<Option<OwnerReply>>,
+    pub(super) done: watch::Sender<Option<Result<()>>>,
     observer: ObserverLease,
-    execution_cancel: Arc<AtomicBool>,
-    started: AtomicBool,
+    pub(super) execution_cancel: Arc<AtomicBool>,
+    pub(super) started: AtomicBool,
     core: Mutex<Option<oneshot::Receiver<crate::session::Result<TurnCompletion>>>>,
     store: Mutex<Option<SessionApi>>,
     operation: Arc<OperationRecord>,
 }
 impl Owner {
-    fn reply(&self, response: Response) {
+    fn reply(&self, response: OwnerReply) {
         self.reply.send_replace(Some(response));
     }
 }
-struct Admission {
+pub(super) struct Admission {
     drain_timeout: Duration,
     stop: StopPhase,
-    turns: HashMap<TurnId, Arc<Owner>>,
+    pub(super) turns: HashMap<TurnId, Arc<Owner>>,
     sessions: HashMap<SessionId, Arc<Owner>>,
     owners: Vec<Arc<Owner>>,
     cleanups: Vec<Arc<OperationRecord>>,
-    diagnostics: HashMap<TurnId, LocalError>,
+    pub(super) diagnostics: HashMap<TurnId, LocalError>,
     unconfirmed_operations: usize,
 }
 impl Default for Admission {
@@ -147,25 +197,32 @@ impl Default for Admission {
     }
 }
 impl Admission {
+    pub(super) fn is_stopping(&self) -> bool {
+        self.stop.is_stopping()
+    }
+
     fn count_unconfirmed(&mut self, operation: &OperationRecord) {
         if !operation.counted.swap(true, Ordering::Relaxed) {
             self.unconfirmed_operations += 1;
         }
     }
 }
-struct Backend {
+pub(super) struct Backend {
     #[cfg(test)]
     layout: StateLayout,
     home: Option<std::path::PathBuf>,
     gateway: std::result::Result<Arc<lattice_llm::RequestGateway>, ConfigRejection>,
+    fallback_tls_roots: Vec<Vec<u8>>,
     metadata: Arc<super::metadata::MetadataRefresh>,
+    components: Arc<super::components::ComponentManager>,
     tools: Arc<dyn ToolExecutor>,
     lifecycle: Arc<dyn HostLifecycle>,
     epoch: String,
-    admission: Mutex<Admission>,
+    pub(super) admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
+    pub(super) stopping: watch::Sender<bool>,
     closed: watch::Sender<bool>,
-    stores: Arc<crate::stores::StoreManager>,
+    pub(super) stores: Arc<crate::stores::StoreManager>,
     observers: Arc<Mutex<HashMap<SessionId, CachedObserver>>>,
     subscriptions: tokio::sync::Semaphore,
     #[cfg(test)]
@@ -175,7 +232,7 @@ struct CachedObserver {
     sink: Arc<ObserverSink>,
     leases: usize,
 }
-struct ObserverLease {
+pub(super) struct ObserverLease {
     sink: Arc<ObserverSink>,
     session_id: SessionId,
     cache: Arc<Mutex<HashMap<SessionId, CachedObserver>>>,
@@ -199,7 +256,7 @@ impl Drop for ObserverLease {
 const DRAFT_TTL_HOURS: i64 = 24;
 /// 同时登记的 Owner 上限；新的提交、configure、rewind 与草稿清理达到上限时都不再占位。
 const MAX_OWNERS: usize = 32;
-struct CleanupGuard {
+pub(super) struct CleanupGuard {
     backend: Arc<Backend>,
     operation: Arc<OperationRecord>,
 }
@@ -212,10 +269,10 @@ impl Drop for CleanupGuard {
         self.backend.changed.send_modify(|v| *v += 1);
     }
 }
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+pub(super) fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().expect("backend lock poisoned")
 }
-fn internal() -> LocalError {
+pub(super) fn internal() -> LocalError {
     LocalError::new(LocalErrorKind::Internal, "后台操作失败；请检查持久化状态")
 }
 fn listener_io_error(action: &str, error: std::io::Error) -> LocalError {
@@ -241,7 +298,7 @@ fn conflict(reason: ConflictReason) -> LocalError {
         )
     }
 }
-fn not_found() -> LocalError {
+pub(super) fn not_found() -> LocalError {
     LocalError::new(LocalErrorKind::NotFound, "session or Turn not found")
 }
 fn uninitialized(error: &LocalError) -> bool {
@@ -258,6 +315,10 @@ async fn blocking<T: Send + 'static>(
         .map_err(|_| internal())?
 }
 impl Backend {
+    pub(super) fn service(self: &Arc<Self>) -> super::service::Service {
+        super::service::Service::new(self.clone())
+    }
+
     fn chatgpt_auth(&self) -> Result<lattice_llm::auth::ChatgptAuth> {
         self.gateway
             .as_ref()
@@ -265,8 +326,8 @@ impl Backend {
             .map_err(|error| ApiError::Configuration(error.clone()).into())
     }
 
-    fn begin_stop(&self) {
-        {
+    pub(super) fn begin_stop(&self) {
+        let pending_component_waiters = {
             let mut state = lock(&self.admission);
             if !matches!(state.stop, StopPhase::Running) {
                 return;
@@ -276,6 +337,15 @@ impl Backend {
                 .checked_add(state.drain_timeout)
                 .unwrap_or_else(|| now + Duration::from_secs(365 * 24 * 60 * 60));
             state.stop = StopPhase::Draining { deadline };
+            let waiters = self.components.begin_stop_locked();
+            self.stopping.send_replace(true);
+            waiters
+        };
+        for tx in pending_component_waiters {
+            let _ = tx.send(Err(LocalError::new(
+                LocalErrorKind::Stopping,
+                "后台正在停止",
+            )));
         }
         self.lifecycle.on_stopping();
         self.metadata.stop();
@@ -325,6 +395,13 @@ impl Backend {
         }
     }
 
+    pub(super) fn tls_roots_der(&self) -> &[Vec<u8>] {
+        match &self.gateway {
+            Ok(gateway) => gateway.tls_roots_der(),
+            Err(_) => &self.fallback_tls_roots,
+        }
+    }
+
     fn with_tools(
         layout: StateLayout,
         home: Option<std::path::PathBuf>,
@@ -341,26 +418,33 @@ impl Backend {
     ) -> Arc<Self> {
         let directory = super::auth::directory(home.as_deref())
             .map_err(|error| ConfigRejection::new(&error.message, None));
-        let gateway = directory.clone().and_then(|directory| {
-            let auth = lattice_llm::auth::AuthStore::new(directory.clone());
-            // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
-            lattice_llm::RequestGateway::new(directory, roots)
-                .map(Arc::new)
-                .map_err(|error| ConfigRejection::new(&error.to_string(), Some(&auth)))
-        });
+        let (gateway, fallback_tls_roots) = match directory.clone() {
+            Ok(directory) => {
+                let auth = lattice_llm::auth::AuthStore::new(directory.clone());
+                // 没有可用根证书不是整个后台的配置错误：网关照常构造，只拒绝 https 端点。
+                let gateway = lattice_llm::RequestGateway::new(directory, roots)
+                    .map(Arc::new)
+                    .map_err(|error| ConfigRejection::new(&error.to_string(), Some(&auth)));
+                (gateway, Vec::new())
+            }
+            Err(error) => (Err(error), lattice_llm::usable_tls_roots_der(roots)),
+        };
         let stores = crate::stores::StoreManager::new(layout.clone());
         Arc::new(Self {
             #[cfg(test)]
             layout,
             home,
             metadata: super::metadata::MetadataRefresh::new(gateway.clone(), directory),
+            components: super::components::ComponentManager::new(Vec::new()),
             gateway,
+            fallback_tls_roots,
             tools,
             lifecycle: Arc::new(NoopLifecycle),
             stores,
             epoch: uuid::Uuid::new_v4().to_string(),
             admission: Mutex::default(),
             changed: watch::channel(0).0,
+            stopping: watch::channel(false).0,
             closed: watch::channel(false).0,
             observers: Arc::default(),
             subscriptions: tokio::sync::Semaphore::new(32),
@@ -368,7 +452,7 @@ impl Backend {
             gates: tests::Gates::default(),
         })
     }
-    fn observer(&self, session_id: SessionId) -> ObserverLease {
+    pub(super) fn observer(&self, session_id: SessionId) -> ObserverLease {
         let mut cache = lock(&self.observers);
         let entry = cache.entry(session_id).or_insert_with(|| CachedObserver {
             sink: Arc::default(),
@@ -387,6 +471,7 @@ impl Backend {
             stopping: state.stop.is_stopping(),
             owners: state.owners.len(),
             unconfirmed_operations: state.unconfirmed_operations,
+            components: self.components.statuses(),
         }
     }
     fn status(&self) -> DaemonStatus {
@@ -408,7 +493,7 @@ impl Backend {
             .map(|entry| entry.sink.clone());
         sink.is_some_and(|sink| sink.has_watchers())
     }
-    fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
+    pub(super) fn begin_cleanup(self: &Arc<Self>) -> Option<CleanupGuard> {
         let mut state = lock(&self.admission);
         if state.stop.is_stopping() {
             return None;
@@ -420,7 +505,7 @@ impl Backend {
             operation,
         })
     }
-    fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
+    pub(super) fn spawn_cleanup_drafts(self: &Arc<Self>, guard: CleanupGuard) {
         let backend = self.clone();
         tokio::spawn(async move {
             let operation = guard.operation.clone();
@@ -551,10 +636,10 @@ impl Backend {
             }
         }
     }
-    async fn open(&self) -> Result<SessionApi> {
+    pub(super) async fn open(&self) -> Result<SessionApi> {
         self.stores.acquire(false).await.map_err(Into::into)
     }
-    async fn optional_store(&self) -> Result<Option<SessionApi>> {
+    pub(super) async fn optional_store(&self) -> Result<Option<SessionApi>> {
         let mut changed = self.stores.subscribe();
         loop {
             changed.borrow_and_update();
@@ -574,16 +659,13 @@ impl Backend {
             }
         }
     }
-    fn claim(
-        self: &Arc<Self>,
-        operation: Request,
-        submitter: Option<UnixStream>,
-    ) -> Result<Arc<Owner>> {
+    pub(super) fn claim(self: &Arc<Self>, operation: BackendOperation) -> Result<Arc<Owner>> {
         let (identity, session) = match &operation {
-            Request::Submit { request, .. } => (Some(request.clone()), Some(request.session)),
-            Request::Rewind { session_id, .. } => (None, Some(*session_id)),
-            Request::Configure { request } => (None, Some(request.session.id())),
-            _ => return Err(internal()),
+            BackendOperation::Submit { request, .. } => {
+                (Some(request.clone()), Some(request.session))
+            }
+            BackendOperation::Rewind { session_id, .. } => (None, Some(*session_id)),
+            BackendOperation::Configure { request } => (None, Some(request.session.id())),
         };
         let owner = {
             let mut state = lock(&self.admission);
@@ -629,23 +711,23 @@ impl Backend {
         let backend = self.clone();
         let task_owner = owner.clone();
         tokio::spawn(async move {
-            let mut result =
-                std::panic::AssertUnwindSafe(backend.perform(operation, &task_owner, submitter))
-                    .catch_unwind()
-                    .await
-                    .unwrap_or_else(|_| Err(internal()));
+            let mut result = std::panic::AssertUnwindSafe(backend.perform(operation, &task_owner))
+                .catch_unwind()
+                .await
+                .unwrap_or_else(|_| Err(internal()));
             let completion = lock(&task_owner.core).take();
             // 回执转交失败不能等待模型或工具排空，也不能否认可能已提交的接受事务。
             if task_owner.reply.borrow().is_none() {
                 let response = if let Some(request) = &task_owner.identity
                     && completion.is_some()
                 {
-                    Response::Acceptance(Acceptance::ConfirmationUnknown {
+                    OwnerReply::Submit(SubmitOutcome::ConfirmationUnknown {
                         turn_id: request.turn_id,
                         session_id: request.session,
+                        cause: RecoveryCause::WorkerFailed,
                     })
                 } else {
-                    Response::Error(result.clone().err().unwrap_or_else(internal))
+                    OwnerReply::Error(result.clone().err().unwrap_or_else(internal))
                 };
                 task_owner.reply(response);
             }
@@ -687,7 +769,9 @@ impl Backend {
                 {
                     state.sessions.remove(&sid);
                     task_owner.observer.owner_changed();
-                    task_owner.observer.release();
+                    task_owner
+                        .observer
+                        .release_turn(task_owner.identity.as_ref().map(|r| r.turn_id));
                 }
                 state.owners.retain(|o| !Arc::ptr_eq(o, &task_owner));
                 task_owner.done.send_replace(Some(result));
@@ -700,14 +784,15 @@ impl Backend {
     }
     async fn perform(
         self: &Arc<Self>,
-        operation: Request,
+        operation: BackendOperation,
         owner: &Arc<Owner>,
-        submitter: Option<UnixStream>,
     ) -> Result<()> {
         match operation {
-            Request::Submit { request } => self.submit(request, owner, submitter).await,
-            Request::Configure { request } => self.configure(request, owner).await,
-            Request::Rewind {
+            BackendOperation::Submit { request, source } => {
+                self.submit(request, owner, source).await
+            }
+            BackendOperation::Configure { request } => self.configure(request, owner).await,
+            BackendOperation::Rewind {
                 session_id,
                 target,
                 workspace,
@@ -730,10 +815,9 @@ impl Backend {
                 #[cfg(test)]
                 tests::pause(&self.gates.rewind_committed).await;
                 owner.observer.replace_path(target);
-                owner.reply(Response::Rewind(record));
+                owner.reply(OwnerReply::Rewind(record));
                 Ok(())
             }
-            _ => Err(internal()),
         }
     }
     async fn configure(
@@ -888,14 +972,14 @@ impl Backend {
             (head.owner, head.diagnostic) = head_status(&state, head.turn_id);
         }
         owner.observer.owner_changed();
-        owner.reply(Response::Configure(ConfigureReply { head, adjustment }));
+        owner.reply(OwnerReply::Configure(ConfigureReply { head, adjustment }));
         Ok(())
     }
     async fn submit(
         self: &Arc<Self>,
         request: TurnRequest,
         owner: &Arc<Owner>,
-        submitter: Option<UnixStream>,
+        source: SubmitSource,
     ) -> Result<()> {
         let api = self.optional_store().await?;
         *lock(&owner.store) = api.clone();
@@ -952,7 +1036,7 @@ impl Backend {
         .await;
         #[cfg(test)]
         tests::pause(&self.gates.registered).await;
-        check_submitter(submitter.as_ref())?;
+        check_submitter(source.stream())?;
         let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
             .await
             .map_err(ApiError::from)?;
@@ -976,7 +1060,7 @@ impl Backend {
         let prepared_model =
             crate::turn::execute::PreparedModel::resolve(&gateway, &settings).await?;
         let shutdown = api.shutdown();
-        check_submitter(submitter.as_ref())?;
+        check_submitter(source.stream())?;
         {
             let _state = lock(&self.admission);
             owner.started.store(true, Ordering::Release);
@@ -1006,33 +1090,33 @@ impl Backend {
             Ok(Ok(accepted)) => accepted,
             Ok(Err(error)) => {
                 let error = LocalError::from(error);
-                owner.reply(Response::Error(error.clone()));
+                owner.reply(OwnerReply::Error(error.clone()));
                 return Err(error);
             }
             Err(_) => {
-                owner.reply(Response::Acceptance(Acceptance::ConfirmationUnknown {
+                owner.reply(OwnerReply::Submit(SubmitOutcome::ConfirmationUnknown {
                     turn_id: request.turn_id,
                     session_id: sid,
+                    cause: RecoveryCause::WorkerFailed,
                 }));
                 return Err(internal());
             }
         };
         #[cfg(test)]
         tests::fail_forwarding(&self.gates.forward_panic).await;
-        owner.reply(Response::Acceptance(match accepted {
-            TurnAcceptance::Accepted { turn } => Acceptance::Accepted {
-                turn: TurnView::from(&turn),
-            },
-            TurnAcceptance::ConfirmationUnknown { turn_id, .. } => {
-                Acceptance::ConfirmationUnknown {
+        owner.reply(OwnerReply::Submit(match accepted {
+            TurnAcceptance::Accepted { turn } => SubmitOutcome::Accepted(Box::new(turn)),
+            TurnAcceptance::ConfirmationUnknown { turn_id, cause, .. } => {
+                SubmitOutcome::ConfirmationUnknown {
                     turn_id,
                     session_id: sid,
+                    cause,
                 }
             }
         }));
         Ok(())
     }
-    async fn lookup(&self, turn_id: TurnId) -> Result<TurnLookup> {
+    pub(super) async fn lookup(&self, turn_id: TurnId) -> Result<TurnLookup> {
         loop {
             let candidate = lock(&self.admission).turns.get(&turn_id).cloned();
             if let Some(api) = self.optional_store().await?
@@ -1054,7 +1138,7 @@ impl Backend {
             }
         }
     }
-    async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
+    pub(super) async fn session_head(&self, session_id: SessionId) -> Result<SessionHead> {
         let observer = self.observer(session_id);
         loop {
             let generation = {
@@ -1147,6 +1231,65 @@ impl Backend {
                         .map_err(super::auth::error)
                 })
                 .await
+            }
+            Request::ImAuthSet { platform, token } => {
+                let dir = im_config_dir(self.home.as_deref())?;
+                blocking(move || {
+                    crate::im_auth::ImAuthStore::new(dir)
+                        .set(&platform, token.as_str())
+                        .map_err(im_auth_error)
+                })
+                .await?;
+                self.components.bind_backend(self);
+                let mount = match self.components.remount("im").await {
+                    Ok(mount) => mount,
+                    Err(err) if err.kind == LocalErrorKind::Stopping => ImMountResult::Unmounted {
+                        reason: "后台正在停止，未重新挂载；新凭据将在下次启动时生效".into(),
+                    },
+                    Err(err) => return Err(err),
+                };
+                Ok(Response::ImAuthSet(ImAuthSetReply { mount }))
+            }
+            Request::ImAuthRemove { platform } => {
+                let dir = im_config_dir(self.home.as_deref())?;
+                let removed = blocking(move || {
+                    crate::im_auth::ImAuthStore::new(dir)
+                        .remove(&platform)
+                        .map_err(im_auth_error)
+                })
+                .await?;
+                self.components.bind_backend(self);
+                let mount = match self.components.remount("im").await {
+                    Ok(mount) => mount,
+                    Err(err) if err.kind == LocalErrorKind::Stopping => ImMountResult::Unmounted {
+                        reason: "后台正在停止，未重新挂载；凭据变更将在下次启动时生效".into(),
+                    },
+                    Err(err) => return Err(err),
+                };
+                Ok(Response::ImAuthRemove(ImAuthRemoveReply { removed, mount }))
+            }
+            Request::ImAuthStatus {} => {
+                let dir = im_config_dir(self.home.as_deref())?;
+                let state = blocking(move || {
+                    crate::im_auth::ImAuthStore::new(dir)
+                        .status(crate::im_auth::TELEGRAM_PLATFORM)
+                        .map_err(im_auth_error)
+                })
+                .await?;
+                Ok(Response::ImAuthStatus(ImAuthStatus {
+                    platforms: vec![ImPlatformAuthStatus {
+                        platform: crate::im_auth::TELEGRAM_PLATFORM.to_owned(),
+                        credential: im_credential_status(state),
+                    }],
+                }))
+            }
+            Request::ImReload {} => {
+                if self.is_stopping() {
+                    return Err(LocalError::new(LocalErrorKind::Stopping, "后台正在停止"));
+                }
+                self.components.bind_backend(self);
+                let mount = self.components.remount("im").await?;
+                Ok(Response::ImReload(mount))
             }
             Request::Models { query } => {
                 let llm_query = super::presentation::model_query(&query);
@@ -1261,11 +1404,11 @@ impl Backend {
                 self.open().await?.read(move |r| r.log(session_id)).await?,
             )),
             Request::Usage { session_id } => Ok(Response::Usage(Box::new(
-                self.open().await?.usage(session_id).await?,
+                self.service().usage_by_prefix(session_id).await?,
             ))),
-            Request::Turn { turn_id } => Ok(Response::Turn(self.lookup(turn_id).await?)),
+            Request::Turn { turn_id } => Ok(Response::Turn(self.service().turn(turn_id).await?)),
             Request::Head { session_id } => {
-                Ok(Response::Head(self.session_head(session_id).await?))
+                Ok(Response::Head(self.service().head(session_id).await?))
             }
             Request::History {
                 session_id,
@@ -1286,41 +1429,47 @@ impl Backend {
                         .await?,
                 }))
             }
-            Request::Cancel { turn_id } => {
-                let owned = {
-                    let state = lock(&self.admission);
-                    state.turns.get(&turn_id).is_some_and(|owner| {
-                        owner.execution_cancel.store(true, Ordering::Release);
-                        true
-                    })
-                };
-                if !owned && let Some(api) = self.optional_store().await? {
-                    api.read(move |r| r.turn_node(turn_id)).await?;
-                }
-                Ok(Response::Cancelled { owned })
-            }
+            Request::Cancel { turn_id } => Ok(Response::Cancelled {
+                owned: self.service().cancel(turn_id).await?,
+            }),
             Request::Submit { .. } => Err(internal()),
-            request @ (Request::Rewind { .. } | Request::Configure { .. }) => {
-                self.wait_reply(self.claim(request, None)?).await
+            Request::Configure { .. } => Err(internal()),
+            Request::Rewind {
+                session_id,
+                target,
+                workspace,
+            } => {
+                let owner = self.claim(BackendOperation::Rewind {
+                    session_id,
+                    target,
+                    workspace,
+                })?;
+                match self.wait_owner_reply(owner).await? {
+                    OwnerReply::Rewind(record) => Ok(Response::Rewind(record)),
+                    _ => Err(internal()),
+                }
             }
             Request::Watch { .. } => Err(internal()),
         }
     }
-    async fn wait_reply(&self, owner: Arc<Owner>) -> Result<Response> {
+    pub(super) async fn wait_owner_reply(&self, owner: Arc<Owner>) -> Result<OwnerReply> {
         let mut reply = owner.reply.subscribe();
         loop {
             let response = reply.borrow_and_update().clone();
             if let Some(response) = response {
                 if matches!(
                     response,
-                    Response::Error(_) | Response::Rewind(_) | Response::Configure(_)
+                    OwnerReply::Error(_) | OwnerReply::Rewind(_) | OwnerReply::Configure(_)
                 ) {
                     let mut done = owner.done.subscribe();
                     while done.borrow_and_update().is_none() {
                         done.changed().await.map_err(|_| internal())?;
                     }
                 }
-                return Ok(response);
+                return match response {
+                    OwnerReply::Error(error) => Err(error),
+                    other => Ok(other),
+                };
             }
             reply.changed().await.map_err(|_| internal())?;
         }
@@ -1535,25 +1684,34 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
                     "backend is stopping",
                 ))
             } else {
-                backend.chatgpt_auth()
+                let providers_path =
+                    super::auth::directory(backend.home.as_deref())?.join("providers.toml");
+                backend.chatgpt_auth().map(|auth| (auth, providers_path))
             }
         });
         return match auth {
-            Ok(auth) => {
+            Ok((auth, providers_path)) => {
                 let metadata = backend.metadata.clone();
-                super::auth::login::exchange(stream, auth.start_login(), move || {
-                    let metadata = metadata.clone();
-                    Box::pin(async move {
-                        match metadata.refresh_chatgpt().await {
-                            Ok(model_count) => {
-                                super::auth::login::AuthCatalogOutcome::Refreshed { model_count }
+                super::auth::login::exchange(
+                    stream,
+                    &providers_path,
+                    auth.start_login(),
+                    move || {
+                        let metadata = metadata.clone();
+                        Box::pin(async move {
+                            match metadata.refresh_chatgpt().await {
+                                Ok(model_count) => {
+                                    super::auth::login::AuthCatalogOutcome::Refreshed {
+                                        model_count,
+                                    }
+                                }
+                                Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
+                                    warning: error.message,
+                                },
                             }
-                            Err(error) => super::auth::login::AuthCatalogOutcome::Failed {
-                                warning: error.message,
-                            },
-                        }
-                    })
-                })
+                        })
+                    },
+                )
                 .await
             }
             Err(error) => writer.write(&mut stream, &Response::Error(error)).await,
@@ -1568,30 +1726,25 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
         }
         return Ok(());
     }
-    let cleanup_after_reply = matches!(
-        &request,
-        Request::Configure {
-            request: ConfigureRequest {
-                session: ConfigureSession::New(_),
-                ..
-            }
+    let service = backend.service();
+    let (response, cleanup_guard) = match request {
+        Request::Configure { request } => {
+            let (result, guard) = service.configure_with_cleanup(request).await;
+            (result.map(Response::Configure), guard)
         }
-    );
-    let response = if matches!(request, Request::Submit { .. }) {
-        let socket = stream.into_std()?;
-        let submitter = UnixStream::from_std(socket.try_clone()?)?;
-        stream = UnixStream::from_std(socket)?;
-        match backend.claim(request, Some(submitter)) {
-            Ok(owner) => backend.wait_reply(owner).await,
-            Err(error) => Err(error),
+        Request::Submit { request } => {
+            let socket = stream.into_std()?;
+            let submitter = UnixStream::from_std(socket.try_clone()?)?;
+            stream = UnixStream::from_std(socket)?;
+            (
+                service
+                    .submit_ipc(request, submitter)
+                    .await
+                    .map(Response::Acceptance),
+                None,
+            )
         }
-    } else {
-        backend.dispatch(request).await
-    };
-    let cleanup_guard = if cleanup_after_reply {
-        backend.begin_cleanup()
-    } else {
-        None
+        other => (backend.dispatch(other).await, None),
     };
     let write_result = writer
         .write(&mut stream, &response.unwrap_or_else(Response::Error))
@@ -1601,7 +1754,45 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     }
     write_result
 }
-/// 实例锁唯一持有者；按统一停机顺序执行有界排空、收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
+fn im_config_dir(home: Option<&std::path::Path>) -> Result<std::path::PathBuf> {
+    match home {
+        Some(home) if home.is_absolute() => Ok(home.join(".lattice")),
+        Some(_) => Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "后台环境中的 HOME 必须是绝对路径",
+        )),
+        None => Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "后台环境中未设置 HOME",
+        )),
+    }
+}
+
+fn im_auth_error(error: crate::im_auth::ImAuthError) -> LocalError {
+    use crate::im_auth::ImAuthError;
+    let kind = match &error {
+        ImAuthError::UnsupportedPlatform
+        | ImAuthError::InvalidToken
+        | ImAuthError::InvalidFile(_) => LocalErrorKind::BadRequest,
+        ImAuthError::Io {
+            kind: std::io::ErrorKind::PermissionDenied,
+            ..
+        } => LocalErrorKind::Permission,
+        ImAuthError::Io { .. } | ImAuthError::Internal(_) => LocalErrorKind::Internal,
+    };
+    LocalError::new(kind, &error.to_string())
+}
+
+fn im_credential_status(state: crate::im_auth::ImPlatformCredentialState) -> ImCredentialStatus {
+    use crate::im_auth::ImPlatformCredentialState;
+    match state {
+        ImPlatformCredentialState::Present => ImCredentialStatus::Present,
+        ImPlatformCredentialState::Missing => ImCredentialStatus::Missing,
+        ImPlatformCredentialState::Invalid { reason } => ImCredentialStatus::Invalid { reason },
+    }
+}
+
+/// 实例锁唯一持有者；按统一停机顺序执行有界排空、组件收尾与撤下 socket，并将实例锁交还进程宿主保持至进程退出。
 /// 后台保存 HOME 配置目录与启动时 TLS 根；配置错误只拒绝需要它们的操作。
 pub async fn serve(
     layout: StateLayout,
@@ -1609,15 +1800,17 @@ pub async fn serve(
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
     lifecycle: impl HostLifecycle,
+    components: Vec<super::components::ComponentRegistration>,
 ) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
     let lifecycle: Arc<dyn HostLifecycle> = Arc::new(lifecycle);
+    let component_manager = super::components::ComponentManager::new(components);
     serve_with_backend(layout, drain_timeout, stop_requests, move || {
         let mut backend = Backend::with_tools(backend_layout, home, tools);
-        Arc::get_mut(&mut backend)
-            .expect("独占构造的后台实例")
-            .lifecycle = lifecycle;
+        let inner = Arc::get_mut(&mut backend).expect("独占构造的后台实例");
+        inner.lifecycle = lifecycle;
+        inner.components = component_manager;
         backend
     })
     .await
@@ -1631,15 +1824,66 @@ pub async fn serve_for_test(
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
 ) -> Result<ServeExit> {
+    serve_test_backend(layout, home, drain_timeout, stop_requests, None, Vec::new()).await
+}
+
+/// 启动测试后台，并在监听就绪后通过 `service_tx` 交出同一后台实例的进程内 [`super::service::Service`]。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test_with_service(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    service_tx: oneshot::Sender<super::service::Service>,
+) -> Result<ServeExit> {
+    serve_test_backend(
+        layout,
+        home,
+        drain_timeout,
+        stop_requests,
+        Some(service_tx),
+        Vec::new(),
+    )
+    .await
+}
+
+/// 启动携带注册组件的测试后台（以空动作替代自动与手动元数据刷新）。
+#[cfg(any(test, feature = "test-utils"))]
+pub async fn serve_for_test_with_components(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    components: Vec<super::components::ComponentRegistration>,
+) -> Result<ServeExit> {
+    serve_test_backend(layout, home, drain_timeout, stop_requests, None, components).await
+}
+
+#[cfg(any(test, feature = "test-utils"))]
+async fn serve_test_backend(
+    layout: StateLayout,
+    home: Option<std::path::PathBuf>,
+    drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    service_tx: Option<oneshot::Sender<super::service::Service>>,
+    components: Vec<super::components::ComponentRegistration>,
+) -> Result<ServeExit> {
     let backend_layout = layout.clone();
     let tools = crate::turn::default_tool_executor();
-    serve_with_backend(layout, drain_timeout, stop_requests, move || {
-        let mut backend = Backend::with_tools(backend_layout, home, tools);
-        Arc::get_mut(&mut backend)
-            .expect("unshared test backend")
-            .metadata = super::metadata::MetadataRefresh::without_network();
-        backend
-    })
+    let component_manager = super::components::ComponentManager::new(components);
+    serve_with_backend_and_service(
+        layout,
+        drain_timeout,
+        stop_requests,
+        service_tx,
+        move || {
+            let mut backend = Backend::with_tools(backend_layout, home, tools);
+            let inner = Arc::get_mut(&mut backend).expect("unshared test backend");
+            inner.metadata = super::metadata::MetadataRefresh::without_network();
+            inner.components = component_manager;
+            backend
+        },
+    )
     .await
 }
 
@@ -1696,7 +1940,17 @@ async fn finish_serve(
 async fn serve_with_backend(
     layout: StateLayout,
     drain_timeout: Duration,
+    stop_requests: tokio::sync::mpsc::Receiver<()>,
+    build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
+) -> Result<ServeExit> {
+    serve_with_backend_and_service(layout, drain_timeout, stop_requests, None, build_backend).await
+}
+
+async fn serve_with_backend_and_service(
+    layout: StateLayout,
+    drain_timeout: Duration,
     mut stop_requests: tokio::sync::mpsc::Receiver<()>,
+    service_tx: Option<oneshot::Sender<super::service::Service>>,
     build_backend: impl FnOnce() -> Arc<Backend> + Send + 'static,
 ) -> Result<ServeExit> {
     let binding_layout = layout.clone();
@@ -1730,6 +1984,7 @@ async fn serve_with_backend(
             .await);
         }
     };
+    backend.components.bind_backend(&backend);
     {
         let mut state = lock(&backend.admission);
         if matches!(state.stop, StopPhase::Running) {
@@ -1766,6 +2021,12 @@ async fn serve_with_backend(
             Some(backend),
         )
         .await);
+    }
+    if !backend.is_stopping() {
+        backend.components.start_initial_mount();
+    }
+    if let Some(tx) = service_tx {
+        let _ = tx.send(backend.service());
     }
 
     let metadata_task = backend.metadata.start();
@@ -1829,7 +2090,7 @@ async fn serve_with_backend(
         }
     };
 
-    // 排空超时停写与元数据、认证尾段期间继续接受连接，服务 status 与重复 IPC stop。
+    // 排空超时停写、第 3 步组件收尾与第 4 步元数据/认证尾段期间继续接受连接，服务 status 与重复 IPC stop。
     let tail_failure = {
         let tail_backend = backend.clone();
         let post_drain = async move {
@@ -1841,7 +2102,10 @@ async fn serve_with_backend(
                 tail_backend.changed.send_modify(|v| *v += 1);
             }
 
-            // 尾段 1：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
+            // 第 3 步：等待全部运行中及正在收尾的组件任务结束，共用单一 10 秒上限（无活动组件时立即跳过）。
+            tail_backend.components.shutdown().await;
+
+            // 第 4 步（尾段 1）：元数据调度任务、在途元数据刷新与认证关闭共用 5 秒上限。
             // 三项各自以同一期限包裹：到期只停止等待尚未结束的一项，已经返回的错误照常记录。
             let tail_deadline = tokio::time::Instant::now() + Duration::from_secs(5);
             let auth = tail_backend.chatgpt_auth().ok();

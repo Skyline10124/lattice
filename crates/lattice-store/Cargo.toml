@@ -4,14 +4,16 @@ version.workspace = true
 license.workspace = true
 edition.workspace = true
 authors.workspace = true
-description = "Linux 私有状态布局、文件锁、fsync 与位置能力探测"
+description = "Linux 私有状态布局、私有目录与文件原子读写、文件锁、fsync 与位置能力探测"
 
 [features]
 default = []
 
 [dependencies]
 libc = { workspace = true }
+rustix = { workspace = true, features = ["process"] }
 thiserror = { workspace = true }
+zeroize = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

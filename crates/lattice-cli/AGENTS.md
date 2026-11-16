@@ -10,8 +10,10 @@
 | `src/commands/mod.rs` | 子命令模块导出 |
 | `src/commands/run.rs` | 请求身份预生成与输出、`current_dir()` 读取与透传、`configure` 会话创建/设置更新、`LocalTurn` 提交/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
 | `src/commands/session.rs` | `session` 子命令（`send`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）先经 `LocalClient::status` 检查已运行后台，再完成参数处理、后台调用与用量费用渲染 |
-| `src/commands/daemon.rs`、`src/commands/daemon/install.rs` | `lattice daemon` 子命令组中文帮助与分派（含 JSON 模式中文参数错误与 `install --json` 拒绝）、`daemon status` / `daemon stop` 人类可读中文输出与 `--json` 状态输出，以及 `daemon install`（同目录有效用户可执行 `lattice-daemon` 核验、`TimeoutStopSec` 计算、`ExecStart` 可执行路径与后续参数分开转义、`lattice.service` 原子写入、`systemctl --user` 调用与启动失败时的对端进程号诊断） |
-| `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、无回显终端或标准输入读取密钥、SIWC 登录浏览器与粘贴交互（`login.rs`）、可唤醒输入线程（`login/input.rs`）及信号下终端模式恢复（`terminal.rs`） |
+| `src/commands/daemon.rs`、`src/commands/daemon/install.rs` | `lattice daemon` 子命令组中文帮助与分派（含 JSON 模式中文参数错误与 `install --json` 拒绝）、`daemon status`（含受托管组件运行状态渲染）/ `daemon stop` 人类可读中文输出与 `--json` 状态输出，以及 `daemon install`（同目录有效用户可执行 `lattice-daemon` 核验、`TimeoutStopSec` 计算、`ExecStart` 可执行路径与后续参数分开转义、`lattice.service` 原子写入、`systemctl --user` 调用与启动失败时的对端进程号诊断） |
+| `src/commands/im.rs` | `lattice im` 子命令组中文帮助与分派（`reload`、`auth set`、`auth remove`、`auth status`，支持 `--json`、中文 JSON 参数错误、无回显终端或管道读取平台凭据及 `0`/`1`/`2` 退出码映射） |
+| `src/commands/secret_input.rs` | `auth` 与 `im auth` 共用的无回显终端与标准输入单行秘密读取、16 KiB 上限、控制字符校验及信号下终端模式恢复 |
+| `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、复用 `secret_input` 读取密钥、直接展示后台生成的 `ProviderAuthStatus.diagnostic`、SIWC 登录浏览器与粘贴交互（`login.rs`）及可唤醒输入线程（`login/input.rs`） |
 | `src/commands/models.rs` | `models` 候选列表渲染、配置问题 stderr 提示与 `models refresh` |
 
 ## 先读
@@ -21,6 +23,7 @@
 | 任何改动 | [Crate 职责与依赖边界](../../docs/architecture/crates.md)、[会话与 Turn](../../docs/architecture/session/README.md)、[实现模块与公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作)、[工程规范](../../docs/development/engineering.md) |
 | 提交、配置拒绝与会话设置 | [Turn 的接受与模型步骤](../../docs/architecture/session/acceptance.md#请求接受)、[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)、[会话设置](../../docs/architecture/session/settings.md#会话设置) |
 | 找回、重连、取消与后台托管 | [重开、取消与未完成状态](../../docs/architecture/session/recovery.md)、[本地后台与访问边界](../../docs/architecture/storage.md#本地后台与访问边界)、[宿主平台](../../docs/architecture/platform.md)、[ADR 0011](../../docs/adr/0011-im-gateway-inside-backend.md) |
+| `im` 子命令组与组件状态展示 | [IM 网关](../../docs/architecture/im.md) |
 | `auth` 与 `models` 子命令 | [凭据与 Sign in with ChatGPT](../../docs/architecture/llm/credentials.md#凭据命令)、[模型引用与元数据](../../docs/architecture/llm/models.md#模型候选)、[provider 配置](../../docs/architecture/llm/providers.md#endpoint-的来源) |
 | `tui` 分派 | [TUI 交互与视觉](../../docs/architecture/tui/README.md#组件接线) |
 | 场景运行与验收步骤 | [测试工程](../../docs/development/testing.md)、[验证指南](../../docs/development/validation-guide.md) |
@@ -29,7 +32,7 @@
 
 - `Cargo.toml` 的内部直接依赖只允许 `lattice-local` 与 `lattice-tui`，普通依赖闭包中禁止出现 `lattice-server`、`lattice-llm`、`lattice-profile`、`lattice-agent`、`lattice-im`，由 `cargo xtask crate-boundary` 强制检查。前端不自动拉起后台：各命令连接已经运行的后台，未运行时返回中文 `not_running` 错误并以 `1` 退出；后台宿主与测试 feature 构建在 `lattice-daemon` 上完成，见[配置来源与后台启动](../../docs/architecture/session/acceptance.md#配置来源与后台启动)、[Crate 职责与依赖边界](../../docs/architecture/crates.md)与[测试工程](../../docs/development/testing.md)。
 - 前端对工作区只读取 `std::env::current_dir()` 原样发送（`workspace_override` 原样透传），不在前端做 `canonicalize`；`current_dir()` 失败时在前端按 `Internal` 固定文案报错并以 `1` 退出，规范路径校验统一交由后台处理。
-- API key 只从无回显终端或标准输入读取，并在命令行解析错误处做脱敏拦截；SIWC 登录只输出授权 URL 与最终结果，使敏感材料隔离于命令行参数、日志、错误与标准输出，见[凭据命令](../../docs/architecture/llm/credentials.md#凭据命令)。
+- API key 与 IM 机器人凭据只从无回显终端或标准输入读取，并在命令行解析错误处（含 `auth`、`im`、`im auth`）做脱敏拦截；SIWC 登录只输出授权 URL 与最终结果，使敏感材料隔离于命令行参数、日志、错误与标准输出，见[凭据命令](../../docs/architecture/llm/credentials.md#凭据命令)与 [IM 网关](../../docs/architecture/im.md)。
 - `--model` 与 `--effort` 在前端只校验 `<provider>/<model>` 与档位名语法；提交前先生成并输出请求身份（新会话同时生成 `SessionId`），新建会话或显式传入 `--agent`、`--model`、`--effort` 时先调用 `configure` 再发出 `submit`，找回与历史读取统一走后台公开只读查询，见[会话设置](../../docs/architecture/session/settings.md#会话设置)与[请求身份与找回](../../docs/architecture/session/recovery.md#请求身份与找回)。
 - 流式命令的 `--json` stdout 输出当前轮的 `configure`、`submit`、`cancel`、`head`、`entry`、`text`、`connection`、`error` 八种 JSONL 记录；人类可读模式在档位被自动调整时写一行提示并在轮末打印一次结局摘要，面向用户的等级等字段使用稳定的小写词，见[实现模块与公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作)。
 - CLI 消费 `LocalClient` 的观察 idle 诊断、`LocalTurn` 的回执等待结果与后台返回的已脱敏单行 `LocalError.message`，精确映射 `0`/`1`/`2` 退出码（`BadRequest`、`NotFound`、`Conflict` 以 `2` 退出），见[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)与[输入与传输限制](../../docs/architecture/session/concurrency.md#输入与传输限制)。
@@ -40,8 +43,8 @@
 | 改动 | 运行 |
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-cli` |
-| 修改子命令、参数冲突或公开帮助面 | `cargo test -p lattice-cli`（常规标志类型由 `clap` 结构保证，单测锁定参数冲突与脱敏），构建 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test fast_cli_help` |
-| 修改 `daemon` 子命令组或 `daemon install` | `cargo test -p lattice-cli`，构建 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test fast_cli_help --test fast_daemon_install`（使用假 `systemctl` 与临时 `XDG_CONFIG_HOME`，不触碰宿主真实 `systemctl`） |
+| 修改子命令、参数冲突或公开帮助面 | `cargo test -p lattice-cli`（常规标志类型由 `clap` 结构保证，单测锁定参数冲突与脱敏），构建 `lattice` 与 `lattice-daemon` 后运行 `TMPDIR=/tmp cargo test -p lattice-system-harness --test fast_cli_help` |
+| 修改 `daemon` 子命令组、`daemon install` 或 `im` 子命令组 | `cargo test -p lattice-cli`，构建 `lattice` 与 `lattice-daemon` 后运行 `TMPDIR=/tmp cargo test -p lattice-system-harness --test fast_cli_help --test fast_daemon_install --test fast_im_cli`（使用假 `systemctl` 与临时 `XDG_CONFIG_HOME`，不触碰宿主真实 `systemctl`） |
 | 修改流前拒绝、正文读取或退出码映射 | 在 `cargo test -p lattice-cli` 中同时核对 `pre-stream` 错误分类、正文读取失败与 `TurnOutcome` 的精确 `0`/`1`/`2` 退出码 |
-| 修改环境与配置来源隔离 | 构建 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test fast_env_boundary` |
+| 修改环境与配置来源隔离 | 构建 `lattice` 与 `lattice-daemon` 后运行 `TMPDIR=/tmp cargo test -p lattice-system-harness --test fast_env_boundary` |
 | 修改 Turn 流式渲染或交互流程 | `cargo test -p lattice-local`、`cargo test -p lattice-server`，并按影响运行对应的 `lattice-system-harness` 场景 |

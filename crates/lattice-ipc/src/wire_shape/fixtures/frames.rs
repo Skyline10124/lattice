@@ -10,7 +10,10 @@ use lattice_session::store::{NodeId, Page};
 
 use super::{
     CaseBook, agent_coder, auth_key, model_gpt5, model_ref_gpt5,
-    models::{auth_status_full, model_candidates_full, provider_auth_status_full},
+    models::{
+        auth_status_full, model_candidates_full, provider_auth_status_full,
+        provider_auth_status_signed_in,
+    },
     non_utf8_workspace_path, provider_openai,
     session::{
         scenario_cancelled, scenario_indeterminate_no_result, scenario_orphan_executing,
@@ -22,12 +25,13 @@ use super::{
     turn_id_1, turn_id_2, utf8_store_path,
 };
 use crate::{
-    Acceptance, AuthCatalogOutcome, AuthLoggedOut, AuthLoginOutcome, AuthRemoval, ConfigureReply,
-    ConfigureRequest, ConfigureSession, ConflictReason, DaemonStatus, EffortAdjustment, LocalError,
-    LocalErrorKind, LocalHistory, LoginAction, LoginResponse, ModelCandidateQuery, RecoveryCause,
-    RecoveryNeed, Request, Response, RevocationStatus, SessionHead, SessionListRow,
-    StoreDiagnostic, TextSegment, TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView,
-    ViewUpdate,
+    Acceptance, AuthCatalogOutcome, AuthLoggedOut, AuthLoginOutcome, AuthRemoval, ComponentState,
+    ComponentStatus, ConfigureReply, ConfigureRequest, ConfigureSession, ConflictReason,
+    DaemonStatus, EffortAdjustment, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus,
+    ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, LocalError, LocalErrorKind,
+    LocalHistory, LoginAction, LoginResponse, ModelCandidateQuery, RecoveryCause, RecoveryNeed,
+    Request, Response, RevocationStatus, SessionHead, SessionListRow, StoreDiagnostic, TextSegment,
+    TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, ViewUpdate,
 };
 
 fn daemon_status_sample() -> DaemonStatus {
@@ -36,6 +40,36 @@ fn daemon_status_sample() -> DaemonStatus {
         stopping: false,
         owners: 1,
         unconfirmed_operations: 0,
+        components: Vec::new(),
+    }
+}
+
+fn daemon_status_with_components() -> DaemonStatus {
+    DaemonStatus {
+        epoch: "epoch-0001".to_owned(),
+        stopping: false,
+        owners: 1,
+        unconfirmed_operations: 0,
+        components: vec![
+            ComponentStatus {
+                name: "im".to_owned(),
+                state: ComponentState::Mounted {
+                    configuration_error: None,
+                },
+            },
+            ComponentStatus {
+                name: "im-prev".to_owned(),
+                state: ComponentState::Mounted {
+                    configuration_error: Some("im/config.toml 第 2 行语法错误".to_owned()),
+                },
+            },
+            ComponentStatus {
+                name: "im-unmounted".to_owned(),
+                state: ComponentState::Unmounted {
+                    reason: "未配置 telegram 凭据；请运行 lattice im auth set telegram".to_owned(),
+                },
+            },
+        ],
     }
 }
 
@@ -421,7 +455,7 @@ pub(super) fn register(book: &mut CaseBook) {
                 "auth_login_result",
                 LoginResponse::AuthLoginResult(_) => LoginResponse::AuthLoginResult(
                     AuthLoginOutcome::SignedIn {
-                        status: provider_auth_status_full(),
+                        status: provider_auth_status_signed_in(),
                         catalog: AuthCatalogOutcome::Failed {
                             warning: "catalog endpoint timed out".to_owned(),
                         },
@@ -429,6 +463,67 @@ pub(super) fn register(book: &mut CaseBook) {
                 )
             ),
             ("error", LoginResponse::Error(_) => LoginResponse::Error(local_error_minimal())),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "component_state",
+        ComponentState {
+            (
+                "mounted",
+                ComponentState::Mounted { .. } => ComponentState::Mounted {
+                    configuration_error: None,
+                }
+            ),
+            (
+                "unmounted",
+                ComponentState::Unmounted { .. } => ComponentState::Unmounted {
+                    reason: "未配置 telegram 凭据；请运行 lattice im auth set telegram".to_owned(),
+                }
+            ),
+        }
+    );
+    book.insert(
+        "fragment/component_state/mounted_with_configuration_error",
+        &ComponentState::Mounted {
+            configuration_error: Some("im/config.toml 第 2 行语法错误".to_owned()),
+        },
+    );
+
+    enum_fragments!(
+        book,
+        "im_mount_result",
+        ImMountResult {
+            ("mounted", ImMountResult::Mounted => ImMountResult::Mounted),
+            (
+                "using_previous_configuration",
+                ImMountResult::UsingPreviousConfiguration { .. } => ImMountResult::UsingPreviousConfiguration {
+                    reason: "im/config.toml 第 2 行语法错误".to_owned(),
+                }
+            ),
+            (
+                "unmounted",
+                ImMountResult::Unmounted { .. } => ImMountResult::Unmounted {
+                    reason: "未配置 telegram 凭据；请运行 lattice im auth set telegram".to_owned(),
+                }
+            ),
+            ("disabled", ImMountResult::Disabled => ImMountResult::Disabled),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "im_credential_status",
+        ImCredentialStatus {
+            ("present", ImCredentialStatus::Present => ImCredentialStatus::Present),
+            ("missing", ImCredentialStatus::Missing => ImCredentialStatus::Missing),
+            (
+                "invalid",
+                ImCredentialStatus::Invalid { .. } => ImCredentialStatus::Invalid {
+                    reason: "im/auth.json 权限过宽".to_owned(),
+                }
+            ),
         }
     );
 
@@ -464,6 +559,21 @@ pub(super) fn register(book: &mut CaseBook) {
                 }
             ),
             ("auth_status", Request::AuthStatus {} => Request::AuthStatus {}),
+            (
+                "im_auth_set",
+                Request::ImAuthSet { .. } => Request::ImAuthSet {
+                    platform: "telegram".to_owned(),
+                    token: auth_key("123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11"),
+                }
+            ),
+            (
+                "im_auth_remove",
+                Request::ImAuthRemove { .. } => Request::ImAuthRemove {
+                    platform: "telegram".to_owned(),
+                }
+            ),
+            ("im_auth_status", Request::ImAuthStatus {} => Request::ImAuthStatus {}),
+            ("im_reload", Request::ImReload {} => Request::ImReload {}),
             (
                 "models",
                 Request::Models { .. } => Request::Models {
@@ -563,6 +673,60 @@ pub(super) fn register(book: &mut CaseBook) {
         revocation: None,
     };
 
+    let im_auth_set_reply_mounted = ImAuthSetReply {
+        mount: ImMountResult::Mounted,
+    };
+    let im_auth_set_reply_prev = ImAuthSetReply {
+        mount: ImMountResult::UsingPreviousConfiguration {
+            reason: "im/config.toml 第 2 行语法错误".to_owned(),
+        },
+    };
+    let im_auth_remove_reply_full = ImAuthRemoveReply {
+        removed: true,
+        mount: ImMountResult::Unmounted {
+            reason: "未配置 telegram 凭据；请运行 lattice im auth set telegram".to_owned(),
+        },
+    };
+    let im_auth_remove_reply_minimal = ImAuthRemoveReply {
+        removed: false,
+        mount: ImMountResult::Disabled,
+    };
+    let im_platform_status_present = ImPlatformAuthStatus {
+        platform: "telegram".to_owned(),
+        credential: ImCredentialStatus::Present,
+    };
+    let im_platform_status_invalid = ImPlatformAuthStatus {
+        platform: "telegram".to_owned(),
+        credential: ImCredentialStatus::Invalid {
+            reason: "im/auth.json 权限过宽".to_owned(),
+        },
+    };
+    let im_auth_status_full = ImAuthStatus {
+        platforms: vec![
+            im_platform_status_present.clone(),
+            ImPlatformAuthStatus {
+                platform: "telegram".to_owned(),
+                credential: ImCredentialStatus::Missing,
+            },
+            im_platform_status_invalid.clone(),
+        ],
+    };
+    let im_auth_status_minimal = ImAuthStatus {
+        platforms: Vec::new(),
+    };
+    let component_status_full = ComponentStatus {
+        name: "im".to_owned(),
+        state: ComponentState::Mounted {
+            configuration_error: Some("im/config.toml 第 2 行语法错误".to_owned()),
+        },
+    };
+    let component_status_minimal = ComponentStatus {
+        name: "im".to_owned(),
+        state: ComponentState::Mounted {
+            configuration_error: None,
+        },
+    };
+
     let session_list_row_full = SessionListRow {
         session: store_session_list_row_full(),
         owner: true,
@@ -627,6 +791,10 @@ pub(super) fn register(book: &mut CaseBook) {
                 })
             ),
             ("auth_status", Response::AuthStatus(_) => Response::AuthStatus(auth_status_full())),
+            ("im_auth_set", Response::ImAuthSet(_) => Response::ImAuthSet(im_auth_set_reply_mounted.clone())),
+            ("im_auth_remove", Response::ImAuthRemove(_) => Response::ImAuthRemove(im_auth_remove_reply_full.clone())),
+            ("im_auth_status", Response::ImAuthStatus(_) => Response::ImAuthStatus(im_auth_status_full.clone())),
+            ("im_reload", Response::ImReload(_) => Response::ImReload(ImMountResult::Mounted)),
             ("models", Response::Models(_) => Response::Models(model_candidates_full())),
             ("models_refreshed", Response::ModelsRefreshed => Response::ModelsRefreshed),
             (
@@ -667,6 +835,56 @@ pub(super) fn register(book: &mut CaseBook) {
     );
 
     // 结构体形态片段
+    book.insert_struct_pair(
+        "daemon_status",
+        &daemon_status_with_components(),
+        &daemon_status_sample(),
+    );
+    book.insert_struct_pair(
+        "component_status",
+        &component_status_full,
+        &component_status_minimal,
+    );
+    book.insert_struct_pair(
+        "im_auth_set_reply",
+        &im_auth_set_reply_prev,
+        &im_auth_set_reply_mounted,
+    );
+    book.insert_struct_pair(
+        "im_auth_remove_reply",
+        &im_auth_remove_reply_full,
+        &im_auth_remove_reply_minimal,
+    );
+    book.insert_struct_pair(
+        "im_platform_auth_status",
+        &im_platform_status_invalid,
+        &im_platform_status_present,
+    );
+    book.insert_struct_pair(
+        "im_auth_status",
+        &im_auth_status_full,
+        &im_auth_status_minimal,
+    );
+    book.insert(
+        "frame/response/status/with_components",
+        &Response::Status(daemon_status_with_components()),
+    );
+    book.insert(
+        "frame/response/im_reload/using_previous_configuration",
+        &Response::ImReload(ImMountResult::UsingPreviousConfiguration {
+            reason: "im/config.toml 第 2 行语法错误".to_owned(),
+        }),
+    );
+    book.insert(
+        "frame/response/im_reload/unmounted",
+        &Response::ImReload(ImMountResult::Unmounted {
+            reason: "未配置 telegram 凭据；请运行 lattice im auth set telegram".to_owned(),
+        }),
+    );
+    book.insert(
+        "frame/response/im_reload/disabled",
+        &Response::ImReload(ImMountResult::Disabled),
+    );
     book.insert_struct_pair("auth_removal", &auth_removal_full, &auth_removal_minimal);
     book.insert_struct_pair(
         "session_head",

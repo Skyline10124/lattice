@@ -22,6 +22,15 @@ const LATTICE_DAEMON_BIN_ENV: &str = "LATTICE_DAEMON_BIN";
 const TIMEOUT_POLL: Duration = Duration::from_millis(10);
 const DRAIN_FINISH_GRACE: Duration = Duration::from_millis(250);
 
+/// 串行化同一测试进程内的子进程派生窗口，避免并发 `Command::spawn` 在 `clone` 到 `execve`
+/// 关闭 `CLOEXEC` 描述符之间短暂继承兄弟场景管道的写端而拖慢 EOF 排空。
+static SPAWN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+fn spawn_serialized(command: &mut Command) -> std::io::Result<Child> {
+    let _guard = SPAWN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    command.spawn()
+}
+
 #[derive(Debug, Clone)]
 pub struct LatticeDriver {
     binary: PathBuf,
@@ -270,7 +279,7 @@ impl RunningCommand {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         set_new_process_group(&mut command);
-        let mut child = command.spawn()?;
+        let mut child = spawn_serialized(&mut command)?;
         let pgid = resolve_child_pgid(&child)?;
         let stdout_stream = child.stdout.take();
         let stderr_stream = child.stderr.take();
@@ -484,7 +493,7 @@ impl DaemonChild {
         command.stdout(Stdio::piped());
         command.stderr(Stdio::piped());
         set_new_process_group(&mut command);
-        let mut child = command.spawn()?;
+        let mut child = spawn_serialized(&mut command)?;
         let pid = child.id();
         let pgid = match resolve_child_pgid(&child) {
             Ok(pgid) => pgid,
@@ -766,10 +775,9 @@ fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
             return Ok(true);
         };
         let mut chunk = [0_u8; 8192];
+        let mut post_stop_reads = 0_usize;
         let reached_eof = loop {
-            if thread_stop.load(Ordering::Acquire) {
-                break false;
-            }
+            let stopping = thread_stop.load(Ordering::Acquire);
             match stream.read(&mut chunk) {
                 Ok(0) => break true,
                 Ok(read) => {
@@ -777,9 +785,18 @@ fn drain_to_thread<R: Read + Send + 'static>(maybe: Option<R>) -> DrainHandle {
                         .lock()
                         .expect("输出收集锁")
                         .extend_from_slice(&chunk[..read]);
+                    if stopping {
+                        post_stop_reads += 1;
+                        if post_stop_reads >= 64 {
+                            break false;
+                        }
+                    }
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    if stopping {
+                        break false;
+                    }
                     std::thread::sleep(TIMEOUT_POLL);
                 }
                 Err(error) => return Err(error),
@@ -1304,6 +1321,22 @@ mod tests {
             !outcome.is_clean_exit(0),
             "未读完的输出排空必须使结果不再视为干净退出"
         );
+    }
+
+    #[test]
+    fn closed_writer_still_reports_complete_when_stop_arrives_before_final_read() {
+        let (reader, mut writer) =
+            std::os::unix::net::UnixStream::pair().expect("创建本地流管道失败");
+        reader.set_nonblocking(true).expect("设置读取端非阻塞失败");
+        std::io::Write::write_all(&mut writer, b"complete-json").expect("写入完整输出失败");
+        drop(writer);
+        let drain = drain_to_thread(Some(reader));
+        // 在写端已关闭的前提下置位停止标志，模拟高负载下读取线程在宽限期后才获得调度。
+        drain.stop.store(true, Ordering::Release);
+
+        let (stdout, stdout_complete) = finish_drain(Some(drain)).expect("结束输出排空失败");
+        assert_eq!(stdout, b"complete-json");
+        assert!(stdout_complete, "写端已关闭的管道排空后仍应判定为读至 EOF");
     }
 
     #[test]

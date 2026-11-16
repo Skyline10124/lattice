@@ -28,11 +28,12 @@ struct ObservationState {
     user_node: Option<NodeId>,
     current: Option<NodeId>,
     attempt: Option<AttemptSegments>,
+    closed_turn: Option<lattice_conversation::TurnId>,
     watchers: Vec<Weak<Mutex<PushState>>>,
     #[cfg(test)]
     events: Vec<TurnEvent>,
 }
-#[cfg(test)]
+#[cfg(any(test, feature = "test-utils"))]
 type AcceptedReadFailure = (
     tokio::sync::oneshot::Sender<()>,
     tokio::sync::oneshot::Receiver<()>,
@@ -40,9 +41,9 @@ type AcceptedReadFailure = (
 pub(crate) struct ObserverSink {
     state: Mutex<ObservationState>,
     changed: tokio::sync::watch::Sender<()>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) accepted_read_failure: Mutex<Option<AcceptedReadFailure>>,
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     pub(crate) before_accept: Mutex<Option<AcceptedReadFailure>>,
 }
 impl Default for ObserverSink {
@@ -50,9 +51,9 @@ impl Default for ObserverSink {
         Self {
             state: Mutex::default(),
             changed: tokio::sync::watch::channel(()).0,
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             accepted_read_failure: Mutex::default(),
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             before_accept: Mutex::default(),
         }
     }
@@ -99,6 +100,28 @@ impl ObserverSink {
         state.watchers.retain(|watcher| watcher.strong_count() != 0);
         !state.watchers.is_empty()
     }
+    /// 返回指定轮次当前模型尝试中的助手正文快照（剔除推理段）；若该轮已关闭则返回 `None`。
+    #[cfg_attr(not(any(test, feature = "test-utils")), allow(dead_code))]
+    pub(crate) fn assistant_draft(&self, turn_id: lattice_conversation::TurnId) -> Option<String> {
+        let state = self.state.lock().expect("观察状态锁不应中毒");
+        if state.closed_turn == Some(turn_id) {
+            return None;
+        }
+        let Some(attempt) = state
+            .attempt
+            .as_ref()
+            .filter(|attempt| attempt.key.turn_id == turn_id)
+        else {
+            return Some(String::new());
+        };
+        let mut text = String::new();
+        for segment in &attempt.segments {
+            if let TextSegment::Text { text: part } = segment {
+                text.push_str(part);
+            }
+        }
+        Some(text)
+    }
     fn mark(state: &mut ObservationState, nodes: &[NodeId], replace: bool) {
         state.watchers.retain(|watcher| {
             let Some(watcher) = watcher.upgrade() else {
@@ -119,6 +142,7 @@ impl ObserverSink {
         state.user_node = None;
         state.current = (position != NodeId(0)).then_some(position);
         state.attempt = None;
+        state.closed_turn = None;
         Self::mark(&mut state, &[], true);
         self.changed.send_replace(());
     }
@@ -162,8 +186,15 @@ impl ObserverSink {
                     .sum::<usize>(),
         ));
     }
+    #[cfg(test)]
     pub(crate) fn release(&self) {
-        let mut state = self.state.lock().expect("observation lock");
+        self.release_turn(None);
+    }
+    pub(crate) fn release_turn(&self, turn_id: Option<lattice_conversation::TurnId>) {
+        let mut state = self.state.lock().expect("观察状态锁不应中毒");
+        if let Some(turn_id) = turn_id {
+            state.closed_turn = Some(turn_id);
+        }
         state.attempt = None;
         let nodes: Vec<_> = state.current.into_iter().collect();
         Self::mark(&mut state, &nodes, false);
@@ -177,11 +208,15 @@ impl ObserverSink {
             TurnEvent::TurnStarted { user_node, .. } => {
                 state.user_node = Some(*user_node);
                 state.current = Some(NodeId(user_node.0 + 1));
+                state.closed_turn = None;
                 nodes.extend([*user_node, NodeId(user_node.0 + 1)]);
             }
             TurnEvent::ModelStarted { key, .. } => {
                 if let Some(user) = state.user_node {
                     state.current = Some(NodeId(user.0 + 1 + u64::from(key.model_step_ordinal)));
+                }
+                if state.closed_turn == Some(key.turn_id) {
+                    state.closed_turn = None;
                 }
                 state.attempt = Some(AttemptSegments {
                     key: *key,
@@ -224,10 +259,11 @@ impl ObserverSink {
                     nodes.extend(state.current);
                 }
             }
-            TurnEvent::TurnCompleted { step, .. }
-            | TurnEvent::TurnFailed { step, .. }
-            | TurnEvent::TurnCancelled { step, .. } => {
+            TurnEvent::TurnCompleted { turn, step, .. }
+            | TurnEvent::TurnFailed { turn, step, .. }
+            | TurnEvent::TurnCancelled { turn, step, .. } => {
                 nodes.push(step.node);
+                state.closed_turn = Some(turn.turn_id);
                 state.attempt = None;
             }
             TurnEvent::ModelFinished { .. }

@@ -130,6 +130,7 @@ mod tests {
             availability: Availability::Ready,
             email: Some("user@example.com".into()),
             expires_at: None,
+            diagnostic: None,
         }
     }
 

@@ -38,11 +38,12 @@ pub use models::{
     ModelPrice, ModelWarning,
 };
 pub use types::{
-    Acceptance, AuthLoggedOut, AuthRemoval, CancelStatus, ConfigureReply, ConfigureRequest,
-    ConfigureResult, ConfigureSession, ConflictReason, ConnectionStatus, DaemonStatus,
-    EffortAdjustment, HISTORY_TURNS, LocalError, LocalErrorKind, LocalHistory, LocalUpdate,
-    MAX_HISTORY_TURNS, RecoveryCause, RecoveryNeed, Request, RequestConflict, Response, Result,
-    SessionHead, SessionListRow, StoreDiagnostic, SubmissionReceipt, SubmissionResult,
-    SubmissionUpdate, TextSegment, TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView,
-    ViewUpdate, WATCH_TURNS,
+    Acceptance, AuthLoggedOut, AuthRemoval, CancelStatus, ComponentState, ComponentStatus,
+    ConfigureReply, ConfigureRequest, ConfigureResult, ConfigureSession, ConflictReason,
+    ConnectionStatus, DaemonStatus, EffortAdjustment, HISTORY_TURNS, ImAuthRemoveReply,
+    ImAuthSetReply, ImAuthStatus, ImCredentialStatus, ImMountResult, ImPlatformAuthStatus,
+    LocalError, LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, RecoveryCause,
+    RecoveryNeed, Request, RequestConflict, Response, Result, SessionHead, SessionListRow,
+    StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment,
+    TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, ViewUpdate, WATCH_TURNS,
 };

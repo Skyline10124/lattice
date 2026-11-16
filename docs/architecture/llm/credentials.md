@@ -31,8 +31,8 @@ status: active
 }
 ```
 
-- **权限。** 文件与所在目录属于当前用户。配置目录（默认 `~/.lattice`）新建时为 0700，`auth.json` 为 0600；二者都不能向同组或其他用户开放。属主不符、权限更宽或是符号链接时，后台拒绝使用并说明原因，不自动修改。目录不满足时，`lattice auth set` 与需要 key 的提交被拒绝。
-- **写入。** 后台进程内串行写入：先在同目录写临时文件（0600）并 fsync，再改名替换，最后 fsync 目录。
+- **权限。** 文件与所在目录经 `lattice-store` 的 `PrivateDirectory` 核验，属于当前有效用户。配置目录（默认 `~/.lattice`）新建时为 0700，`auth.json` 为 0600；二者都不能向同组或其他用户开放（`mode & 0o077 == 0`，只读如 0500、0400 允许读取）。属主不符、权限更宽、符号链接或非普通文件时，后台拒绝使用并说明原因，不自动修改。目录不满足时，`lattice auth set` 与需要 key 的提交被拒绝。
+- **写入。** 后台进程内串行写入，经 `PrivateDirectory` 执行：先在同目录写临时文件（0600）并 fsync，发布前复核当前目标不是坏权限、符号链接或特殊文件，再改名替换，最后 fsync 目录。
 - **大小。** 文件最多 1 MiB；单个 key 1～16,384 字节，不含控制字符。
 - **严格解析。** 不认识的 `version` 或结构错误时整个文件无效，所有需要凭据的操作按配置错误拒绝；`lattice auth status` 将依赖凭据的 provider 标为 `invalid` 并报告文件错误。
 - **不外泄。** 凭据不进入会话库、会话设置、日志、诊断、公开 DTO 或 Debug 输出。配置拒绝的脱敏以 `auth.json` 中的全部凭据值为已知值，见[会话合同的配置拒绝](../session/acceptance.md#配置拒绝的原因)。
@@ -47,7 +47,7 @@ status: active
 | `lattice auth remove <provider>` | 删除该 provider 的 key；对 `chatgpt` 先按[登出](#登出)处理，再删除 `client_id` 与账号信息，保留 host ID |
 | `lattice auth login chatgpt` | SIWC 登录，见下节 |
 | `lattice auth logout chatgpt` | SIWC 登出 |
-| `lattice auth status` | 每个已注册 provider 的[可用性状态](models.md#可用性判定)：`ready`、`unconfigured`（附所缺要求 `declaration`、`api_key` 或 `chatgpt_login` 及操作提示）或 `invalid`（`auth.json` 无效及原因）；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
+| `lattice auth status` | 每个已注册 provider 的[可用性状态](models.md#可用性判定)：`ready`、`unconfigured`（附所缺要求 `declaration`、`api_key` 或 `chatgpt_login`）或 `invalid`（`auth.json` 无效及原因），以及后台按自身实际 `<config_dir>/providers.toml` 生成并随 `ProviderAuthStatus.diagnostic` 下发的操作提示（`ready` 时省略）；`chatgpt` 另给账号邮箱与 access token 的到期时间。前端直接展示后台下发的 `diagnostic`，不在本地拼接配置路径；响应不返回凭据本身 |
 
 只有 `auth` 为 `bearer`、`x-api-key` 或 `x-goog-api-key` 的 provider 能 `set`。
 

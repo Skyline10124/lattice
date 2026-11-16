@@ -6,13 +6,13 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 决策记录：[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)
+> 决策记录：[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0011](../adr/0011-im-gateway-inside-backend.md)
 
 ## 目的与范围
 
-本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供状态布局、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
+本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供状态布局、私有目录与单分量私有文件的严格打开/限量读取/同目录临时文件原子替换、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
 
-私有状态目录下的存储是会话库 `lattice.redb`：全局一份，保存 Session、会话树（Step 节点内含调用槽位）、会话设置、配置表与各索引，由 `lattice-session` 维护。
+私有状态目录下的存储包括全局会话库 `lattice.redb`（保存 Session、会话树、会话设置、配置表与各索引，由 `lattice-session` 维护）以及 IM 台账 `im/ledger`（保存会话绑定与入站事件相位，由 `lattice-im` 维护，见[IM 网关](im.md)）。
 
 会话记录与事务序列见[会话合同](session/README.md)，调用槽位推进与结果载荷见[调用槽位](session/steps.md#调用槽位)。
 
@@ -26,6 +26,7 @@ status: active
 | --- | --- |
 | `lattice.redb` | `lattice-session`，全局会话库 |
 | `locks/sessions/<SessionId>.lock` | 会话操作锁 |
+| `im/ledger` | `lattice-im`，IM 会话绑定与入站事件相位台账，见[IM 网关](im.md) |
 
 打开会话库时，若 `lattice/` 下存在 `sessions.git` 或 `projects/*/invocations.git`，打开失败并在错误中列出这些路径，由人删除或存档。
 
@@ -168,7 +169,7 @@ SIGKILL 后重开证明相应进程崩溃场景。文件系统探测、进程崩
 | --- | --- |
 | 会话库打开、创建、格式版本，以及存在 `sessions.git` 或 `invocations.git` 时的拒绝 | `cargo test -p lattice-session` |
 | 会话库的崩溃与重开 | 真实二进制与真实状态根上的 E2E 场景，按[测试工程合同](../development/testing.md)选择 |
-| 寻址、状态布局、锁、`fsync` 与能力探测 | `cargo test -p lattice-store` |
+| 寻址、状态布局、私有目录与文件原子读写、锁、`fsync` 与能力探测 | `cargo test -p lattice-store` |
 | 内核静态检查 | `cargo clippy -p lattice-store --all-targets -- -D warnings` |
 | 依赖边界 | `cargo tree -p lattice-store --edges normal`、`cargo xtask harness-boundary` |
 | 会话的新建与续写不在 `projects/` 下创建或改动内容 | `cargo test -p lattice-server --test session_without_workspace_history` |
@@ -176,6 +177,6 @@ SIGKILL 后重开证明相应进程崩溃场景。文件系统探测、进程崩
 
 纯文档修订核对接口责任、锁范围、来源、状态及图示。修改内核或会话库接线时先检查直接故障窗口，再验证使用该机制的领域，执行资源和被测产物按[测试工程合同](../development/testing.md)处理。
 
-承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件，以及 [ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md) 的会话库升版与存储收敛。机制接口与实现核对位置为 [`layout.rs`](../../crates/lattice-store/src/layout.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
+承接来源为 ADR 0005 的项目寻址、通用内核、操作锁和位置能力部分，[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md) 的存储布局与会话库使用条件，[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md) 的会话库升版与存储收敛，以及 [ADR 0011](../adr/0011-im-gateway-inside-backend.md) 的私有目录与文件原语。机制接口与实现核对位置为 [`layout.rs`](../../crates/lattice-store/src/layout.rs)、[`private_file.rs`](../../crates/lattice-store/src/private_file.rs)、[`durability.rs`](../../crates/lattice-store/src/durability.rs)、[`lock.rs`](../../crates/lattice-store/src/lock.rs)及 [`probe.rs`](../../crates/lattice-store/src/probe.rs)。
 
 创建残留的完整报告与跨位置能力覆盖仍需核验。

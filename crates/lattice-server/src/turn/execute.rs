@@ -131,6 +131,7 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
                 Some(session_id) => Ok(TurnAcceptance::ConfirmationUnknown {
                     turn_id,
                     session_id,
+                    cause: confirmation_unknown_cause(error),
                 }),
                 None => Err(error.clone()),
             };
@@ -143,6 +144,18 @@ pub(crate) fn start_execution(mut input: ExecutionInput) -> TurnExecution {
         completion,
         #[cfg(any(test, feature = "test-utils"))]
         cancel_flag,
+    }
+}
+
+fn confirmation_unknown_cause(error: &ApiError) -> lattice_ipc::RecoveryCause {
+    match error {
+        ApiError::WorkerFailed => lattice_ipc::RecoveryCause::WorkerFailed,
+        ApiError::Store(store_error)
+            if matches!(store_error.as_ref(), StoreError::WriteDisabled) =>
+        {
+            lattice_ipc::RecoveryCause::WriteDisabled
+        }
+        _ => lattice_ipc::RecoveryCause::CommitFailed,
     }
 }
 
@@ -251,7 +264,7 @@ async fn execute_owned(
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     {
         let gate = observer
             .before_accept
@@ -297,6 +310,7 @@ async fn execute_owned(
                     TurnAcceptance::ConfirmationUnknown {
                         turn_id,
                         session_id,
+                        cause: confirmation_unknown_cause(&error),
                     },
                 );
             }
@@ -310,7 +324,7 @@ async fn execute_owned(
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(timeout.as_secs());
     #[cfg(feature = "test-crash-barriers")]
     super::crash_barrier::hit(&coordinator.io, turn_id, "turn_accepted", None, None).await?;
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-utils"))]
     let fail_read = {
         let gate = observer
             .accepted_read_failure
@@ -328,7 +342,7 @@ async fn execute_owned(
     let turn = coordinator
         .io
         .read(move |read| {
-            #[cfg(test)]
+            #[cfg(any(test, feature = "test-utils"))]
             if fail_read {
                 return Err(StoreError::Corruption {
                     table: "test".into(),

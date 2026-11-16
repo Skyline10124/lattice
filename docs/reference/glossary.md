@@ -149,3 +149,13 @@ _Avoid_: thinking budget, reasoning mode, effort string
 英文名 Session settings。会话保存在会话库中的下一轮配置记录（`SessionSettings`），含有效 profile、内联系统提示、可选的模型与可选推理档位，内容摘要构成设置版本（`SettingsVersion`）；由 `configure` 写入或更新，接受一轮时从中冻结本轮配置。provider 配置与凭据不在会话设置中。
 见[会话设置](../architecture/session/settings.md#会话设置)。
 _Avoid_: frozen configuration, current agent lookup, session config cache
+
+**IM 网关**:
+本地后台进程内把外部即时通讯平台（当前为 Telegram 私聊）接入 LATTICE 会话服务的组件，负责授权过滤、命令分发、流式草稿与文本切分回复；它面向外部消息平台收发用户对话，不同于向模型服务发起调用的请求网关。
+见[IM 网关](../architecture/im.md#组件与职责)。
+_Avoid_: 请求网关, 独立桥接进程, webhook 服务, 远程后台入口
+
+**台账**:
+英文名 Ledger。`lattice-im` 在 `<state-root>/lattice/im/ledger` 维护的私有状态文件，只保存外部对话与 `SessionId` 的当前绑定及重投窗口内入站事件的投递相位（`Registered`、`Accepted`、`Delivered`）；对话历史仍在会话树中，它也不保存消息正文或模型与工具调用记录。
+见[IM 网关](../architecture/im.md#状态)。
+_Avoid_: 会话树, invocation ledger, `invocations.git`, 消息历史库

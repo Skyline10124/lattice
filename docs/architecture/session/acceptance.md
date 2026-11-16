@@ -55,7 +55,7 @@ status: active
 
 | 项 | 来源 |
 | --- | --- |
-| 配置目录 | 后台环境中的 `$HOME/.lattice`；其中有 `providers.toml`、`auth.json`、`cache/` 与 `agents/` |
+| 配置目录 | 后台环境中的 `$HOME/.lattice`；其中有 `providers.toml`、`auth.json`、`cache/`、`agents/`，以及可选 IM 组件使用的 `im/config.toml` 与 `im/auth.json`（见[IM 网关](../im.md)） |
 | agents 目录 | 项目内的 `.lattice/agents` 与配置目录下的 `agents`，查找顺序见[会话设置](settings.md#configure-的计算基准与保存)；没有其他覆盖方式 |
 | TLS 根证书 | 平台根证书，按 `rustls-native-certs` 的规则从后台环境加载，所以 `SSL_CERT_FILE`、`SSL_CERT_DIR` 有效 |
 

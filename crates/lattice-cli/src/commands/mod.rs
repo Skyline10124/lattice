@@ -3,6 +3,8 @@
 
 pub mod auth;
 pub mod daemon;
+pub mod im;
 pub mod models;
 pub mod run;
+pub(crate) mod secret_input;
 pub mod session;
