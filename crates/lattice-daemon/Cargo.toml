@@ -14,10 +14,11 @@ path = "src/main.rs"
 [dependencies]
 # 帮助文本含中文，按显示宽度对齐需要 clap 的 `unicode` feature。
 clap = { workspace = true, features = ["unicode"] }
+lattice-im = { workspace = true }
 lattice-ipc = { workspace = true }
 lattice-server = { workspace = true }
 lattice-store = { workspace = true }
-rustix = { workspace = true, features = ["net"] }
+rustix = { workspace = true, features = ["fs", "net"] }
 tokio = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }

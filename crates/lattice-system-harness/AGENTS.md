@@ -7,7 +7,7 @@
 | 模块 | 负责 |
 | --- | --- |
 | `src/lib.rs` | 重导出场景世界、进程驱动、假 provider 服务、预算与断言辅助接口 |
-| `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离、环境变量白名单与后台环境快照、直接子进程后台的显式启动与限时就绪轮询、显式重启、有序 `stop`、自有进程组回收及状态根残留后台检查 |
+| `src/world.rs`、`src/daemon.rs` | `ScenarioWorld` 临时工作区与 `HOME`/`XDG_STATE_HOME` 隔离（`~/.local/state/lattice` 按 `0700` 私有权限建立）、环境变量白名单与后台环境快照、直接子进程后台的显式启动与限时就绪轮询、显式重启、有序 `stop`、自有进程组回收及状态根残留后台检查 |
 | `src/driver.rs`、`src/cli.rs` | `LATTICE_BIN` 与 `LATTICE_DAEMON_BIN` 路径与可执行权限核验、独立进程组命令执行、`terminate`（`SIGTERM`）与超时终止、`CommandOutcome` 采集及快速 CLI 辅助 |
 | `src/scenario.rs` | 场景分层与单命令、整场景时长预算计算 |
 | `src/fake_llm.rs`、`src/provider.rs`、`src/tls.rs` | 五协议 TLS + HTTP/2 `FakeLlmServer`、`ResponseGate`、工具 schema 校验、临时 CA 签发及经 `providers.toml` 与 `lattice auth set` 的正式配置接入 |
@@ -23,7 +23,7 @@
 | 任何改动 | [测试工程](../../docs/development/testing.md)、[宿主平台](../../docs/architecture/platform.md)、[工程规范](../../docs/development/engineering.md) |
 | 被测二进制准备与运行命令 | [验证指南](../../docs/development/validation-guide.md)、[运行测试](../../docs/development/scenarios/manual/run-tests.md) |
 | 新增或修改产品场景 | [场景卡片](../../docs/development/scenarios/README.md)：每个产品场景对应一张自动场景卡片 |
-| 具体场景断言（会话、模型、TUI、工具） | 对应领域的架构合同（如[会话与 Turn](../../docs/architecture/session/README.md)、[模型接入](../../docs/architecture/llm/README.md)、[Dock 与输入区](../../docs/architecture/tui/dock.md#选择面板)、[移除旧 LANCET 执行器 ADR](../../docs/adr/0009-remove-legacy-lancet-tool-executor.md)） |
+| 具体场景断言（会话、模型、IM、TUI、工具） | 对应领域的架构合同（如[会话与 Turn](../../docs/architecture/session/README.md)、[模型接入](../../docs/architecture/llm/README.md)、[IM 网关](../../docs/architecture/im.md)、[Dock 与输入区](../../docs/architecture/tui/dock.md#选择面板)、[移除旧 LANCET 执行器 ADR](../../docs/adr/0009-remove-legacy-lancet-tool-executor.md)） |
 
 ## 约束
 
@@ -39,7 +39,7 @@
 | 改动 | 运行 |
 | --- | --- |
 | 修改 `src/` 通用驱动或解析器 | `cargo test -p lattice-system-harness --lib` 与 `cargo xtask harness-boundary` |
-| 修改 CLI 帮助、环境变量或参数场景 | 先构建 `lattice` 与 `lattice-daemon`，再运行对应的 `cargo test -p lattice-system-harness --test fast_<场景>` |
+| 修改 CLI 帮助、环境变量、凭据、IM 重载或参数场景 | 先构建 `lattice` 与 `lattice-daemon`，再运行对应的 `TMPDIR=/tmp cargo test -p lattice-system-harness --test fast_<场景>`（如 `fast_cli_help`、`fast_im_cli`） |
 | 修改后台重连、会话树或 provider 默认场景 | 先构建无测试 feature 的 `lattice` 与 `lattice-daemon`，再按影响范围运行对应的 `cargo test -p lattice-system-harness --test direct_<场景>` |
 | 修改工具循环场景或 `tui_mock` 工具分支 | 先构建 `lattice` 与带 `--features lattice-server/test-fake-tools` 的 `lattice-daemon`，再运行对应的 `cargo test -p lattice-system-harness --features fake-tools --test direct_<场景>` |
 | 修改 TUI 冒烟驱动或 `pty_tui_smoke` | 默认非工具子集：构建无测试 feature 的 `lattice` 与 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --test pty_tui_smoke`；含假工具块与面板重试的全集：构建 `--features lattice-server/test-fake-tools` 的 `lattice-daemon` 后运行 `cargo test -p lattice-system-harness --features fake-tools --test pty_tui_smoke` |

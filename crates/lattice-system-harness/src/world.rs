@@ -106,7 +106,10 @@ impl ScenarioWorld {
             home.join(".lattice/providers.toml"),
             "[metadata]\nauto_refresh = false\n",
         )?;
-        std::fs::create_dir_all(&session_store)?;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&session_store)?;
         std::fs::create_dir_all(project.join(".lattice"))?;
 
         let port = os_free_port()?;

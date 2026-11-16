@@ -11,6 +11,7 @@ LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命
 - **会话管理**：在全局会话库中保存树形对话与步骤记录，支持本地后台持续执行、重连观察、历史查看和退回任意节点后分叉继续。
 - **多协议模型接入**：支持内置与自定义 provider 配置、API key 及登录凭据管理、推理档位选择，以及逐轮 token 用量与费用估算。
 - **工具执行接缝**：协调层经可注入的 `ToolExecutor` 驱动调用槽位；当前版本生产环境默认注入空目录的 `NoTools`，会话以纯对话运行，不向模型暴露工具定义或任意 Shell 命令执行能力。
+- **内置 IM 网关（Telegram）**：本地后台可作为可选组件托管 Telegram 私聊纯文本接入，支持流式草稿、停止生成按钮、内置会话与用量命令（`/new`、`/cancel`、`/status`、`/usage`、`/help`）、`inotify` 配置热重载及崩溃后未投递回复补发。
 
 ## 安装
 
@@ -126,11 +127,30 @@ lattice tui "$SESSION_ID"
 > 概括这个项目的用途，并指出主要入口文件和目录。
 ```
 
+## 内置 IM 网关（可选）
+
+后台默认不启用 IM 组件（`lattice daemon status` 显示 `组件：无`）。需要通过 Telegram 私聊使用 LATTICE 时，在私有目录 `~/.lattice/im`（权限 `0700`）下创建权限为 `0600` 的 `~/.lattice/im/config.toml`，并录入机器人 Token：
+
+```toml
+[telegram]
+allowed_senders = [123456789]
+workspace = "/abs/path/to/your/workspace"
+agent = "reader"
+```
+
+```sh
+lattice im auth set telegram
+lattice im auth status
+lattice daemon status
+```
+
+保存或原子替换 `~/.lattice/im/config.toml` 时，后台会通过 `inotify` 自动重新挂载 IM 组件且不中断正在执行的对话轮次；若新配置存在错误，已运行的网关实例会继续按上一份有效配置服务，并在 `lattice daemon status` 中提示原因。也可手动执行 `lattice im reload` 触发重载（例如修复文件权限或重建被删除的 `~/.lattice/im` 目录后），或执行 `lattice im auth remove telegram` 移除凭据。完整步骤与命令说明见 [Telegram 私聊接入与运维](docs/development/scenarios/manual/im-telegram.md)。
+
 ## 后台执行与重连
 
-Session 命令、TUI、`auth` 与 `models` 只连接已经运行的本地后台（`lattice-daemon`），不会自动拉起后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
+Session 命令、TUI、`auth`、`im` 与 `models` 只连接已经运行的本地后台（`lattice-daemon`），不会自动拉起后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-`lattice-daemon` 使用启动它的宿主进程环境（systemd user manager 环境或手动启动时的进程环境），在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，执行 `systemctl --user restart lattice`（手动运行时先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`）。
+`lattice-daemon` 使用启动它的宿主进程环境（systemd user manager 环境或手动启动时的进程环境），在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据、`im/` 与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，执行 `systemctl --user restart lattice`（手动运行时先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`）。
 
 配置目录里的 `providers.toml` 与凭据在每次模型请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。凭据也可通过 `lattice auth set` 更新。价格的生效时机见[费用估算](docs/architecture/llm/usage.md#费用估算)。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
@@ -145,6 +165,7 @@ lattice session cancel <session_id> <turn_id>
 lattice daemon install
 lattice daemon status
 lattice daemon stop
+lattice im --help
 ```
 
 接受回执未知时的找回与退出码见[判读结果](docs/development/validation-guide.md#判读结果)；取消与崩溃遗留任务的处理见[取消与执行者消失后继续](docs/development/scenarios/manual/cancel-and-continue.md)。
@@ -179,7 +200,7 @@ lattice session usage <session_id>
 lattice --json session usage <session_id>
 ```
 
-由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。从自动拉起后台的旧版本升级时，若执行 `lattice daemon install` 报告旧后台仍占用状态根，先执行 `lattice daemon stop`（协议不兼容时用旧二进制执行），再执行 `systemctl --user start lattice`。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
+由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。跨本地 IPC 协议版本（当前为 `64`）升级或从旧版本迁移时，若新前端与运行中旧后台报 `incompatible_backend`，先执行 `systemctl --user stop lattice`（手动运行后台时用旧二进制执行 `lattice daemon stop`），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 
@@ -206,6 +227,7 @@ lattice models refresh
 | 文档索引 | [docs/README.md](docs/README.md) |
 | Agent 工作指引 | [AGENTS.md](AGENTS.md) |
 | 领域术语 | [docs/reference/glossary.md](docs/reference/glossary.md) |
+| IM 网关合同与手动指南 | [IM 网关](docs/architecture/im.md)与 [Telegram 私聊接入与运维](docs/development/scenarios/manual/im-telegram.md) |
 | 工具执行接缝 | [Step 执行与结果保存](docs/architecture/session/steps.md#调用槽位)与 [ADR 0009](docs/adr/0009-remove-legacy-lancet-tool-executor.md) |
 | 开发测试与验证方式 | [测试工程合同](docs/development/testing.md)与[验证操作指南](docs/development/validation-guide.md) |
 

@@ -47,7 +47,7 @@ status: active
 | `lattice auth remove <provider>` | 删除该 provider 的 key；对 `chatgpt` 先按[登出](#登出)处理，再删除 `client_id` 与账号信息，保留 host ID |
 | `lattice auth login chatgpt` | SIWC 登录，见下节 |
 | `lattice auth logout chatgpt` | SIWC 登出 |
-| `lattice auth status` | 每个已注册 provider 的[可用性状态](models.md#可用性判定)：`ready`、`unconfigured`（附所缺要求 `declaration`、`api_key` 或 `chatgpt_login` 及操作提示）或 `invalid`（`auth.json` 无效及原因）；`chatgpt` 另给账号邮箱与 access token 的到期时间。不返回凭据本身 |
+| `lattice auth status` | 每个已注册 provider 的[可用性状态](models.md#可用性判定)：`ready`、`unconfigured`（附所缺要求 `declaration`、`api_key` 或 `chatgpt_login`）或 `invalid`（`auth.json` 无效及原因），以及后台按自身实际 `<config_dir>/providers.toml` 生成并随 `ProviderAuthStatus.diagnostic` 下发的操作提示（`ready` 时省略）；`chatgpt` 另给账号邮箱与 access token 的到期时间。前端直接展示后台下发的 `diagnostic`，不在本地拼接配置路径；响应不返回凭据本身 |
 
 只有 `auth` 为 `bearer`、`x-api-key` 或 `x-goog-api-key` 的 provider 能 `set`。
 

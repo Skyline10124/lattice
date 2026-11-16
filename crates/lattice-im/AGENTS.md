@@ -1,6 +1,6 @@
 # lattice-im 工作指引
 
-提供本地后台内置的 IM 网关库（当前首个平台为 Telegram 私聊纯文本接入）：只读解析 `im/config.toml` 并经 `lattice-server` 读取 `im/auth.json` 平台凭据，维护 `<state-root>/lattice/im/ledger` 私有台账与滑动窗口清理，通过进程内 `Service` 完成会话绑定、准入提交、崩溃找回、流式纯文本草稿推送、草稿停止按钮取消与 4096 字符三级切分回复。
+提供由 `lattice-daemon` 经 `lattice-server` 组件管理器托管的进程内 IM 网关库（当前首个平台为 Telegram 私聊纯文本接入）：只读解析 `im/config.toml` 并经 `lattice-server` 读取 `im/auth.json` 平台凭据，维护 `<state-root>/lattice/im/ledger` 私有台账与滑动窗口清理，通过进程内 `Service` 完成会话绑定、准入提交、崩溃找回、流式纯文本草稿推送、草稿停止按钮取消与 4096 字符三级切分回复。
 
 ## 模块
 
@@ -16,7 +16,7 @@
 | `src/telegram.rs` | Telegram 更新解析、`tg:` 身份键转换、连续已确认前缀推进器 `OffsetTracker` 与本包唯一的抽象接口 `TelegramIo` |
 | `src/telegram_http.rs` | 固定连接 `https://api.telegram.org` 的真实客户端：运行期在阻塞线程池执行 `net_guard` 校验与公网地址固定、仅信任后台启动期根证书、禁用代理与重定向，并分类处理 `429`、`5xx` 与 `400`/`403` 平台拒收 |
 | `src/reply.rs` | 活跃草稿登记表、单对话共享 1 秒草稿节流与 25 秒保活、末尾 4096 字符草稿截取、最终回复结局说明拼接、段落/行/字符三级 4096 切分与可靠重试发送 |
-| `src/gateway.rs` | 网关主循环、启动期遗留 `Registered` 准入屏障与并行恢复、同对话按序准入、草稿会话被清理后的同身份重建及全部派生子任务的有界优雅收尾 |
+| `src/gateway.rs`、`src/gateway_tests.rs` | 网关主循环、启动期遗留 `Registered` 准入屏障与并行恢复、同对话按序准入、草稿会话被清理后的同身份重建、全部派生子任务的有界优雅收尾，以及联立 `serve_for_test_with_components` 的组件托管、合并重挂、10 秒 `abort` 强拆恢复与 panic 隔离集成测试 |
 
 ## 先读
 

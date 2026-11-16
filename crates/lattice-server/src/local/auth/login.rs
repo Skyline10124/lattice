@@ -62,6 +62,7 @@ impl Drop for Input {
 }
 
 fn outcome(
+    providers_path: &std::path::Path,
     result: std::result::Result<
         (lattice_llm::auth::ProviderAuthStatus, AuthCatalogOutcome),
         LoginError,
@@ -69,7 +70,7 @@ fn outcome(
 ) -> LoginResponse {
     match result {
         Ok((status, catalog)) => LoginResponse::AuthLoginResult(AuthLoginOutcome::SignedIn {
-            status: crate::local::presentation::provider_auth_status(status),
+            status: crate::local::presentation::provider_auth_status(providers_path, status),
             catalog,
         }),
         Err(LoginError::Cancelled) => {
@@ -93,6 +94,7 @@ fn outcome(
 }
 
 async fn finish(
+    providers_path: &std::path::Path,
     result: std::result::Result<lattice_llm::auth::ProviderAuthStatus, LoginError>,
     refresh: &impl Fn() -> BoxFuture<'static, AuthCatalogOutcome>,
 ) -> LoginResponse {
@@ -100,12 +102,13 @@ async fn finish(
         Ok(status) => Ok((status, refresh().await)),
         Err(error) => Err(error),
     };
-    outcome(result)
+    outcome(providers_path, result)
 }
 
 /// 认证规则归 LLM；这里只管理专用连接的输入、输出和取消责任。
 pub(in crate::local) async fn exchange<A: LoginAttempt>(
     stream: UnixStream,
+    providers_path: &std::path::Path,
     start: impl std::future::Future<Output = std::result::Result<A, LoginError>>,
     refresh: impl Fn() -> BoxFuture<'static, AuthCatalogOutcome> + Send + Sync,
 ) -> Result<()> {
@@ -138,7 +141,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
         }
         attempt = &mut start => match attempt {
             Ok(attempt) => attempt,
-            Err(error) => return writer.write(&mut write, &outcome(Err(error))).await,
+            Err(error) => return writer.write(&mut write, &outcome(providers_path, Err(error))).await,
         },
     };
     let authorization = LoginResponse::AuthLoginAuthorization {
@@ -163,7 +166,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
     let response = loop {
         tokio::select! {
             biased;
-            result = attempt.wait() => break finish(result, &refresh).await,
+            result = attempt.wait() => break finish(providers_path, result, &refresh).await,
             action = input.messages.recv() => match action {
                 Some(Ok(Some(LoginAction::Callback { mut url }))) if !callback_sent => {
                     callback_sent = true;
@@ -172,7 +175,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
                 }
                 Some(Ok(Some(LoginAction::Cancel {}))) => {
                     attempt.cancel();
-                    break finish(attempt.wait().await, &refresh).await;
+                    break finish(providers_path, attempt.wait().await, &refresh).await;
                 }
                 Some(Ok(None)) | None => {
                     attempt.cancel();
@@ -182,7 +185,7 @@ pub(in crate::local) async fn exchange<A: LoginAttempt>(
                 message => {
                     attempt.cancel();
                     let final_result = attempt.wait().await;
-                    if final_result.is_ok() { break finish(final_result, &refresh).await; }
+                    if final_result.is_ok() { break finish(providers_path, final_result, &refresh).await; }
                     break LoginResponse::Error(match message { Some(Err(error)) => error, _ => protocol() });
                 }
             }

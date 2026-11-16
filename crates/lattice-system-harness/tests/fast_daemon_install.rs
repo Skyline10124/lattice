@@ -270,9 +270,9 @@ impl IncompatiblePeerFixture {
                 .map_err(|e| format!("期限内读取客户端探测帧魔数失败：{e}"))?;
 
             apply_stream_deadline(&stream, deadline)?;
-            // 写入比当前协议版本（63 = 0x3f）旧一版的 LTLOCAL 帧魔数。
+            // 写入比当前协议版本（64 = 0x40）旧一版的 LTLOCAL 帧魔数。
             stream
-                .write_all(b"LTLOCAL\x3e")
+                .write_all(b"LTLOCAL\x3f")
                 .map_err(|e| format!("期限内写入旧协议魔数失败：{e}"))?;
             stream
                 .flush()
@@ -774,6 +774,7 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
                 "代次：",
                 "在途执行者：",
                 "未确认收尾操作：",
+                "组件：无",
             ],
         )
         .map_err(|e| e.to_string())?;
@@ -793,7 +794,13 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
         assert_exit_code(&json_status, 0).map_err(|e| e.to_string())?;
         let parsed: serde_json::Value =
             serde_json::from_slice(&json_status.stdout).map_err(|e| e.to_string())?;
-        for field in ["epoch", "stopping", "owners", "unconfirmed_operations"] {
+        for field in [
+            "epoch",
+            "stopping",
+            "owners",
+            "unconfirmed_operations",
+            "components",
+        ] {
             if parsed.get(field).is_none() {
                 return Err(format!("--json daemon status 缺少字段 `{field}`：{parsed}"));
             }

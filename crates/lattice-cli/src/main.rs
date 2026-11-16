@@ -42,6 +42,15 @@ enum Commands {
         disable_help_subcommand = true
     )]
     Daemon(commands::daemon::DaemonArgs),
+    /// 管理内置 IM 网关的平台凭据与配置重载。
+    #[command(
+        help_template = commands::im::IM_HELP_TEMPLATE,
+        override_usage = "lattice im <命令>",
+        subcommand_value_name = "命令",
+        disable_help_flag = true,
+        disable_help_subcommand = true
+    )]
+    Im(commands::im::ImArgs),
     /// Manage provider credentials and Sign in with ChatGPT.
     Auth {
         #[command(subcommand)]
@@ -77,6 +86,7 @@ fn cli_command() -> clap::Command {
     let mut cmd = Cli::command();
     cmd.build();
     cmd.mut_subcommand("daemon", commands::daemon::localize_help)
+        .mut_subcommand("im", commands::im::localize_help)
 }
 
 #[derive(Debug)]
@@ -173,6 +183,10 @@ fn render_cli_parse_error(
                 }
                 CliParseError::Clap(error) => commands::daemon::cli_error_message(error),
             }
+        } else if let (Some(sub), CliParseError::Clap(error)) = (subcmd, parse_error)
+            && sub == "im"
+        {
+            commands::im::cli_error_message(args, error)
         } else {
             "invalid command; use --help".to_owned()
         };
@@ -187,6 +201,12 @@ fn render_cli_parse_error(
     if subcmd.is_some_and(|arg| arg == "auth") {
         // 包括 help auth 路径在内，clap 错误都可能回显误放在参数中的 key。
         let _ = writeln!(err, "error: invalid auth command; use lattice auth --help");
+        return Some(2);
+    }
+    if subcmd.is_some_and(|arg| arg == "im") {
+        if let CliParseError::Clap(error) = parse_error {
+            let _ = writeln!(err, "{}", commands::im::format_cli_error(args, error));
+        }
         return Some(2);
     }
     if subcmd.is_some_and(|arg| arg == "daemon") {
@@ -266,6 +286,9 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
         }
         Some(Commands::Daemon(daemon)) => {
             return commands::daemon::run(daemon.action, cli.json).await;
+        }
+        Some(Commands::Im(im)) => {
+            return commands::im::run(im.action, cli.json).await;
         }
         Some(Commands::Auth { action }) => {
             return commands::auth::run(action, cli.json).await;
@@ -520,10 +543,244 @@ mod tests {
                 .get_subcommands()
                 .map(|c| c.get_name())
                 .collect::<Vec<_>>(),
-            ["run", "daemon", "auth", "models", "session", "tui"]
+            ["run", "daemon", "im", "auth", "models", "session", "tui"]
         );
         assert!(Cli::try_parse_from(["lattice", "audit"]).is_err());
         assert!(Cli::try_parse_from(["lattice", "lancet"]).is_err());
+    }
+
+    #[test]
+    fn im_subcommands_expose_chinese_help_and_redact_parse_errors_in_text_and_json() {
+        let mut root = super::cli_command();
+        let top_help = root.render_help().to_string();
+        assert!(
+            top_help.contains("管理内置 IM 网关的平台凭据与配置重载。"),
+            "顶层 lattice --help 列表应包含中文 im 摘要：{top_help}"
+        );
+
+        let im = root.find_subcommand_mut("im").unwrap();
+        assert_eq!(
+            im.get_subcommands()
+                .map(|c| c.get_name())
+                .collect::<Vec<_>>(),
+            ["auth", "reload"]
+        );
+        let im_help = im.render_help().to_string();
+        for expected in [
+            "管理内置 IM 网关的平台凭据与配置重载。",
+            "用法：lattice im <命令>",
+            "命令：",
+            "auth",
+            "reload",
+            "选项：",
+            "显示帮助。",
+        ] {
+            assert!(
+                im_help.contains(expected),
+                "im --help 缺少 `{expected}`：{im_help}"
+            );
+        }
+        for forbidden in [
+            "Usage:",
+            "Commands:",
+            "Options:",
+            "Arguments:",
+            "Print help",
+            "Verbose logging",
+            "Emit JSONL",
+            "Manage built-in IM",
+        ] {
+            assert!(
+                !im_help.contains(forbidden),
+                "im --help 不应残留英文 `{forbidden}`：{im_help}"
+            );
+        }
+
+        let reload_help = im
+            .find_subcommand_mut("reload")
+            .unwrap()
+            .render_help()
+            .to_string();
+        assert!(reload_help.contains("用法：lattice im reload [--json]"));
+        for forbidden in [
+            "Usage:",
+            "Options:",
+            "Print help",
+            "Emit JSONL",
+            "Verbose logging",
+        ] {
+            assert!(
+                !reload_help.contains(forbidden),
+                "im reload --help 不应残留英文 `{forbidden}`：{reload_help}"
+            );
+        }
+
+        let auth = im.find_subcommand_mut("auth").unwrap();
+        assert_eq!(
+            auth.get_subcommands()
+                .map(|c| c.get_name())
+                .collect::<Vec<_>>(),
+            ["set", "remove", "status"]
+        );
+        let auth_help = auth.render_help().to_string();
+        for expected in [
+            "管理 IM 平台凭据（保存、删除与查看状态）。",
+            "用法：lattice im auth <命令>",
+            "命令：",
+            "set",
+            "remove",
+            "status",
+        ] {
+            assert!(
+                auth_help.contains(expected),
+                "im auth --help 缺少 `{expected}`：{auth_help}"
+            );
+        }
+        for forbidden in [
+            "Usage:",
+            "Commands:",
+            "Options:",
+            "Print help",
+            "Emit JSONL",
+        ] {
+            assert!(
+                !auth_help.contains(forbidden),
+                "im auth --help 不应残留英文 `{forbidden}`：{auth_help}"
+            );
+        }
+
+        for (leaf, expected_usage) in [
+            ("set", "用法：lattice im auth set <平台> [--json]"),
+            ("remove", "用法：lattice im auth remove <平台> [--json]"),
+            ("status", "用法：lattice im auth status [--json]"),
+        ] {
+            let leaf_help = auth
+                .find_subcommand_mut(leaf)
+                .unwrap()
+                .render_help()
+                .to_string();
+            assert!(
+                leaf_help.contains(expected_usage),
+                "im auth {leaf} --help 缺少 `{expected_usage}`：{leaf_help}"
+            );
+            for forbidden in [
+                "Usage:",
+                "Options:",
+                "Arguments:",
+                "Print help",
+                "Emit JSONL",
+                "Verbose logging",
+            ] {
+                assert!(
+                    !leaf_help.contains(forbidden),
+                    "im auth {leaf} --help 不应残留英文 `{forbidden}`：{leaf_help}"
+                );
+            }
+        }
+
+        for valid in [
+            vec!["lattice", "im", "reload"],
+            vec!["lattice", "--json", "im", "reload"],
+            vec!["lattice", "im", "auth", "status"],
+            vec!["lattice", "im", "auth", "set", "telegram"],
+            vec!["lattice", "im", "auth", "remove", "telegram"],
+        ] {
+            assert!(parse_cli(valid.clone()).is_ok(), "{valid:?} 应可正常解析");
+        }
+
+        let secret = "777888999:AAH_SUPER_SECRET_BOT_TOKEN_DO_NOT_ECHO";
+        for (args, expected_help_hint) in [
+            (vec!["lattice", "im"], "lattice im --help"),
+            (vec!["lattice", "im", secret], "lattice im --help"),
+            (vec!["lattice", "im", "reload", secret], "lattice im --help"),
+            (vec!["lattice", "im", "auth"], "lattice im auth --help"),
+            (
+                vec!["lattice", "im", "auth", secret],
+                "lattice im auth --help",
+            ),
+            (
+                vec!["lattice", "im", "auth", "set"],
+                "lattice im auth --help",
+            ),
+            (
+                vec!["lattice", "im", "auth", "set", "telegram", secret],
+                "lattice im auth --help",
+            ),
+            (
+                vec![
+                    "lattice",
+                    "im",
+                    "auth",
+                    "set",
+                    "telegram",
+                    "--unknown",
+                    secret,
+                ],
+                "lattice im auth --help",
+            ),
+            (
+                vec!["lattice", "help", "im", "auth", "set", secret],
+                "lattice im auth --help",
+            ),
+            (
+                vec!["lattice", "im", "help", "auth", secret],
+                "lattice im auth --help",
+            ),
+        ] {
+            // 文本模式
+            let os_args: Vec<std::ffi::OsString> = args.iter().map(Into::into).collect();
+            let err = super::parse_cli(os_args.iter().cloned())
+                .err()
+                .expect("非法 im 参数应解析失败");
+            let mut out = Vec::new();
+            let mut stderr = Vec::new();
+            let code = super::render_cli_parse_error(&os_args, &err, &mut out, &mut stderr);
+            assert_eq!(code, Some(2), "{args:?} 文本模式应退出 2");
+            assert!(out.is_empty(), "{args:?} 文本模式标准输出应为空");
+            let err_str = String::from_utf8(stderr).unwrap();
+            assert!(
+                !err_str.contains(secret),
+                "{args:?} 文本错误严禁回显秘密：{err_str}"
+            );
+            assert!(
+                err_str.starts_with("错误：") && err_str.contains(expected_help_hint),
+                "{args:?} 文本错误应输出中文提示 `{expected_help_hint}`，实际：{err_str}"
+            );
+
+            // JSON 模式
+            let mut json_vec = vec!["lattice", "--json"];
+            json_vec.extend_from_slice(&args[1..]);
+            let json_os_args: Vec<std::ffi::OsString> = json_vec.iter().map(Into::into).collect();
+            let json_err = super::parse_cli(json_os_args.iter().cloned())
+                .err()
+                .expect("非法 --json im 参数应解析失败");
+            let mut json_out = Vec::new();
+            let mut json_stderr = Vec::new();
+            let json_code = super::render_cli_parse_error(
+                &json_os_args,
+                &json_err,
+                &mut json_out,
+                &mut json_stderr,
+            );
+            assert_eq!(json_code, Some(2), "{json_vec:?} JSON 模式应退出 2");
+            assert!(
+                json_stderr.is_empty(),
+                "{json_vec:?} JSON 模式标准错误应为空"
+            );
+            let stdout = String::from_utf8(json_out).unwrap();
+            assert!(
+                !stdout.contains(secret),
+                "{json_vec:?} JSON 错误严禁回显秘密：{stdout}"
+            );
+            let parsed: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+            assert_eq!(parsed["type"], "error");
+            assert_eq!(parsed["kind"], "bad_request");
+            let msg = parsed["message"].as_str().unwrap();
+            assert!(
+                msg.contains(expected_help_hint) && !msg.contains("invalid command"),
+                "{json_vec:?} JSON 错误消息应为中文且包含 `{expected_help_hint}`，实际：{msg}"
+            );
+        }
     }
 
     #[test]

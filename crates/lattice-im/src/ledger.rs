@@ -584,20 +584,22 @@ impl Ledger {
         let layout_for_open = layout.clone();
         let latch_for_open = latch.clone();
         let data = tokio::task::spawn_blocking(move || {
-            let im_dir = open_im_state_dir(&layout_for_open)?;
-            let existing = im_dir
-                .read(OsStr::new(LEDGER_FILE_NAME), Some(max_bytes))
-                .map_err(map_private_error)?;
-            let mut data = match existing {
-                None => LedgerData::default(),
-                Some(bytes) => parse_ledger_bytes(&bytes)?,
-            };
+            lattice_server::with_component_panic_scope(|| {
+                let im_dir = open_im_state_dir(&layout_for_open)?;
+                let existing = im_dir
+                    .read(OsStr::new(LEDGER_FILE_NAME), Some(max_bytes))
+                    .map_err(map_private_error)?;
+                let mut data = match existing {
+                    None => LedgerData::default(),
+                    Some(bytes) => parse_ledger_bytes(&bytes)?,
+                };
 
-            if prune_expired_delivered(&mut data, now, redelivery_window) {
-                let bytes = serialize_checked_ledger_data(&data, max_bytes)?;
-                replace_ledger_guarded(&im_dir, &bytes, &latch_for_open)?;
-            }
-            Ok::<LedgerData, LedgerError>(data)
+                if prune_expired_delivered(&mut data, now, redelivery_window) {
+                    let bytes = serialize_checked_ledger_data(&data, max_bytes)?;
+                    replace_ledger_guarded(&im_dir, &bytes, &latch_for_open)?;
+                }
+                Ok::<LedgerData, LedgerError>(data)
+            })
         })
         .await
         .map_err(|_| LedgerError::Io("启动期台账读取阻塞任务异常中断".into()))??;
@@ -768,50 +770,52 @@ impl Ledger {
         let latch = guard.latch.clone();
         let mut candidate = guard.data.clone();
         let updated = tokio::task::spawn_blocking(move || {
-            apply(&mut candidate)?;
-            let bytes = match serialize_checked_ledger_data(&candidate, max_bytes) {
-                Ok(bytes) => bytes,
-                Err(_) => {
-                    // 长期运行累积接近大小上限时，先清理已过重投窗口的 Delivered 条目再核验大小；
-                    // 若仍超限则在原子替换前直接拒绝，绝不写出下次启动无法读取的超限台账文件。
-                    prune_expired_delivered(&mut candidate, Utc::now(), redelivery_window);
-                    serialize_checked_ledger_data(&candidate, max_bytes)?
-                }
-            };
-            #[cfg(test)]
-            let mut _notify_finished_on_drop = NotifyOnDrop(None);
-            #[cfg(test)]
-            {
-                let maybe_fault_hit = {
-                    let mut map = TEST_TRANSIENT_WRITE_ERRORS
-                        .lock()
-                        .expect("测试台账故障集合锁不应中毒");
-                    if map
-                        .get(layout.lattice_root())
-                        .is_some_and(|(target_id, _)| candidate.inbound.contains_key(target_id))
-                    {
-                        map.remove(layout.lattice_root()).map(|(_, tx)| tx)
-                    } else {
-                        None
+            lattice_server::with_component_panic_scope(|| {
+                apply(&mut candidate)?;
+                let bytes = match serialize_checked_ledger_data(&candidate, max_bytes) {
+                    Ok(bytes) => bytes,
+                    Err(_) => {
+                        // 长期运行累积接近大小上限时，先清理已过重投窗口的 Delivered 条目再核验大小；
+                        // 若仍超限则在原子替换前直接拒绝，绝不写出下次启动无法读取的超限台账文件。
+                        prune_expired_delivered(&mut candidate, Utc::now(), redelivery_window);
+                        serialize_checked_ledger_data(&candidate, max_bytes)?
                     }
                 };
-                if let Some(hit_tx) = maybe_fault_hit {
-                    let _ = hit_tx.send(());
-                    return Err(LedgerError::Io("注入的临时台账写入故障".into()));
+                #[cfg(test)]
+                let mut _notify_finished_on_drop = NotifyOnDrop(None);
+                #[cfg(test)]
+                {
+                    let maybe_fault_hit = {
+                        let mut map = TEST_TRANSIENT_WRITE_ERRORS
+                            .lock()
+                            .expect("测试台账故障集合锁不应中毒");
+                        if map
+                            .get(layout.lattice_root())
+                            .is_some_and(|(target_id, _)| candidate.inbound.contains_key(target_id))
+                        {
+                            map.remove(layout.lattice_root()).map(|(_, tx)| tx)
+                        } else {
+                            None
+                        }
+                    };
+                    if let Some(hit_tx) = maybe_fault_hit {
+                        let _ = hit_tx.send(());
+                        return Err(LedgerError::Io("注入的临时台账写入故障".into()));
+                    }
+                    let maybe_gate = TEST_REPLACE_GATES
+                        .lock()
+                        .expect("测试台账替换闸门锁不应中毒")
+                        .remove(layout.lattice_root());
+                    if let Some((entered_tx, release_rx, finished_tx)) = maybe_gate {
+                        _notify_finished_on_drop = NotifyOnDrop(Some(finished_tx));
+                        let _ = entered_tx.send(());
+                        let _ = release_rx.recv();
+                    }
                 }
-                let maybe_gate = TEST_REPLACE_GATES
-                    .lock()
-                    .expect("测试台账替换闸门锁不应中毒")
-                    .remove(layout.lattice_root());
-                if let Some((entered_tx, release_rx, finished_tx)) = maybe_gate {
-                    _notify_finished_on_drop = NotifyOnDrop(Some(finished_tx));
-                    let _ = entered_tx.send(());
-                    let _ = release_rx.recv();
-                }
-            }
-            let im_dir = open_im_state_dir(&layout)?;
-            replace_ledger_guarded(&im_dir, &bytes, &latch)?;
-            Ok::<LedgerData, LedgerError>(candidate)
+                let im_dir = open_im_state_dir(&layout)?;
+                replace_ledger_guarded(&im_dir, &bytes, &latch)?;
+                Ok::<LedgerData, LedgerError>(candidate)
+            })
         })
         .await
         .map_err(|_| LedgerError::Io("台账写入阻塞任务异常中断".into()))??;

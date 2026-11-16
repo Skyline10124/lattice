@@ -22,10 +22,12 @@ pub use lattice_conversation::{
 };
 pub use lattice_ipc::{
     Acceptance, AgentName, AgentNameError, AttemptProgress, AuthCatalogOutcome, AuthLoginOutcome,
-    AuthRemoval, AuthStatus, Availability, CancelStatus, ConfigurationRequirement, ConfigureReply,
-    ConfigureRequest, ConfigureResult, ConfigureSession, ConflictReason, ConnectionStatus,
-    ConversationEntry, DaemonStatus, DrainTimeout, EffortAdjustment, HISTORY_TURNS, LocalError,
-    LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary, ModelCandidate,
+    AuthRemoval, AuthStatus, Availability, CancelStatus, ComponentState, ComponentStatus,
+    ConfigurationRequirement, ConfigureReply, ConfigureRequest, ConfigureResult, ConfigureSession,
+    ConflictReason, ConnectionStatus, ConversationEntry, DaemonStatus, DrainTimeout,
+    EffortAdjustment, HISTORY_TURNS, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus,
+    ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, LocalError, LocalErrorKind,
+    LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary, ModelCandidate,
     ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning, Node, NodeId, NodeKind,
     NodeRef, Notice, NoticeLevel, Page, ProjectPath, ProviderAuthStatus, PublicTurnOutcome,
     RecoveryCause, RecoveryNeed, RequestConflict, Result, RetryNotice, RetryPolicy,

@@ -115,7 +115,7 @@ impl PreparedImGateway {
         io: Arc<dyn TelegramIo>,
         stop: impl Future<Output = ()> + Send,
     ) -> Result<(), ImGatewayError> {
-        self.run_inner(io, stop, None).await
+        lattice_server::scoped_component_future(self.run_inner(io, stop, None)).await
     }
 
     #[cfg(test)]
@@ -125,7 +125,7 @@ impl PreparedImGateway {
         stop: impl Future<Output = ()> + Send,
         probe_out: tokio::sync::oneshot::Sender<GatewayDebugProbe>,
     ) -> Result<(), ImGatewayError> {
-        self.run_inner(io, stop, Some(probe_out)).await
+        lattice_server::scoped_component_future(self.run_inner(io, stop, Some(probe_out))).await
     }
 
     async fn run_inner(
@@ -204,7 +204,7 @@ impl PreparedImGateway {
                 } => {
                     let barrier_guard = state.chat_queues.register_startup_barrier(&chat);
                     let rt = Arc::clone(&state);
-                    join_set.spawn(async move {
+                    join_set.spawn(lattice_server::scoped_component_future(async move {
                         let mut maybe_guard = Some(barrier_guard);
                         rt.resolve_registered_until_settled(
                             &mut maybe_guard,
@@ -214,7 +214,7 @@ impl PreparedImGateway {
                             turn,
                         )
                         .await;
-                    });
+                    }));
                 }
                 InboundRecord::Accepted {
                     chat,
@@ -222,10 +222,10 @@ impl PreparedImGateway {
                     turn,
                 } => {
                     let rt = Arc::clone(&state);
-                    join_set.spawn(async move {
+                    join_set.spawn(lattice_server::scoped_component_future(async move {
                         rt.recover_accepted_turn(inbound_id, chat, session, turn)
                             .await;
-                    });
+                    }));
                 }
                 InboundRecord::DeliveredTurn { .. } | InboundRecord::DeliveredReset { .. } => {}
             }
@@ -233,9 +233,9 @@ impl PreparedImGateway {
 
         // 3. 不等待恢复任务结束，立即启动 getUpdates 长轮询主循环并纳入监督。
         let poll_rt = Arc::clone(&state);
-        let mut poll_task = tokio::spawn(async move {
+        let mut poll_task = tokio::spawn(lattice_server::scoped_component_future(async move {
             poll_rt.poll_updates_loop().await;
-        });
+        }));
         let mut poll_abort_guard = AbortTaskOnDrop(Some(poll_task.abort_handle()));
         let mut poll_done = false;
         let mut first_panic: Option<Box<dyn Any + Send + 'static>> = None;
@@ -620,7 +620,9 @@ impl GatewayRuntime {
     where
         F: Future<Output = ()> + Send + 'static,
     {
-        let _ = self.spawn_tx.send(Box::pin(fut));
+        let _ = self
+            .spawn_tx
+            .send(Box::pin(lattice_server::scoped_component_future(fut)));
     }
 
     fn ack_update(&self, inbound_id: &InboundId) {

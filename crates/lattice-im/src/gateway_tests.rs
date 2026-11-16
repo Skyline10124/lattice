@@ -2417,9 +2417,15 @@ async fn chat_admission_subtask_panic_cleans_guards_drains_io_propagates_panic_a
 
     let (mut s1, _) = bounded(harness.listener.accept()).await.unwrap();
     let _ = read_http_request(&mut s1).await;
+    // 在首条轮次尚未返回前，排队中的次条消息必然收到忙碌提示，随后再完成首条轮次回复，避免高负载下调度竞态。
+    let _ = io2.wait_message_count(1).await;
     write_sse_complete(&mut s1, None, "重挂第一条回复", None).await;
     let msgs = io2.wait_message_count(2).await;
-    assert_eq!(msgs.len(), 2, "重挂后首条完成与次条 Busy/执行均应正常响应");
+    assert_eq!(
+        msgs.len(),
+        2,
+        "重挂后次条忙碌提示与首条完成回复均应正常响应"
+    );
 
     let _ = gw_stop2.send(());
     bounded(gw_task2).await.unwrap().unwrap();
@@ -2984,4 +2990,496 @@ async fn slow_6s_successful_draft_requests_keep_25s_interval_within_30s_ttl() {
     let _ = gw_stop.send(());
     bounded(gw_task).await.unwrap().unwrap();
     harness.shutdown().await;
+}
+
+/// 组装由 `serve_for_test_with_components` 真实托管的 `"im"` 组件注册项（注入可切换的假 `TelegramIo`）。
+fn hosted_im_registration(
+    config_dir: PathBuf,
+    layout: StateLayout,
+    io_slot: Arc<StdMutex<Arc<FakeTelegramIo>>>,
+) -> lattice_server::ComponentRegistration {
+    lattice_server::ComponentRegistration::new("im", move |service| {
+        match prepare_im_gateway(&config_dir, layout.clone(), service) {
+            ImBuildOutcome::Prepared(gw) => {
+                let io = io_slot.lock().unwrap().clone();
+                lattice_server::ComponentBuildOutcome::Component(
+                    lattice_server::PreparedComponent::new(move |stop| async move {
+                        gw.run_with_io(io, stop).await.map_err(|e| e.to_string())
+                    }),
+                )
+            }
+            ImBuildOutcome::Unavailable { reason } => {
+                lattice_server::ComponentBuildOutcome::Unavailable { reason }
+            }
+            ImBuildOutcome::InvalidConfiguration { reason } => {
+                lattice_server::ComponentBuildOutcome::InvalidConfiguration { reason }
+            }
+            ImBuildOutcome::Disabled => lattice_server::ComponentBuildOutcome::Disabled,
+        }
+    })
+}
+
+/// 初始化真实托管 IM 组件测试目录与本地假模型监听器。
+async fn setup_hosted_im_env(
+    allowed_senders: &[i64],
+) -> (tempfile::TempDir, PathBuf, StateLayout, TcpListener) {
+    let dir = tempfile::tempdir().expect("创建临时目录应成功");
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("绑定本地假模型端口应成功");
+    let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
+
+    let home_dir = dir.path().to_path_buf();
+    let config_dir = home_dir.join(".lattice");
+    let agent_path = config_dir.join("agents/local-test/agent.toml");
+    std::fs::create_dir_all(agent_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &agent_path,
+        "schema_version = 1\n[agent]\nname = 'local-test'\nmodel = 'local/local-test'\n[prompt]\nsystem = 'test'\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+
+    let cfg_priv = PrivateDirectory::open_or_create(&config_dir).unwrap();
+    cfg_priv
+        .replace(
+            OsStr::new("providers.toml"),
+            format!(
+                "[providers.local]\nprotocol='chat-completions'\nbase_url='{endpoint}'\nauth='none'\n"
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+
+    let workspace_raw = home_dir.join("workspace");
+    std::fs::create_dir_all(&workspace_raw).unwrap();
+    let workspace = LocalWorkspaceRoot::from_path(&workspace_raw)
+        .unwrap()
+        .canonical_path()
+        .to_path_buf();
+
+    let im_dir = cfg_priv.child(OsStr::new("im"), true).unwrap().unwrap();
+    let senders_str = allowed_senders
+        .iter()
+        .map(i64::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let im_config = format!(
+        "[telegram]\nallowed_senders = [{senders_str}]\nworkspace = '{}'\nagent = 'local-test'\n",
+        workspace.display()
+    );
+    im_dir
+        .replace(OsStr::new("config.toml"), im_config.as_bytes())
+        .unwrap();
+
+    ImAuthStore::new(config_dir.clone())
+        .set(TELEGRAM_PLATFORM, "999888:INTEGRATION_BOT_SECRET")
+        .unwrap();
+
+    let layout = StateLayout::in_state_root(&home_dir);
+    (dir, config_dir, layout, listener)
+}
+
+async fn wait_client_ready(client: &LocalClient) -> lattice_ipc::DaemonStatus {
+    bounded(async {
+        loop {
+            if let Ok(status) = client.status().await
+                && status.components.iter().any(|c| {
+                    c.name == "im" && matches!(c.state, lattice_ipc::ComponentState::Mounted { .. })
+                })
+            {
+                return status;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+}
+
+#[tokio::test]
+async fn reload_mid_turn_preserves_epoch_and_new_gateway_delivers_final_reply() {
+    let (dir, config_dir, layout, listener) = setup_hosted_im_env(&[ALLOWED_UID]).await;
+    let io1 = Arc::new(FakeTelegramIo::default());
+    let io2 = Arc::new(FakeTelegramIo::default());
+    let io_slot = Arc::new(StdMutex::new(Arc::clone(&io1)));
+
+    let (stop_tx, stop_rx) = mpsc::channel(4);
+    let reg = hosted_im_registration(config_dir, layout.clone(), Arc::clone(&io_slot));
+    let serve_layout = layout.clone();
+    let home = Some(dir.path().to_path_buf());
+    let daemon_task = tokio::spawn(async move {
+        lattice_server::serve_for_test_with_components(
+            serve_layout,
+            home,
+            Duration::from_secs(30),
+            stop_rx,
+            vec![reg],
+        )
+        .await
+    });
+
+    let client = LocalClient::new(layout.clone());
+    let before = wait_client_ready(&client).await;
+    assert_eq!(
+        before.components,
+        vec![lattice_ipc::ComponentStatus {
+            name: "im".into(),
+            state: lattice_ipc::ComponentState::Mounted {
+                configuration_error: None,
+            },
+        }]
+    );
+
+    io1.push_updates(vec![private_text_update(
+        1801,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "长轮次执行期间热重载网关",
+    )]);
+
+    let (mut sock, _) = bounded(listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock).await;
+    sock.write_all(
+        b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n",
+    )
+    .await
+    .unwrap();
+    let part1 = "data: {\"choices\":[{\"delta\":{\"content\":\"热重载前半段\"},\"finish_reason\":null}]}\n\n";
+    sock.write_all(format!("{:X}\r\n{part1}\r\n", part1.len()).as_bytes())
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+
+    // 确认该轮已被后台接受并产出草稿。
+    let _ = io1.wait_draft_count(1).await;
+
+    // 切换到新网关收发替身并经 IPC 执行 im_reload。
+    *io_slot.lock().unwrap() = Arc::clone(&io2);
+    let mount = bounded(client.im_reload()).await.unwrap();
+    assert_eq!(mount, lattice_ipc::ImMountResult::Mounted);
+
+    let during = bounded(client.status()).await.unwrap();
+    assert_eq!(during.epoch, before.epoch, "热重载不得改变后台 epoch");
+    assert_eq!(during.owners, 1, "正在执行的轮次不得因组件热重载中断");
+
+    // 完成该轮模型流式输出：新网关实例接手台账后发出完整最终回复。
+    let part2 = "data: {\"choices\":[{\"delta\":{\"content\":\"与后半段\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
+    sock.write_all(format!("{:X}\r\n{part2}\r\n0\r\n\r\n", part2.len()).as_bytes())
+        .await
+        .unwrap();
+    sock.flush().await.unwrap();
+
+    let final_msgs = io2.wait_message_count(1).await;
+    assert_eq!(final_msgs[0].1, "热重载前半段与后半段");
+    assert!(
+        io1.sent_messages.lock().unwrap().is_empty(),
+        "旧网关实例退出后不应发出最终回复"
+    );
+
+    stop_tx.send(()).await.unwrap();
+    let exit = bounded(daemon_task).await.unwrap().unwrap();
+    assert!(exit.failure.is_none());
+}
+
+#[tokio::test]
+async fn step3_10s_timeout_abandons_hung_gateway_and_restart_delivers_final_reply() {
+    let (dir, config_dir, layout, listener) = setup_hosted_im_env(&[ALLOWED_UID]).await;
+    let io1 = Arc::new(FakeTelegramIo::default());
+    let _hold_send_tx = io1.install_send_gate();
+    let (drain_entered_rx, _hold_drain_tx) = io1.install_drain_gate();
+
+    let io_slot1 = Arc::new(StdMutex::new(Arc::clone(&io1)));
+    let (stop_tx1, stop_rx1) = mpsc::channel(4);
+    let reg1 = hosted_im_registration(config_dir.clone(), layout.clone(), io_slot1);
+    let serve_layout1 = layout.clone();
+    let home1 = Some(dir.path().to_path_buf());
+    let mut daemon_task1 = tokio::spawn(async move {
+        lattice_server::serve_for_test_with_components(
+            serve_layout1,
+            home1,
+            Duration::from_secs(30),
+            stop_rx1,
+            vec![reg1],
+        )
+        .await
+    });
+
+    let client = LocalClient::new(layout.clone());
+    let _ = wait_client_ready(&client).await;
+
+    io1.push_updates(vec![private_text_update(
+        1802,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "停机超 10 秒放弃收尾后重启补发",
+    )]);
+
+    let (mut sock, _) = bounded(listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock).await;
+    write_sse_complete(&mut sock, None, "重启后台后补发的最终回复", None).await;
+
+    // 等待模型轮次结束且网关进入被卡住的最终回复 send_message。
+    bounded(async {
+        loop {
+            let notified = io1.send_entered_notify.notified();
+            if io1
+                .send_entered_count
+                .load(std::sync::atomic::Ordering::SeqCst)
+                >= 1
+            {
+                break;
+            }
+            notified.await;
+        }
+    })
+    .await;
+
+    // 暂停模拟时钟并触发后台停机：在途 send_message 被取消（保留未发出的台账记录），网关收尾卡在 drain 满 10 秒后被第 3 步强制中止。
+    tokio::time::pause();
+    stop_tx1.send(()).await.unwrap();
+    drain_entered_rx.await.unwrap();
+    tokio::time::advance(Duration::from_secs(9)).await;
+    tokio::task::yield_now().await;
+    assert!(
+        !daemon_task1.is_finished(),
+        "未满 10 秒时后台仍在第 3 步等待 IM 收尾"
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    for _ in 0..8 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::resume();
+
+    let exit1 = bounded(&mut daemon_task1).await.unwrap().unwrap();
+    assert!(exit1.failure.is_none());
+    drop(exit1);
+    assert!(
+        io1.sent_messages.lock().unwrap().is_empty(),
+        "卡住的旧网关在 10 秒超时被中止，未发出最终回复"
+    );
+
+    // 在同一状态根重启新后台并再次挂载 IM：启动期恢复台账补发该轮最终回复。
+    let io2 = Arc::new(FakeTelegramIo::default());
+    let io_slot2 = Arc::new(StdMutex::new(Arc::clone(&io2)));
+    let (stop_tx2, stop_rx2) = mpsc::channel(4);
+    let reg2 = hosted_im_registration(config_dir, layout.clone(), io_slot2);
+    let serve_layout2 = layout.clone();
+    let home2 = Some(dir.path().to_path_buf());
+    let daemon_task2 = tokio::spawn(async move {
+        lattice_server::serve_for_test_with_components(
+            serve_layout2,
+            home2,
+            Duration::from_secs(30),
+            stop_rx2,
+            vec![reg2],
+        )
+        .await
+    });
+
+    let _ = wait_client_ready(&client).await;
+    let recovered_msgs = io2.wait_message_count(1).await;
+    assert_eq!(recovered_msgs[0].1, "重启后台后补发的最终回复");
+
+    stop_tx2.send(()).await.unwrap();
+    let exit2 = bounded(daemon_task2).await.unwrap().unwrap();
+    assert!(exit2.failure.is_none());
+}
+
+#[tokio::test]
+async fn gateway_panic_is_isolated_in_daemon_status_and_recovers_on_im_reload() {
+    let (dir, config_dir, layout, listener) = setup_hosted_im_env(&[ALLOWED_UID]).await;
+    let io1 = Arc::new(FakeTelegramIo::default());
+    let io2 = Arc::new(FakeTelegramIo::default());
+    let io_slot = Arc::new(StdMutex::new(Arc::clone(&io1)));
+
+    let (stop_tx, stop_rx) = mpsc::channel(4);
+    let reg = hosted_im_registration(config_dir, layout.clone(), Arc::clone(&io_slot));
+    let serve_layout = layout.clone();
+    let home = Some(dir.path().to_path_buf());
+    let daemon_task = tokio::spawn(async move {
+        lattice_server::serve_for_test_with_components(
+            serve_layout,
+            home,
+            Duration::from_secs(30),
+            stop_rx,
+            vec![reg],
+        )
+        .await
+    });
+
+    let client = LocalClient::new(layout);
+    let _ = wait_client_ready(&client).await;
+
+    // 触发假 TelegramIo 轮询任务 panic，验证 PreparedImGateway 将 panic 传播给后台组件监督器且不拖垮后台。
+    io1.panic_on_next_poll
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    io1.batch_notify.notify_waiters();
+
+    let reason = bounded(async {
+        loop {
+            let status = client.status().await.unwrap();
+            if let Some(lattice_ipc::ComponentStatus {
+                state: lattice_ipc::ComponentState::Unmounted { reason },
+                ..
+            }) = status.components.first()
+            {
+                return reason.clone();
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    assert!(reason.contains("panic"), "未挂载原因应指明 panic：{reason}");
+    assert!(
+        !reason.contains("注入轮询任务"),
+        "不得暴露原始 panic 消息载荷：{reason}"
+    );
+
+    // 切换到正常收发替身后通过 client.im_reload() 恢复挂载并正常处理消息。
+    *io_slot.lock().unwrap() = Arc::clone(&io2);
+    assert_eq!(
+        bounded(client.im_reload()).await.unwrap(),
+        lattice_ipc::ImMountResult::Mounted
+    );
+
+    io2.push_updates(vec![private_text_update(
+        1803,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "panic 后恢复服务",
+    )]);
+    let (mut sock, _) = bounded(listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock).await;
+    write_sse_complete(&mut sock, None, "恢复成功", None).await;
+
+    let msgs = io2.wait_message_count(1).await;
+    assert_eq!(msgs[0].1, "恢复成功");
+
+    stop_tx.send(()).await.unwrap();
+    let exit = bounded(daemon_task).await.unwrap().unwrap();
+    assert!(exit.failure.is_none());
+}
+
+#[tokio::test]
+async fn hosted_gateway_subtask_panic_never_leaks_payload_to_stderr() {
+    const SUBPROC_ENV: &str = "LATTICE_TEST_GATEWAY_PANIC_SUBPROCESS";
+
+    if std::env::var(SUBPROC_ENV).as_deref() == Ok("1") {
+        let filter = tracing_subscriber::EnvFilter::try_from_env("LATTICE_LOG")
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("trace"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_writer(std::io::stderr)
+            .with_ansi(false)
+            .compact()
+            .try_init();
+        lattice_server::install_component_panic_hook();
+
+        let (dir, config_dir, layout, _listener) = setup_hosted_im_env(&[ALLOWED_UID]).await;
+        let io1 = Arc::new(FakeTelegramIo::default());
+        let io2 = Arc::new(FakeTelegramIo::default());
+        let io_slot = Arc::new(StdMutex::new(Arc::clone(&io1)));
+
+        let (stop_tx, stop_rx) = mpsc::channel(4);
+        let reg = hosted_im_registration(config_dir, layout.clone(), Arc::clone(&io_slot));
+        let serve_layout = layout.clone();
+        let home = Some(dir.path().to_path_buf());
+        let daemon_task = tokio::spawn(async move {
+            lattice_server::serve_for_test_with_components(
+                serve_layout,
+                home,
+                Duration::from_secs(30),
+                stop_rx,
+                vec![reg],
+            )
+            .await
+        });
+
+        let client = LocalClient::new(layout);
+        let _ = wait_client_ready(&client).await;
+
+        // 1. 触发轮询子任务 panic。
+        io1.arm_panic_on_next_poll();
+        bounded(async {
+            loop {
+                let status = client.status().await.unwrap();
+                if matches!(
+                    status.components.first(),
+                    Some(lattice_ipc::ComponentStatus {
+                        state: lattice_ipc::ComponentState::Unmounted { reason },
+                        ..
+                    }) if reason.contains("panic")
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        // 2. 重新挂载后触发单对话准入子任务 panic。
+        *io_slot.lock().unwrap() = Arc::clone(&io2);
+        assert_eq!(
+            bounded(client.im_reload()).await.unwrap(),
+            lattice_ipc::ImMountResult::Mounted
+        );
+        crate::gateway::arm_chat_worker_panic_for_test(inbound_id_from_update_id(1899));
+        io2.push_updates(vec![private_text_update(
+            1899,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "触发准入工作协程 panic",
+        )]);
+        bounded(async {
+            loop {
+                let status = client.status().await.unwrap();
+                if matches!(
+                    status.components.first(),
+                    Some(lattice_ipc::ComponentStatus {
+                        state: lattice_ipc::ComponentState::Unmounted { reason },
+                        ..
+                    }) if reason.contains("panic")
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await;
+
+        stop_tx.send(()).await.unwrap();
+        let exit = bounded(daemon_task).await.unwrap().unwrap();
+        assert!(exit.failure.is_none());
+        return;
+    }
+
+    let exe = std::env::current_exe().unwrap();
+    let out = std::process::Command::new(&exe)
+        .args([
+            "--exact",
+            "gateway_tests::hosted_gateway_subtask_panic_never_leaks_payload_to_stderr",
+            "--nocapture",
+        ])
+        .env(SUBPROC_ENV, "1")
+        .env("LATTICE_LOG", "trace")
+        .env("NO_COLOR", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "网关子任务 panic 隔离子进程应正常退出，stdout={stdout}\nstderr={stderr}"
+    );
+    for raw_payload in ["注入轮询任务", "注入单对话准入子任务"] {
+        assert!(
+            !stdout.contains(raw_payload) && !stderr.contains(raw_payload),
+            "网关子任务 panic 原始载荷不得泄露到 stderr/stdout（命中 {raw_payload}）：\nstdout={stdout}\nstderr={stderr}"
+        );
+    }
+    assert!(
+        stderr.contains("受托管组件执行期间发生 panic（已抑制原始载荷）"),
+        "stderr 应记录脱敏后的组件 panic 位置告警：{stderr}"
+    );
 }

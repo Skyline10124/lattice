@@ -8,7 +8,7 @@
 | --- | --- |
 | `src/lib.rs` | 重导出请求网关、协议、模型候选、认证与流事件接口 |
 | `src/gateway.rs`、`src/gateway/` | `RequestGateway`（筛选并缓存可用 TLS 根）、`GatewayTurn::prepare` 准入与档位选择、`GatewayTurn::resolve` 按次解析及 `cost.rs` 费用估算 |
-| `src/availability.rs` | 统一的 provider 与模型 `Availability`（`Ready` / `Unconfigured` / `Invalid`）判定与补救提示（诊断文案与 `lattice-ipc::Availability::diagnostic` 由 `lattice-server` 对照测试锁定一致） |
+| `src/availability.rs` | 统一的 provider 与模型 `Availability`（`Ready` / `Unconfigured` / `Invalid`）判定与补救提示（作为 `ProviderAuthStatus.diagnostic` 的唯一诊断文案来源，由 `lattice-server` 在展示转换边界直接填充） |
 | `src/protocol/` | 五种协议适配器（`chat_completions.rs`、`responses.rs`、`anthropic_messages.rs`、`generate_content.rs`、`interactions.rs`）、`features.rs`、`usage.rs`、`common.rs` 及唯一生产消息投影 `projection/`（含工具结果与 `ToolError` 载荷编码） |
 | `src/provider/` | 内置 provider 表（`builtins.rs`）、`providers.toml` 严格解析与合并（`config.rs`，含显式声明 `declared` 事实）及按 `ProviderId` 查找 |
 | `src/metadata/`、`src/models.rs`、`src/reasoning.rs` | 内置快照、`models.dev` 与 ChatGPT 账号目录单次拉取与缓存合并、`ModelCandidateQuery` 候选查询、不需要凭据且返回 `Result` 的 `model_supported_efforts` 档位能力查询，以及可用推理档位推导与映射 |
@@ -43,6 +43,6 @@
 | 改动 | 运行 |
 | --- | --- |
 | 任何改动 | `cargo test -p lattice-llm`（含对照 `tests/fixtures/projection/` 正式 wire 夹具的消息投影测试） |
-| 修改 `Availability::diagnostic` 或可用性变体 | 同步更新 `lattice-ipc::Availability::diagnostic`，并运行 `cargo test -p lattice-server` |
+| 修改 `Availability::diagnostic` 或可用性变体 | 运行 `cargo test -p lattice-server -p lattice-cli`，并在变更线上结构时同步更新 `lattice-ipc` 快照 |
 | 新增或修改协议适配器、`features` | 在 `cargo test -p lattice-llm` 中覆盖流解析、ToolCall、用量、错误映射及该 feature 各取值的请求体，再运行 `cargo test -p lattice-agent` 与 `cargo test -p lattice-server` |
 | 修改 URL、DNS、重定向或地址固定 | 在 `cargo test -p lattice-llm` 中覆盖私网与保留地址、`localhost`、DNS rebinding 域名、重定向拒绝与连接地址固定 |

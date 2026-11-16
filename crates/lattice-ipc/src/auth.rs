@@ -49,6 +49,8 @@ pub struct ProviderAuthStatus {
     pub email: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub expires_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostic: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]

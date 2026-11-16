@@ -7,7 +7,7 @@ status: active
 | 项 | 内容 |
 | --- | --- |
 | 目标 | IPC `stop`、`SIGTERM` 与 `SIGINT` 共用有界停机顺序：关闭新准入，在 `--drain-timeout` 内排空已接管工作，并在就绪与排空开始时经 `$NOTIFY_SOCKET` 发送 `READY=1` 与 `STOPPING=1`；超时或排空中再收信号时停写会话库并以退出码 `4` 结束，状态根被占用或参数错误时分别以退出码 `3`、`2` 结束 |
-| 前提 | 用 `FakeLlmServer` 的 `ResponseGate` 保持已接管 `Turn` 在途，另备查询、取消与新提交客户端；经统一的后台生命周期接口按需传入 `--drain-timeout` 显式启动直接子进程后台；退场窗口的局部测试在回执之后持有 `InstanceLock` 或挂起尾段任务。用户级服务安装与 `lattice daemon` 子命令组验证见[安装用户级后台服务](daemon-install.md) |
+| 前提 | 用 `FakeLlmServer` 的 `ResponseGate` 保持已接管 `Turn` 在途，另备查询、取消与新提交客户端；经统一的后台生命周期接口按需传入 `--drain-timeout` 显式启动直接子进程后台；退场窗口的局部测试在回执之后持有 `InstanceLock` 或挂起尾段任务。用户级服务安装见[安装用户级后台服务](daemon-install.md)；内置托管组件的重新挂载与 10 秒收尾见[IM 组件托管、自动重载与 CLI 凭据管理](im-component-and-cli.md) |
 | 相关测试 | `direct_background`：`busy_cancel_and_stop_do_not_serialize_distinct_sessions`、`sigterm_drains_inflight_turn_and_exits_zero`、`sigint_right_after_ready_exits_zero_and_releases_resources`、`sigterm_drain_timeout_exits_four_and_leaves_vanished_owner_turn`、`ipc_daemon_stop_drain_timeout_reports_unconfirmed_and_daemon_exits_four`、`second_sigterm_during_drain_triggers_immediate_timeout_exit_four`、`frontends_without_daemon_report_not_running_without_spawning_or_locking`、`external_holder_of_owner_lock_causes_lattice_daemon_to_exit_three`、`notify_socket_delivers_ready_after_bind_and_stopping_across_shutdown_paths`、`daemon_startup_and_shutdown_failures_report_chinese_diagnostics_and_exit_one`；`fast_cli_help`：`fast_lattice_daemon_chinese_help_and_argument_validation` |
 
 ## 操作

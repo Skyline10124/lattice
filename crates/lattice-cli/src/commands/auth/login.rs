@@ -285,6 +285,7 @@ mod output_tests {
                 availability: lattice_local::Availability::Ready,
                 email: None,
                 expires_at: None,
+                diagnostic: None,
             },
             catalog: AuthCatalogOutcome::Failed {
                 warning: "HTTP 503".into(),
@@ -341,6 +342,7 @@ mod output_tests {
                     availability: lattice_local::Availability::Ready,
                     email: Some("user@example.com".into()),
                     expires_at: None,
+                    diagnostic: None,
                 },
                 catalog: AuthCatalogOutcome::Refreshed { model_count: 2 },
             },
