@@ -1,5 +1,5 @@
 ---
-status: proposed
+status: accepted
 ---
 
 # ADR 0013：用户图片输入支持
@@ -54,6 +54,7 @@ status: proposed
    - 本 ADR 同步覆盖 IM 平台（Telegram 私聊）的用户图片输入；
    - Telegram 私聊同时支持压缩照片（`message.photo` 最高分辨率项）与未压缩图片文件（`message.document` 且 `mime_type` 为四种受支持图片类型，下载后统一按文件头魔数核验）；
    - Telegram 相册多图（共享同一 `media_group_id` 的多条消息）支持收集合并为同一轮提交。
+3. 2026-11-16：维护者批准本 ADR（#415、#416）。
 
 ## 决策
 
