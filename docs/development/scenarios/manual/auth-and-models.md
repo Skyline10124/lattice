@@ -47,7 +47,7 @@ lattice --json models refresh
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `models [--provider <id>]` | 输出 `MODEL`、`CONTEXT`、`OUTPUT`、`EFFORTS`、`PRICE`、`AUTH`（无效标 `config-error` / `invalid`，原因写 stderr） |
+| `models [--provider <id>]` | 输出 `MODEL`、`CONTEXT`、`OUTPUT`、`EFFORTS`、`INPUT`、`PRICE`、`AUTH`（无效标 `config-error` / `invalid`，原因写 stderr） |
 | `models --auth` | 仅列 `ready` 候选，跳过未就绪警告 |
 | `--json models` | 输出 `models` 与 `warnings` |
 | `models refresh` | 全成功输出 `{"type":"models_refresh","status":"refreshed"}`；部分或全败退出 `1`（保留已更新项），带 `--provider` / `--auth` 退出 `2` |

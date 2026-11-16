@@ -1808,7 +1808,7 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
         a.settings_version = base_version;
         let expected_detail = match case {
             0 => {
-                a.input = "x".repeat(MAX_USER_INPUT_BYTES + 1);
+                a.input = "x".repeat(lattice_conversation::MAX_USER_TEXT_BYTES + 1);
                 None
             }
             1 => {
@@ -1898,7 +1898,7 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
         Err(StoreError::InvalidLockCapability)
     ));
     let mut a = accept(sid(1), tid(1));
-    a.input = "x".repeat(MAX_USER_INPUT_BYTES);
+    a.input = "x".repeat(lattice_conversation::MAX_USER_TEXT_BYTES);
     a.settings_version = base_version;
     db.accept_turn(&lock, a).unwrap();
     assert_eq!(
@@ -5730,5 +5730,105 @@ fn disable_writes_waits_for_inflight_commit_and_blocks_later_writes() {
             Err(StoreError::WriteDisabled)
         ),
         "重复调用 disable_writes 应保持幂等并继续拒绝写入"
+    );
+}
+
+#[test]
+fn assistant_replies_with_images_are_rejected_without_mutating_records() {
+    use lattice_conversation::{ImageMediaType, ImageRef};
+
+    let (_dir, _layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+    db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+        .unwrap();
+
+    let image_part = MessagePart::semantic_only(MessageSemantic::Image {
+        image: ImageRef {
+            sha256: [0x22; 32],
+            media_type: ImageMediaType::Png,
+            byte_length: 1024,
+        },
+    });
+    let before = records(&db);
+
+    // 1. Finish 路径含图片被拒绝
+    let mut finish_reply = reply(key(tid(1), 0, 0), 0);
+    finish_reply.message.parts.push(image_part.clone());
+    let finish_err = db
+        .close_step(&lock, CloseStep::Finish(finish_reply), now())
+        .expect_err("Finish 回复包含图片时必须拒绝");
+    assert!(
+        matches!(
+            &finish_err,
+            StoreError::InvalidInput { field: "reply", detail } if detail.contains("助手消息不能包含图片")
+        ),
+        "预期返回中文助手图片拒绝错误，实际为：{finish_err:?}"
+    );
+    assert!(before == records(&db), "Finish 拒绝图片后不得修改持久记录");
+
+    // 2. register_calls 路径含图片被拒绝
+    let mut call_reply = reply(key(tid(1), 0, 0), 1);
+    call_reply.message.parts.push(image_part);
+    let register_err = db
+        .register_calls(&lock, call_reply, &[iid(1)], now())
+        .expect_err("工具批次回复包含图片时必须拒绝");
+    assert!(
+        matches!(
+            &register_err,
+            StoreError::InvalidInput { field: "reply", detail } if detail.contains("助手消息不能包含图片")
+        ),
+        "预期返回中文助手图片拒绝错误，实际为：{register_err:?}"
+    );
+    assert!(
+        before == records(&db),
+        "register_calls 拒绝图片后不得修改持久记录"
+    );
+}
+
+#[test]
+fn opening_v9_store_with_user_image_node_reports_corruption() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
+
+    db.edit_test_node(
+        NodeRef {
+            session_id: sid(1),
+            node: NodeId(1),
+        },
+        |wire| {
+            wire["message"]["parts"].as_array_mut().unwrap().push(json!({
+                "semantic": {
+                    "image": {
+                        "image": {
+                            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                            "media_type": "png",
+                            "byte_length": 256
+                        }
+                    }
+                },
+                "replay_state": null
+            }));
+        },
+    )
+    .expect("测试注入含图用户节点应成功提交");
+
+    drop(lock);
+    drop(db);
+
+    let err = match SessionStore::open(&layout) {
+        Ok(_) => panic!("含用户图片节点的格式 9 会话库打开时必须报损坏"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(
+            &err,
+            StoreError::Corruption { table, key, detail }
+                if table == "nodes"
+                    && key == &format!("{}/1", sid(1))
+                    && detail == "会话库格式 9 的用户消息不能包含图片"
+        ),
+        "打开含图用户节点的错误与预期不符：{err:?}"
     );
 }

@@ -4,19 +4,19 @@
 //! `lattice-conversation` 线上类型片段（全部 enum 穷尽片段与带可选/集合字段结构体片段）。
 
 use lattice_conversation::{
-    BoundToolCall, CostEstimate, CostSummary, Effort, IndeterminateCause, InvocationId,
-    MessagePart, MessageRole, MessageSemantic, ModelMessageAddress, NativeMessage,
-    OpaqueProviderState, Protocol, ReplayOrigin, ResultPayload, SuccessContent, TokenSummary,
-    TokenUsage, ToolCallAddress, ToolCallValidation, ToolError, ToolResultOutcome, TurnId,
-    UsageCompleteness,
+    BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, IndeterminateCause,
+    InputModality, InvocationId, MessagePart, MessageRole, MessageSemantic, ModelMessageAddress,
+    NativeMessage, OpaqueProviderState, Protocol, ReplayOrigin, ResultPayload, SuccessContent,
+    TokenSummary, TokenUsage, ToolCallAddress, ToolCallValidation, ToolError, ToolResultOutcome,
+    TurnId, UsageCompleteness,
 };
 use serde_json::json;
 
 use super::{
     ARGS_CARGO_TOML_DIGEST_HEX, ARGS_MISSING_TXT_DIGEST_HEX, ARGS_SLEEP_CMD_DIGEST_HEX,
     CONTENT_LINES_42_BYTES, CONTENT_LINES_42_DIGEST_HEX, CONTENT_OVERSIZE_BYTES,
-    CONTENT_OVERSIZE_DIGEST_HEX, CaseBook, hex_32, invocation_id_1, provider_openai,
-    session_id_primary, turn_id_1,
+    CONTENT_OVERSIZE_DIGEST_HEX, CaseBook, IMAGE_SAMPLE_BYTES, IMAGE_SAMPLE_DIGEST_HEX, hex_32,
+    invocation_id_1, provider_openai, session_id_primary, turn_id_1,
 };
 
 pub(super) fn replay_origin_openai() -> ReplayOrigin {
@@ -149,6 +149,14 @@ pub(super) fn cost_estimate_exact() -> CostEstimate {
     }
 }
 
+pub(super) fn image_ref_sample() -> ImageRef {
+    ImageRef {
+        sha256: hex_32(IMAGE_SAMPLE_DIGEST_HEX),
+        media_type: ImageMediaType::Png,
+        byte_length: IMAGE_SAMPLE_BYTES,
+    }
+}
+
 pub(super) fn register(book: &mut CaseBook) {
     let call_full = bound_call_read_cargo(turn_id_1(), 0, 1, invocation_id_1(), Some("call_01"));
     let call_minimal = bound_call_read_cargo(turn_id_1(), 0, 0, invocation_id_1(), None);
@@ -164,6 +172,28 @@ pub(super) fn register(book: &mut CaseBook) {
             ("high", Effort::High => Effort::High),
             ("xhigh", Effort::Xhigh => Effort::Xhigh),
             ("max", Effort::Max => Effort::Max),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "image_media_type",
+        ImageMediaType {
+            ("png", ImageMediaType::Png => ImageMediaType::Png),
+            ("jpeg", ImageMediaType::Jpeg => ImageMediaType::Jpeg),
+            ("webp", ImageMediaType::Webp => ImageMediaType::Webp),
+            ("gif", ImageMediaType::Gif => ImageMediaType::Gif),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "input_modality",
+        InputModality {
+            ("text", InputModality::Text => InputModality::Text),
+            ("image", InputModality::Image => InputModality::Image),
+            ("audio", InputModality::Audio => InputModality::Audio),
+            ("video", InputModality::Video => InputModality::Video),
         }
     );
 
@@ -210,6 +240,12 @@ pub(super) fn register(book: &mut CaseBook) {
                 "tool_call",
                 MessageSemantic::ToolCall { .. } => MessageSemantic::ToolCall {
                     call: call_full.clone(),
+                }
+            ),
+            (
+                "image",
+                MessageSemantic::Image { .. } => MessageSemantic::Image {
+                    image: image_ref_sample(),
                 }
             ),
         }

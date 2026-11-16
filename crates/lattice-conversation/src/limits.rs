@@ -32,6 +32,18 @@ pub const MAX_REASONING_CONTENT_BYTES: usize = 2 * 1024 * 1024;
 /// Maximum total byte length assembled by one model attempt (16 MiB).
 pub const MAX_MODEL_ATTEMPT_BYTES: usize = 16 * 1024 * 1024;
 
+/// 单张用户上传原始图片的最大字节数（3.75 MiB，即 3,932,160 字节；base64 编码后至多 5 MiB）。
+pub const MAX_IMAGE_BYTES: usize = 3_932_160;
+
+/// 单轮用户消息最多包含的图片张数（按出现次数计数）。
+pub const MAX_USER_IMAGES_PER_TURN: usize = 8;
+
+/// 单轮用户消息原始图片字节总和上限（10 MiB，即 10,485,760 字节）。
+pub const MAX_USER_IMAGE_TOTAL_BYTES: usize = 10_485_760;
+
+/// 单轮用户消息全部文本片段 UTF-8 字节总和上限（2 MiB，即 2,097,152 字节）。
+pub const MAX_USER_TEXT_BYTES: usize = 2_097_152;
+
 /// Which protocol limit was exceeded.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -208,6 +220,8 @@ pub fn validate_assistant_bounds<S: crate::ToolCallState>(
                         .saturating_add(call.provider_call_id().map_or(0, str::len)),
                 )?;
             }
+            // 图片位置合法性由 validate_image_placement 负责，本函数只计量助手输出字节。
+            crate::MessageSemantic::Image { .. } => {}
         }
         if let Some(replay) = &part.replay_state {
             assembly.replace_metadata(0, replay.as_str().len())?;

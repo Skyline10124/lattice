@@ -187,6 +187,11 @@ pub enum MessageSemantic<S: ToolCallState> {
         /// The call, in the message's binding state.
         call: S,
     },
+    /// 用户输入图片引用：只出现在 User 消息中，`replay_state` 为 `None`。
+    Image {
+        /// 内容寻址图片引用。
+        image: crate::ImageRef,
+    },
 }
 
 /// One ordered part of a message: neutral semantics plus optional part-local
@@ -266,6 +271,7 @@ impl NativeMessage<crate::UnboundToolCall> {
                     MessageSemantic::Text { text } => MessageSemantic::Text { text },
                     MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
                     MessageSemantic::ToolCall { .. } => unreachable!("checked above"),
+                    MessageSemantic::Image { image } => MessageSemantic::Image { image },
                 },
                 replay_state: part.replay_state,
             })

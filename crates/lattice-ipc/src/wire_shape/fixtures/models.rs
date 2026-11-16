@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use lattice_conversation::{Effort, ModelId, ProviderId};
+use lattice_conversation::{Effort, InputModality, ModelId, ProviderId};
 
 use super::{CaseBook, model_gpt5, model_ref_gpt5, provider_openai};
 use crate::{
@@ -38,6 +38,12 @@ pub(super) fn model_candidate_full() -> ModelCandidate {
         name: Some("GPT-5".to_owned()),
         context: Some(400_000),
         output: Some(128_000),
+        input: Some(vec![
+            InputModality::Text,
+            InputModality::Image,
+            InputModality::Audio,
+            InputModality::Video,
+        ]),
         supported_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
         cost: Some(model_price_full()),
         availability: Availability::Ready,
@@ -51,11 +57,26 @@ pub(super) fn model_candidate_minimal() -> ModelCandidate {
         name: None,
         context: None,
         output: None,
+        input: None,
         supported_efforts: Vec::new(),
         cost: None,
         availability: Availability::Unconfigured {
             requirement: ConfigurationRequirement::ApiKey,
         },
+    }
+}
+
+pub(super) fn model_candidate_empty_input() -> ModelCandidate {
+    ModelCandidate {
+        provider: ProviderId::parse("local").expect("固定 ProviderId 应合法"),
+        model: ModelId::parse("empty-input-v1").expect("固定 ModelId 应合法"),
+        name: None,
+        context: None,
+        output: None,
+        input: Some(Vec::new()),
+        supported_efforts: Vec::new(),
+        cost: None,
+        availability: Availability::Ready,
     }
 }
 
@@ -203,6 +224,10 @@ pub(super) fn register(book: &mut CaseBook) {
         "model_candidate",
         &model_candidate_full(),
         &model_candidate_minimal(),
+    );
+    book.insert(
+        "fragment/model_candidate/empty_input",
+        &model_candidate_empty_input(),
     );
     book.insert_struct_pair(
         "model_warning",

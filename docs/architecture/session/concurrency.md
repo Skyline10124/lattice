@@ -82,7 +82,7 @@ stateDiagram-v2
 
 | 对象/场景 | 度量、限制与触发行为 | 来源与证据范围 |
 | --- | --- | --- |
-| 新用户输入 | User 消息全部 text parts 的 UTF-8 字节之和，最多 2 MiB，即 2,097,152 字节；超一字节在接受前拒绝 | 既有协议；`lattice-session` 的 `MAX_USER_INPUT_BYTES`。源码解释为对齐助手正文上限，非测量结果 |
+| 新用户输入 | User 消息全部 text parts 的 UTF-8 字节之和，最多 2 MiB，即 2,097,152 字节；超一字节在接受前拒绝 | 既有协议；`lattice-conversation` 的 `MAX_USER_TEXT_BYTES`。源码解释为对齐助手正文上限，非测量结果 |
 | 工具目录快照 | 按工具名排序 entries 的规范 JSON，最多 1 MiB，即 1,048,576 字节；新快照超限拒绝，已存快照不合法时报损坏 | `lattice-session` 的 `MAX_CATALOG_SNAPSHOT_BYTES`；ADR 0005 请求接受协议与 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)。计量对象不是文件目录或 provider wire |
 | 调用结果载荷 | Succeeded 载荷规范 JSON 最多 65,536 字节；超过时不保存正文，记录摘要与长度，内容不可用 | `lattice-session` 的 `MAX_TOOL_CONTENT_BYTES`；见[调用槽位](steps.md#调用槽位) |
 | 有效 profile | `agent.toml` 最多 16 MiB，即 16,777,216 字节；system prompt 最多 2 MiB，Agent 名最多 128 字节，模型引用的 provider 部分最多 64 字节并按 `id` 规则校验、模型部分最多 4,096 字节；`schema_version` 为 1，仅接受 `[agent]`、`[prompt]` 与可选 `[llm]`（出现未知节如 `[lancet]`、`[tools]` 时拒绝加载）；`max_retries` ≤ 10，退避初始/最大值均 ≤ 60,000 毫秒且最大值不小于初始值，显式 `timeout_secs`（Turn deadline）为 1–86,400 秒；无效时在 `configure` 加载阶段按配置错误拒绝 | `agent.toml` 加载与文件上限见 [load.rs 的 load_agent_profile、MAX_PROFILE_FILE_BYTES 与 MAX_SYSTEM_PROMPT_BYTES](../../../crates/lattice-profile/src/load.rs)，Agent 名、超时与重试策略的领域类型构造入口见 [model/mod.rs 的 AgentName::parse、TurnTimeout::new 与 RetryPolicy::new](../../../crates/lattice-session/src/model/mod.rs)，模型引用的领域类型构造入口见 [model_selection.rs 的 ModelRef::parse、ProviderId::parse 与 ModelId::parse](../../../crates/lattice-conversation/src/model_selection.rs)。上限 86,400 秒由 ADR 0010 第 11 节确定，使超过 SIWC token 有效期的 Turn 成为实际用法；未设置时使用 300 秒，与观察 idle 分开；粒度与默认值由 #222 裁决 |

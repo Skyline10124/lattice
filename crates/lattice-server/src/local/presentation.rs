@@ -40,6 +40,7 @@ fn model_candidate(candidate: lattice_llm::ModelCandidate) -> lattice_ipc::Model
         name,
         context,
         output,
+        input,
         supported_efforts,
         cost,
         availability: status,
@@ -50,6 +51,7 @@ fn model_candidate(candidate: lattice_llm::ModelCandidate) -> lattice_ipc::Model
         name,
         context,
         output,
+        input,
         supported_efforts,
         cost: cost.map(model_price),
         availability: availability(status),
@@ -159,7 +161,7 @@ pub(super) fn revocation_status(
 mod tests {
     use std::path::Path;
 
-    use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
+    use lattice_conversation::{Effort, InputModality, ModelId, ModelRef, ProviderId};
 
     use super::*;
 
@@ -341,6 +343,12 @@ mod tests {
             name: Some("GPT-5".to_owned()),
             context: Some(400_000),
             output: Some(128_000),
+            input: Some(vec![
+                InputModality::Text,
+                InputModality::Image,
+                InputModality::Audio,
+                InputModality::Video,
+            ]),
             supported_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
             cost: Some(price_full),
             availability: lattice_llm::Availability::Ready,
@@ -351,6 +359,7 @@ mod tests {
             name: None,
             context: None,
             output: None,
+            input: None,
             supported_efforts: Vec::new(),
             cost: None,
             availability: lattice_llm::Availability::Unconfigured {
@@ -365,6 +374,12 @@ mod tests {
                 name: Some("GPT-5".to_owned()),
                 context: Some(400_000),
                 output: Some(128_000),
+                input: Some(vec![
+                    InputModality::Text,
+                    InputModality::Image,
+                    InputModality::Audio,
+                    InputModality::Video,
+                ]),
                 supported_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
                 cost: Some(lattice_ipc::ModelPrice {
                     input: Some(1.25),
@@ -384,6 +399,7 @@ mod tests {
                 name: None,
                 context: None,
                 output: None,
+                input: None,
                 supported_efforts: Vec::new(),
                 cost: None,
                 availability: lattice_ipc::Availability::Unconfigured {
@@ -436,6 +452,12 @@ mod tests {
                         name: Some("GPT-5".to_owned()),
                         context: Some(400_000),
                         output: Some(128_000),
+                        input: Some(vec![
+                            InputModality::Text,
+                            InputModality::Image,
+                            InputModality::Audio,
+                            InputModality::Video,
+                        ]),
                         supported_efforts: vec![Effort::Low, Effort::Medium, Effort::High],
                         cost: Some(lattice_ipc::ModelPrice {
                             input: Some(1.25),
@@ -451,6 +473,7 @@ mod tests {
                         name: None,
                         context: None,
                         output: None,
+                        input: None,
                         supported_efforts: Vec::new(),
                         cost: None,
                         availability: lattice_ipc::Availability::Unconfigured {

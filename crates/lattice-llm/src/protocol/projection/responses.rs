@@ -88,7 +88,11 @@ pub(super) fn native_to_wire<S: ToolCallState>(
                     "content":[{"type":"output_text", "text":text, "annotations":[]}],
                 })),
                 MessageSemantic::ToolCall { call } => Ok(function(call)),
-                _ => Err(ProjectionError::MissingReplayState {
+                MessageSemantic::Reasoning { .. } => Err(ProjectionError::MissingReplayState {
+                    provider: Protocol::Responses,
+                    part_ordinal: ordinal,
+                }),
+                MessageSemantic::Image { .. } => Err(ProjectionError::UnsupportedPart {
                     provider: Protocol::Responses,
                     part_ordinal: ordinal,
                 }),
@@ -97,6 +101,12 @@ pub(super) fn native_to_wire<S: ToolCallState>(
     }
     let mut groups = BTreeMap::<usize, Group>::new();
     for (ordinal, part) in message.parts.iter().enumerate() {
+        if matches!(part.semantic, MessageSemantic::Image { .. }) {
+            return Err(ProjectionError::UnsupportedPart {
+                provider: Protocol::Responses,
+                part_ordinal: ordinal,
+            });
+        }
         let state = part
             .replay_state
             .as_ref()

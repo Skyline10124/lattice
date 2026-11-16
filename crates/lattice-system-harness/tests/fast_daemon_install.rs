@@ -270,9 +270,9 @@ impl IncompatiblePeerFixture {
                 .map_err(|e| format!("期限内读取客户端探测帧魔数失败：{e}"))?;
 
             apply_stream_deadline(&stream, deadline)?;
-            // 写入比当前协议版本（64 = 0x40）旧一版的 LTLOCAL 帧魔数。
+            // 写入比当前协议版本（65 = 0x41）旧一版的 LTLOCAL 帧魔数。
             stream
-                .write_all(b"LTLOCAL\x3f")
+                .write_all(b"LTLOCAL\x40")
                 .map_err(|e| format!("期限内写入旧协议魔数失败：{e}"))?;
             stream
                 .flush()

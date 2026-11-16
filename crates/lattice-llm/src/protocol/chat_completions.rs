@@ -427,6 +427,7 @@ mod tests {
                 MessageSemantic::Text { text } => format!("T:{text}"),
                 MessageSemantic::Reasoning { text } => format!("R:{text}"),
                 MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
+                MessageSemantic::Image { .. } => panic!("助手回复不应包含图片片段"),
             })
             .collect()
     }

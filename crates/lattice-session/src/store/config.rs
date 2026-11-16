@@ -22,11 +22,6 @@ pub const MAX_MODEL_STEPS: u32 = 32;
 /// exactly this length is legal; one byte more fails closed.
 pub const MAX_CATALOG_SNAPSHOT_BYTES: usize = 1024 * 1024;
 
-/// User input byte bound, aligned with the assistant content bound of one
-/// attempt (`lattice-conversation` limits, ADR 0005 §10). Counted as UTF-8
-/// bytes of the user message's text parts.
-pub const MAX_USER_INPUT_BYTES: usize = 2 * 1024 * 1024;
-
 /// 系统提示 UTF-8 字节上限（2 MiB）；会话设置与单轮持久配置共用同一边界。
 const MAX_SYSTEM_PROMPT_BYTES: usize = 2 * 1024 * 1024;
 

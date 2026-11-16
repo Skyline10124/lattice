@@ -35,6 +35,7 @@ pub(super) fn model_candidate(
         name: None,
         context: None,
         output: None,
+        input: None,
         supported_efforts: efforts.to_vec(),
         cost: None,
         availability: lattice_local::Availability::Ready,

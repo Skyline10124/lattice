@@ -243,7 +243,7 @@ fn append_history_step(
                 }
                 adjacent = true;
             }
-            MessageSemantic::ToolCall { .. } => adjacent = false,
+            MessageSemantic::ToolCall { .. } | MessageSemantic::Image { .. } => adjacent = false,
             MessageSemantic::Reasoning { .. } => {}
         }
     }
@@ -323,21 +323,65 @@ fn append_messages(
     messages: Vec<lattice_local::NativeMessage<lattice_local::BoundToolCall>>,
 ) {
     for message in messages {
+        if message.role == MessageRole::User {
+            append_user_message(blocks, message);
+            continue;
+        }
         for part in message.parts {
             match part.semantic {
                 MessageSemantic::Text { text } => match message.role {
-                    MessageRole::User => blocks.push(user_block(text)),
                     MessageRole::Assistant => append_assistant_text(blocks, text),
-                    MessageRole::System | MessageRole::Tool => {}
+                    MessageRole::User | MessageRole::System | MessageRole::Tool => {}
                 },
                 MessageSemantic::ToolCall { call } => blocks.push(Block::Tool {
                     id: call.invocation_id.to_string(),
                     name: call.name,
                     state: ToolState::Unknown,
                 }),
-                MessageSemantic::Reasoning { .. } => {}
+                MessageSemantic::Reasoning { .. } | MessageSemantic::Image { .. } => {}
             }
         }
+    }
+}
+
+fn append_user_message(
+    blocks: &mut BlockList,
+    message: lattice_local::NativeMessage<lattice_local::BoundToolCall>,
+) {
+    let mut out = String::new();
+    let mut has_content = false;
+    let mut prev_was_image = false;
+    let mut image_ordinal: usize = 0;
+
+    for part in message.parts {
+        match part.semantic {
+            MessageSemantic::Text { text } => {
+                has_content = true;
+                if !text.is_empty() {
+                    if prev_was_image && !text.chars().next().is_some_and(char::is_whitespace) {
+                        out.push(' ');
+                    }
+                    out.push_str(&text);
+                    prev_was_image = false;
+                }
+            }
+            MessageSemantic::Image { image } => {
+                has_content = true;
+                image_ordinal = image_ordinal.saturating_add(1);
+                let ordinal = std::num::NonZeroUsize::new(image_ordinal)
+                    .expect("图片序号从 1 开始递增，必定非零");
+                if !out.is_empty() && !out.chars().next_back().is_some_and(char::is_whitespace) {
+                    out.push(' ');
+                }
+                out.push_str(&lattice_local::format_image_marker(ordinal, &image));
+                prev_was_image = true;
+            }
+            MessageSemantic::ToolCall { .. } | MessageSemantic::Reasoning { .. } => {}
+        }
+    }
+
+    if has_content {
+        blocks.push(user_block(out));
     }
 }
 
@@ -346,5 +390,189 @@ fn append_assistant_text(blocks: &mut BlockList, text: String) {
     match blocks.entries.last_mut().map(|entry| &mut entry.block) {
         Some(Block::Assistant(previous)) => previous.push_str(&text),
         _ => blocks.push(Block::Assistant(text)),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn user_entry_from_parts(
+        node: u64,
+        turn_n: u64,
+        ordinal: u64,
+        parts: Value,
+    ) -> ConversationEntry {
+        let turn_id =
+            lattice_local::TurnId::parse(&format!("44444444-4444-4444-8444-{turn_n:012}")).unwrap();
+        serde_json::from_value(json!({
+            "kind": "user_message",
+            "node": node,
+            "ordinal": ordinal,
+            "content": {
+                "kind": "user_message",
+                "parent": node.saturating_sub(1),
+                "turn_id": turn_id,
+                "accepted_at": "2026-01-01T00:00:00Z",
+                "agent_name": "coder",
+                "model": "model-a",
+                "provider": "openai",
+                "limits": {
+                    "timeout_secs": 300,
+                    "max_model_steps": 32,
+                    "max_model_attempts": 3
+                },
+                "config_digest": "0".repeat(64),
+                "message": {
+                    "role": "user",
+                    "parts": parts
+                }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn image_part_json(media_type: &str, byte_length: u64) -> Value {
+        json!({
+            "semantic": {
+                "image": {
+                    "image": {
+                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "media_type": media_type,
+                        "byte_length": byte_length
+                    }
+                }
+            },
+            "replay_state": null
+        })
+    }
+
+    fn text_part_json(text: &str) -> Value {
+        json!({
+            "semantic": {
+                "text": {
+                    "text": text
+                }
+            },
+            "replay_state": null
+        })
+    }
+
+    #[test]
+    fn interleaved_text_and_image_user_message_renders_single_user_block_in_order() {
+        let entry = user_entry_from_parts(
+            1,
+            1,
+            1,
+            json!([
+                text_part_json("请看报错截图"),
+                image_part_json("png", 2048),
+                text_part_json("定位原因")
+            ]),
+        );
+        let blocks = entry_blocks(&entry, true, None);
+        assert_eq!(
+            blocks.len(),
+            2,
+            "UserMessage 条目应只生成一个标题块和一个 USER 正文块"
+        );
+        assert!(
+            matches!(blocks[0], Block::UserTurn { .. }),
+            "首块应为 UserTurn"
+        );
+        assert_eq!(
+            blocks[1],
+            Block::User("请看报错截图 [IMAGE 1 · png · 2 KiB] 定位原因".to_owned()),
+            "图文交错消息应按顺序拼入单个 USER 块并在无空白交界处补单个空格"
+        );
+
+        let with_existing_whitespace = user_entry_from_parts(
+            3,
+            2,
+            2,
+            json!([
+                text_part_json("第一行\n"),
+                image_part_json("jpeg", 1023),
+                text_part_json("\n第二行")
+            ]),
+        );
+        let ws_blocks = entry_blocks(&with_existing_whitespace, true, None);
+        assert_eq!(ws_blocks.len(), 2);
+        assert_eq!(
+            ws_blocks[1],
+            Block::User("第一行\n[IMAGE 1 · jpg · 1023 B]\n第二行".to_owned()),
+            "相邻文本在交界处已有空白时不应重复插入空格"
+        );
+    }
+
+    #[test]
+    fn pure_image_user_message_renders_without_leading_or_trailing_spaces() {
+        let single_image = user_entry_from_parts(1, 1, 1, json!([image_part_json("webp", 1536)]));
+        let single_blocks = entry_blocks(&single_image, true, None);
+        assert_eq!(single_blocks.len(), 2);
+        assert_eq!(
+            single_blocks[1],
+            Block::User("[IMAGE 1 · webp · 2 KiB]".to_owned()),
+            "单张纯图片消息开头与结尾不应有多余空格"
+        );
+
+        let two_images = user_entry_from_parts(
+            3,
+            2,
+            2,
+            json!([
+                image_part_json("png", 1024),
+                image_part_json("jpeg", 3_932_160)
+            ]),
+        );
+        let two_blocks = entry_blocks(&two_images, true, None);
+        assert_eq!(two_blocks.len(), 2);
+        assert_eq!(
+            two_blocks[1],
+            Block::User("[IMAGE 1 · png · 1 KiB] [IMAGE 2 · jpg · 3.8 MiB]".to_owned()),
+            "连续图片标记之间应以单个空格分隔"
+        );
+    }
+
+    #[test]
+    fn separate_user_messages_restart_image_ordinals_from_one() {
+        let first = user_entry_from_parts(
+            1,
+            1,
+            1,
+            json!([image_part_json("png", 1024), image_part_json("gif", 512)]),
+        );
+        let second = user_entry_from_parts(
+            3,
+            2,
+            2,
+            json!([text_part_json("再来一张"), image_part_json("jpeg", 4096)]),
+        );
+
+        let first_blocks = entry_blocks(&first, true, None);
+        let second_blocks = entry_blocks(&second, true, None);
+        assert_eq!(
+            first_blocks[1],
+            Block::User("[IMAGE 1 · png · 1 KiB] [IMAGE 2 · gif · 512 B]".to_owned()),
+            "第一条消息的图片序号应为 1 和 2"
+        );
+        assert_eq!(
+            second_blocks[1],
+            Block::User("再来一张 [IMAGE 1 · jpg · 4 KiB]".to_owned()),
+            "第二条消息的图片序号应重新从 1 开始计数"
+        );
+    }
+
+    #[test]
+    fn plain_text_user_message_rendering_is_unchanged() {
+        let plain = user_entry_from_parts(1, 1, 1, json!([text_part_json("  保持原样\n第二行  ")]));
+        let blocks = entry_blocks(&plain, true, None);
+        assert_eq!(blocks.len(), 2);
+        assert_eq!(
+            blocks[1],
+            Block::User("  保持原样\n第二行  ".to_owned()),
+            "纯文本用户消息渲染结果必须保持完全不变"
+        );
     }
 }

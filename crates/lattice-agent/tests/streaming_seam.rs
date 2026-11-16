@@ -82,6 +82,7 @@ async fn fake_stream_preserves_part_order_and_matches_its_live_projection() {
             MessageSemantic::Text { text } => format!("T:{text}"),
             MessageSemantic::Reasoning { text } => format!("R:{text}"),
             MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
+            MessageSemantic::Image { .. } => panic!("助手回复不应包含图片片段"),
         })
         .collect();
     assert_eq!(labels, ["T:A", "R:R", "C:first", "T:B", "C:second"]);

@@ -29,8 +29,8 @@ use super::{
     CONTENT_OVERSIZE_DIGEST_HEX, CaseBook, agent_coder,
     conversation::{
         bound_call_read_cargo, bound_call_read_missing, bound_call_sleep_cmd, cost_estimate_exact,
-        opaque_state_sample, replay_origin_openai, success_content_json_sample, token_usage_full,
-        tool_error_not_found,
+        image_ref_sample, opaque_state_sample, replay_origin_openai, success_content_json_sample,
+        token_usage_full, tool_error_not_found,
     },
     hex_32, invocation_id_1, invocation_id_2, model_gpt5, project_path_non_utf8, provider_openai,
     session_id_primary, ts_accepted, ts_created, ts_ended, ts_step_0, turn_id_1, turn_id_2,
@@ -50,8 +50,40 @@ struct TurnSpec {
     turn_id: TurnId,
     turn_ordinal: u64,
     effort: Option<Effort>,
-    user_prompt: &'static str,
+    user_parts: Vec<MessagePart<BoundToolCall>>,
     steps: Vec<StepSpec>,
+}
+
+fn user_text_parts(text: &str) -> Vec<MessagePart<BoundToolCall>> {
+    vec![MessagePart {
+        semantic: MessageSemantic::Text {
+            text: text.to_owned(),
+        },
+        replay_state: None,
+    }]
+}
+
+fn user_interleaved_image_parts(before: &str, after: &str) -> Vec<MessagePart<BoundToolCall>> {
+    vec![
+        MessagePart {
+            semantic: MessageSemantic::Text {
+                text: before.to_owned(),
+            },
+            replay_state: None,
+        },
+        MessagePart {
+            semantic: MessageSemantic::Image {
+                image: image_ref_sample(),
+            },
+            replay_state: None,
+        },
+        MessagePart {
+            semantic: MessageSemantic::Text {
+                text: after.to_owned(),
+            },
+            replay_state: None,
+        },
+    ]
 }
 
 struct StepSpec {
@@ -464,12 +496,7 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
         message: NativeMessage {
             role: MessageRole::User,
             provider_origin: None,
-            parts: vec![MessagePart {
-                semantic: MessageSemantic::Text {
-                    text: spec.user_prompt.to_owned(),
-                },
-                replay_state: None,
-            }],
+            parts: spec.user_parts,
         },
     };
 
@@ -748,7 +775,7 @@ pub(super) fn scenario_success_tool_then_finish() -> BuiltScenario {
         turn_id: turn_id_1(),
         turn_ordinal: 1,
         effort: Some(Effort::High),
-        user_prompt: "请查看 Cargo.toml 的行数",
+        user_parts: user_text_parts("请查看 Cargo.toml 的行数"),
         steps: vec![
             StepSpec {
                 progress: StepProgress::Closed {
@@ -801,7 +828,7 @@ pub(super) fn scenario_retry_then_success() -> BuiltScenario {
         turn_id: turn_id_2(),
         turn_ordinal: 1,
         effort: Some(Effort::Medium),
-        user_prompt: "检查服务连通性",
+        user_parts: user_interleaved_image_parts("请结合截图检查服务连通性：", "定位报错原因"),
         steps: vec![StepSpec {
             progress: StepProgress::Closed {
                 end: StepEnd::Finish,
@@ -855,7 +882,7 @@ pub(super) fn scenario_tool_failed() -> BuiltScenario {
         turn_id: turn_id_3(),
         turn_ordinal: 1,
         effort: Some(Effort::Low),
-        user_prompt: "读取 missing.txt",
+        user_parts: user_text_parts("读取 missing.txt"),
         steps: vec![
             StepSpec {
                 progress: StepProgress::Closed {
@@ -917,7 +944,7 @@ pub(super) fn scenario_cancelled() -> BuiltScenario {
         turn_id: turn_id_1(),
         turn_ordinal: 1,
         effort: None,
-        user_prompt: "运行耗时命令后读取配置",
+        user_parts: user_text_parts("运行耗时命令后读取配置"),
         steps: vec![StepSpec {
             progress: StepProgress::Closed {
                 end: StepEnd::Stop {
@@ -939,7 +966,7 @@ pub(super) fn scenario_orphan_reserved() -> BuiltScenario {
         turn_id: turn_id_2(),
         turn_ordinal: 1,
         effort: None,
-        user_prompt: "刚接受尚未发出请求的轮次",
+        user_parts: user_text_parts("刚接受尚未发出请求的轮次"),
         steps: vec![StepSpec {
             progress: StepProgress::Reserved,
             attempts: Vec::new(),
@@ -957,7 +984,7 @@ pub(super) fn scenario_orphan_requesting() -> BuiltScenario {
         turn_id: turn_id_2(),
         turn_ordinal: 1,
         effort: Some(Effort::Medium),
-        user_prompt: "模型流式响应中途进程退出",
+        user_parts: user_text_parts("模型流式响应中途进程退出"),
         steps: vec![StepSpec {
             progress: StepProgress::Requesting,
             attempts: vec![sent_attempt_minimal()],
@@ -1006,7 +1033,7 @@ pub(super) fn scenario_orphan_executing() -> BuiltScenario {
         turn_id: turn_id_2(),
         turn_ordinal: 1,
         effort: Some(Effort::High),
-        user_prompt: "依次读取两个文件",
+        user_parts: user_text_parts("依次读取两个文件"),
         steps: vec![StepSpec {
             progress: StepProgress::Executing,
             attempts: vec![completed_attempt(token_usage_full(), cost_estimate_exact())],
@@ -1038,7 +1065,7 @@ pub(super) fn scenario_indeterminate_no_result() -> BuiltScenario {
         turn_id: turn_id_3(),
         turn_ordinal: 1,
         effort: Some(Effort::High),
-        user_prompt: "执行外部脚本直至轮次超时",
+        user_parts: user_text_parts("执行外部脚本直至轮次超时"),
         steps: vec![StepSpec {
             progress: StepProgress::Closed {
                 end: StepEnd::Stop {
@@ -1353,6 +1380,10 @@ pub(super) fn register(book: &mut CaseBook) {
             ("user_message", ConversationEntry::UserMessage { .. } => success.entries[0].clone()),
             ("step", ConversationEntry::Step { .. } => success.entries[1].clone()),
         }
+    );
+    book.insert(
+        "fragment/conversation_entry/user_message_with_image",
+        &retried.entries[0],
     );
 
     let turn_summary_full = indeterminate.turn_detail.summary.clone();

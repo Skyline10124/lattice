@@ -183,6 +183,12 @@ pub fn native_to_wire<S: ToolCallState>(
                 }
                 blocks.push(block);
             }
+            MessageSemantic::Image { .. } => {
+                return Err(ProjectionError::UnsupportedPart {
+                    provider: Protocol::Messages,
+                    part_ordinal: ordinal,
+                });
+            }
         }
     }
     Ok(json!({

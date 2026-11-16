@@ -151,6 +151,7 @@ pub(crate) fn bind_replay_step(
             }
             MessageSemantic::Text { text } => MessageSemantic::Text { text },
             MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
+            MessageSemantic::Image { image } => MessageSemantic::Image { image },
         };
         parts.push(MessagePart {
             semantic,
