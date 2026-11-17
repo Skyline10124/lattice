@@ -11,6 +11,8 @@ mod tls;
 pub use tls::{load_tls_roots_der, usable_tls_roots_der};
 mod gateway;
 pub use gateway::{GatewayTurn, PrepareError, RequestGateway, ResolvedRequest};
+mod image_source;
+pub use image_source::{ImageReader, ImageSource, NoImages};
 pub use protocol::Protocol;
 mod models;
 pub use models::{

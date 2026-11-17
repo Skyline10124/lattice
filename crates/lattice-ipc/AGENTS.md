@@ -11,7 +11,7 @@
 | `src/types.rs` | 分页常量（`WATCH_TURNS`、`HISTORY_TURNS`、`MAX_HISTORY_TURNS`）、`Request` / `Response`、会话配置与提交载荷、视图更新、`DaemonStatus` / `ComponentStatus` / `ComponentState`、IM 凭据与挂载载荷（`ImMountResult`、`ImAuthSetReply`、`ImAuthRemoveReply`、`ImCredentialStatus`、`ImPlatformAuthStatus`、`ImAuthStatus`）、`LocalError` / `RequestConflict`（`ConflictReason`）与恢复/存储诊断、`TurnRef` / `TextSegment` 及 Unix 路径原始字节 serde |
 | `src/models.rs` | `ModelCandidateQuery` 请求类型，以及 `ModelCandidates`、`ModelCandidate`、`ModelPrice`、`ModelWarning`、`Availability`（含 `status_str`）、`ConfigurationRequirement`（含 `Display`）展示类型 |
 | `src/auth.rs` | 透明清零且不实现 `Debug` 的 `AuthKey`、`require_chatgpt`、`AuthStatus` / `ProviderAuthStatus`（含后台生成的 `diagnostic`）/ `RevocationStatus` 展示类型，以及专用登录连接帧 `LoginAction` / `LoginResponse` / `AuthLoginOutcome` / `AuthCatalogOutcome` |
-| `src/ipc.rs` | `PROTOCOL_VERSION`（`64`）与帧魔数、`MAX_FRAME`（16 MiB）单帧读写与响应分片拼回、响应缓冲清零、`rustix` 有效 UID 读取、`check_dir` 目录所有者与权限检查与 `socket_peercred` 对端核验；运行时仅导出帧读写、目录权限与 UID/对端核验入口，`PROTOCOL_VERSION`、`MAGIC`、`MAX_FRAME`、`magic_for_version` 与 `read` 仅在 `test` 或 `test-utils` 下导出 |
+| `src/ipc.rs` | `PROTOCOL_VERSION`（`65`）与帧魔数、`MAX_FRAME`（16 MiB）单帧读写与响应分片拼回、响应缓冲清零、`rustix` 有效 UID 读取、`check_dir` 目录所有者与权限检查与 `socket_peercred` 对端核验；运行时仅导出帧读写、目录权限与 UID/对端核验入口，`PROTOCOL_VERSION`、`MAGIC`、`MAX_FRAME`、`magic_for_version` 与 `read` 仅在 `test` 或 `test-utils` 下导出 |
 | `src/wire_shape/`、`src/wire_shape.json` | 本地 IPC 闭包内全部枚举变体、结构体 `full`/`minimal` 形态与场景帧的逐字节 JSON 快照基线及 `PROTOCOL_VERSION` 门禁（`gate.rs` 与 `fixtures/` 分离） |
 
 ## 先读

@@ -8,6 +8,7 @@ pub use lattice_conversation::Protocol;
 pub(crate) mod anthropic_messages;
 pub(crate) mod chat_completions;
 mod common;
+pub(crate) mod encoding;
 mod features;
 pub(crate) mod generate_content;
 pub(crate) mod interactions;

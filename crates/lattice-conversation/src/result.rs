@@ -3,7 +3,7 @@
 
 //! 持久结构化工具结果；provider 文本只能在投影边界派生。
 
-use crate::tool_call::hex_digest;
+use crate::hex_digest;
 use crate::{BoundToolCall, InvocationId, NativeMessage, ToolError, ToolResultOutcome};
 use serde::{Deserialize, Serialize};
 

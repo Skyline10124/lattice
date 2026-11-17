@@ -23,8 +23,11 @@ pub mod attempt;
 mod canonical;
 mod digest;
 pub mod effort;
+mod hex_digest;
 pub mod history;
 mod identity;
+mod image;
+mod input_modality;
 pub mod limits;
 pub mod message;
 pub mod model_selection;
@@ -33,6 +36,7 @@ pub mod result;
 pub mod tool_call;
 pub mod tool_error;
 pub mod usage;
+mod user_input;
 
 pub use address::{ModelAttemptKey, ModelMessageAddress, ToolCallAddress};
 pub use attempt::{AttemptInterruption, AttemptRejection};
@@ -41,10 +45,13 @@ pub use digest::arguments_digest;
 pub use effort::{Effort, ParseEffortError};
 pub use history::ConversationItem;
 pub use identity::{IdParseError, InvocationId, SessionId, TurnId};
+pub use image::{ImageMediaType, ImagePlacementError, ImageRef, validate_image_placement};
+pub use input_modality::InputModality;
 pub use limits::{
-    AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_MODEL_ATTEMPT_BYTES,
-    MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES, MAX_TOOL_CALLS_PER_BATCH,
-    validate_assistant_bounds,
+    AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_IMAGE_BYTES,
+    MAX_MODEL_ATTEMPT_BYTES, MAX_REASONING_CONTENT_BYTES, MAX_TOOL_CALL_ARGUMENTS_BYTES,
+    MAX_TOOL_CALLS_PER_BATCH, MAX_USER_IMAGE_TOTAL_BYTES, MAX_USER_IMAGES_PER_TURN,
+    MAX_USER_TEXT_BYTES, validate_assistant_bounds,
 };
 pub use message::{
     MAX_OPAQUE_REPLAY_STATE_BYTES, MessagePart, MessageRole, MessageSemantic, NativeMessage,
@@ -67,3 +74,4 @@ pub use tool_error::ToolError;
 pub use usage::{
     CostEstimate, CostSummary, TokenSummary, TokenUsage, UsageCompleteness, UsageSummary,
 };
+pub use user_input::{UserInputError, normalize_user_message};

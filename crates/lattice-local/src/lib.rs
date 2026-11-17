@@ -4,6 +4,7 @@
 //! LATTICE 本地前端客户端门面：客户端句柄、会话观察状态机、登录流、日志初始化与类型重导出。
 
 mod client;
+mod display;
 mod endpoint;
 mod logging;
 mod login;
@@ -12,13 +13,15 @@ mod operation;
 pub use client::LocalClient;
 #[cfg(any(test, feature = "test-utils"))]
 pub use client::LocalWatch;
+pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
 pub use lattice_conversation::{
-    BoundToolCall, CostEstimate, CostSummary, Effort, InvocationId, MessageRole, MessageSemantic,
-    ModelAttemptKey, ModelId, ModelIdError, ModelRef, ModelRefError, NativeMessage, ProviderId,
-    ProviderIdError, ResultPayload, SessionId, StepContent, StoredToolResult, SuccessContent,
-    TokenSummary, TokenUsage, ToolError, ToolResultOutcome, TurnId, UsageCompleteness,
+    BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
+    InvocationId, MessageRole, MessageSemantic, ModelAttemptKey, ModelId, ModelIdError, ModelRef,
+    ModelRefError, NativeMessage, ProviderId, ProviderIdError, ResultPayload, SessionId,
+    StepContent, StoredToolResult, SuccessContent, TokenSummary, TokenUsage, ToolError,
+    ToolResultOutcome, TurnId, UsageCompleteness,
 };
 pub use lattice_ipc::{
     Acceptance, AgentName, AgentNameError, AttemptProgress, AuthCatalogOutcome, AuthLoginOutcome,

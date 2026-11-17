@@ -3,7 +3,9 @@
 
 use anyhow::Result;
 use clap::Subcommand;
-use lattice_local::{Availability, LocalClient, ModelCandidateQuery, ProviderId, StateLayout};
+use lattice_local::{
+    Availability, InputModality, LocalClient, ModelCandidateQuery, ProviderId, StateLayout,
+};
 use std::io::Write;
 
 #[derive(Subcommand)]
@@ -36,7 +38,7 @@ pub async fn run(
     }
 
     println!(
-        "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
+        "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tINPUT\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
     );
     let mut config_errors = Vec::new();
     for model in candidates.models {
@@ -60,13 +62,15 @@ pub async fn run(
                 .collect::<Vec<_>>()
                 .join(",")
         };
+        let input = format_input_modalities(model.input.as_deref());
         println!(
-            "{}/{}\t{}\t{}\t{}\t{}/{}/{}/{}\t{}",
+            "{}/{}\t{}\t{}\t{}\t{}\t{}/{}/{}/{}\t{}",
             model.provider,
             model.model,
             limits(model.context),
             limits(model.output),
             efforts,
+            input,
             price(cost.input),
             price(cost.output),
             price(cost.cache_read),
@@ -100,4 +104,49 @@ pub(super) async fn refresh(client: &LocalClient, json: bool, out: &mut impl Wri
         writeln!(out, "Model metadata refreshed.")?;
     }
     Ok(())
+}
+
+fn format_input_modalities(input: Option<&[InputModality]>) -> String {
+    match input {
+        Some(modalities) if !modalities.is_empty() => modalities
+            .iter()
+            .map(|modality| modality.as_str())
+            .collect::<Vec<_>>()
+            .join(","),
+        _ => "-".to_owned(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_input_modalities_covers_non_empty_empty_and_none_cells() {
+        assert_eq!(
+            format_input_modalities(Some(&[InputModality::Text, InputModality::Image])),
+            "text,image",
+            "非空输入模态列表应用逗号连接标签"
+        );
+        assert_eq!(
+            format_input_modalities(Some(&[
+                InputModality::Text,
+                InputModality::Image,
+                InputModality::Audio,
+                InputModality::Video,
+            ])),
+            "text,image,audio,video",
+            "全部四种输入模态应按原顺序连接"
+        );
+        assert_eq!(
+            format_input_modalities(Some(&[])),
+            "-",
+            "空输入模态列表应显示连字符占位"
+        );
+        assert_eq!(
+            format_input_modalities(None),
+            "-",
+            "缺失输入模态元数据应显示连字符占位"
+        );
+    }
 }

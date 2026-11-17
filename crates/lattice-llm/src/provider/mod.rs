@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use lattice_conversation::{Effort, ModelId, ProviderId};
+use lattice_conversation::{Effort, InputModality, ModelId, ProviderId};
 use serde::Deserialize;
 
 use crate::protocol::{Features, Protocol};
@@ -49,6 +49,7 @@ pub(crate) struct ModelCost {
 pub(crate) struct ModelMetadata {
     pub(crate) context: Option<u64>,
     pub(crate) output: Option<u64>,
+    pub(crate) input: Option<Vec<InputModality>>,
     pub(crate) reasoning: Option<bool>,
     pub(crate) effort: Option<Vec<Effort>>,
     /// 未指定时继承元数据；所有来源都未指定时，默认支持工具。

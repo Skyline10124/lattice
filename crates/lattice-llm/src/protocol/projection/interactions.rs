@@ -78,7 +78,11 @@ pub(super) fn native_to_wire<S: ToolCallState>(
                     Ok(json!({"type":"model_output","content":[{"type":"text","text":text}]}))
                 }
                 MessageSemantic::ToolCall { call } => Ok(function(call)),
-                _ => Err(ProjectionError::MissingReplayState {
+                MessageSemantic::Reasoning { .. } => Err(ProjectionError::MissingReplayState {
+                    provider: Protocol::Interactions,
+                    part_ordinal: ordinal,
+                }),
+                MessageSemantic::Image { .. } => Err(ProjectionError::UnsupportedPart {
                     provider: Protocol::Interactions,
                     part_ordinal: ordinal,
                 }),
@@ -87,6 +91,12 @@ pub(super) fn native_to_wire<S: ToolCallState>(
     }
     let mut groups = BTreeMap::<usize, Group>::new();
     for (ordinal, part) in message.parts.iter().enumerate() {
+        if matches!(part.semantic, MessageSemantic::Image { .. }) {
+            return Err(ProjectionError::UnsupportedPart {
+                provider: Protocol::Interactions,
+                part_ordinal: ordinal,
+            });
+        }
         let state = part
             .replay_state
             .as_ref()
@@ -120,6 +130,12 @@ pub(super) fn native_to_wire<S: ToolCallState>(
                 if group.call.replace(function(call)).is_some() {
                     return Err(malformed("duplicate function part"));
                 }
+            }
+            (MessageSemantic::Image { .. }, _, _) => {
+                return Err(ProjectionError::UnsupportedPart {
+                    provider: Protocol::Interactions,
+                    part_ordinal: ordinal,
+                });
             }
             _ => return Err(malformed("replay part does not match step")),
         }

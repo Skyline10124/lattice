@@ -1,0 +1,1 @@
+{"messages":[{"content":"对象内最大推理预算","role":"user"}],"model":"test-model","reasoning":{"max_tokens":8192},"stream":true,"stream_options":{"include_usage":true}}

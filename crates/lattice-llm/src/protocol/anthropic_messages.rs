@@ -6,8 +6,9 @@
 use lattice_conversation::{Protocol, ReplayOrigin};
 use std::collections::BTreeMap;
 
+use super::encoding::RequestBody;
 use crate::LlmError;
-use crate::protocol::projection::request_messages_to_wire;
+use crate::protocol::projection::request_messages_with_replay;
 use crate::reasoning::ReasoningPlan;
 use crate::reply::{
     PartDelta, PartKind, ProtocolEvent, ReplyProtocolError, StreamStop, StringPatch,
@@ -39,7 +40,7 @@ fn map_stop_reason(reason: &str) -> String {
 /// 按模型名构造 Messages 流式请求。
 ///
 /// `max_tokens` 必填，使用元数据输出上限；缺失或为 0 时用 [`DEFAULT_MAX_OUTPUT_TOKENS`]。
-pub fn build_request_json(
+pub(crate) fn build_request_json(
     request: &ChatRequest,
     model: &str,
     output_limit: Option<u64>,
@@ -47,15 +48,15 @@ pub fn build_request_json(
     reasoning: Option<ReasoningPlan>,
     model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
-) -> Result<serde_json::Value, LlmError> {
+) -> Result<RequestBody, LlmError> {
     let cache = features.cache;
-    let projected = request_messages_to_wire(origin, &request.messages)?;
+    let projected =
+        request_messages_with_replay(origin, &request.messages, super::ReasoningReplay::None)?;
     let max_tokens = output_limit
         .filter(|limit| *limit != 0)
         .unwrap_or(DEFAULT_MAX_OUTPUT_TOKENS);
     let mut body = serde_json::json!({
         "model": model,
-        "messages": projected.messages,
         "max_tokens": max_tokens,
         "stream": true,
     });
@@ -109,7 +110,10 @@ pub fn build_request_json(
         body["tools"] = serde_json::Value::Array(tools);
     }
 
-    Ok(body)
+    let serde_json::Value::Object(fields) = body else {
+        unreachable!("请求顶层固定为 JSON 对象");
+    };
+    Ok(RequestBody::new(fields, "messages", projected.messages))
 }
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
@@ -706,7 +710,7 @@ mod tests {
             target: ModelTarget::test_target("anthropic", "claude-sonnet-4-6"),
             client_request_id: None,
         };
-        let body = build_request_json(
+        let raw_body = build_request_json(
             &request,
             "claude-sonnet-4-6",
             None,
@@ -718,6 +722,7 @@ mod tests {
             &crate::test_reply::replay_origin(Protocol::Messages),
         )
         .expect("projection");
+        let body = crate::protocol::encoding::body_to_value(&raw_body);
         assert_eq!(body["model"], "claude-sonnet-4-6");
         assert_eq!(body["system"], "First prompt.\n\nSecond prompt.");
         assert_eq!(body["messages"][0]["content"][0]["text"], "Hello");

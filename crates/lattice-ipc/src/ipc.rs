@@ -19,7 +19,7 @@ use zeroize::{Zeroize, Zeroizing};
 use crate::types::{LocalError, LocalErrorKind, Result};
 
 mod defs {
-    pub const PROTOCOL_VERSION: u8 = 64;
+    pub const PROTOCOL_VERSION: u8 = 65;
     pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
     /// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
     pub const fn magic_for_version(version: u8) -> [u8; 8] {

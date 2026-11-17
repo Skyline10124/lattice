@@ -1019,7 +1019,7 @@ impl Backend {
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            if request.input.len() > lattice_session::store::MAX_USER_INPUT_BYTES {
+            if request.input.len() > lattice_conversation::MAX_USER_TEXT_BYTES {
                 return Err(LocalError::new(
                     LocalErrorKind::BadRequest,
                     "invalid Turn request",

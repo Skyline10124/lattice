@@ -5,23 +5,23 @@
 
 use lattice_conversation::{Protocol, ReplayOrigin};
 
-use crate::protocol::projection::{ProjectionError, request_messages_to_wire};
+use super::encoding::RequestBody;
+use crate::protocol::projection::{ProjectionError, request_messages_with_replay};
 use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
 use crate::types::ChatRequest;
 use lattice_conversation::Effort;
 
 /// 构造 generateContent 请求；模型名由端点路径指定。
-pub fn build_request_json(
+pub(crate) fn build_request_json(
     request: &ChatRequest,
     reasoning: Option<ReasoningPlan>,
     model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
-) -> Result<serde_json::Value, ProjectionError> {
-    let projected = request_messages_to_wire(origin, &request.messages)?;
-    let mut body = serde_json::json!({
-        "contents": projected.messages,
-    });
+) -> Result<RequestBody, ProjectionError> {
+    let projected =
+        request_messages_with_replay(origin, &request.messages, super::ReasoningReplay::None)?;
+    let mut body = serde_json::json!({});
 
     let mut config = serde_json::json!({});
     if let Some(plan) = reasoning {
@@ -76,7 +76,10 @@ pub fn build_request_json(
         }]);
     }
 
-    Ok(body)
+    let serde_json::Value::Object(fields) = body else {
+        unreachable!("请求顶层固定为 JSON 对象");
+    };
+    Ok(RequestBody::new(fields, "contents", projected.messages))
 }
 
 /// Build the full Gemini streaming endpoint URL.

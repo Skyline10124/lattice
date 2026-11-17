@@ -19,7 +19,7 @@ status: active
 ## 环境与后台
 
 - 后台（`lattice-daemon`）在启动时按自己的宿主环境确定配置目录、全局 agents 目录与 TLS 根（带 `test-fake-tools` 的测试构建还会读取逗号分隔的 `LATTICE_TEST_TOOLS` 注册假工具），之后保持不变；`providers.toml` 与凭据在每次请求时重读。更换决定这些位置、TLS 根或假工具名单的环境后，重启后台使新环境生效。规则见[配置来源与后台启动](../architecture/session/acceptance.md#配置来源与后台启动)。
-- 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。跨 IPC 协议版本（当前为 `64`）升级后台时，新旧二进制互连会报 `incompatible_backend`（连接存活时附对端 pid），先用 `systemctl --user stop lattice` 或旧版 `lattice daemon stop` 停下旧后台再启动新版。
+- 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。跨 IPC 协议版本（当前为 `65`）升级后台时，新旧二进制互连会报 `incompatible_backend`（连接存活时附对端 pid），先用 `systemctl --user stop lattice` 或旧版 `lattice daemon stop` 停下旧后台再启动新版。
 - 崩溃注入与强制清理只在隔离的状态根上进行，例如以 `lattice-daemon --state-root <绝对路径>` 启动的后台。
 
 | 入口 | 与后台的关系 |

@@ -1,0 +1,1 @@
+{"cache_control":{"type":"ephemeral"},"max_tokens":32768,"messages":[{"content":[{"text":"请检查当前目录。","type":"text"}],"role":"user"}],"model":"test-model","stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"你是严谨的代码助手。\n\n回答保持简洁。","type":"text"}]}

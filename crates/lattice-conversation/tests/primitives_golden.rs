@@ -767,3 +767,48 @@ fn arguments_digest_golden_vectors_and_key_order_invariance() {
         "{{\"a\":1,\"b\":2}} 摘要不匹配"
     );
 }
+
+// ============================================================================
+// f. 图片原语、输入模态与 MessageSemantic::Image 序列化及往返
+// ============================================================================
+
+#[test]
+fn image_semantic_and_input_modality_serde_exact_and_roundtrip() {
+    use lattice_conversation::{
+        BoundToolCall, ImageMediaType, ImageRef, InputModality, MessageSemantic,
+    };
+
+    let sha_hex = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+    let mut sha256 = [0u8; 32];
+    for (idx, slot) in sha256.iter_mut().enumerate() {
+        *slot = u8::from_str_radix(&sha_hex[idx * 2..idx * 2 + 2], 16).expect("合法十六进制");
+    }
+    let image = ImageRef {
+        sha256,
+        media_type: ImageMediaType::Webp,
+        byte_length: 4096,
+    };
+    let semantic = MessageSemantic::<BoundToolCall>::Image { image };
+    let expected = r#"{"image":{"image":{"sha256":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef","media_type":"webp","byte_length":4096}}}"#;
+
+    let encoded = serde_json::to_string(&semantic).expect("MessageSemantic::Image 序列化应成功");
+    assert_eq!(
+        encoded, expected,
+        "MessageSemantic::Image 外部标签 JSON 输出不匹配"
+    );
+    let decoded: MessageSemantic<BoundToolCall> =
+        serde_json::from_str(&encoded).expect("MessageSemantic::Image 反序列化应成功");
+    assert_eq!(decoded, semantic, "MessageSemantic::Image 往返应相等");
+
+    let modalities = [
+        InputModality::Text,
+        InputModality::Image,
+        InputModality::Audio,
+        InputModality::Video,
+    ];
+    let encoded_modalities = serde_json::to_string(&modalities).expect("InputModality 列表序列化");
+    assert_eq!(
+        encoded_modalities, r#"["text","image","audio","video"]"#,
+        "InputModality 列表 JSON 输出不匹配"
+    );
+}

@@ -69,6 +69,7 @@ thinking_toggle = "enable-thinking"    # 无元数据来源时，off/high 写关
 [providers.my-vllm.models."qwen3-32b"] # 元数据中没有的模型，手写元数据
 context = 131072
 output = 8192
+input = ["text", "image"]
 reasoning = true
 effort = ["off", "high"]
 
@@ -87,7 +88,7 @@ reasoning_replay = "none"              # 按模型覆盖 feature
 | `auto_refresh` | 顶层 `metadata` 表 | 布尔，默认 true。每次自动触发都读取当前文件：false 时跳过本次拉取；文件无效时本次自动刷新算作失败，按拉取失败的退避重试。`lattice models refresh` 不受影响 |
 | `protocol`、`base_url`、`auth`、`catalog` | provider 表 | 见[字段](#字段)；覆盖内置 provider 时只写要改的字段，不能写 `protocol` |
 | `features` | provider 子表 | 覆盖或补充 provider 级 features |
-| `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`reasoning`（布尔，覆盖目录元数据中的同名标志，缺失时继承），`effort`（可用档位列表；无元数据来源时[按 features 推出写法](reasoning.md#可用档位)），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
+| `models."<模型>"` | provider 子表 | 手写元数据：`context`、`output`（token 数），`input`（输入模态非空字符串数组，元素只允许 `"text"`、`"image"`、`"audio"`、`"video"`，重复项按首次出现顺序去重，存在时整表覆盖目录输入模态；空数组、未知取值或非字符串元素按配置错误拒绝，附文件路径与该字段行号），`reasoning`（布尔，覆盖目录元数据中的同名标志，缺失时继承），`effort`（可用档位列表；无元数据来源时[按 features 推出写法](reasoning.md#可用档位)），`tools`（布尔，默认 true），`cost`（`input`、`output`、`cache_read`、`cache_write`，美元每百万 token） |
 | `models."<模型>".features` | 模型子表 | 按模型覆盖 features |
 
 没有目录元数据的模型，在 Responses、Interactions、generateContent 或 Messages 上请求推理文字时需要手写 `reasoning = true`；Responses 也据此请求 include 中的加密 reasoning。该标志不增加或移除可选档位，档位仍按[可用档位](reasoning.md#可用档位)的规则推导。

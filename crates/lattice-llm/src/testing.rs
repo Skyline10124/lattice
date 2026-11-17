@@ -187,6 +187,9 @@ pub fn parts_events(parts: Vec<MessagePart<UnboundToolCall>>) -> Vec<ScriptEvent
                 });
                 events.push(ScriptEvent::ToolEnd { index });
             }
+            MessageSemantic::Image { .. } => {
+                panic!("助手流脚本不支持图片片段");
+            }
         }
     }
     events

@@ -6,7 +6,8 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 扁平显式重导出客户端句柄、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`（含组件与 IM 凭据/挂载状态展示类型）、`lattice-conversation`、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
+| `src/lib.rs` | 扁平显式重导出客户端句柄、`format_image_marker`、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`（含组件与 IM 凭据/挂载状态展示类型）、`lattice-conversation`（含图片与输入模态原语）、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
+| `src/display.rs` | 面向人阅读的图片占位标记格式化 `format_image_marker`（`[IMAGE n · <ext> · <size>]` 整数二进制单位换算） |
 | `src/endpoint.rs` | 本地 Unix socket 端点路径校验、客户端建连与对端有效 UID 核验，以及等待 socket 撤下与 `owner.lock` 释放的 `Departure` |
 | `src/client.rs` | `LocalClient`（连接已运行后台完成单次请求/查询、`status_with_peer_pid` 经同一连接的 `SO_PEERCRED` 读取对端进程号、`stop` 后等待 `Departure`、`auth_login` 握手、`im_auth_set` / `im_auth_remove` / `im_auth_status` / `im_reload` 调用；不自动启动后台）与 `LocalWatch`（持续读取任务、观察流驱动与按 `STREAM_IDLE_TIMEOUT_SECS` 的有执行者观察 idle 判定） |
 | `src/operation.rs` | `LocalTurn`（提交请求、取消意图登记、5 秒回执等待与一次补发、按 `TurnId` 找回及 `detach` 退出交接）、`DetachReport`、`ConfigureOutcome` 与 `STREAM_IDLE_TIMEOUT_SECS`（`300` 秒） |

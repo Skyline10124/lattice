@@ -51,7 +51,7 @@ async fn fake_stream_preserves_part_order_and_matches_its_live_projection() {
         ])
         .build();
     let mut live = Vec::new();
-    let attempt = ModelStepDriver::new(Arc::new(client))
+    let attempt = ModelStepDriver::new(Arc::new(client), Arc::new(lattice_llm::NoImages))
         .run(
             &ModelStepRequest {
                 effort: None,
@@ -82,6 +82,7 @@ async fn fake_stream_preserves_part_order_and_matches_its_live_projection() {
             MessageSemantic::Text { text } => format!("T:{text}"),
             MessageSemantic::Reasoning { text } => format!("R:{text}"),
             MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
+            MessageSemantic::Image { .. } => panic!("助手回复不应包含图片片段"),
         })
         .collect();
     assert_eq!(labels, ["T:A", "R:R", "C:first", "T:B", "C:second"]);
@@ -109,23 +110,26 @@ async fn typed_stream_failure_after_delta_preserves_retryability() {
                 },
             ])
             .build();
-        let result = ModelStepDriver::new(std::sync::Arc::new(client))
-            .run(
-                &ModelStepRequest {
-                    effort: None,
-                    system_prompt: None,
-                    history: vec![],
-                    model: lattice_conversation::ModelId::parse("test-model").unwrap(),
-                    provider: lattice_conversation::ProviderId::parse("test").unwrap(),
-                    tools: vec![],
-                    cancel: None,
-                    deadline: None,
-                    session_id: None,
-                },
-                None,
-            )
-            .await
-            .unwrap();
+        let result = ModelStepDriver::new(
+            std::sync::Arc::new(client),
+            std::sync::Arc::new(lattice_llm::NoImages),
+        )
+        .run(
+            &ModelStepRequest {
+                effort: None,
+                system_prompt: None,
+                history: vec![],
+                model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                provider: lattice_conversation::ProviderId::parse("test").unwrap(),
+                tools: vec![],
+                cancel: None,
+                deadline: None,
+                session_id: None,
+            },
+            None,
+        )
+        .await
+        .unwrap();
         assert!(
             matches!(result, ModelStepAttempt::Stopped { cause: ModelStopCause::ProviderError { retryable: actual }, diagnostic, .. } if actual == retryable && diagnostic.provider_error.as_deref() == Some("already redacted"))
         );

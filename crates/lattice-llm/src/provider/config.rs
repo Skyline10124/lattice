@@ -8,7 +8,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use lattice_conversation::{ModelId, ProviderId};
+use lattice_conversation::{InputModality, ModelId, ProviderId};
 use serde::Deserialize;
 use toml::Spanned;
 
@@ -206,6 +206,10 @@ impl ProviderRegistry {
                     ModelMetadata {
                         context: raw.context,
                         output: raw.output,
+                        input: raw
+                            .input
+                            .map(|value| parse_input_modalities(value, &error_at))
+                            .transpose()?,
                         reasoning: raw.reasoning,
                         effort: raw
                             .effort
@@ -362,11 +366,52 @@ struct RawProvider {
     models: BTreeMap<Spanned<String>, Spanned<Table<RawModel>>>,
 }
 
+fn parse_input_modalities(
+    value: Spanned<toml::Value>,
+    error_at: &impl Fn(usize, String) -> ProviderConfigError,
+) -> Result<Vec<InputModality>, ProviderConfigError> {
+    let offset = value.span().start;
+    let toml::Value::Array(items) = value.into_inner() else {
+        return Err(error_at(
+            offset,
+            "模型字段 input 必须是非空字符串数组".to_owned(),
+        ));
+    };
+    if items.is_empty() {
+        return Err(error_at(
+            offset,
+            "模型字段 input 不能为空数组，至少需要包含一个输入模态".to_owned(),
+        ));
+    }
+    let mut modalities = Vec::with_capacity(items.len());
+    for item in items {
+        let toml::Value::String(raw) = item else {
+            return Err(error_at(
+                offset,
+                "模型字段 input 的数组元素必须是字符串".to_owned(),
+            ));
+        };
+        let modality = raw.parse::<InputModality>().map_err(|_| {
+            error_at(
+                offset,
+                format!(
+                    "模型字段 input 包含未知输入模态 {raw:?}，仅允许 \"text\"、\"image\"、\"audio\"、\"video\""
+                ),
+            )
+        })?;
+        if !modalities.contains(&modality) {
+            modalities.push(modality);
+        }
+    }
+    Ok(modalities)
+}
+
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct RawModel {
     context: Option<u64>,
     output: Option<u64>,
+    input: Option<Spanned<toml::Value>>,
     reasoning: Option<bool>,
     effort: Option<Vec<Spanned<String>>>,
     tools: Option<bool>,

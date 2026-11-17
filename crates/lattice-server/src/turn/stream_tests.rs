@@ -89,13 +89,14 @@ impl lattice_agent::LlmClient for TimedLlm {
     async fn stream_chat(
         &self,
         request: lattice_llm::ChatRequest,
+        images: Arc<dyn lattice_llm::ImageSource>,
         control: lattice_llm::StreamControl,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         self.starts
             .lock()
             .unwrap()
             .push(tokio::time::Instant::now());
-        self.inner.stream_chat(request, control).await
+        self.inner.stream_chat(request, images, control).await
     }
 }
 fn opening_failure() -> lattice_llm::LlmError {

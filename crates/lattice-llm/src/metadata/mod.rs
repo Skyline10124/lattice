@@ -8,7 +8,7 @@ use std::{collections::BTreeMap, path::Path, sync::LazyLock};
 use serde::{Deserialize, Serialize};
 
 use crate::provider::{ModelMetadata, Provider, config::ProviderRegistry};
-use lattice_conversation::Effort;
+use lattice_conversation::{Effort, InputModality};
 
 pub(crate) mod chatgpt;
 pub(crate) mod fetch;
@@ -38,7 +38,7 @@ pub(crate) struct Limits {
     pub(crate) output: Option<u64>,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub(crate) struct Modalities {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) input: Option<Vec<String>>,
@@ -93,12 +93,33 @@ pub(crate) struct Model {
 }
 
 impl Model {
+    pub(crate) fn input_modalities(&self) -> Option<Vec<InputModality>> {
+        let raw = self.modalities.as_ref()?.input.as_ref()?;
+        let mut modalities = Vec::new();
+        for item in raw {
+            if let Ok(modality) = item.parse::<InputModality>()
+                && !modalities.contains(&modality)
+            {
+                modalities.push(modality);
+            }
+        }
+        Some(modalities)
+    }
+
     fn overlay(&mut self, handwritten: &ModelMetadata) {
         if let Some(context) = handwritten.context {
             self.limit.get_or_insert_default().context = Some(context);
         }
         if let Some(output) = handwritten.output {
             self.limit.get_or_insert_default().output = Some(output);
+        }
+        if let Some(input) = &handwritten.input {
+            self.modalities.get_or_insert_default().input = Some(
+                input
+                    .iter()
+                    .map(|modality| modality.as_str().to_owned())
+                    .collect(),
+            );
         }
         self.reasoning = handwritten.reasoning.or(self.reasoning);
         self.effort.clone_from(&handwritten.effort);

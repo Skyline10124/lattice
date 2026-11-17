@@ -18,10 +18,11 @@ pub use auth::{
 };
 pub use drain_timeout::{DrainTimeout, parse_drain_timeout};
 pub use lattice_conversation::{
-    BoundToolCall, CostEstimate, CostSummary, Effort, InvocationId, MessageRole, MessageSemantic,
-    ModelAttemptKey, ModelId, ModelIdError, ModelRef, ModelRefError, NativeMessage, ProviderId,
-    ProviderIdError, ResultPayload, SessionId, StepContent, StoredToolResult, SuccessContent,
-    TokenSummary, ToolError, ToolResultOutcome, TurnId, UsageCompleteness,
+    BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
+    InvocationId, MessageRole, MessageSemantic, ModelAttemptKey, ModelId, ModelIdError, ModelRef,
+    ModelRefError, NativeMessage, ProviderId, ProviderIdError, ResultPayload, SessionId,
+    StepContent, StoredToolResult, SuccessContent, TokenSummary, ToolError, ToolResultOutcome,
+    TurnId, UsageCompleteness,
 };
 pub use lattice_session::{
     AgentName, AgentNameError, ProjectPath, RetryPolicy, RetryPolicyError, TurnTimeout,

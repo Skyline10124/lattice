@@ -1,0 +1,1 @@
+{"messages":[{"content":"你是严谨的代码助手。\n\n回答保持简洁。","role":"system"},{"content":"请检查当前目录。","role":"user"}],"model":"test-model","stream":true,"stream_options":{"include_usage":true}}

@@ -1,0 +1,1 @@
+{"enable_thinking":true,"messages":[{"content":"使用推理对象参数","role":"user"}],"model":"test-model","reasoning":{"effort":"high"},"stream":true,"stream_options":{"include_usage":true}}

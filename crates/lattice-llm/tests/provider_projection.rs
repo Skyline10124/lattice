@@ -1237,6 +1237,7 @@ fn bind_message(message: &NativeMessage<UnboundToolCall>) -> NativeMessage<Bound
             MessageSemantic::Reasoning { text } => {
                 MessageSemantic::Reasoning { text: text.clone() }
             }
+            MessageSemantic::Image { image } => MessageSemantic::Image { image: *image },
         };
         bound_parts.push(MessagePart {
             semantic,
@@ -1746,5 +1747,102 @@ fn replay_origin(protocol: Protocol) -> ReplayOrigin {
     ReplayOrigin {
         protocol,
         provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
+    }
+}
+
+#[test]
+fn assistant_and_invalid_image_placements_are_rejected_across_all_protocols() {
+    use lattice_conversation::{
+        BoundToolCall, ConversationItem, ImageMediaType, ImagePlacementError, ImageRef,
+        MessagePart, MessageRole,
+    };
+    use lattice_llm::protocol::projection::{native_to_wire, request_messages_to_wire};
+
+    let image = ImageRef {
+        sha256: [0x5a; 32],
+        media_type: ImageMediaType::Png,
+        byte_length: 1024,
+    };
+
+    for protocol in [
+        Protocol::ChatCompletions,
+        Protocol::Messages,
+        Protocol::GenerateContent,
+        Protocol::Responses,
+        Protocol::Interactions,
+    ] {
+        let origin = replay_origin(protocol);
+        let assistant = NativeMessage::<BoundToolCall>::new(
+            MessageRole::Assistant,
+            Some(origin.clone()),
+            vec![
+                MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "hello".into(),
+                }),
+                MessagePart::semantic_only(MessageSemantic::Image { image }),
+            ],
+        );
+        assert_eq!(
+            native_to_wire(&origin, &assistant),
+            Err(ProjectionError::UnsupportedPart {
+                provider: protocol,
+                part_ordinal: 1,
+            }),
+            "{protocol:?} 无回放状态助手图片必须返回 UnsupportedPart"
+        );
+
+        let user_with_replay = NativeMessage::<BoundToolCall>::new(
+            MessageRole::User,
+            None,
+            vec![MessagePart {
+                semantic: MessageSemantic::Image { image },
+                replay_state: Some(OpaqueProviderState::new("sig").unwrap()),
+            }],
+        );
+        assert_eq!(
+            request_messages_to_wire(&origin, &[ConversationItem::Message(user_with_replay)]),
+            Err(ProjectionError::InvalidImagePlacement(
+                ImagePlacementError::UnexpectedReplayState { part: 1 }
+            )),
+            "{protocol:?} 携带回放状态的用户图片必须拒绝"
+        );
+
+        let system_with_image = NativeMessage::<BoundToolCall>::new(
+            MessageRole::System,
+            None,
+            vec![MessagePart::semantic_only(MessageSemantic::Image { image })],
+        );
+        assert_eq!(
+            request_messages_to_wire(&origin, &[ConversationItem::Message(system_with_image)]),
+            Err(ProjectionError::InvalidImagePlacement(
+                ImagePlacementError::DisallowedRole {
+                    role: MessageRole::System,
+                    part: 1,
+                }
+            )),
+            "{protocol:?} 系统消息包含图片必须拒绝"
+        );
+    }
+
+    // Responses 与 Interactions 在存在真实回放状态时也不得把 Image 误报为 MissingReplayState。
+    for (protocol, fixture_name) in [
+        (Protocol::Responses, "responses_output.json"),
+        (Protocol::Interactions, "interactions_output.json"),
+    ] {
+        let origin = replay_origin(protocol);
+        let unbound = wire_to_native(&origin, &fixture(fixture_name)).expect("官方夹具解析应成功");
+        let mut bound = bind_message(&unbound);
+        let image_ordinal = bound.parts.len();
+        bound
+            .parts
+            .push(MessagePart::semantic_only(MessageSemantic::Image { image }));
+        assert_eq!(
+            native_to_wire(&origin, &bound),
+            Err(ProjectionError::UnsupportedPart {
+                provider: protocol,
+                part_ordinal: image_ordinal,
+            }),
+            "{protocol:?} 混合真实回放状态时助手图片必须归入 UnsupportedPart"
+        );
     }
 }

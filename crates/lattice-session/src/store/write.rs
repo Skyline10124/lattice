@@ -393,7 +393,7 @@ impl SessionStore {
                 }
                 return Ok(AcceptedTurn::Existing(r.turn_detail(s, input.turn_id)?));
             }
-            if input.input.len() > MAX_USER_INPUT_BYTES {
+            if input.input.len() > lattice_conversation::MAX_USER_TEXT_BYTES {
                 return Err(invalid("input", "user input exceeds byte bound"));
             }
             validate::config(&input.config)?;
@@ -635,6 +635,9 @@ impl SessionStore {
                 let semantic = match part.semantic {
                     MessageSemantic::Text { text } => MessageSemantic::Text { text },
                     MessageSemantic::Reasoning { text } => MessageSemantic::Reasoning { text },
+                    MessageSemantic::Image { .. } => {
+                        return Err(invalid("reply", "助手回复不能包含图片"));
+                    }
                     MessageSemantic::ToolCall { call } => {
                         let entry = config
                             .catalog

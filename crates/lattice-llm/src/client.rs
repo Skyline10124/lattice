@@ -105,6 +105,18 @@ impl ProtocolParser {
         }
     }
 
+    #[cfg(test)]
+    fn protocol(&self) -> Protocol {
+        match self {
+            Self::ChatCompletions(_) => Protocol::ChatCompletions,
+            Self::Responses(_) => Protocol::Responses,
+            Self::Messages(_) => Protocol::Messages,
+            Self::GenerateContent(_) => Protocol::GenerateContent,
+            Self::Interactions(_) => Protocol::Interactions,
+        }
+    }
+
+    #[cfg(test)]
     fn request_body(
         &self,
         request: &ChatRequest,
@@ -113,51 +125,16 @@ impl ProtocolParser {
         features: Features,
         reasoning: Option<crate::reasoning::ReasoningPlan>,
         origin: &lattice_conversation::ReplayOrigin,
-    ) -> Result<serde_json::Value, LlmError> {
-        match self {
-            Self::ChatCompletions(_) => {
-                let Features::ChatCompletions(features) = features else {
-                    unreachable!("resolved features match the protocol")
-                };
-                protocol::chat_completions::build_request_json(
-                    request,
-                    request.target.model.model().as_str(),
-                    features,
-                    reasoning,
-                    origin,
-                )
-            }
-            Self::Messages(_) => {
-                let Features::Messages(features) = features else {
-                    unreachable!("resolved features match the protocol")
-                };
-                return protocol::anthropic_messages::build_request_json(
-                    request,
-                    request.target.model.model().as_str(),
-                    output_limit,
-                    features,
-                    reasoning,
-                    model_reasoning,
-                    origin,
-                );
-            }
-            Self::Responses(_) => {
-                protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
-            }
-            Self::Interactions(_) => protocol::interactions::build_request_json(
-                request,
-                reasoning,
-                model_reasoning,
-                origin,
-            ),
-            Self::GenerateContent(_) => protocol::generate_content::build_request_json(
-                request,
-                reasoning,
-                model_reasoning,
-                origin,
-            ),
-        }
-        .map_err(Into::into)
+    ) -> Result<protocol::encoding::RequestBody, LlmError> {
+        build_protocol_request_body(
+            self.protocol(),
+            request,
+            output_limit,
+            model_reasoning,
+            features,
+            reasoning,
+            origin,
+        )
     }
 
     fn buffer_limit(&self) -> usize {
@@ -603,6 +580,8 @@ pub(crate) fn redact_error_with(
         | LlmError::ProviderHttp { message, .. }
         | LlmError::StreamRead { message }
         | LlmError::ProtocolLimit { message }
+        | LlmError::RequestBudgetExceeded { message }
+        | LlmError::UnsupportedInput { message }
         | LlmError::Other(message) => *message = redact(message),
         LlmError::Projection(_) => {}
     }
@@ -768,15 +747,94 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) chatgpt_auth: &'a crate::auth::ChatgptAuth,
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
-    pub(crate) output_limit: Option<u64>,
-    pub(crate) model_reasoning: Option<bool>,
-    pub(crate) features: Features,
-    pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
+}
+
+pub(crate) fn build_protocol_request_body(
+    protocol: Protocol,
+    request: &ChatRequest,
+    output_limit: Option<u64>,
+    model_reasoning: Option<bool>,
+    features: Features,
+    reasoning: Option<crate::reasoning::ReasoningPlan>,
+    origin: &lattice_conversation::ReplayOrigin,
+) -> Result<protocol::encoding::RequestBody, LlmError> {
+    match protocol {
+        Protocol::ChatCompletions => {
+            let Features::ChatCompletions(features) = features else {
+                unreachable!("resolved features match the protocol")
+            };
+            protocol::chat_completions::build_request_json(
+                request,
+                request.target.model.model().as_str(),
+                features,
+                reasoning,
+                origin,
+            )
+            .map_err(Into::into)
+        }
+        Protocol::Messages => {
+            let Features::Messages(features) = features else {
+                unreachable!("resolved features match the protocol")
+            };
+            protocol::anthropic_messages::build_request_json(
+                request,
+                request.target.model.model().as_str(),
+                output_limit,
+                features,
+                reasoning,
+                model_reasoning,
+                origin,
+            )
+        }
+        Protocol::Responses => {
+            protocol::responses::build_request_json(request, reasoning, model_reasoning, origin)
+                .map_err(Into::into)
+        }
+        Protocol::Interactions => {
+            protocol::interactions::build_request_json(request, reasoning, model_reasoning, origin)
+                .map_err(Into::into)
+        }
+        Protocol::GenerateContent => protocol::generate_content::build_request_json(
+            request,
+            reasoning,
+            model_reasoning,
+            origin,
+        )
+        .map_err(Into::into),
+    }
+}
+
+/// 图片来源与编码的失败一律按不可重试的 `LlmError::Other` 报告：来源实现返回的其他错误种类
+/// （例如超时或可重试的传输错误）在这里归一，模型重试预算不会重放同一次图片读取失败。
+fn image_source_error(error: LlmError) -> LlmError {
+    match error {
+        LlmError::Other(message) => LlmError::Other(message),
+        other => LlmError::Other(format!("读取图片来源失败：{other}")),
+    }
+}
+
+pub(crate) fn request_has_user_images(request: &ChatRequest) -> bool {
+    request.messages.iter().any(|item| match item {
+        lattice_conversation::ConversationItem::Message(message)
+            if message.role == lattice_conversation::MessageRole::User =>
+        {
+            message.parts.iter().any(|part| {
+                matches!(
+                    part.semantic,
+                    lattice_conversation::MessageSemantic::Image { .. }
+                )
+            })
+        }
+        _ => false,
+    })
 }
 
 pub(crate) async fn dispatch(
-    request: ChatRequest,
+    body: protocol::encoding::RequestBody,
+    expected_len: usize,
+    client_request_id: Option<&str>,
     endpoint: RequestEndpoint<'_>,
+    images: Arc<dyn crate::ImageSource>,
     control: StreamControl,
 ) -> Result<LlmStream, LlmError> {
     let access_token = if endpoint.auth == Auth::OauthChatgpt {
@@ -803,14 +861,39 @@ pub(crate) async fn dispatch(
         provider_id: endpoint.provider.clone(),
     };
     let url = parser.endpoint_url(endpoint.base_url, endpoint.model.as_str());
-    let body = parser.request_body(
-        &request,
-        endpoint.output_limit,
-        endpoint.model_reasoning,
-        endpoint.features,
-        endpoint.reasoning,
-        &origin,
-    )?;
+
+    let body_bytes = if body.has_user_images() {
+        let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, LlmError> {
+            let mut encoded = None;
+            images
+                .with_reader(&mut |reader| {
+                    if encoded.is_some() {
+                        return Err(LlmError::Other("图片来源读取作用域被重复调用".into()));
+                    }
+                    let buf = protocol::encoding::encode_body(&body, reader, expected_len)?;
+                    encoded = Some(buf);
+                    Ok(())
+                })
+                .map_err(image_source_error)?;
+            encoded.ok_or_else(|| LlmError::Other("图片来源未执行编码回调".into()))
+        })
+        .await
+        .map_err(|_| LlmError::Other("含图请求编码任务异常中止".into()))?
+        .map_err(|error| redact_error(error, &credentials))?;
+
+        if let Some(stop) = control.stop() {
+            return Ok(assemble_reply_stream(
+                Some(origin),
+                Box::pin(stream::once(async move { ProtocolEvent::Failed(stop) })),
+                control,
+            ));
+        }
+        bytes
+    } else {
+        protocol::encoding::encode_body_without_images(&body, expected_len)
+            .map_err(|error| redact_error(error, &credentials))?
+    };
+
     let client = endpoint
         .client
         .get(&url, endpoint.roots)
@@ -819,15 +902,16 @@ pub(crate) async fn dispatch(
     let mut req_builder = client
         .post(&url)
         .header(reqwest::header::ACCEPT, ACCEPT)
-        .json(&body);
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body_bytes);
     if endpoint.protocol == Protocol::Messages {
         req_builder = req_builder.header(
             "anthropic-version",
             protocol::anthropic_messages::ANTHROPIC_VERSION,
         );
     }
-    if let Some(id) = &request.client_request_id {
-        req_builder = req_builder.header("x-client-request-id", id.as_str());
+    if let Some(id) = client_request_id {
+        req_builder = req_builder.header("x-client-request-id", id);
     }
     for (name, value) in headers {
         req_builder = req_builder.header(name, value);
@@ -1325,9 +1409,10 @@ mod tests {
                         protocol,
                         provider_id: lattice_conversation::ProviderId::parse("test").unwrap(),
                     };
-                    let body = ProtocolParser::new(protocol)
+                    let raw_body = ProtocolParser::new(protocol)
                         .request_body(&request, output, model.reasoning, features, plan, &origin)
                         .unwrap();
+                    let body = protocol::encoding::body_to_value(&raw_body);
                     let controls: serde_json::Map<_, _> = body
                         .as_object()
                         .unwrap()
@@ -1419,9 +1504,10 @@ mod tests {
                     _ => Features::GenerateContent,
                 };
                 let parser = ProtocolParser::new(protocol);
-                let body = parser
+                let raw_body = parser
                     .request_body(&request, None, None, features, None, &origin)
                     .unwrap();
+                let body = protocol::encoding::body_to_value(&raw_body);
                 let expected = match protocol {
                     Protocol::ChatCompletions if enabled => markers(&[
                         "/messages/0/content/0/cache_control",
@@ -1492,9 +1578,10 @@ mod tests {
                     protocol,
                     provider_id: ProviderId::parse("other").unwrap(),
                 };
-                let body = ProtocolParser::new(protocol)
+                let raw_body = ProtocolParser::new(protocol)
                     .request_body(&request, None, None, features, None, &origin)
                     .unwrap();
+                let body = protocol::encoding::body_to_value(&raw_body);
                 let expected = match (protocol, with_system) {
                     (Protocol::ChatCompletions, true) => markers(&[
                         "/messages/0/content/0/cache_control",
@@ -1565,7 +1652,7 @@ mod tests {
                     protocol: Protocol::ChatCompletions,
                     provider_id: ProviderId::parse("test").unwrap(),
                 };
-                let body = ProtocolParser::new(Protocol::ChatCompletions)
+                let raw_body = ProtocolParser::new(Protocol::ChatCompletions)
                     .request_body(
                         &request,
                         None,
@@ -1579,6 +1666,7 @@ mod tests {
                         &origin,
                     )
                     .unwrap();
+                let body = protocol::encoding::body_to_value(&raw_body);
                 let messages = body["messages"].as_array().unwrap();
                 assert_eq!(
                     messages.last().unwrap(),
@@ -1995,7 +2083,7 @@ mod tests {
                 StreamControl::default()
             };
             let mut stream = connection
-                .stream_chat(chat_request(), control)
+                .stream_chat(chat_request(), Arc::new(crate::NoImages), control)
                 .await
                 .unwrap();
             assert_eq!(tokio::time::Instant::now(), started);
@@ -2104,7 +2192,11 @@ mod tests {
                 resolved_request("responses", &format!("http://{address}"), "frozen-secret").await;
             let result = tokio::time::timeout(Duration::from_secs(3), async {
                 match connection
-                    .stream_chat(chat_request(), StreamControl::default())
+                    .stream_chat(
+                        chat_request(),
+                        Arc::new(crate::NoImages),
+                        StreamControl::default(),
+                    )
                     .await
                 {
                     Ok(stream) => Ok(stream.collect::<Vec<_>>().await),
@@ -2212,7 +2304,7 @@ mod tests {
         let request = chat_request();
         let error = match tokio::time::timeout(
             Duration::from_secs(3),
-            connection.stream_chat(request, StreamControl::default()),
+            connection.stream_chat(request, Arc::new(crate::NoImages), StreamControl::default()),
         )
         .await
         .unwrap()
@@ -2225,7 +2317,7 @@ mod tests {
         let request = chat_request();
         let events = tokio::time::timeout(Duration::from_secs(3), async {
             connection
-                .stream_chat(request, StreamControl::default())
+                .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -2244,7 +2336,11 @@ mod tests {
         .await;
         let events = tokio::time::timeout(Duration::from_secs(3), async {
             connection
-                .stream_chat(chat_request(), StreamControl::default())
+                .stream_chat(
+                    chat_request(),
+                    Arc::new(crate::NoImages),
+                    StreamControl::default(),
+                )
                 .await
                 .unwrap()
                 .collect::<Vec<_>>()
@@ -2303,7 +2399,11 @@ mod tests {
                 resolved_request("anthropic-messages", &format!("http://{address}"), &key).await;
             let events = tokio::time::timeout(Duration::from_secs(3), async {
                 connection
-                    .stream_chat(chat_request(), StreamControl::default())
+                    .stream_chat(
+                        chat_request(),
+                        Arc::new(crate::NoImages),
+                        StreamControl::default(),
+                    )
                     .await
                     .unwrap()
                     .collect::<Vec<_>>()
@@ -2677,3 +2777,6 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod request_bytes_tests;

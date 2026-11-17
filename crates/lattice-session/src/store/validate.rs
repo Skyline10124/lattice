@@ -50,6 +50,8 @@ pub(super) fn config(config: &FrozenTurnConfig) -> Result<()> {
 }
 
 pub(super) fn assistant<S: ToolCallState>(message: &NativeMessage<S>) -> Result<()> {
+    lattice_conversation::validate_image_placement(message)
+        .map_err(|err| invalid("reply", &err.to_string()))?;
     if message.role != MessageRole::Assistant {
         return Err(invalid("reply", "expected assistant role"));
     }
@@ -290,9 +292,20 @@ fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
         return Err(err());
     }
     match node {
-        Node::UserMessage { .. } => {
+        Node::UserMessage { message, .. } => {
             if user_ref.node != n {
                 return Err(err());
+            }
+            if message
+                .parts
+                .iter()
+                .any(|part| matches!(part.semantic, MessageSemantic::Image { .. }))
+            {
+                return Err(corrupt(
+                    "nodes",
+                    &format!("{s}/{}", n.0),
+                    "会话库格式 9 的用户消息不能包含图片",
+                ));
             }
         }
         Node::Step { step_ordinal, .. } => {

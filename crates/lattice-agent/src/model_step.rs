@@ -43,6 +43,7 @@ pub trait LlmClient: Send + Sync {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        images: Arc<dyn lattice_llm::ImageSource>,
         control: StreamControl,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>;
 }
@@ -52,9 +53,10 @@ impl LlmClient for lattice_llm::ResolvedRequest {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        images: Arc<dyn lattice_llm::ImageSource>,
         control: StreamControl,
     ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
-        Ok(lattice_llm::ResolvedRequest::stream_chat(self, request, control).await?)
+        Ok(lattice_llm::ResolvedRequest::stream_chat(self, request, images, control).await?)
     }
 }
 
@@ -164,15 +166,16 @@ pub struct ModelStepRequest {
     pub session_id: Option<String>,
 }
 
-/// The one-attempt model step driver.
+/// 单次尝试的模型步骤驱动，持有可注入的客户端与图片来源。
 pub struct ModelStepDriver {
     llm: Arc<dyn LlmClient>,
+    images: Arc<dyn lattice_llm::ImageSource>,
 }
 
 impl ModelStepDriver {
-    /// Build a driver over one injectable LLM client.
-    pub fn new(llm: Arc<dyn LlmClient>) -> Self {
-        Self { llm }
+    /// 基于可注入的客户端与图片来源构造驱动。
+    pub fn new(llm: Arc<dyn LlmClient>, images: Arc<dyn lattice_llm::ImageSource>) -> Self {
+        Self { llm, images }
     }
 
     /// 执行一次provider尝试；打开失败保持类型化错误，流内结果由ModelStepAttempt表达。
@@ -221,7 +224,9 @@ impl ModelStepDriver {
             ));
         }
 
-        let opening = self.llm.stream_chat(chat, control.clone());
+        let opening = self
+            .llm
+            .stream_chat(chat, self.images.clone(), control.clone());
         tokio::pin!(opening);
         let stream = loop {
             tokio::select! {
@@ -360,6 +365,80 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
     }
 }
 
+#[cfg(test)]
+mod opening_error_tests {
+    use super::*;
+
+    struct FailingClient(lattice_llm::LlmError);
+
+    #[async_trait::async_trait]
+    impl LlmClient for FailingClient {
+        async fn stream_chat(
+            &self,
+            _request: ChatRequest,
+            _images: Arc<dyn lattice_llm::ImageSource>,
+            _control: StreamControl,
+        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+            Err(Box::new(self.0.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_budget_and_413_errors_are_non_retryable_and_preserve_messages() {
+        let budget_msg = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let http_413_msg = "HTTP 413 request_too_large: payload exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+
+        for (label, llm_error, expected_msg) in [
+            (
+                "本地请求体预算超限",
+                lattice_llm::LlmError::RequestBudgetExceeded {
+                    message: budget_msg.into(),
+                },
+                budget_msg,
+            ),
+            (
+                "远端 HTTP 413 拒绝",
+                lattice_llm::LlmError::ProviderHttp {
+                    status_code: 413,
+                    message: http_413_msg.into(),
+                    retryable: false,
+                    retry_after: None,
+                },
+                http_413_msg,
+            ),
+        ] {
+            let driver = ModelStepDriver::new(
+                Arc::new(FailingClient(llm_error)),
+                Arc::new(lattice_llm::NoImages),
+            );
+            let step_request = ModelStepRequest {
+                effort: None,
+                system_prompt: None,
+                history: Vec::new(),
+                model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                provider: lattice_conversation::ProviderId::parse("test").unwrap(),
+                tools: Vec::new(),
+                cancel: None,
+                deadline: None,
+                session_id: Some("session-1".into()),
+            };
+            let err = driver
+                .run(&step_request, None)
+                .await
+                .expect_err("打开阶段错误必须返回 Err");
+            assert_eq!(
+                err,
+                ModelStepError::OpeningFailed {
+                    message: expected_msg.into(),
+                    retryable: false,
+                    retry_after: None,
+                },
+                "{label} 应映射为不可重试且消息原样保留的 OpeningFailed"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;
@@ -375,6 +454,7 @@ mod tests {
             async fn stream_chat(
                 &self,
                 request: ChatRequest,
+                _images: Arc<dyn lattice_llm::ImageSource>,
                 control: StreamControl,
             ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
             {
@@ -390,7 +470,7 @@ mod tests {
             }
         }
         let client = Arc::new(Capturing(std::sync::Mutex::new(vec![])));
-        let driver = ModelStepDriver::new(client.clone());
+        let driver = ModelStepDriver::new(client.clone(), Arc::new(lattice_llm::NoImages));
         for effort in [
             None,
             Some(lattice_conversation::Effort::Off),
@@ -411,11 +491,14 @@ mod tests {
     }
 
     fn driver(events: Vec<ScriptEvent>) -> ModelStepDriver {
-        ModelStepDriver::new(Arc::new(
-            FakeStreamingLlmClient::builder()
-                .push_events(events)
-                .build(),
-        ))
+        ModelStepDriver::new(
+            Arc::new(
+                FakeStreamingLlmClient::builder()
+                    .push_events(events)
+                    .build(),
+            ),
+            Arc::new(lattice_llm::NoImages),
+        )
     }
 
     fn request() -> ModelStepRequest {
@@ -503,7 +586,7 @@ mod tests {
                     .push_events(events)
                     .build(),
             );
-            let driver = ModelStepDriver::new(client.clone());
+            let driver = ModelStepDriver::new(client.clone(), Arc::new(lattice_llm::NoImages));
             let mut request = request();
             request.cancel = cancel.map(|cancelled| Arc::new(AtomicBool::new(cancelled)));
             request.deadline = match deadline {
@@ -654,11 +737,14 @@ mod tests {
     #[test]
     fn opening_failure_is_typed_with_a_retry_hint() {
         let result = runtime().block_on(
-            ModelStepDriver::new(Arc::new(
-                FakeStreamingLlmClient::builder()
-                    .push_error("connection refused")
-                    .build(),
-            ))
+            ModelStepDriver::new(
+                Arc::new(
+                    FakeStreamingLlmClient::builder()
+                        .push_error("connection refused")
+                        .build(),
+                ),
+                Arc::new(lattice_llm::NoImages),
+            )
             .run(&request(), None),
         );
         assert!(matches!(
@@ -692,5 +778,76 @@ mod tests {
         assert!(seen[1..].iter().all(
             |event| matches!(event, ModelStepEvent::TokenDelta { content } if content == "hi")
         ));
+    }
+
+    #[tokio::test]
+    async fn driver_forwards_injected_image_source_to_client_on_each_run() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingImageSource(AtomicUsize);
+        impl lattice_llm::ImageSource for CountingImageSource {
+            fn with_reader(
+                &self,
+                encode: &mut dyn FnMut(
+                    &dyn lattice_llm::ImageReader,
+                ) -> Result<(), lattice_llm::LlmError>,
+            ) -> Result<(), lattice_llm::LlmError> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                lattice_llm::NoImages.with_reader(encode)
+            }
+        }
+
+        struct VerifyingClient {
+            expected: Arc<dyn lattice_llm::ImageSource>,
+        }
+        #[async_trait::async_trait]
+        impl LlmClient for VerifyingClient {
+            async fn stream_chat(
+                &self,
+                request: ChatRequest,
+                images: Arc<dyn lattice_llm::ImageSource>,
+                control: StreamControl,
+            ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
+            {
+                assert!(
+                    Arc::ptr_eq(&self.expected, &images),
+                    "驱动必须原样传递构造时注入的图片来源实例"
+                );
+                images.with_reader(&mut |_reader| Ok(()))?;
+                Ok(lattice_llm::testing::script_stream(
+                    lattice_conversation::ReplayOrigin {
+                        protocol: lattice_conversation::Protocol::ChatCompletions,
+                        provider_id: request.target.model.provider().clone(),
+                    },
+                    vec![ScriptEvent::Done {
+                        finish_reason: "stop".into(),
+                        usage: None,
+                    }],
+                    control,
+                ))
+            }
+        }
+
+        let counter = Arc::new(CountingImageSource(AtomicUsize::new(0)));
+        let expected_dyn: Arc<dyn lattice_llm::ImageSource> = counter.clone();
+        let driver = ModelStepDriver::new(
+            Arc::new(VerifyingClient {
+                expected: expected_dyn.clone(),
+            }),
+            expected_dyn,
+        );
+        driver
+            .run(&request(), None)
+            .await
+            .expect("第一次尝试应成功");
+        driver
+            .run(&request(), None)
+            .await
+            .expect("第二次尝试应成功");
+        assert_eq!(
+            counter.0.load(Ordering::SeqCst),
+            2,
+            "每次调用都应向下游传递同一图片来源"
+        );
     }
 }

@@ -6,16 +6,20 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 重导出身份类型、结构地址、规范 JSON、参数摘要、对话类型与协议上限常量 |
+| `src/lib.rs` | 重导出身份类型、结构地址、规范 JSON、参数摘要、图片与输入模态原语、对话类型、单轮用户输入规范化与协议上限常量 |
 | `src/identity.rs` | `SessionId`（32 位小写十六进制）、`TurnId` 与 `InvocationId`（小写连字符 UUID v4）严格解析、显示与 serde 表示，以及 `IdParseError` |
 | `src/address.rs` | 结构化地址 `ModelMessageAddress`、`ToolCallAddress` 与模型尝试键 `ModelAttemptKey` |
 | `src/canonical.rs` | 键按 UTF-8 字节序显式排序的无空白规范 JSON 序列化 `canonical_json` |
 | `src/digest.rs` | 工具调用参数对象的域分离 SHA-256 摘要 `arguments_digest` |
+| `src/hex_digest.rs` | 固定 32 字节摘要与 64 位小写十六进制字符串的私有 serde 编解码，供 `tool_call`、`result` 与 `image` 共用 |
 | `src/effort.rs` | 推理档位 `Effort` 解析与排序 |
+| `src/input_modality.rs` | 模型输入模态 `InputModality`（`text`、`image`、`audio`、`video`）严格解析与序列化 |
+| `src/image.rs` | 图片媒体类型魔数识别 `ImageMediaType`、内容寻址引用 `ImageRef` 与消息图片位置核验 `validate_image_placement` |
+| `src/user_input.rs` | 单轮用户输入的上限校验与保序规范化 `normalize_user_message` 及 `UserInputError` |
 | `src/model_selection.rs` | `ProviderId`、`ModelId`、`ModelRef` 构造与字符、长度校验 |
-| `src/message.rs` | 有序 `NativeMessage<ToolCallState>`、`MessagePart`、回放来源 `ReplayOrigin` 与 64 KiB `OpaqueProviderState` |
+| `src/message.rs` | 有序 `NativeMessage<ToolCallState>`、`MessagePart`、`MessageSemantic`（含 `Image`）、回放来源 `ReplayOrigin` 与 64 KiB `OpaqueProviderState` |
 | `src/tool_call.rs` | `UnboundToolCall` / `BoundToolCall` typestate、规范 JSON 参数对象、域分离 SHA-256 摘要与 `validate_tool_call_batch` |
-| `src/limits.rs` | 流式增量计量 `AttemptAssembly`、完整回复边界核验 `validate_assistant_bounds` 与字节上限常量 |
+| `src/limits.rs` | 流式增量计量 `AttemptAssembly`、完整回复边界核验 `validate_assistant_bounds`、助手输出与单轮用户输入上限常量 |
 | `src/outcome.rs` | 闭合的调用结局 `ToolResultOutcome` 与 `IndeterminateCause` |
 | `src/tool_error.rs` | 工具执行失败载荷 `ToolError { code, message }` |
 | `src/result.rs` | 结构化工具结果 `StoredToolResult`、`ResultPayload`（含 `Failed(ToolError)`）与 64 KiB 正文保存边界 |

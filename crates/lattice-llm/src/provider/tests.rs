@@ -195,12 +195,13 @@ catalog = "custom-catalog"
         (
             absent.context,
             absent.output,
+            &absent.input,
             absent.reasoning,
             &absent.effort,
             absent.tools,
             &absent.cost
         ),
-        (None, None, None, &None, None, &None)
+        (None, None, &None, None, &None, None, &None)
     );
     assert_eq!(absent.features, provider.features);
     let custom = registry.get("my-vllm").unwrap();
@@ -778,4 +779,65 @@ fn file_loading_applies_overrides_and_reports_invalid_input() {
         (error.path.as_path(), error.line, error.reason.as_str()),
         (path.as_path(), 2, "providers.toml must be UTF-8")
     );
+}
+
+#[test]
+fn handwritten_model_input_validates_deduplicates_and_reports_path_and_line() {
+    let registry = parse(
+        r#"
+[providers.openai.models.vision]
+input = ["image", "text", "image", "audio", "video", "text"]
+"#,
+    );
+    assert_eq!(
+        registry.get("openai").unwrap().models["vision"].input,
+        Some(vec![
+            InputModality::Image,
+            InputModality::Text,
+            InputModality::Audio,
+            InputModality::Video,
+        ]),
+        "合法手写 input 应去重并保持首次出现顺序"
+    );
+
+    for (source, line, expected_reason) in [
+        ("[providers.openai.models.m]\ninput = []", 2, "不能为空数组"),
+        (
+            "[providers.openai.models.m]\ncontext = 100\ninput = ['text', 'pdf']",
+            3,
+            "未知输入模态",
+        ),
+        (
+            "[providers.openai.models.m]\ninput = ['voice']",
+            2,
+            "未知输入模态",
+        ),
+        (
+            "[providers.openai.models.m]\ninput = [123]",
+            2,
+            "数组元素必须是字符串",
+        ),
+        (
+            "[providers.openai.models.m]\n\ninput = ['text', 42]",
+            3,
+            "数组元素必须是字符串",
+        ),
+        (
+            "[providers.openai.models.m]\ninput = 'text'",
+            2,
+            "必须是非空字符串数组",
+        ),
+        (
+            "[providers.openai.models.m]\ninput = 1",
+            2,
+            "必须是非空字符串数组",
+        ),
+        (
+            "[providers.openai.models.m]\ninput = { text = true }",
+            2,
+            "必须是非空字符串数组",
+        ),
+    ] {
+        assert_invalid(source, line, expected_reason);
+    }
 }

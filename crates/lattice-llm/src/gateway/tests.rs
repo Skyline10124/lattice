@@ -297,6 +297,7 @@ struct Received {
     connection: usize,
     path: String,
     headers: BTreeMap<String, String>,
+    body_len: usize,
     body: serde_json::Value,
 }
 
@@ -451,6 +452,7 @@ async fn serve(
             .map_or(0, |length| length.parse().unwrap());
         let mut body = vec![0; length];
         socket.read_exact(&mut body).await.unwrap();
+        let body_len = body.len();
         let body = if body.is_empty() {
             serde_json::Value::Null
         } else {
@@ -471,6 +473,7 @@ async fn serve(
             connection,
             path,
             headers,
+            body_len,
             body,
         })
         .unwrap();
@@ -556,7 +559,7 @@ async fn finished_cost_uses_current_merged_prices_without_requiring_current_cred
         let release = price_response(&server, DONE);
         let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
         let resolved = gateway.open_turn().resolve(&request("test").target).await.unwrap();
-        let mut stream = resolved.stream_chat(request("test"), StreamControl::default()).await.unwrap();
+        let mut stream = resolved.stream_chat(request("test"), Arc::new(crate::NoImages), StreamControl::default()).await.unwrap();
         assert_eq!(stream.next().await, Some(LlmEvent::Started));
         assert_eq!(stream.next().await, Some(LlmEvent::Delta(crate::LiveDelta::Text("priced".into()))));
         price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\ncache_read = 0.5\n");
@@ -1137,7 +1140,7 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     let mut changed = request.clone();
     changed.target.effort = Some(lattice_conversation::Effort::Off);
     let error = match resolved
-        .stream_chat(changed, StreamControl::default())
+        .stream_chat(changed, Arc::new(crate::NoImages), StreamControl::default())
         .await
     {
         Err(error) => error,
@@ -1146,7 +1149,11 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     assert!(matches!(error, crate::LlmError::Config { .. }));
     complete(
         resolved
-            .stream_chat(request.clone(), StreamControl::default())
+            .stream_chat(
+                request.clone(),
+                Arc::new(crate::NoImages),
+                StreamControl::default(),
+            )
             .await
             .unwrap(),
     )
@@ -1162,7 +1169,7 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     );
     complete(
         resolved
-            .stream_chat(request, StreamControl::default())
+            .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
             .await
             .unwrap(),
     )
@@ -1195,9 +1202,13 @@ async fn reasoning_plan_reloads_metadata_and_model_features_for_each_resolution(
     let old = turn.resolve(&request.target).await.unwrap();
     configure_model(24576, "enable-thinking", "thinking-budget");
     complete(
-        old.stream_chat(request.clone(), StreamControl::default())
-            .await
-            .unwrap(),
+        old.stream_chat(
+            request.clone(),
+            Arc::new(crate::NoImages),
+            StreamControl::default(),
+        )
+        .await
+        .unwrap(),
     )
     .await;
     let body = server.next().await.body;
@@ -1541,7 +1552,7 @@ async fn chat_replay_defaults_to_no_reasoning() {
         std::fs::write(directory.path().join("providers.toml"), &base).unwrap();
         complete(
             resolved
-                .stream_chat(request, StreamControl::default())
+                .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
                 .await
                 .unwrap(),
         )
@@ -1727,9 +1738,13 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
     let old = turn.resolve(&request.target).await.unwrap();
     write_cache(65536);
     complete(
-        old.stream_chat(request.clone(), StreamControl::default())
-            .await
-            .unwrap(),
+        old.stream_chat(
+            request.clone(),
+            Arc::new(crate::NoImages),
+            StreamControl::default(),
+        )
+        .await
+        .unwrap(),
     )
     .await;
     assert_eq!(server.next().await.body["max_tokens"], 8192);
@@ -2423,7 +2438,11 @@ async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_
         gateway.chatgpt_auth().stop_logins();
         complete(
             resolved
-                .stream_chat(request("chatgpt"), StreamControl::default())
+                .stream_chat(
+                    request("chatgpt"),
+                    Arc::new(crate::NoImages),
+                    StreamControl::default(),
+                )
                 .await
                 .unwrap(),
         )
@@ -2439,7 +2458,11 @@ async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_
     gateway.chatgpt_auth().shutdown().await.unwrap();
     assert!(
         resolved
-            .stream_chat(request("chatgpt"), StreamControl::default())
+            .stream_chat(
+                request("chatgpt"),
+                Arc::new(crate::NoImages),
+                StreamControl::default(),
+            )
             .await
             .is_err()
     );
@@ -2612,7 +2635,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                 );
                 complete(
                     resolved
-                        .stream_chat(request, StreamControl::default())
+                        .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
                         .await
                         .unwrap(),
                 )
@@ -3356,4 +3379,537 @@ fn client_slot(turn: &GatewayTurn, url: &str) -> Arc<TurnClient> {
         .get(&(crate::ProviderId::parse("test").unwrap(), url.to_owned()))
         .unwrap()
         .clone()
+}
+
+fn sample_png_16() -> (lattice_conversation::ImageRef, Vec<u8>) {
+    use sha2::{Digest, Sha256};
+    let bytes = b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR".to_vec();
+    let media_type =
+        lattice_conversation::ImageMediaType::sniff(&bytes).expect("样例 PNG 魔数合法");
+    let digest = Sha256::digest(&bytes);
+    let mut sha256 = [0u8; 32];
+    sha256.copy_from_slice(&digest);
+    (
+        lattice_conversation::ImageRef {
+            sha256,
+            media_type,
+            byte_length: bytes.len() as u64,
+        },
+        bytes,
+    )
+}
+
+fn user_text_item(text: &str) -> lattice_conversation::ConversationItem {
+    use lattice_conversation::{
+        ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    ConversationItem::Message(NativeMessage::new(
+        MessageRole::User,
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::Text {
+            text: text.into(),
+        })],
+    ))
+}
+
+fn user_image_item(
+    image: lattice_conversation::ImageRef,
+) -> lattice_conversation::ConversationItem {
+    use lattice_conversation::{
+        ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    };
+    ConversationItem::Message(NativeMessage::new(
+        MessageRole::User,
+        None,
+        vec![
+            MessagePart::semantic_only(MessageSemantic::Text {
+                text: "请看截图".into(),
+            }),
+            MessagePart::semantic_only(MessageSemantic::Image { image }),
+        ],
+    ))
+}
+
+/// 按单轮上限构造的三轮含图历史，用于逼近 32 MiB 本地预算。
+///
+/// 每轮用户消息都经 `normalize_user_message` 构造，图片张数、单张与单轮总量都在上限之内；
+/// 不同图片用不同摘要，轮与轮之间是同来源的助手步骤。最后一轮在图片后附 `pad_len` 字节文本，
+/// 供测试按计长结果精确补齐。
+fn budget_history(seed: u8, pad_len: usize) -> Vec<lattice_conversation::ConversationItem> {
+    use lattice_conversation::{
+        ConversationItem, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_USER_IMAGE_TOTAL_BYTES,
+        MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, ProviderId,
+        ReplayOrigin, StepContent, normalize_user_message,
+    };
+
+    let mut next_image = 0u8;
+    let mut image = |byte_length: usize| {
+        next_image += 1;
+        let mut sha256 = [seed; 32];
+        sha256[0] = next_image;
+        MessageSemantic::Image {
+            image: ImageRef {
+                sha256,
+                media_type: ImageMediaType::Png,
+                byte_length: byte_length as u64,
+            },
+        }
+    };
+    let assistant_step = |text: &str| {
+        ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                Some(ReplayOrigin {
+                    protocol: Protocol::ChatCompletions,
+                    provider_id: ProviderId::parse("test").unwrap(),
+                }),
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: text.into(),
+                })],
+            ),
+            results: Vec::new(),
+        })
+    };
+    // 一轮取满单轮总量：3,932,160 + 3,932,160 + 2,621,440 = 10,485,760 字节。
+    let last_of_full_turn = MAX_USER_IMAGE_TOTAL_BYTES - 2 * MAX_IMAGE_BYTES;
+    let mut history = Vec::new();
+    for round in 1..=2 {
+        let message = normalize_user_message(vec![
+            MessageSemantic::Text {
+                text: format!("第 {round} 轮截图"),
+            },
+            image(MAX_IMAGE_BYTES),
+            image(MAX_IMAGE_BYTES),
+            image(last_of_full_turn),
+        ])
+        .expect("每轮图片都在单轮上限之内");
+        history.push(ConversationItem::Message(message));
+        history.push(assistant_step("已收到这一轮的截图"));
+    }
+    let last = normalize_user_message(vec![
+        image(MAX_IMAGE_BYTES),
+        MessageSemantic::Text {
+            text: "x".repeat(pad_len),
+        },
+    ])
+    .expect("最后一轮的图片与补齐文本都在单轮上限之内");
+    history.push(ConversationItem::Message(last));
+    history
+}
+
+#[tokio::test]
+async fn check_request_enforces_input_modalities_and_request_invariants() {
+    use lattice_conversation::{
+        ConversationItem, MessagePart, MessageRole, MessageSemantic, NativeMessage, StepContent,
+    };
+
+    let directory = private_dir();
+    std::fs::create_dir_all(directory.path().join("cache")).unwrap();
+    std::fs::write(
+        directory.path().join("cache/models.json"),
+        serde_json::to_vec(&serde_json::json!({
+            "test-catalog": {
+                "models": {
+                    "catalog-text": {
+                        "id": "catalog-text",
+                        "modalities": { "input": ["text"] }
+                    },
+                    "catalog-vision": {
+                        "id": "catalog-vision",
+                        "modalities": { "input": ["text", "image"] }
+                    },
+                    "catalog-unknown": {
+                        "id": "catalog-unknown"
+                    }
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        concat!(
+            "[metadata]\nauto_refresh = false\n",
+            "[providers.test]\nprotocol = 'chat-completions'\nbase_url = 'http://localhost:1/v1'\nauth = 'none'\ncatalog = 'test-catalog'\n",
+            "[providers.test.models.handwritten-text]\ninput = ['text']\n",
+            "[providers.test.models.handwritten-vision]\ninput = ['text', 'image']\n",
+        ),
+    )
+    .unwrap();
+
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let (png_ref, _) = sample_png_16();
+
+    let make_req = |model: &str, messages: Vec<ConversationItem>| {
+        let mut req = ChatRequest::new(messages, ModelTarget::test_target("test", model));
+        req.client_request_id = Some("session-check".into());
+        req
+    };
+
+    // 1. Some([Text])（目录与手写）+ 当前轮含图：拒绝，UnsupportedInput，消息含模型名。
+    for model in ["catalog-text", "handwritten-text"] {
+        let target = ModelTarget::test_target("test", model);
+        let resolved = turn.resolve(&target).await.unwrap();
+        let err = resolved
+            .check_request(&make_req(model, vec![user_image_item(png_ref)]))
+            .expect_err("不支持图片的模型遇到含图请求必须被拒绝");
+        assert_eq!(
+            err.kind(),
+            "unsupported_input",
+            "模态拒绝应分类为 unsupported_input"
+        );
+        assert!(!err.retryable(), "模态拒绝必须不可重试");
+        let expected_msg = format!(
+            "模型 test/{model} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点"
+        );
+        assert_eq!(
+            err.to_string(),
+            expected_msg,
+            "模态拒绝的最终显示只有中文说明（{model}）"
+        );
+        assert_eq!(
+            err,
+            crate::LlmError::UnsupportedInput {
+                message: expected_msg
+            },
+            "模态拒绝消息应与合同一致（{model}）"
+        );
+
+        // Some([Text]) + 纯文本请求放行。
+        let plain_len = resolved
+            .check_request(&make_req(model, vec![user_text_item("纯文本问题")]))
+            .expect("纯文本请求在纯文本模型上应放行");
+        assert!(plain_len > 0, "纯文本请求编码长度应大于 0");
+
+        // 历史较早用户消息含图、中间有助手步骤、当前轮纯文本：仍拒绝。
+        let assistant_step = ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "已看到第一轮图片".into(),
+                })],
+            ),
+            results: Vec::new(),
+        });
+        let history_err = resolved
+            .check_request(&make_req(
+                model,
+                vec![
+                    user_image_item(png_ref),
+                    assistant_step,
+                    user_text_item("当前轮只发纯文本"),
+                ],
+            ))
+            .expect_err("历史路径包含用户图片时纯文本模型必须拒绝");
+        assert!(
+            matches!(history_err, crate::LlmError::UnsupportedInput { ref message } if message.contains(&format!("test/{model}"))),
+            "历史含图拒绝应指出目标模型：{history_err:?}"
+        );
+    }
+
+    // 2. Some([Text, Image]) 与 None（目录未知及未登记模型）均放行。
+    for model in [
+        "catalog-vision",
+        "handwritten-vision",
+        "catalog-unknown",
+        "unlisted-model",
+    ] {
+        let resolved = turn
+            .resolve(&ModelTarget::test_target("test", model))
+            .await
+            .unwrap();
+        let len = resolved
+            .check_request(&make_req(model, vec![user_image_item(png_ref)]))
+            .unwrap_or_else(|err| panic!("模型 {model} 应放行含图请求，实际报错：{err:?}"));
+        assert!(len > 0, "放行请求应返回正整数编码字节长度（{model}）");
+    }
+
+    // 3. check_request 同样核对 target 一致性、SessionId 必填与投影错误传播。
+    let resolved = turn
+        .resolve(&ModelTarget::test_target("test", "catalog-vision"))
+        .await
+        .unwrap();
+    let mut missing_session = make_req("catalog-vision", vec![user_text_item("hi")]);
+    missing_session.client_request_id = None;
+    assert!(
+        matches!(
+            resolved.check_request(&missing_session),
+            Err(crate::LlmError::Config { .. })
+        ),
+        "缺少 SessionId 时 check_request 应按配置错误拒绝"
+    );
+    let wrong_target = make_req("handwritten-vision", vec![user_text_item("hi")]);
+    assert!(
+        matches!(
+            resolved.check_request(&wrong_target),
+            Err(crate::LlmError::Config { .. })
+        ),
+        "target 与解析句柄不一致时 check_request 应按配置错误拒绝"
+    );
+    let illegal_assistant_image = make_req(
+        "catalog-vision",
+        vec![ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Image {
+                    image: png_ref,
+                })],
+            ),
+            results: Vec::new(),
+        })],
+    );
+    assert!(
+        matches!(
+            resolved.check_request(&illegal_assistant_image),
+            Err(crate::LlmError::Projection(_))
+        ),
+        "check_request 应原样传播协议投影错误"
+    );
+}
+
+#[tokio::test]
+async fn check_request_enforces_exact_32_mib_local_request_budget() {
+    use crate::protocol::encoding::MAX_MODEL_REQUEST_BYTES;
+
+    let directory = private_dir();
+    configure(
+        directory.path(),
+        "http://localhost:1/v1",
+        "chat-completions",
+        "none",
+    );
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let target = ModelTarget::test_target("test", "model-id");
+    let resolved = turn.resolve(&target).await.unwrap();
+
+    // 三轮合法含图历史逐轮累积到预算附近；计长不读取图片字节。
+    let build_with_padding = |pad_len: usize| {
+        let mut req = ChatRequest::new(budget_history(0xab, pad_len), target.clone());
+        req.client_request_id = Some("session-budget".into());
+        req
+    };
+
+    // 空文本会被规范化删除，基准取 1 字节补齐文本；此后每多一个 `x`，编码长度多 1 字节。
+    let base_len = resolved
+        .check_request(&build_with_padding(1))
+        .expect("未超预算的基准请求应通过计长");
+    assert!(
+        base_len < MAX_MODEL_REQUEST_BYTES,
+        "基准长度应小于 32 MiB 以便补齐：{base_len}"
+    );
+    let exact_pad = 1 + (MAX_MODEL_REQUEST_BYTES - base_len);
+
+    // 恰好等于 33_554_432 字节时放行。
+    let exact_len = resolved
+        .check_request(&build_with_padding(exact_pad))
+        .expect("编码后恰好等于 32 MiB 的请求应放行");
+    assert_eq!(
+        exact_len, MAX_MODEL_REQUEST_BYTES,
+        "补齐后的请求编码长度应精确等于 33_554_432"
+    );
+
+    // 超出 1 字节（33_554_433）时拒绝。
+    let err = resolved
+        .check_request(&build_with_padding(exact_pad + 1))
+        .expect_err("超过本地预算 1 字节的请求必须被拒绝");
+    assert_eq!(
+        err.kind(),
+        "request_budget",
+        "超预算错误种类应为 request_budget"
+    );
+    assert!(!err.retryable(), "本地预算超限必须不可重试");
+    assert_eq!(
+        err,
+        crate::LlmError::RequestBudgetExceeded {
+            message: "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话".into(),
+        },
+        "超预算错误消息应与合同完全一致"
+    );
+}
+
+#[tokio::test]
+async fn stream_chat_shares_preflight_without_reading_images_or_sending_http_on_rejection() {
+    use crate::protocol::encoding::MAX_MODEL_REQUEST_BYTES;
+    use lattice_conversation::ImageRef;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct CountingImageSource {
+        png_bytes: Vec<u8>,
+        reader_calls: AtomicUsize,
+        image_calls: AtomicUsize,
+    }
+
+    impl crate::ImageSource for CountingImageSource {
+        fn with_reader(
+            &self,
+            encode: &mut dyn FnMut(&dyn crate::ImageReader) -> Result<(), crate::LlmError>,
+        ) -> Result<(), crate::LlmError> {
+            self.reader_calls.fetch_add(1, Ordering::SeqCst);
+            encode(self)
+        }
+    }
+
+    impl crate::ImageReader for CountingImageSource {
+        fn with_image(
+            &self,
+            _image: &ImageRef,
+            consume: &mut dyn FnMut(&[u8]) -> Result<(), crate::LlmError>,
+        ) -> Result<(), crate::LlmError> {
+            self.image_calls.fetch_add(1, Ordering::SeqCst);
+            consume(&self.png_bytes)
+        }
+    }
+
+    let mut server = Server::start(false).await;
+    let directory = private_dir();
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        format!(
+            concat!(
+                "[metadata]\nauto_refresh = false\n",
+                "[providers.test]\nprotocol = 'chat-completions'\nbase_url = '{}'\nauth = 'none'\n",
+                "[providers.test.models.text-only]\ninput = ['text']\n",
+                "[providers.test.models.vision]\ninput = ['text', 'image']\n",
+                "[providers.msg]\nprotocol = 'anthropic-messages'\nbase_url = '{}'\nauth = 'none'\n",
+                "[providers.msg.models.vision]\ninput = ['text', 'image']\n",
+            ),
+            server.url,
+            server.url.trim_end_matches("/v1"),
+        ),
+    )
+    .unwrap();
+    let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
+    let turn = gateway.open_turn();
+    let (png_ref, png_bytes) = sample_png_16();
+    let source = Arc::new(CountingImageSource {
+        png_bytes,
+        reader_calls: AtomicUsize::new(0),
+        image_calls: AtomicUsize::new(0),
+    });
+
+    // 1. 能力不符时 stream_chat 不读取图片、不发起 HTTP。
+    let text_only = turn
+        .resolve(&ModelTarget::test_target("test", "text-only"))
+        .await
+        .unwrap();
+    let mut bad_modality_req = ChatRequest::new(
+        vec![user_image_item(png_ref)],
+        ModelTarget::test_target("test", "text-only"),
+    );
+    bad_modality_req.client_request_id = Some("session-1".into());
+    let modality_err = match text_only
+        .stream_chat(bad_modality_req, source.clone(), StreamControl::default())
+        .await
+    {
+        Ok(_) => panic!("不支持图片输入的模型不应打开流"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(modality_err, crate::LlmError::UnsupportedInput { .. }),
+        "发送路径能力不符应返回 UnsupportedInput：{modality_err:?}"
+    );
+    assert_eq!(
+        source.reader_calls.load(Ordering::SeqCst),
+        0,
+        "能力不符时 with_reader 调用次数必须为 0"
+    );
+    assert_eq!(
+        source.image_calls.load(Ordering::SeqCst),
+        0,
+        "能力不符时 with_image 调用次数必须为 0"
+    );
+    assert_eq!(
+        server.connections_before_probe().await,
+        0,
+        "能力不符时不得建立任何 HTTP 连接"
+    );
+
+    // 2. 超出本地预算时 stream_chat 不读取图片、不发起 HTTP。
+    let vision = turn
+        .resolve(&ModelTarget::test_target("test", "vision"))
+        .await
+        .unwrap();
+    let make_budget_req = |pad: usize| {
+        let mut req = ChatRequest::new(
+            budget_history(0xcd, pad),
+            ModelTarget::test_target("test", "vision"),
+        );
+        req.client_request_id = Some("session-2".into());
+        req
+    };
+    // 基准取 1 字节补齐文本（空文本会被规范化删除），再补到恰好超出预算 1 字节。
+    let base_len = vision.check_request(&make_budget_req(1)).unwrap();
+    let over_budget_req = make_budget_req(1 + (MAX_MODEL_REQUEST_BYTES - base_len) + 1);
+    let budget_err = match vision
+        .stream_chat(over_budget_req, source.clone(), StreamControl::default())
+        .await
+    {
+        Ok(_) => panic!("超预算请求不应打开流"),
+        Err(err) => err,
+    };
+    assert!(
+        matches!(budget_err, crate::LlmError::RequestBudgetExceeded { .. }),
+        "发送路径超预算应返回 RequestBudgetExceeded：{budget_err:?}"
+    );
+    assert_eq!(
+        source.reader_calls.load(Ordering::SeqCst),
+        0,
+        "超预算时 with_reader 调用次数必须为 0"
+    );
+    assert_eq!(
+        source.image_calls.load(Ordering::SeqCst),
+        0,
+        "超预算时 with_image 调用次数必须为 0"
+    );
+    assert_eq!(
+        server.connections_before_probe().await,
+        0,
+        "超预算时不得建立任何 HTTP 连接"
+    );
+
+    // 3. check_request 返回值与 stream_chat 实际发出的请求体字节数完全相等（纯文本 + 含图）。
+    for (provider, messages, expected_reads) in [
+        (
+            "test",
+            vec![user_text_item("核对纯文本长度与实发字节一致")],
+            0usize,
+        ),
+        ("test", vec![user_image_item(png_ref)], 1usize),
+        ("msg", vec![user_image_item(png_ref)], 2usize),
+    ] {
+        let target = ModelTarget::test_target(provider, "vision");
+        let resolved = turn.resolve(&target).await.unwrap();
+        let mut req = ChatRequest::new(messages, target);
+        req.client_request_id = Some("session-wire-len".into());
+        let checked_len = resolved
+            .check_request(&req)
+            .expect("合法请求 check_request 应通过");
+        complete(
+            resolved
+                .stream_chat(req, source.clone(), StreamControl::default())
+                .await
+                .expect("合法请求 stream_chat 应成功发送"),
+        )
+        .await;
+        let received = server.next().await;
+        assert_eq!(
+            received.body_len, checked_len,
+            "实发 HTTP 请求体字节数必须等于 check_request 返回值（{provider}）"
+        );
+        assert_eq!(
+            received.headers["content-length"].parse::<usize>().unwrap(),
+            checked_len,
+            "Content-Length 请求头必须等于 check_request 返回值（{provider}）"
+        );
+        assert_eq!(
+            source.image_calls.load(Ordering::SeqCst),
+            expected_reads,
+            "图片读取次数应与含图发送次数一致（{provider}）"
+        );
+    }
 }

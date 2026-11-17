@@ -218,15 +218,15 @@ catalog = "arbitrary-entry"
         assert_eq!(
             text.lines().next(),
             Some(
-                "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
+                "MODEL\tCONTEXT\tOUTPUT\tEFFORTS\tINPUT\tPRICE ($/M tokens: input/output/cache-read/cache-write)\tAUTH"
             ),
-            "文本表头必须包含价格与凭据列"
+            "文本表头必须包含输入模态、价格与凭据列"
         );
         assert_eq!(
             text.lines()
                 .find(|line| line.starts_with("local/current\t")),
-            Some("local/current\t999\t200\toff,high\t1.2/3.4/0.1/0.2\tready"),
-            "文本行必须包含模型限额、价格与凭据状态"
+            Some("local/current\t999\t200\toff,high\t-\t1.2/3.4/0.1/0.2\tready"),
+            "文本行必须包含模型限额、输入模态、价格与凭据状态"
         );
         assert!(
             !text.contains("retired"),
@@ -253,7 +253,7 @@ catalog = "arbitrary-entry"
         assert!(
             String::from_utf8_lossy(&empty_text.stdout)
                 .lines()
-                .any(|line| line == "empty/listed\t-\t-\t-\t-/-/-/-\tready")
+                .any(|line| line == "empty/listed\t-\t-\t-\t-\t-/-/-/-\tready")
         );
         let ordered = cli(&world, &spec, &["--json", "models"]);
         evidence.record_command("查询候选 provider 与模型的排序结果", &ordered);

@@ -48,10 +48,17 @@ pub enum LlmError {
     #[error("protocol limit exceeded: {message}")]
     ProtocolLimit { message: String },
 
+    #[error("{message}")]
+    RequestBudgetExceeded { message: String },
+
+    /// 请求含目标模型明确不支持的输入模态（例如向纯文本模型发送图片），属于配置类拒绝，不可重试。
+    #[error("{message}")]
+    UnsupportedInput { message: String },
+
     #[error("provider projection error: {0}")]
     Projection(#[from] crate::protocol::projection::ProjectionError),
 
-    #[error("LLM error: {0}")]
+    #[error("{0}")]
     Other(String),
 }
 
@@ -66,6 +73,8 @@ impl LlmError {
             Self::ProviderHttp { .. } => "provider_http",
             Self::StreamRead { .. } => "stream_read",
             Self::ProtocolLimit { .. } => "protocol_limit",
+            Self::RequestBudgetExceeded { .. } => "request_budget",
+            Self::UnsupportedInput { .. } => "unsupported_input",
             Self::Projection(_) => "projection",
             Self::Other(_) => "other",
         }

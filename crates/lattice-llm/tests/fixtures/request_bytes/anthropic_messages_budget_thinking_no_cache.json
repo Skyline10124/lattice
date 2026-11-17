@@ -1,0 +1,1 @@
+{"max_tokens":32768,"messages":[{"content":[{"text":"按预算开启思考","type":"text"}],"role":"user"}],"model":"test-model","stream":true,"system":"无缓存系统提示","thinking":{"budget_tokens":4096,"type":"enabled"}}

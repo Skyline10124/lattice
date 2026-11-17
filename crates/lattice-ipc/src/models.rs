@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId};
+use lattice_conversation::{Effort, InputModality, ModelId, ModelRef, ProviderId};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +72,7 @@ pub struct ModelCandidate {
     pub name: Option<String>,
     pub context: Option<u64>,
     pub output: Option<u64>,
+    pub input: Option<Vec<InputModality>>,
     pub supported_efforts: Vec<Effort>,
     pub cost: Option<ModelPrice>,
     pub availability: Availability,

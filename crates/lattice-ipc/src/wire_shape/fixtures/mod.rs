@@ -49,6 +49,11 @@ pub(super) const CONTENT_OVERSIZE_DIGEST_HEX: &str =
     "f2db82c87ef0dbca63c34720fccf7d310202539d840d7555c953bdfec7406090";
 pub(super) const CONTENT_OVERSIZE_BYTES: u64 = 131_072;
 
+/// 用户上传图片对应的固定合法内容摘要字面量（64 位小写十六进制）。
+pub(super) const IMAGE_SAMPLE_DIGEST_HEX: &str =
+    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
+pub(super) const IMAGE_SAMPLE_BYTES: u64 = 12_345;
+
 pub(super) fn register_all(book: &mut CaseBook) {
     conversation::register(book);
     models::register(book);

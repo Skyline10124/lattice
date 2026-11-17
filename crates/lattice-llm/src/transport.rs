@@ -51,6 +51,8 @@ fn seconds(value: &str, unit: f64) -> Option<Duration> {
     Some(Duration::try_from_secs_f64(number * unit).unwrap_or(Duration::MAX))
 }
 
+const PAYLOAD_TOO_LARGE_SUFFIX: &str = "；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+
 /// 非 2xx 响应的类型化错误：一行诊断、是否可重试、建议等待。
 /// 正文与请求标识由 client 在调用前按凭据脱敏。
 pub(crate) fn status_error(
@@ -72,6 +74,20 @@ pub(crate) fn status_error(
     if !message.is_empty() {
         head.push_str(": ");
         head.push_str(&message);
+    }
+    if status == 413 {
+        // 先为固定说明预留字符再截断远端摘要，保证单行不超过 256 字符且说明完整。
+        let mut line = truncate_chars(
+            &head,
+            MAX_DIAGNOSTIC_CHARS - PAYLOAD_TOO_LARGE_SUFFIX.chars().count(),
+        );
+        line.push_str(PAYLOAD_TOO_LARGE_SUFFIX);
+        return LlmError::ProviderHttp {
+            status_code: status,
+            message: line,
+            retryable: false,
+            retry_after: None,
+        };
     }
     let retry_after = retry_after(headers, SystemTime::now());
     let usage_limit = status == 429 && subscription_usage_limit(code.as_deref());
@@ -489,6 +505,94 @@ mod tests {
         let bounded = status_error(429, &headers(&[("retry-after", "7")]), &long, None).to_string();
         assert_eq!(bounded.chars().count(), MAX_DIAGNOSTIC_CHARS);
         assert!(bounded.ends_with("… (retry after 7s)"), "{bounded}");
+    }
+
+    #[test]
+    fn status_413_is_never_retryable_and_preserves_bounded_suffix() {
+        let suffix = "；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let body = r#"{"error":{"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#;
+        let expected_line = format!(
+            "HTTP 413 INVALID_ARGUMENT: Request payload size exceeds the limit: 20971520 bytes.{suffix}"
+        );
+
+        for (name, pairs) in [
+            ("无重试头", vec![]),
+            ("x-should-retry 为 true", vec![("x-should-retry", "true")]),
+            ("x-should-retry 为 false", vec![("x-should-retry", "false")]),
+            (
+                "同时带 x-should-retry 与 Retry-After",
+                vec![
+                    ("x-should-retry", "true"),
+                    ("retry-after", "5"),
+                    ("retry-after-ms", "250"),
+                ],
+            ),
+        ] {
+            let error = status_error(413, &headers(&pairs), body, Some("req-413"));
+            assert_eq!(error.status_code(), Some(413), "状态码应为 413（{name}）");
+            assert!(
+                !error.retryable(),
+                "HTTP 413 在任何响应头下都必须不可重试（{name}）"
+            );
+            assert_eq!(
+                error.retry_after(),
+                None,
+                "HTTP 413 必须忽略 Retry-After（{name}）"
+            );
+            assert_eq!(
+                error.to_string(),
+                expected_line,
+                "HTTP 413 诊断文本应保留远端摘要并附固定中文说明（{name}）"
+            );
+            assert!(
+                !error.to_string().contains("retry after"),
+                "HTTP 413 诊断不得附加 retry after 提示（{name}）"
+            );
+        }
+
+        // 空正文 413 同样附加完整后缀。
+        let empty = status_error(413, &HeaderMap::new(), "", None);
+        assert!(!empty.retryable(), "空正文 HTTP 413 必须不可重试");
+        assert_eq!(empty.retry_after(), None, "空正文 HTTP 413 无 retry_after");
+        assert_eq!(empty.to_string(), format!("HTTP 413{suffix}"));
+
+        // 超长且含换行、控制字符的远端摘要先截断再拼后缀，整行固定不超过 256 字符。
+        let noisy_long = format!(
+            "{{\"error\":{{\"message\":\"line1\\n\\u001b[31m{}\",\"type\":\"request_too_large\"}}}}",
+            "超".repeat(300)
+        );
+        let truncated = status_error(
+            413,
+            &headers(&[("x-should-retry", "true"), ("retry-after", "9")]),
+            &noisy_long,
+            None,
+        );
+        assert!(!truncated.retryable(), "超长正文 HTTP 413 必须不可重试");
+        assert_eq!(
+            truncated.retry_after(),
+            None,
+            "超长正文 HTTP 413 无 retry_after"
+        );
+        let text = truncated.to_string();
+        assert_eq!(
+            text.chars().count(),
+            MAX_DIAGNOSTIC_CHARS,
+            "截断后的 HTTP 413 诊断字符数应恰好等于上限 256：{text}"
+        );
+        assert!(
+            text.starts_with("HTTP 413 request_too_large: line1 [31m超"),
+            "远端摘要前缀应压成单行并保留开头：{text}"
+        );
+        assert!(
+            text.ends_with(&format!("…{suffix}")),
+            "远端摘要截断后必须保留完整后缀：{text}"
+        );
+        assert!(
+            !text
+                .chars()
+                .any(|c| c == '\n' || c == '\r' || c.is_control()),
+            "HTTP 413 诊断不得包含换行或控制字符：{text}"
+        );
     }
 
     #[test]

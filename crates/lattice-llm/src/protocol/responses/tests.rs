@@ -105,7 +105,8 @@ fn request_controls_preserve_session_tools_metadata_and_effort() {
                 effort,
                 enable_toggle: false,
             });
-            let body = build_request_json(&request, plan, model_reasoning, &origin()).unwrap();
+            let raw_body = build_request_json(&request, plan, model_reasoning, &origin()).unwrap();
+            let body = crate::protocol::encoding::body_to_value(&raw_body);
             assert_eq!(
                 body.get("include").cloned(),
                 (model_reasoning == Some(true)).then(|| json!(["reasoning.encrypted_content"]))

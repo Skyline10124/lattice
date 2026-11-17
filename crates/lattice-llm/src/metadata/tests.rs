@@ -238,7 +238,7 @@ fn candidates_merge_metadata_filter_deprecated_and_report_missing_catalogs() {
         serde_json::to_value(&unknown.models).unwrap(),
         json!([{
             "provider":"local", "model":"org/unknown", "name":null,
-            "context":null, "output":null, "supported_efforts":[], "cost":null,
+            "context":null, "output":null, "input":null, "supported_efforts":[], "cost":null,
             "availability":{"status":"ready"}
         }])
     );
@@ -678,5 +678,148 @@ fn embedded_snapshot_matches_builtin_catalogs_and_model_identity() {
             assert_eq!(*id, model.id, "{catalog}");
             assert!(!id.is_empty(), "{catalog}");
         }
+    }
+}
+
+#[test]
+fn input_modalities_parse_catalog_overlay_handwritten_and_surface_in_candidates() {
+    use lattice_conversation::InputModality;
+
+    let directory = tempfile::tempdir().unwrap();
+    std::fs::set_permissions(
+        directory.path(),
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::write(
+        directory.path().join("providers.toml"),
+        r#"
+[providers.local]
+protocol = 'chat-completions'
+base_url = 'http://localhost:1/v1'
+auth = 'none'
+catalog = 'modalities-catalog'
+
+[providers.local.models.overridden]
+input = ['text']
+
+[providers.local.models.handwritten-only]
+input = ['image', 'text', 'image', 'audio', 'video']
+"#,
+    )
+    .unwrap();
+    cache(
+        directory.path(),
+        &json!({
+            "modalities-catalog": {
+                "models": {
+                    "missing-modalities": { "id": "missing-modalities" },
+                    "missing-input": { "id": "missing-input", "modalities": {} },
+                    "null-input": { "id": "null-input", "modalities": { "input": null } },
+                    "mixed": {
+                        "id": "mixed",
+                        "modalities": {
+                            "input": ["video", "pdf", "text", "video", "image", "unknown", "audio"]
+                        }
+                    },
+                    "pdf-only": {
+                        "id": "pdf-only",
+                        "modalities": { "input": ["pdf"] }
+                    },
+                    "empty-array": {
+                        "id": "empty-array",
+                        "modalities": { "input": [] }
+                    },
+                    "overridden": {
+                        "id": "overridden",
+                        "modalities": { "input": ["text", "image", "audio"] }
+                    }
+                }
+            }
+        }),
+    );
+
+    let listed =
+        crate::model_candidates(directory.path(), &list_query(Some("local"), false)).unwrap();
+    let by_id: std::collections::BTreeMap<_, _> = listed
+        .models
+        .iter()
+        .map(|candidate| (candidate.model.as_str(), candidate.input.clone()))
+        .collect();
+
+    assert_eq!(
+        by_id["missing-modalities"], None,
+        "缺少 modalities 时 input 应为 None"
+    );
+    assert_eq!(
+        by_id["missing-input"], None,
+        "缺少 input 时 input 应为 None"
+    );
+    assert_eq!(by_id["null-input"], None, "input 为 null 时应为 None");
+    assert_eq!(
+        by_id["mixed"],
+        Some(vec![
+            InputModality::Video,
+            InputModality::Text,
+            InputModality::Image,
+            InputModality::Audio,
+        ]),
+        "混合目录值应只保留四个允许值并去重保序"
+    );
+    assert_eq!(
+        by_id["pdf-only"],
+        Some(vec![]),
+        "仅含未知模态字符串时应返回 Some(vec![])"
+    );
+    assert_eq!(
+        by_id["empty-array"],
+        Some(vec![]),
+        "空数组应返回 Some(vec![])"
+    );
+    assert_eq!(
+        by_id["overridden"],
+        Some(vec![InputModality::Text]),
+        "手写 input 应整表覆盖目录输入模态"
+    );
+    assert_eq!(
+        by_id["handwritten-only"],
+        Some(vec![
+            InputModality::Image,
+            InputModality::Text,
+            InputModality::Audio,
+            InputModality::Video,
+        ]),
+        "仅在 providers.toml 声明的模型应生效手写 input 并去重保序"
+    );
+
+    for (target, expected) in [
+        (
+            "local/mixed",
+            Some(vec![
+                InputModality::Video,
+                InputModality::Text,
+                InputModality::Image,
+                InputModality::Audio,
+            ]),
+        ),
+        ("local/pdf-only", Some(vec![])),
+        ("local/overridden", Some(vec![InputModality::Text])),
+        (
+            "local/handwritten-only",
+            Some(vec![
+                InputModality::Image,
+                InputModality::Text,
+                InputModality::Audio,
+                InputModality::Video,
+            ]),
+        ),
+        ("local/unlisted", None),
+    ] {
+        let queried = crate::model_candidates(directory.path(), &target_query(target)).unwrap();
+        assert_eq!(queried.models.len(), 1);
+        assert_eq!(
+            queried.models[0].input, expected,
+            "Target 查询 {target} 的 input 不匹配"
+        );
     }
 }

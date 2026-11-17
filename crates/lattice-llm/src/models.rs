@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use lattice_conversation::Effort;
+use lattice_conversation::{Effort, InputModality};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -32,6 +32,7 @@ pub struct ModelCandidate {
     pub name: Option<String>,
     pub context: Option<u64>,
     pub output: Option<u64>,
+    pub input: Option<Vec<InputModality>>,
     pub supported_efforts: Vec<Effort>,
     pub cost: Option<ModelPrice>,
     pub availability: Availability,
@@ -235,6 +236,7 @@ fn candidate(
         name: model.and_then(|model| model.name.clone()),
         context: limits.and_then(|limit| limit.context),
         output: limits.and_then(|limit| limit.output),
+        input: model.and_then(Model::input_modalities),
         supported_efforts,
         cost: model
             .and_then(|model| model.cost.as_ref())

@@ -7,6 +7,7 @@ use std::collections::BTreeMap;
 
 use lattice_conversation::{Protocol, ReplayOrigin};
 
+use super::encoding::{RequestBody, WireItem};
 use super::{EffortParam, ThinkingBudget, ThinkingToggle};
 use crate::protocol::ChatCompletionsFeatures;
 use crate::protocol::projection::{ProjectionError, request_messages_with_replay};
@@ -17,18 +18,20 @@ use lattice_conversation::Effort;
 
 /// 按模型名构造流式请求，并要求服务端报告用量。
 /// 响应路径只解析 SSE、不解码非流式 JSON，因此固定发送 stream: true。
-pub fn build_request_json(
+pub(crate) fn build_request_json(
     request: &ChatRequest,
     model: &str,
     features: ChatCompletionsFeatures,
     reasoning: Option<ReasoningPlan>,
     origin: &ReplayOrigin,
-) -> Result<serde_json::Value, ProjectionError> {
+) -> Result<RequestBody, ProjectionError> {
     let projected =
         request_messages_with_replay(origin, &request.messages, features.reasoning_replay)?;
     let mut messages = Vec::new();
     if let Some(system) = projected.system {
-        messages.push(serde_json::json!({"role": "system", "content": system}));
+        messages.push(WireItem::Json(
+            serde_json::json!({"role": "system", "content": system}),
+        ));
     }
     let system_count = messages.len();
     messages.extend(projected.messages);
@@ -43,7 +46,6 @@ pub fn build_request_json(
 
     let mut body = serde_json::json!({
         "model": model,
-        "messages": messages,
         "stream": true,
         "stream_options": {"include_usage": true},
     });
@@ -121,19 +123,29 @@ pub fn build_request_json(
         body["tools"] = serde_json::Value::Array(tools_array);
     }
 
-    Ok(body)
+    let serde_json::Value::Object(fields) = body else {
+        unreachable!("请求顶层固定为 JSON 对象");
+    };
+    Ok(RequestBody::new(fields, "messages", messages))
 }
 
-/// 只标记已有的合法末块；无文本的工具调用不产生缓存块。
-fn mark_last_content(message: &mut serde_json::Value) {
-    let content = &mut message["content"];
-    if let Some(text) = content.as_str().filter(|text| !text.is_empty()) {
-        *content = serde_json::json!([{"type":"text","text":text}]);
-    }
-    if let Some(last) = content.as_array_mut().and_then(|blocks| blocks.last_mut())
-        && last["type"] == "text"
-    {
-        last["cache_control"] = serde_json::json!({"type":"ephemeral"});
+/// 只标记已有的合法末块；无文本的工具调用或以图片结尾的用户消息不产生缓存块。
+fn mark_last_content(item: &mut WireItem) {
+    match item {
+        WireItem::Json(message) => {
+            let content = &mut message["content"];
+            if let Some(text) = content.as_str().filter(|text| !text.is_empty()) {
+                *content = serde_json::json!([{"type":"text","text":text}]);
+            }
+            if let Some(last) = content.as_array_mut().and_then(|blocks| blocks.last_mut())
+                && last["type"] == "text"
+            {
+                last["cache_control"] = serde_json::json!({"type":"ephemeral"});
+            }
+        }
+        WireItem::UserImages(wire) => {
+            wire.enable_last_text_cache_marker();
+        }
     }
 }
 
@@ -427,6 +439,7 @@ mod tests {
                 MessageSemantic::Text { text } => format!("T:{text}"),
                 MessageSemantic::Reasoning { text } => format!("R:{text}"),
                 MessageSemantic::ToolCall { call } => format!("C:{}", call.name),
+                MessageSemantic::Image { .. } => panic!("助手回复不应包含图片片段"),
             })
             .collect()
     }
