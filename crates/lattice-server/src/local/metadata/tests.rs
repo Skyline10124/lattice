@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use super::*;
+use crate::local::test_support::without_auto_advance;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::sync::{Semaphore, mpsc};
 
@@ -437,21 +438,14 @@ fn observed(mut refresh: Arc<MetadataRefresh>) -> (Arc<MetadataRefresh>, Timer) 
     )
 }
 
-/// 等待定时任务的下一个事件。触发里的配置与缓存读取跑在 spawn_blocking 线程上；
-/// 若用 `recv().await` 让运行时空闲，暂停的时钟会自动跳到下一个定时点。
-/// 这里只让出执行权，时钟保持不动；真实时间只用作卡死时的失败期限。
+/// 在当前虚拟时刻接收定时任务的下一个事件。
+///
+/// 等待期间时钟不动，定时任务不会因为测试在等而提前跑到下一个定时点；冻结方式与卡死期限
+/// 见 `without_auto_advance`。通道关闭且已缓冲的事件读完时立即失败。
 async fn next_event(timer: &mut Timer) -> TimerEvent {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        if let Ok(event) = timer.events.try_recv() {
-            return event;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no timer event within 5s of real time"
-        );
-        tokio::task::yield_now().await;
-    }
+    without_auto_advance("等待元数据定时任务的下一个事件", timer.events.recv())
+        .await
+        .expect("定时任务事件通道不应关闭")
 }
 
 /// 等待下一次定时触发的结果，跳过其间的等待事件。

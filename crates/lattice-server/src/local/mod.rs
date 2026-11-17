@@ -34,3 +34,6 @@ mod client_tests;
 
 #[cfg(test)]
 mod components_tests;
+
+#[cfg(test)]
+mod test_support;
