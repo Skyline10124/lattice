@@ -803,6 +803,15 @@ pub(crate) fn build_protocol_request_body(
     }
 }
 
+/// 图片来源与编码的失败一律按不可重试的 `LlmError::Other` 报告：来源实现返回的其他错误种类
+/// （例如超时或可重试的传输错误）在这里归一，模型重试预算不会重放同一次图片读取失败。
+fn image_source_error(error: LlmError) -> LlmError {
+    match error {
+        LlmError::Other(message) => LlmError::Other(message),
+        other => LlmError::Other(format!("读取图片来源失败：{other}")),
+    }
+}
+
 pub(crate) fn request_has_user_images(request: &ChatRequest) -> bool {
     request.messages.iter().any(|item| match item {
         lattice_conversation::ConversationItem::Message(message)
@@ -855,14 +864,16 @@ pub(crate) async fn dispatch(
     let body_bytes = if body.has_user_images() {
         let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, LlmError> {
             let mut encoded = None;
-            images.with_reader(&mut |reader| {
-                if encoded.is_some() {
-                    return Err(LlmError::Other("图片来源读取作用域被重复调用".into()));
-                }
-                let buf = protocol::encoding::encode_body(&body, reader, expected_len)?;
-                encoded = Some(buf);
-                Ok(())
-            })?;
+            images
+                .with_reader(&mut |reader| {
+                    if encoded.is_some() {
+                        return Err(LlmError::Other("图片来源读取作用域被重复调用".into()));
+                    }
+                    let buf = protocol::encoding::encode_body(&body, reader, expected_len)?;
+                    encoded = Some(buf);
+                    Ok(())
+                })
+                .map_err(image_source_error)?;
             encoded.ok_or_else(|| LlmError::Other("图片来源未执行编码回调".into()))
         })
         .await

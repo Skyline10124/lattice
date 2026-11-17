@@ -8,6 +8,8 @@ use lattice_conversation::ImageRef;
 use crate::LlmError;
 
 /// 请求编码时的只读图片来源。
+///
+/// 来源或读取器返回的任何错误，都由发送路径按不可重试的 `LlmError::Other` 报告。
 pub trait ImageSource: Send + Sync {
     /// 打开一个读取作用域并恰好调用一次 `encode`；作用域内借出的图片字节在返回前全部释放。
     fn with_reader(

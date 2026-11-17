@@ -54,7 +54,7 @@ pub enum LlmError {
     #[error("provider projection error: {0}")]
     Projection(#[from] crate::protocol::projection::ProjectionError),
 
-    #[error("LLM error: {0}")]
+    #[error("{0}")]
     Other(String),
 }
 

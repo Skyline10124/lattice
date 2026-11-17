@@ -1226,6 +1226,11 @@ async fn image_source_seam_enforces_no_images_length_check_blocking_thread_and_c
             msg.contains("当前图片来源无法读取图片") && msg.contains(&expected_short_digest),
             "诊断应为包含 12 位摘要的中文说明：{msg}"
         );
+        assert_eq!(
+            err.to_string(),
+            format!("当前图片来源无法读取图片 {expected_short_digest}"),
+            "最终显示的诊断应只有中文说明，不带英文前缀"
+        );
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
                 .await
@@ -1286,6 +1291,50 @@ async fn image_source_seam_enforces_no_images_length_check_blocking_thread_and_c
                 .await
                 .is_err(),
             "图片长度不符时不得发起任何 HTTP 连接"
+        );
+    }
+
+    // 2b. 来源打开读取作用域时返回其他种类的错误（例如超时），按不可重试的 Other 报告且不发起 HTTP。
+    {
+        struct ScopeOpenTimeoutSource;
+        impl crate::ImageSource for ScopeOpenTimeoutSource {
+            fn with_reader(
+                &self,
+                _encode: &mut dyn FnMut(&dyn crate::ImageReader) -> Result<(), crate::LlmError>,
+            ) -> Result<(), crate::LlmError> {
+                Err(crate::LlmError::Timeout {
+                    message: "image store read timed out".into(),
+                })
+            }
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (_dir, resolved) = make_resolved(&format!("http://{addr}")).await;
+        let err = match resolved
+            .stream_chat(
+                image_chat_request(),
+                Arc::new(ScopeOpenTimeoutSource),
+                crate::StreamControl::default(),
+            )
+            .await
+        {
+            Ok(_) => panic!("图片来源打开读取作用域失败时必须报错"),
+            Err(err) => err,
+        };
+        assert!(!err.retryable(), "图片来源返回的超时也必须按不可重试报告");
+        let crate::LlmError::Other(msg) = &err else {
+            panic!("图片来源失败应归一为 LlmError::Other，实际：{err:?}");
+        };
+        assert_eq!(
+            msg, "读取图片来源失败：HTTP request timed out: image store read timed out",
+            "诊断应以中文说明开头并保留来源的原始错误文本"
+        );
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                .await
+                .is_err(),
+            "图片来源失败时不得发起任何 HTTP 连接"
         );
     }
 
