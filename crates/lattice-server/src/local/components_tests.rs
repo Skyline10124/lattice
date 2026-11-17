@@ -44,6 +44,26 @@ async fn wait_handles_idle(handles: &[ComponentRemountHandle]) {
     }
 }
 
+/// 保持暂停的虚拟时钟不动，等待 `future` 完成；`stage` 用于在卡死时指出是哪一步。
+///
+/// 运行时空闲时，暂停的时钟会自动跳到下一个计时点。这里每轮只轮询一次再让出执行权，
+/// 运行时只做零超时的驱动轮询，时钟因此保持不动，阻塞线程与 I/O 照常推进。
+/// 真实时间 10 秒只用于报告卡死，不参与业务期限判断。
+async fn without_auto_advance<T>(stage: &str, future: impl std::future::Future<Output = T>) -> T {
+    let started = std::time::Instant::now();
+    tokio::pin!(future);
+    loop {
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{stage}：固定模拟时刻等待超过十秒真实时间"
+        );
+        if let std::task::Poll::Ready(value) = futures::poll!(&mut future) {
+            return value;
+        }
+        tokio::task::yield_now().await;
+    }
+}
+
 #[tokio::test]
 async fn status_components_empty_when_disabled_and_sorted_by_name() {
     let dir = tempfile::tempdir().unwrap();
@@ -378,17 +398,25 @@ async fn old_instance_exits_or_aborts_at_10s_before_new_instance_starts() {
     let inst1_alive = Arc::new(AtomicBool::new(false));
     let inst2_started = Arc::new(AtomicBool::new(false));
     let inst2_saw_inst1_alive = Arc::new(AtomicBool::new(false));
+    let inst1_ready = Arc::new(Notify::new());
+    let inst1_stop_seen = Arc::new(Notify::new());
+    let inst2_ready = Arc::new(Notify::new());
 
     let gen_cl = generation.clone();
     let inst1_alive_cl = inst1_alive.clone();
     let inst2_started_cl = inst2_started.clone();
     let inst2_saw_cl = inst2_saw_inst1_alive.clone();
+    let inst1_ready_cl = inst1_ready.clone();
+    let inst1_stop_seen_cl = inst1_stop_seen.clone();
+    let inst2_ready_cl = inst2_ready.clone();
 
     let reg = ComponentRegistration::new("im", move |_service| {
         let g = gen_cl.fetch_add(1, Ordering::SeqCst) + 1;
         if g == 1 {
             let alive = inst1_alive_cl.clone();
-            ComponentBuildOutcome::Component(PreparedComponent::new(move |_stop| async move {
+            let ready = inst1_ready_cl.clone();
+            let stop_seen = inst1_stop_seen_cl.clone();
+            ComponentBuildOutcome::Component(PreparedComponent::new(move |stop| async move {
                 struct AliveGuard(Arc<AtomicBool>);
                 impl Drop for AliveGuard {
                     fn drop(&mut self) {
@@ -397,7 +425,10 @@ async fn old_instance_exits_or_aborts_at_10s_before_new_instance_starts() {
                 }
                 alive.store(true, Ordering::Release);
                 let _guard = AliveGuard(alive);
-                // 故意忽略 stop 信号，永久挂起以验证 10 秒超时强制中止。
+                ready.notify_one();
+                stop.await;
+                stop_seen.notify_one();
+                // 收到停止信号后仍不退出，必须由停旧超时中止。
                 std::future::pending::<()>().await;
                 Ok(())
             }))
@@ -405,11 +436,13 @@ async fn old_instance_exits_or_aborts_at_10s_before_new_instance_starts() {
             let alive = inst1_alive_cl.clone();
             let started = inst2_started_cl.clone();
             let saw = inst2_saw_cl.clone();
+            let ready = inst2_ready_cl.clone();
             ComponentBuildOutcome::Component(PreparedComponent::new(move |stop| async move {
                 if alive.load(Ordering::Acquire) {
                     saw.store(true, Ordering::Release);
                 }
                 started.store(true, Ordering::Release);
+                ready.notify_one();
                 stop.await;
                 Ok(())
             }))
@@ -432,17 +465,40 @@ async fn old_instance_exits_or_aborts_at_10s_before_new_instance_starts() {
 
     let client = LocalClient::new(layout);
     wait_ready(&client).await;
-    remount_handle.wait_idle_for_test().await;
-    tokio::task::yield_now().await;
-    assert!(inst1_alive.load(Ordering::Acquire));
 
+    without_auto_advance("等待初始实例开始运行", async {
+        remount_handle.wait_idle_for_test().await;
+        inst1_ready.notified().await;
+    })
+    .await;
+    assert!(
+        inst1_alive.load(Ordering::Acquire),
+        "重新挂载前旧实例必须仍存活"
+    );
+
+    // 构造新实例与发出停止信号期间时钟保持不动，因此这一时刻就是停旧计时的起点。
+    let retire_started_at = tokio::time::Instant::now();
     let handle_reload = remount_handle.clone();
-    let reload_task = tokio::spawn(async move { handle_reload.remount().await });
+    let mut reload_task = tokio::spawn(async move { handle_reload.remount().await });
+
+    // 测试运行在 current-thread 运行时上：重新挂载在同一次 poll 内发出停止信号，
+    // 再创建并首次轮询 10 秒停旧计时器，中间没有让出点；旧实例要等这次 poll 结束才会运行。
+    // 因此测试收到“旧实例收到停止信号”的通知时，停旧计时器已经登记。
+    without_auto_advance("等待旧实例收到停止信号", inst1_stop_seen.notified()).await;
+    assert_eq!(
+        retire_started_at.elapsed(),
+        Duration::ZERO,
+        "停旧计时器登记前不得推进虚拟时钟"
+    );
 
     // 推进 9 秒：旧实例尚未到 10 秒超时，新实例绝不能提前启动。
-    tokio::task::yield_now().await;
     tokio::time::advance(Duration::from_secs(9)).await;
     tokio::task::yield_now().await;
+    assert_eq!(
+        retire_started_at.elapsed(),
+        Duration::from_secs(9),
+        "虚拟时钟只能前进显式指定的 9 秒"
+    );
     assert!(
         !reload_task.is_finished(),
         "未满 10 秒时重新挂载仍在等待旧实例"
@@ -451,20 +507,47 @@ async fn old_instance_exits_or_aborts_at_10s_before_new_instance_starts() {
         !inst2_started.load(Ordering::Acquire),
         "旧实例退出前不得启动新实例"
     );
+    assert!(
+        inst1_alive.load(Ordering::Acquire),
+        "未满 10 秒时挂起的旧实例必须仍存活"
+    );
 
-    // 再推进 1 秒到达精确 10 秒上限：旧实例被 abort 释放后新实例启动。
+    // 再推进 1 秒到达 10 秒上限：之后时钟保持不动，中止旧实例、启动新实例与返回结果都必须在这一刻完成。
     tokio::time::advance(Duration::from_secs(1)).await;
-    let res = reload_task.await.unwrap().unwrap();
-    assert_eq!(res, ImMountResult::Mounted);
-    assert!(inst2_started.load(Ordering::Acquire));
+    without_auto_advance("停旧满 10 秒后完成中止与重新挂载", async {
+        let res = (&mut reload_task)
+            .await
+            .expect("重新挂载任务不应异常终止")
+            .expect("重新挂载应成功");
+        assert_eq!(res, ImMountResult::Mounted, "重新挂载应返回已挂载");
+        // 返回 Mounted 与新实例真正开始运行分开检查。
+        inst2_ready.notified().await;
+    })
+    .await;
+    assert_eq!(
+        retire_started_at.elapsed(),
+        Duration::from_secs(10),
+        "中止旧实例、启动新实例与返回结果都必须在第 10 秒完成"
+    );
+    assert!(
+        !inst1_alive.load(Ordering::Acquire),
+        "到达 10 秒时旧实例必须已完成 Drop"
+    );
+    assert!(
+        inst2_started.load(Ordering::Acquire),
+        "到达 10 秒时新实例必须已开始运行"
+    );
     assert!(
         !inst2_saw_inst1_alive.load(Ordering::Acquire),
         "新实例启动时旧实例必须已经彻底退出并完成 Drop"
     );
 
-    stop_tx.send(()).await.unwrap();
-    let exit = handle.await.unwrap().unwrap();
-    assert!(exit.failure.is_none());
+    stop_tx.send(()).await.expect("发送后台停止请求");
+    let exit = handle
+        .await
+        .expect("后台任务不应异常终止")
+        .expect("后台应正常返回");
+    assert!(exit.failure.is_none(), "后台停机不应报告失败");
 }
 
 #[tokio::test]
