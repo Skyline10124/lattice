@@ -59,7 +59,7 @@ status: active
 `ResolvedRequest::check_request` 与每次 `ResolvedRequest::stream_chat` 发送前共用同一检查入口，在不读取图片原始字节、不发起网络请求的前提下按顺序核对：
 
 1. **请求目标与身份。** `ChatRequest.target` 与解析句柄的 `ModelTarget` 一致，且携带 `SessionId`（`client_request_id`）。
-2. **模型输入能力。** 请求消息（含历史重放与当前轮输入）包含用户 `Image` 片段时：目标模型合并后的 `input` 为 `Some(list)` 且不含 `image` 的，按不可重试的配置错误（`LlmError::Config`）拒绝，提示改用支持图片的模型或执行 `lattice session rewind` 退回不含图片的节点；`input` 为 `None`（元数据未知）时放行，由远端服务判定。
+2. **模型输入能力。** 请求消息（含历史重放与当前轮输入）包含用户 `Image` 片段时：目标模型合并后的 `input` 为 `Some(list)` 且不含 `image` 的，以不可重试的 `LlmError::UnsupportedInput` 拒绝（属于配置类拒绝，消息只含中文说明），提示改用支持图片的模型或执行 `lattice session rewind` 退回不含图片的节点；`input` 为 `None`（元数据未知）时放行，由远端服务判定。
 3. **本地请求体预算。** 构造目标协议 `RequestBody` 并经同源流式序列化器计算编码后的整包 JSON UTF-8 字节数，上限为 `MAX_MODEL_REQUEST_BYTES`（32 MiB，即 33,554,432 字节，含等于上限）。
 
 本地请求体预算与远端 `HTTP 413` 独立判定，两者均不可重试：

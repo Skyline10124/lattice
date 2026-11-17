@@ -3430,6 +3430,73 @@ fn user_image_item(
     ))
 }
 
+/// 按单轮上限构造的三轮含图历史，用于逼近 32 MiB 本地预算。
+///
+/// 每轮用户消息都经 `normalize_user_message` 构造，图片张数、单张与单轮总量都在上限之内；
+/// 不同图片用不同摘要，轮与轮之间是同来源的助手步骤。最后一轮在图片后附 `pad_len` 字节文本，
+/// 供测试按计长结果精确补齐。
+fn budget_history(seed: u8, pad_len: usize) -> Vec<lattice_conversation::ConversationItem> {
+    use lattice_conversation::{
+        ConversationItem, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MAX_USER_IMAGE_TOTAL_BYTES,
+        MessagePart, MessageRole, MessageSemantic, NativeMessage, Protocol, ProviderId,
+        ReplayOrigin, StepContent, normalize_user_message,
+    };
+
+    let mut next_image = 0u8;
+    let mut image = |byte_length: usize| {
+        next_image += 1;
+        let mut sha256 = [seed; 32];
+        sha256[0] = next_image;
+        MessageSemantic::Image {
+            image: ImageRef {
+                sha256,
+                media_type: ImageMediaType::Png,
+                byte_length: byte_length as u64,
+            },
+        }
+    };
+    let assistant_step = |text: &str| {
+        ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                Some(ReplayOrigin {
+                    protocol: Protocol::ChatCompletions,
+                    provider_id: ProviderId::parse("test").unwrap(),
+                }),
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: text.into(),
+                })],
+            ),
+            results: Vec::new(),
+        })
+    };
+    // 一轮取满单轮总量：3,932,160 + 3,932,160 + 2,621,440 = 10,485,760 字节。
+    let last_of_full_turn = MAX_USER_IMAGE_TOTAL_BYTES - 2 * MAX_IMAGE_BYTES;
+    let mut history = Vec::new();
+    for round in 1..=2 {
+        let message = normalize_user_message(vec![
+            MessageSemantic::Text {
+                text: format!("第 {round} 轮截图"),
+            },
+            image(MAX_IMAGE_BYTES),
+            image(MAX_IMAGE_BYTES),
+            image(last_of_full_turn),
+        ])
+        .expect("每轮图片都在单轮上限之内");
+        history.push(ConversationItem::Message(message));
+        history.push(assistant_step("已收到这一轮的截图"));
+    }
+    let last = normalize_user_message(vec![
+        image(MAX_IMAGE_BYTES),
+        MessageSemantic::Text {
+            text: "x".repeat(pad_len),
+        },
+    ])
+    .expect("最后一轮的图片与补齐文本都在单轮上限之内");
+    history.push(ConversationItem::Message(last));
+    history
+}
+
 #[tokio::test]
 async fn check_request_enforces_input_modalities_and_request_invariants() {
     use lattice_conversation::{
@@ -3481,21 +3548,30 @@ async fn check_request_enforces_input_modalities_and_request_invariants() {
         req
     };
 
-    // 1. Some([Text])（目录与手写）+ 当前轮含图：拒绝，Config，消息含模型名。
+    // 1. Some([Text])（目录与手写）+ 当前轮含图：拒绝，UnsupportedInput，消息含模型名。
     for model in ["catalog-text", "handwritten-text"] {
         let target = ModelTarget::test_target("test", model);
         let resolved = turn.resolve(&target).await.unwrap();
         let err = resolved
             .check_request(&make_req(model, vec![user_image_item(png_ref)]))
             .expect_err("不支持图片的模型遇到含图请求必须被拒绝");
-        assert_eq!(err.kind(), "config", "模态拒绝应分类为 config");
+        assert_eq!(
+            err.kind(),
+            "unsupported_input",
+            "模态拒绝应分类为 unsupported_input"
+        );
         assert!(!err.retryable(), "模态拒绝必须不可重试");
         let expected_msg = format!(
             "模型 test/{model} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点"
         );
         assert_eq!(
+            err.to_string(),
+            expected_msg,
+            "模态拒绝的最终显示只有中文说明（{model}）"
+        );
+        assert_eq!(
             err,
-            crate::LlmError::Config {
+            crate::LlmError::UnsupportedInput {
                 message: expected_msg
             },
             "模态拒绝消息应与合同一致（{model}）"
@@ -3529,7 +3605,7 @@ async fn check_request_enforces_input_modalities_and_request_invariants() {
             ))
             .expect_err("历史路径包含用户图片时纯文本模型必须拒绝");
         assert!(
-            matches!(history_err, crate::LlmError::Config { ref message } if message.contains(&format!("test/{model}"))),
+            matches!(history_err, crate::LlmError::UnsupportedInput { ref message } if message.contains(&format!("test/{model}"))),
             "历史含图拒绝应指出目标模型：{history_err:?}"
         );
     }
@@ -3598,10 +3674,6 @@ async fn check_request_enforces_input_modalities_and_request_invariants() {
 #[tokio::test]
 async fn check_request_enforces_exact_32_mib_local_request_budget() {
     use crate::protocol::encoding::MAX_MODEL_REQUEST_BYTES;
-    use lattice_conversation::{
-        ConversationItem, ImageMediaType, ImageRef, MessagePart, MessageRole, MessageSemantic,
-        NativeMessage,
-    };
 
     let directory = private_dir();
     configure(
@@ -3615,38 +3687,22 @@ async fn check_request_enforces_exact_32_mib_local_request_budget() {
     let target = ModelTarget::test_target("test", "model-id");
     let resolved = turn.resolve(&target).await.unwrap();
 
-    // 25_164_000 字节能被 3 整除，base64 编码后为 33_552_000 字节；计长不读取图片字节。
-    let big_image = ImageRef {
-        sha256: [0xabu8; 32],
-        media_type: ImageMediaType::Png,
-        byte_length: 25_164_000,
-    };
+    // 三轮合法含图历史逐轮累积到预算附近；计长不读取图片字节。
     let build_with_padding = |pad_len: usize| {
-        let mut req = ChatRequest::new(
-            vec![ConversationItem::Message(NativeMessage::new(
-                MessageRole::User,
-                None,
-                vec![
-                    MessagePart::semantic_only(MessageSemantic::Image { image: big_image }),
-                    MessagePart::semantic_only(MessageSemantic::Text {
-                        text: "x".repeat(pad_len),
-                    }),
-                ],
-            ))],
-            target.clone(),
-        );
+        let mut req = ChatRequest::new(budget_history(0xab, pad_len), target.clone());
         req.client_request_id = Some("session-budget".into());
         req
     };
 
+    // 空文本会被规范化删除，基准取 1 字节补齐文本；此后每多一个 `x`，编码长度多 1 字节。
     let base_len = resolved
-        .check_request(&build_with_padding(0))
+        .check_request(&build_with_padding(1))
         .expect("未超预算的基准请求应通过计长");
     assert!(
         base_len < MAX_MODEL_REQUEST_BYTES,
         "基准长度应小于 32 MiB 以便补齐：{base_len}"
     );
-    let exact_pad = MAX_MODEL_REQUEST_BYTES - base_len;
+    let exact_pad = 1 + (MAX_MODEL_REQUEST_BYTES - base_len);
 
     // 恰好等于 33_554_432 字节时放行。
     let exact_len = resolved
@@ -3679,10 +3735,7 @@ async fn check_request_enforces_exact_32_mib_local_request_budget() {
 #[tokio::test]
 async fn stream_chat_shares_preflight_without_reading_images_or_sending_http_on_rejection() {
     use crate::protocol::encoding::MAX_MODEL_REQUEST_BYTES;
-    use lattice_conversation::{
-        ConversationItem, ImageMediaType, ImageRef, MessagePart, MessageRole, MessageSemantic,
-        NativeMessage,
-    };
+    use lattice_conversation::ImageRef;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct CountingImageSource {
@@ -3757,8 +3810,8 @@ async fn stream_chat_shares_preflight_without_reading_images_or_sending_http_on_
         Err(err) => err,
     };
     assert!(
-        matches!(modality_err, crate::LlmError::Config { .. }),
-        "发送路径能力不符应返回 Config：{modality_err:?}"
+        matches!(modality_err, crate::LlmError::UnsupportedInput { .. }),
+        "发送路径能力不符应返回 UnsupportedInput：{modality_err:?}"
     );
     assert_eq!(
         source.reader_calls.load(Ordering::SeqCst),
@@ -3781,30 +3834,17 @@ async fn stream_chat_shares_preflight_without_reading_images_or_sending_http_on_
         .resolve(&ModelTarget::test_target("test", "vision"))
         .await
         .unwrap();
-    let big_image = ImageRef {
-        sha256: [0xcdu8; 32],
-        media_type: ImageMediaType::Png,
-        byte_length: 25_164_000,
-    };
     let make_budget_req = |pad: usize| {
         let mut req = ChatRequest::new(
-            vec![ConversationItem::Message(NativeMessage::new(
-                MessageRole::User,
-                None,
-                vec![
-                    MessagePart::semantic_only(MessageSemantic::Image { image: big_image }),
-                    MessagePart::semantic_only(MessageSemantic::Text {
-                        text: "x".repeat(pad),
-                    }),
-                ],
-            ))],
+            budget_history(0xcd, pad),
             ModelTarget::test_target("test", "vision"),
         );
         req.client_request_id = Some("session-2".into());
         req
     };
-    let base_len = vision.check_request(&make_budget_req(0)).unwrap();
-    let over_budget_req = make_budget_req(MAX_MODEL_REQUEST_BYTES - base_len + 1);
+    // 基准取 1 字节补齐文本（空文本会被规范化删除），再补到恰好超出预算 1 字节。
+    let base_len = vision.check_request(&make_budget_req(1)).unwrap();
+    let over_budget_req = make_budget_req(1 + (MAX_MODEL_REQUEST_BYTES - base_len) + 1);
     let budget_err = match vision
         .stream_chat(over_budget_req, source.clone(), StreamControl::default())
         .await

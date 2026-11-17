@@ -338,7 +338,7 @@ impl ResolvedRequest {
             && let Some(modalities) = &self.input
             && !modalities.contains(&lattice_conversation::InputModality::Image)
         {
-            return Err(LlmError::Config {
+            return Err(LlmError::UnsupportedInput {
                 message: format!(
                     "模型 {} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
                     self.target.model

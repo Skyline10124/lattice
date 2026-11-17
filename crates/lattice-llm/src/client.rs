@@ -581,6 +581,7 @@ pub(crate) fn redact_error_with(
         | LlmError::StreamRead { message }
         | LlmError::ProtocolLimit { message }
         | LlmError::RequestBudgetExceeded { message }
+        | LlmError::UnsupportedInput { message }
         | LlmError::Other(message) => *message = redact(message),
         LlmError::Projection(_) => {}
     }
