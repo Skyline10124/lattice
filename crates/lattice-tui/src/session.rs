@@ -433,12 +433,13 @@ mod tests {
         .unwrap()
     }
 
-    fn image_part_json(media_type: &str, byte_length: u64) -> Value {
+    /// 图片按内容寻址：同一摘要只对应一种媒体类型与长度，不同图片用不同的摘要种子。
+    fn image_part_json(digest_seed: char, media_type: &str, byte_length: u64) -> Value {
         json!({
             "semantic": {
                 "image": {
                     "image": {
-                        "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                        "sha256": digest_seed.to_string().repeat(64),
                         "media_type": media_type,
                         "byte_length": byte_length
                     }
@@ -467,7 +468,7 @@ mod tests {
             1,
             json!([
                 text_part_json("请看报错截图"),
-                image_part_json("png", 2048),
+                image_part_json('1', "png", 2048),
                 text_part_json("定位原因")
             ]),
         );
@@ -493,7 +494,7 @@ mod tests {
             2,
             json!([
                 text_part_json("第一行\n"),
-                image_part_json("jpeg", 1023),
+                image_part_json('2', "jpeg", 1023),
                 text_part_json("\n第二行")
             ]),
         );
@@ -508,7 +509,8 @@ mod tests {
 
     #[test]
     fn pure_image_user_message_renders_without_leading_or_trailing_spaces() {
-        let single_image = user_entry_from_parts(1, 1, 1, json!([image_part_json("webp", 1536)]));
+        let single_image =
+            user_entry_from_parts(1, 1, 1, json!([image_part_json('3', "webp", 1536)]));
         let single_blocks = entry_blocks(&single_image, true, None);
         assert_eq!(single_blocks.len(), 2);
         assert_eq!(
@@ -522,8 +524,8 @@ mod tests {
             2,
             2,
             json!([
-                image_part_json("png", 1024),
-                image_part_json("jpeg", 3_932_160)
+                image_part_json('4', "png", 1024),
+                image_part_json('5', "jpeg", 3_932_160)
             ]),
         );
         let two_blocks = entry_blocks(&two_images, true, None);
@@ -541,13 +543,19 @@ mod tests {
             1,
             1,
             1,
-            json!([image_part_json("png", 1024), image_part_json("gif", 512)]),
+            json!([
+                image_part_json('4', "png", 1024),
+                image_part_json('6', "gif", 512)
+            ]),
         );
         let second = user_entry_from_parts(
             3,
             2,
             2,
-            json!([text_part_json("再来一张"), image_part_json("jpeg", 4096)]),
+            json!([
+                text_part_json("再来一张"),
+                image_part_json('7', "jpeg", 4096)
+            ]),
         );
 
         let first_blocks = entry_blocks(&first, true, None);

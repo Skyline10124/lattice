@@ -87,7 +87,7 @@ pub enum ImagePlacementError {
         part: usize,
     },
     /// 图片片段携带了不透明回放状态。
-    #[error("第 {part} 个图片片段不能携带回放状态")]
+    #[error("第 {part} 个片段为图片，不能携带回放状态")]
     UnexpectedReplayState {
         /// 从 1 开始的片段序号。
         part: usize,
@@ -317,6 +317,6 @@ mod tests {
             ImagePlacementError::UnexpectedReplayState { part: 2 },
             "回放状态错误应返回从 1 开始的片段序号"
         );
-        assert_eq!(err.to_string(), "第 2 个图片片段不能携带回放状态");
+        assert_eq!(err.to_string(), "第 2 个片段为图片，不能携带回放状态");
     }
 }
