@@ -24,6 +24,7 @@ use super::{
         LocalErrorKind,
     },
 };
+use crate::local::test_support::without_auto_advance;
 
 async fn wait_ready(client: &LocalClient) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
@@ -41,26 +42,6 @@ async fn wait_ready(client: &LocalClient) {
 async fn wait_handles_idle(handles: &[ComponentRemountHandle]) {
     for handle in handles {
         handle.wait_idle_for_test().await;
-    }
-}
-
-/// 保持暂停的虚拟时钟不动，等待 `future` 完成；`stage` 用于在卡死时指出是哪一步。
-///
-/// 运行时空闲时，暂停的时钟会自动跳到下一个计时点。这里每轮只轮询一次再让出执行权，
-/// 运行时只做零超时的驱动轮询，时钟因此保持不动，阻塞线程与 I/O 照常推进。
-/// 真实时间 10 秒只用于报告卡死，不参与业务期限判断。
-async fn without_auto_advance<T>(stage: &str, future: impl std::future::Future<Output = T>) -> T {
-    let started = std::time::Instant::now();
-    tokio::pin!(future);
-    loop {
-        assert!(
-            started.elapsed() < Duration::from_secs(10),
-            "{stage}：固定模拟时刻等待超过十秒真实时间"
-        );
-        if let std::task::Poll::Ready(value) = futures::poll!(&mut future) {
-            return value;
-        }
-        tokio::task::yield_now().await;
     }
 }
 
