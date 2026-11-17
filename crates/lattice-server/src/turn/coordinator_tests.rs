@@ -43,7 +43,7 @@ fn input() -> AcceptTurn {
         session_id: sid(),
         turn_id: tid(1),
         project_path: ProjectPath::from_bytes(b"/coordinator-test".as_slice()).unwrap(),
-        input: "原始输入\n".into(),
+        input: TurnInput::text("原始输入\n".into()).expect("构造测试输入"),
         accepted_at: chrono::Utc::now(),
         config,
     }
@@ -617,7 +617,7 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         )
         .unwrap();
     let request = RunTurnRequest {
-        input: " original \n".into(),
+        input: TurnInput::text(" original \n".into()).expect("构造测试输入"),
         session_id,
         expected_settings: None,
         cancel_flag: None,
@@ -648,7 +648,12 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
     assert_eq!(llm.call_count(), 1);
     let read = store.begin_read().unwrap();
     assert_eq!(read.list(None, 100).unwrap().items.len(), 1);
-    assert_eq!(read.turn_input(sid, tid(9)).unwrap(), " original \n");
+    assert_eq!(
+        read.turn_input(sid, tid(9)).unwrap(),
+        vec![MessagePart::semantic_only(MessageSemantic::Text {
+            text: " original \n".into()
+        })]
+    );
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]

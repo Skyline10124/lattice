@@ -57,6 +57,7 @@ impl ModelExecution {
     async fn resolve(
         &mut self,
         target: &lattice_llm::ModelTarget,
+        images: &Arc<dyn lattice_llm::ImageSource>,
     ) -> (
         AttemptOrigin,
         std::result::Result<Arc<ModelStepDriver>, crate::config_rejection::ConfigRejection>,
@@ -70,7 +71,7 @@ impl ModelExecution {
                             last_origin.clone(),
                             Ok(Arc::new(ModelStepDriver::new(
                                 Arc::new(resolved),
-                                Arc::new(lattice_llm::NoImages),
+                                images.clone(),
                             ))),
                         )
                     }
@@ -162,6 +163,7 @@ pub(crate) async fn run_coordinator_saga(
     mut live: LiveExecution,
 ) -> Result<TurnDetail> {
     let session = coordinator.io.session_id();
+    let images = coordinator.io.image_source();
     let config = coordinator
         .io
         .read(move |read| read.turn_config(session, turn_id))
@@ -203,7 +205,7 @@ pub(crate) async fn run_coordinator_saga(
                 ),
                 effort: config.effort,
             };
-            let (origin, driver) = live.model.resolve(&target).await;
+            let (origin, driver) = live.model.resolve(&target, &images).await;
             live.healthy()?;
             if let Some(cause) = live.stop() {
                 let closed = coordinator
@@ -724,12 +726,13 @@ mod resolution_tests {
         );
         let initial = turn.resolve(&target).await.unwrap();
         let mut execution = ModelExecution::gateway(turn, &initial);
+        let images: Arc<dyn lattice_llm::ImageSource> = Arc::new(lattice_llm::NoImages);
         configure("generate-content");
-        let (latest, ready) = execution.resolve(&target).await;
+        let (latest, ready) = execution.resolve(&target, &images).await;
         assert!(ready.is_ok());
         assert_eq!(latest.protocol, AttemptProtocol::GenerateContent);
         std::fs::write(path, "invalid configuration").unwrap();
-        let (failed, request) = execution.resolve(&target).await;
+        let (failed, request) = execution.resolve(&target, &images).await;
         assert!(
             request
                 .err()

@@ -6,7 +6,7 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../../governance/charter.md)、[宿主平台](../platform.md)
-> 决策记录：[ADR 0006](../../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0007](../../adr/0007-session-tree-as-single-authority.md)、[ADR 0008](../../adr/0008-backend-api-commands-view-queries.md)、[ADR 0010](../../adr/0010-protocol-adapters-and-configured-providers.md)、[ADR 0012](../../adr/0012-backend-owns-session-settings.md)
+> 决策记录：[ADR 0006](../../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0007](../../adr/0007-session-tree-as-single-authority.md)、[ADR 0008](../../adr/0008-backend-api-commands-view-queries.md)、[ADR 0010](../../adr/0010-protocol-adapters-and-configured-providers.md)、[ADR 0012](../../adr/0012-backend-owns-session-settings.md)、[ADR 0013](../../adr/0013-user-image-input.md)
 
 ## 目的与范围
 
@@ -26,14 +26,14 @@ Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，
 
 会话历史是一棵树。一个会话里发生过什么，以树上的节点为唯一权威：后台为这个会话提交的每一件事都写在节点上，其他表是节点的一部分、指针，或从节点得出的索引。节点有两种：
 
-- **UserMessage**：一条用户输入。一个 Turn 从它的 UserMessage 开始。接受这一轮时确定的事实也记在这个节点上：`turn_id`、接受时间、agent 名、模型、provider、推理档位和执行限制。体积大的系统提示与工具目录放在配置表，节点只记它们的内容摘要，见[表、读取范围与 rewind](#表读取范围与-rewind)。
+- **UserMessage**：一条用户输入，按规范化后的片段顺序保存文字与内容寻址图片引用（`ImageRef`）；图片原始字节保存在 `blobs` 表，见[对话数据与模型投影](conversation.md#用户图片与单轮输入规范化)。一个 Turn 从它的 UserMessage 开始。接受这一轮时确定的事实也记在这个节点上：`turn_id`、接受时间、agent 名、模型、provider、推理档位和执行限制。体积大的系统提示与工具目录放在配置表，节点只记它们的内容摘要，见[表、读取范围与 rewind](#表读取范围与-rewind)。
 - **Step**：这一轮的一个模型步骤。它记录这一步的各次模型请求（称为尝试）、得到的模型回复、回复发出的各个工具调用及其结果（每个调用一个槽位）、这一步怎么结束，以及最后一次推进的时间。
 
 每个 Session 建立时写入根节点 `0`：它没有内容、不属于任何 Turn，代表空对话，树始终只有这一个根。其他节点记录父节点和所属 `turn_id`，Step 节点另记它是这一轮的第几步。节点身份 NodeId 是每个 Session 内单调递增的 `u64`，写入节点时分配，第一条 UserMessage 为 `1`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`，用户可以直接输入序号。**当前位置**是 Session 记录中的一个 NodeId：新节点以当前位置为父，写入后当前位置前移到新节点。
 
 父子关系只表示先后：子节点接在父节点之后。节点属于哪个 Turn、是第几步，由节点上的 `turn_id` 和步骤序号表达，不由树形表达。所以一个 Turn 在树上是相连的一段：它的 UserMessage，后面依次是它的各个 Step，节点序号连续。树上的分叉只由 `rewind` 产生，表示同一位置之后的另一种后续。
 
-消息内容由有序片段组成：文字、模型推理内容（reasoning）、工具调用请求（ToolCall）或调用结果（ToolResult）。ToolCall 说明要使用哪个工具和参数；ToolResult 记录执行结果与返回内容。一次工具调用以 `InvocationId` 标识，一个 Step 可以包含多次调用，一个 Turn 可以包含多个 Step。
+消息内容由有序片段组成：文字、图片引用（`Image`，仅用于 User 消息）、模型推理内容（reasoning）、工具调用请求（ToolCall）或调用结果（ToolResult）。ToolCall 说明要使用哪个工具和参数；ToolResult 记录执行结果与返回内容。一次工具调用以 `InvocationId` 标识，一个 Step 可以包含多次调用，一个 Turn 可以包含多个 Step。
 
 #### 预留、progress 与结论
 
@@ -72,8 +72,9 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | Session 记录 | `SessionId` | 身份、项目绑定（`ProjectPath`）、创建与更新时间；当前位置这个指针 | `configure(New)` 建立时写入；当前位置随节点写入和 `rewind` 移动，更新时间随 `configure` 与接受事务刷新 |
 | 会话设置 | `SessionId` | 会话的有效 profile、内联保存的系统提示（上限 2 MiB）、可选的模型（`ModelRef`）与可选推理档位（`Effort`），见[会话设置](settings.md) | `configure(New)` 创建会话时写入，之后由 `configure(Existing)` 更新；接受事务与 `rewind` 不修改 |
 | InvocationId 索引 | `InvocationId` | 调用所在的 Step 与片段位置 | 登记调用时写入 |
+| 图片字节（`blobs`） | 64 位小写十六进制 SHA-256 | 4 字节格式版本头加原始图片字节，由 UserMessage 中的 `ImageRef` 引用；相同摘要只存一份 | 接受事务在写入 UserMessage 前按摘要去重只追加写入；`delete_draft` 与 `rewind` 不回收 |
 
-一轮的结局、notice、usage 汇总和结束时间都从它的 Step 节点得出，见[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)。配置表以内容摘要为键，键由内容算出，不会与引用它的节点不一致。TurnId 索引与 InvocationId 索引是派生记录，与节点在同一事务中更新。
+一轮的结局、notice、usage 汇总和结束时间都从它的 Step 节点得出，见[关闭 Step 与 Turn](steps.md#关闭-step-与-turn)。配置表与图片字节表以内容摘要为键，键由内容算出，不会与引用它的节点不一致。视图推送（`ConversationEntry`）、对话分页读取与 `session log` 只读取 `nodes` 中的 `ImageRef` 引用，不读取 `blobs` 表；仅在向模型发送请求编码时才经会话库按需借用原始图片字节。TurnId 索引与 InvocationId 索引是派生记录，与节点在同一事务中更新。
 
 模型上下文与视图读取的对话只有一种范围：从根到 Session 当前位置的路径。发给模型的上下文取这条路径上的 UserMessage 和已有回复的 Step；没有回复的 Step 不发给 provider，对话条目照常给出。根节点 `0` 不含内容，不发给 provider。要让模型上下文与当前视图换到其他分叉上的对话，先 `rewind` 到那里；历史查询按 `before` 的父链读取，不受当前位置限制，见[观察与重连](recovery.md#观察与重连)。
 
@@ -94,7 +95,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 | 执行协调 TurnCoordinator | 推进一次 Turn：请求模型、组织工具调用、把每一步进度写入会话库，最后关闭 Step 与 Turn |
 | 模型驱动 ModelStepDriver / LLM | 接收对话和本次配置，请求模型，将响应交回 TurnCoordinator |
 | 工具执行 ToolExecutor | 接收已登记的工具调用，执行后向 TurnCoordinator 返回执行结局与载荷 |
-| 会话库 `lattice-session` | 保存 Session 记录、会话树、会话设置、配置表、TurnId 索引与 InvocationId 索引；每次推进是一个事务 |
+| 会话库 `lattice-session` | 保存 Session 记录、会话树、会话设置、配置表、图片字节表 `blobs`、TurnId 索引与 InvocationId 索引；每次推进是一个事务 |
 
 前端负责用户交互，LocalClient 负责操作交付与连接，后台负责任务生命周期与视图，TurnCoordinator 负责持久执行流程，会话库负责事实的保存与一致性。[实现模块与公开操作](operations.md#实现模块与公开操作)进一步说明各 crate 和操作接口。
 

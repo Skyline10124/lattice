@@ -6,14 +6,14 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 use lattice_conversation::SessionId;
-use lattice_session::store::{SettingsVersion, TurnDetail};
+use lattice_session::store::{SettingsVersion, TurnDetail, TurnInput};
 #[cfg(test)]
 use lattice_session::store::{TurnSummary, UsageSummary};
 
 /// 执行核心的冻结输入；会话设置由会话库持有，请求配置与凭据由后台网关读取。
 #[derive(Clone)]
 pub struct RunTurnRequest {
-    pub input: String,
+    pub input: TurnInput,
     pub session_id: SessionId,
     pub expected_settings: Option<SettingsVersion>,
     pub cancel_flag: Option<Arc<AtomicBool>>,

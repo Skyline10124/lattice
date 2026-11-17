@@ -14,7 +14,7 @@
 | `src/hex_digest.rs` | 固定 32 字节摘要与 64 位小写十六进制字符串的私有 serde 编解码，供 `tool_call`、`result` 与 `image` 共用 |
 | `src/effort.rs` | 推理档位 `Effort` 解析与排序 |
 | `src/input_modality.rs` | 模型输入模态 `InputModality`（`text`、`image`、`audio`、`video`）严格解析与序列化 |
-| `src/image.rs` | 图片媒体类型魔数识别 `ImageMediaType`、内容寻址引用 `ImageRef` 与消息图片位置核验 `validate_image_placement` |
+| `src/image.rs` | 图片媒体类型魔数识别 `ImageMediaType`、内容寻址引用 `ImageRef`（含 `ImageRef::from_bytes` 与 `ImageBytesError`）及消息图片位置核验 `validate_image_placement` |
 | `src/user_input.rs` | 单轮用户输入的上限校验与保序规范化 `normalize_user_message` 及 `UserInputError` |
 | `src/model_selection.rs` | `ProviderId`、`ModelId`、`ModelRef` 构造与字符、长度校验 |
 | `src/message.rs` | 有序 `NativeMessage<ToolCallState>`、`MessagePart`、`MessageSemantic`（含 `Image`）、回放来源 `ReplayOrigin` 与 64 KiB `OpaqueProviderState` |

@@ -15,7 +15,8 @@ pub(super) const NODES: TableDefinition<&[u8], &[u8]> = TableDefinition::new("no
 pub(super) const CONFIGS: TableDefinition<&str, &[u8]> = TableDefinition::new("configs");
 pub(super) const TURN_INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("turn_index");
 pub(super) const INDEX: TableDefinition<&str, &[u8]> = TableDefinition::new("invocation_index");
-pub(super) const VERSION: u32 = 9;
+pub(super) const BLOBS: TableDefinition<&str, &[u8]> = TableDefinition::new("blobs");
+pub(super) const VERSION: u32 = 10;
 
 pub(super) fn attach_path<T>(path: &std::path::Path, result: Result<T>) -> Result<T> {
     result.map_err(|err| match err {
@@ -143,6 +144,18 @@ pub(super) fn config_key(digest: &[u8; 32]) -> String {
 pub(super) fn decode_config_key(key: &str) -> Result<[u8; 32]> {
     hex_digest::decode_hex(key).ok_or_else(|| corrupt("configs", "key", "invalid config digest"))
 }
+pub(super) fn blob_key(digest: &[u8; 32]) -> String {
+    hex_digest::encode_hex(digest)
+}
+pub(super) fn decode_blob_key(key: &str) -> Result<[u8; 32]> {
+    hex_digest::decode_hex(key).ok_or_else(|| corrupt("blobs", "key", "图片摘要键格式无效"))
+}
+pub(super) fn encode_blob(bytes: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(4 + bytes.len());
+    out.extend_from_slice(&VERSION.to_be_bytes());
+    out.extend_from_slice(bytes);
+    out
+}
 pub(super) fn table_error(e: redb::TableError) -> StoreError {
     match e {
         redb::TableError::Storage(e) => StoreError::Storage(e),
@@ -152,6 +165,12 @@ pub(super) fn table_error(e: redb::TableError) -> StoreError {
             "missing table or incompatible table type",
         ),
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct BlobMeta {
+    pub media_type: lattice_conversation::ImageMediaType,
+    pub byte_length: u64,
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -164,6 +183,7 @@ pub(super) struct Records {
     pub configs: BTreeMap<[u8; 32], StoredTurnConfig>,
     pub turn_index: BTreeMap<TurnId, NodeRef>,
     pub index: BTreeMap<InvocationId, InvocationIndexEntry>,
+    pub blobs: BTreeMap<[u8; 32], BlobMeta>,
 }
 
 // 两种事务的 open_table 返回类型不同；宏共用固定的领域表读取。
@@ -242,6 +262,24 @@ macro_rules! load_records {
             r.index
                 .insert(id, decode("invocation_index", k.value(), v.value())?);
         }
+        for entry in $tx.open_table(BLOBS).map_err(table_error)?.iter()? {
+            let (k, v) = entry?;
+            let key_str = k.value();
+            let digest = decode_blob_key(key_str)?;
+            let raw = payload("blobs", key_str, v.value())?;
+            let image = lattice_conversation::ImageRef::from_bytes(raw)
+                .map_err(|err| corrupt("blobs", key_str, &format!("图片载荷无效：{err}")))?;
+            if image.sha256 != digest {
+                return Err(corrupt("blobs", key_str, "图片摘要与键不匹配"));
+            }
+            r.blobs.insert(
+                digest,
+                BlobMeta {
+                    media_type: image.media_type,
+                    byte_length: image.byte_length,
+                },
+            );
+        }
         Ok(r)
     }};
 }
@@ -268,6 +306,7 @@ pub(super) fn initialize(tx: &redb::WriteTransaction) -> Result<()> {
     tx.open_table(CONFIGS).map_err(table_error)?;
     tx.open_table(TURN_INDEX).map_err(table_error)?;
     tx.open_table(INDEX).map_err(table_error)?;
+    tx.open_table(BLOBS).map_err(table_error)?;
     Ok(())
 }
 

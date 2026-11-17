@@ -68,6 +68,10 @@ impl CoordinatorStoreIo {
         self.lock.session_id()
     }
 
+    pub(crate) fn image_source(&self) -> Arc<dyn lattice_llm::ImageSource> {
+        Arc::new(super::images::SessionImages::new(self.api.clone()))
+    }
+
     async fn write<T: Send + 'static>(
         &self,
         operation: impl FnOnce(

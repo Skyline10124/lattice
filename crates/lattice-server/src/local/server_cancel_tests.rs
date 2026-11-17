@@ -720,7 +720,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 session_id: sid,
                 turn_id: id,
                 project_path: project,
-                input: "seed".into(),
+                input: TurnInput::text("seed".into()).expect("构造测试输入"),
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
@@ -1921,24 +1921,27 @@ async fn dispatch_submit_without_submitter_is_an_internal_error() {
 #[tokio::test]
 async fn invalid_request_is_rejected_before_claiming_session() {
     let (dir, backend, client, task) = backend().await;
-    config(dir.path(), "http://127.0.0.1:1/v1");
-    let mut input = create_request(&client, dir.path()).await;
-    input.input = "x".repeat(2 * 1024 * 1024 + 1);
-    let sid = input.session;
-    let (entered, release) = arm(&backend.gates.registered);
-    let submitting = {
-        let client = client.clone();
-        invalid(dir.path());
-        tokio::spawn(async move { client.submit(input).await })
-    };
-    tokio::select! {
-        result = submitting => assert_eq!(result.unwrap().unwrap_err().kind, LocalErrorKind::BadRequest),
-        _ = entered => {
-            release.send(()).unwrap();
-            panic!("无效输入占住了 Session 槽位");
+    for bad_input in [String::new(), "x".repeat(2 * 1024 * 1024 + 1)] {
+        config(dir.path(), "http://127.0.0.1:1/v1");
+        let mut input = create_request(&client, dir.path()).await;
+        input.input = bad_input;
+        let sid = input.session;
+        let (entered, release) = arm(&backend.gates.registered);
+        let submitting = {
+            let client = client.clone();
+            invalid(dir.path());
+            tokio::spawn(async move { client.submit(input).await })
+        };
+        tokio::select! {
+            result = submitting => assert_eq!(result.unwrap().unwrap_err().kind, LocalErrorKind::BadRequest),
+            _ = entered => {
+                release.send(()).unwrap();
+                panic!("无效输入占住了 Session 槽位");
+            }
         }
+        drop(lock(&backend.gates.registered).take());
+        assert!(!lock(&backend.admission).sessions.contains_key(&sid));
     }
-    assert!(!lock(&backend.admission).sessions.contains_key(&sid));
     finish(&backend, task).await;
 }
 

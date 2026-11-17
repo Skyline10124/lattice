@@ -247,7 +247,7 @@ async fn execute_owned(
                     super::saga::ModelExecution::Injected {
                         driver: Arc::new(lattice_agent::ModelStepDriver::new(
                             client,
-                            Arc::new(lattice_llm::NoImages),
+                            coordinator.io.image_source(),
                         )),
                         origin,
                     },

@@ -46,7 +46,7 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
                 session_id: sid,
                 turn_id: tid,
                 project_path,
-                input: "原始输入".into(),
+                input: TurnInput::text("原始输入".into()).expect("构造测试输入"),
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,

@@ -6,8 +6,8 @@
 use thiserror::Error;
 
 use crate::{
-    BoundToolCall, MAX_IMAGE_BYTES, MAX_USER_IMAGE_TOTAL_BYTES, MAX_USER_IMAGES_PER_TURN,
-    MAX_USER_TEXT_BYTES, MessagePart, MessageRole, MessageSemantic, NativeMessage,
+    BoundToolCall, MAX_USER_IMAGE_TOTAL_BYTES, MAX_USER_IMAGES_PER_TURN, MAX_USER_TEXT_BYTES,
+    MessagePart, MessageRole, MessageSemantic, NativeMessage, image::is_valid_image_length,
 };
 
 /// 单轮用户输入校验或规范化失败原因。
@@ -35,6 +35,12 @@ pub enum UserInputError {
         image: usize,
         /// 该图片的原始字节长度。
         actual: u64,
+    },
+    /// 图片文件头魔数不属于受支持的格式。
+    #[error("第 {image} 张图片不是受支持的格式，仅支持 PNG、JPEG、WebP、GIF")]
+    UnsupportedImageFormat {
+        /// 从 1 开始的图片序号。
+        image: usize,
     },
     /// 单轮图片张数超过上限。
     #[error("单轮图片为 {actual} 张，不能超过 8 张")]
@@ -85,9 +91,7 @@ pub fn normalize_user_message(
             image_count = image_count
                 .checked_add(1)
                 .ok_or(UserInputError::TooManyImages { actual: usize::MAX })?;
-            let valid_len = usize::try_from(image.byte_length)
-                .is_ok_and(|len| len > 0 && len <= MAX_IMAGE_BYTES);
-            if !valid_len {
+            if !is_valid_image_length(image.byte_length) {
                 return Err(UserInputError::InvalidImageLength {
                     image: image_count,
                     actual: image.byte_length,
@@ -154,8 +158,8 @@ pub fn normalize_user_message(
 mod tests {
     use super::*;
     use crate::{
-        ImageMediaType, ImageRef, InvocationId, ModelMessageAddress, SessionId, ToolCallAddress,
-        TurnId, UnboundToolCall,
+        ImageMediaType, ImageRef, InvocationId, MAX_IMAGE_BYTES, ModelMessageAddress, SessionId,
+        ToolCallAddress, TurnId, UnboundToolCall,
     };
 
     fn img(tag: u8, byte_length: u64) -> ImageRef {

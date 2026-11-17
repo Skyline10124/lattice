@@ -4,8 +4,8 @@
 use super::*;
 use super::{codec::*, local::Selection};
 use lattice_conversation::{
-    CostEstimate, ModelAttemptKey, ModelId, ProviderId, TokenUsage, ToolResultOutcome,
-    UsageCompleteness,
+    BoundToolCall, CostEstimate, MessagePart, ModelAttemptKey, ModelId, ProviderId, TokenUsage,
+    ToolResultOutcome, UsageCompleteness,
 };
 
 #[derive(serde::Deserialize)]
@@ -524,9 +524,24 @@ impl SessionRead {
             .turn_config(session, turn)
     }
 
-    pub fn turn_input(&self, session: SessionId, turn: TurnId) -> Result<String> {
+    pub fn turn_input(
+        &self,
+        session: SessionId,
+        turn: TurnId,
+    ) -> Result<Vec<MessagePart<BoundToolCall>>> {
         self.local(session, Selection::Turn(turn))?
             .turn_input(session, turn)
+    }
+
+    /// 借出一张图片的原始字节并调用一次 `consume`；字节只在回调内有效。
+    pub fn with_blob<T>(&self, digest: &[u8; 32], consume: impl FnOnce(&[u8]) -> T) -> Result<T> {
+        let key = blob_key(digest);
+        let table = self.tx.open_table(BLOBS).map_err(table_error)?;
+        let guard = table
+            .get(key.as_str())?
+            .ok_or_else(|| corrupt("blobs", &key, "引用的图片字节不存在"))?;
+        let bytes = attach_path(&self.path, payload("blobs", &key, guard.value()))?;
+        Ok(consume(bytes))
     }
 
     pub fn stored_config(&self, digest: &[u8; 32]) -> Result<StoredTurnConfig> {

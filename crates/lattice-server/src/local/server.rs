@@ -1014,20 +1014,17 @@ impl Backend {
         if record.project_path != workspace.project_path() {
             return Err(conflict(ConflictReason::BindingMismatch));
         }
-        {
+        let input = {
             let mut state = lock(&self.admission);
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            if request.input.len() > lattice_conversation::MAX_USER_TEXT_BYTES {
-                return Err(LocalError::new(
-                    LocalErrorKind::BadRequest,
-                    "invalid Turn request",
-                ));
-            }
+            let input = lattice_session::store::TurnInput::text(request.input)
+                .map_err(|_| LocalError::new(LocalErrorKind::BadRequest, "invalid Turn request"))?;
             state.sessions.insert(sid, owner.clone());
             owner.observer.owner_changed();
-        }
+            input
+        };
         #[cfg(feature = "test-crash-barriers")]
         crate::turn::crash_barrier::schedule(
             "admission_registered",
@@ -1073,7 +1070,7 @@ impl Backend {
             shutdown,
             observer: owner.observer.clone(),
             request: RunTurnRequest {
-                input: request.input,
+                input,
                 session_id: sid,
                 expected_settings: request.expected_settings,
                 cancel_flag: Some(owner.execution_cancel.clone()),
