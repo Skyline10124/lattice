@@ -65,6 +65,25 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
         .await
         .expect("局部调度超时")
 }
+/// 保持暂停的虚拟时钟不动，等待 `future` 完成。
+///
+/// 运行时空闲时，暂停的时钟会自动跳到下一个计时点，跳多远取决于阻塞线程与真实 I/O 的完成顺序。
+/// 这里每轮只轮询一次再让出执行权，运行时只做零超时的驱动轮询，时钟因此保持不动，
+/// 阻塞线程与 I/O 照常推进。真实时间只用作卡死时的失败期限。
+async fn without_auto_advance<T>(future: impl std::future::Future<Output = T>) -> T {
+    tokio::pin!(future);
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if let std::task::Poll::Ready(value) = futures::poll!(future.as_mut()) {
+            return value;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "保持虚拟时钟不动时等待测试事件超时"
+        );
+        tokio::task::yield_now().await;
+    }
+}
 pub(in crate::local) struct Provider {
     pub(in crate::local) endpoint: String,
     pub(super) arrived: oneshot::Receiver<()>,
@@ -2546,31 +2565,55 @@ async fn final_release_and_socket_removal_share_the_shutdown_deadline() {
 
 #[tokio::test(start_paused = true)]
 async fn tail_deadlines_bound_idle_connection_and_hung_metadata_at_five_seconds() {
-    // 1. 不发请求的空闲连接占着 socket：同步到连接收尾尾段起点后，虚拟时间 5 秒起、10 秒读帧超时前返回。
-    {
-        let (configured, armed) = serve_configured(
-            Duration::from_secs(60),
-            None,
-            Some(|gates| &gates.listener_close),
-        )
-        .await;
-        let (close_entered, close_release) = armed.expect("armed listener_close gate");
-        while configured.client.status().await.is_err() {
-            tokio::task::yield_now().await;
-        }
-        let _idle_stream = lattice_local::test_support::connect(configured.layout.clone())
-            .await
-            .expect("建立不发请求的连接");
-        configured
-            .client
-            .status()
-            .await
-            .expect("确认空闲连接已被 accept 循环接纳");
+    use tokio::io::AsyncReadExt;
 
-        configured.stop.send(()).await.unwrap();
-        close_entered.await.expect("同步到连接收尾尾段起点");
-        let started = tokio::time::Instant::now();
-        close_release.send(()).unwrap();
+    // 1. 不发请求的空闲连接占着 socket：准备阶段冻结虚拟时钟，空闲连接的 10 秒读帧期限因此落在
+    //    收尾开始后 10 秒；serve 登记 5 秒连接收尾计时器后才推进时钟，5 秒期限到达时 abort 空闲连接并返回。
+    {
+        let (configured, mut idle_stream, started) = without_auto_advance(async {
+            let (configured, armed) = serve_configured(
+                Duration::from_secs(60),
+                None,
+                Some(|gates| &gates.listener_close),
+            )
+            .await;
+            let (close_entered, close_release) = armed.expect("连接收尾闸门应已安装");
+            while configured.client.status().await.is_err() {
+                tokio::task::yield_now().await;
+            }
+            let connected_at = tokio::time::Instant::now();
+            let idle_stream = lattice_local::test_support::connect(configured.layout.clone())
+                .await
+                .expect("建立不发请求的连接");
+            configured
+                .client
+                .status()
+                .await
+                .expect("确认空闲连接已被 accept 循环接纳");
+
+            let mut closed = configured.backend.closed.subscribe();
+            configured.stop.send(()).await.expect("发送停机信号");
+            close_entered.await.expect("同步到连接收尾尾段起点");
+            let started = tokio::time::Instant::now();
+            assert_eq!(started, connected_at, "准备阶段不应推进虚拟时钟");
+
+            close_release.send(()).expect("放行连接收尾");
+            // 测试运行在 current-thread 运行时上；serve 在放行 `listener_close` 闸门后的同一次 poll 内
+            // 依次执行 `closed.send_replace(true)`、`drop(listener)`，再创建并首次轮询 5 秒 `timeout`，
+            // 中间没有让出点。因此测试观察到 `closed` 为 `true` 时，计时器已经按冻结的时钟登记，
+            // 期限为 `started + 5s`。
+            closed
+                .wait_for(|closed| *closed)
+                .await
+                .expect("后台应进入连接收尾等待");
+            assert_eq!(
+                tokio::time::Instant::now(),
+                started,
+                "登记连接收尾计时器前不应推进虚拟时钟"
+            );
+            (configured, idle_stream, started)
+        })
+        .await;
 
         tokio::time::advance(Duration::from_millis(4_900)).await;
         tokio::task::yield_now().await;
@@ -2582,8 +2625,8 @@ async fn tail_deadlines_bound_idle_connection_and_hung_metadata_at_five_seconds(
         let outcome = tokio::time::timeout(Duration::from_secs(2), configured.serving)
             .await
             .expect("连接收尾应在 5 秒期限到达后立即返回，不等待 10 秒读帧超时")
-            .unwrap()
-            .unwrap();
+            .expect("serve 任务不应异常终止")
+            .expect("serve 应正常完成收尾");
         let elapsed = started.elapsed();
         assert!(
             elapsed >= Duration::from_secs(5) && elapsed < Duration::from_secs(10),
@@ -2597,21 +2640,35 @@ async fn tail_deadlines_bound_idle_connection_and_hung_metadata_at_five_seconds(
                 .join("local/api.sock")
                 .exists()
         );
+        // 5 秒期限到达后后台 abort 了连接任务，空闲连接应读到 EOF；时钟保持不动，读帧超时无法代为关闭连接。
+        let mut byte = [0_u8; 1];
+        let read = without_auto_advance(idle_stream.read(&mut byte))
+            .await
+            .expect("读取空闲连接的关闭结果");
+        assert_eq!(read, 0, "连接尾段到期后空闲连接应被关闭");
     }
 
-    // 2. 元数据收尾 gate 永不放行：同步到元数据尾段起点后，虚拟时间 5 秒起继续收尾并返回。
+    // 2. 元数据收尾 gate 永不放行：准备阶段冻结虚拟时钟，从发送停机起计时；5 秒期限到达后继续收尾并返回。
     {
-        let (configured, armed) = serve_configured(
-            Duration::from_secs(60),
-            None,
-            Some(|gates| &gates.metadata_drain),
-        )
+        let (configured, _never_release, started) = without_auto_advance(async {
+            let (configured, armed) = serve_configured(
+                Duration::from_secs(60),
+                None,
+                Some(|gates| &gates.metadata_drain),
+            )
+            .await;
+            let (meta_entered, never_release) = armed.expect("元数据收尾闸门应已安装");
+            let started = tokio::time::Instant::now();
+            configured.stop.send(()).await.expect("发送停机信号");
+            meta_entered.await.expect("同步到元数据收尾尾段起点");
+            assert_eq!(
+                started.elapsed(),
+                Duration::ZERO,
+                "进入元数据收尾闸门前不应推进虚拟时钟"
+            );
+            (configured, never_release, started)
+        })
         .await;
-        let (meta_entered, _never_release) = armed.expect("armed metadata_drain gate");
-
-        configured.stop.send(()).await.unwrap();
-        meta_entered.await.expect("同步到元数据收尾尾段起点");
-        let started = tokio::time::Instant::now();
 
         tokio::time::advance(Duration::from_millis(4_900)).await;
         tokio::task::yield_now().await;
