@@ -5951,6 +5951,7 @@ fn turn_input_validates_limits_deduplicates_blobs_preserves_order_and_redacts_de
 
     // 重复图片保留每次出现并只存一份字节，相邻非空文本合并、空文本剔除。
     let secret_bytes = png_bytes(b"SENSITIVE_RAW_PIXEL_MARKER");
+    let secret_array = format!("{secret_bytes:?}");
     let expected_ref = ImageRef::from_bytes(&secret_bytes).unwrap();
     let input = TurnInput::new(vec![
         TurnInputPart::Text { text: "".into() },
@@ -5995,6 +5996,11 @@ fn turn_input_validates_limits_deduplicates_blobs_preserves_order_and_redacts_de
     assert!(
         !debug.contains("SENSITIVE_RAW_PIXEL_MARKER"),
         "Debug 输出不得包含图片原始字节内容：{debug}"
+    );
+    // 派生的 Debug 会把字节映射按十进制数组输出，标记文本检查不出来，所以另外核对数组形式。
+    assert!(
+        !debug.contains(&secret_array),
+        "Debug 输出不得包含图片原始字节数组：{debug}"
     );
     assert!(debug.contains("TurnInput"));
     assert_eq!(expected_ref.media_type, ImageMediaType::Png);
