@@ -16,6 +16,9 @@ use crate::image_source::{no_images_reader, short_image_digest};
 use crate::protocol::projection::ProjectionError;
 use crate::{ImageReader, LlmError};
 
+/// 后台单次模型 HTTP 请求体的本地内存预算，五种协议统一适用，不代表远端服务的上限。
+pub(crate) const MAX_MODEL_REQUEST_BYTES: usize = 33_554_432;
+
 /// 协议请求体的同源表示：顶层非消息字段按字典序存放，消息列表在对应键位流式插入。
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct RequestBody {
@@ -39,6 +42,12 @@ impl RequestBody {
             list_key,
             items,
         }
+    }
+
+    pub(crate) fn has_user_images(&self) -> bool {
+        self.items
+            .iter()
+            .any(|item| matches!(item, WireItem::UserImages(_)))
     }
 }
 

@@ -105,6 +105,7 @@ impl ProtocolParser {
         }
     }
 
+    #[cfg(test)]
     fn protocol(&self) -> Protocol {
         match self {
             Self::ChatCompletions(_) => Protocol::ChatCompletions,
@@ -115,6 +116,7 @@ impl ProtocolParser {
         }
     }
 
+    #[cfg(test)]
     fn request_body(
         &self,
         request: &ChatRequest,
@@ -578,6 +580,7 @@ pub(crate) fn redact_error_with(
         | LlmError::ProviderHttp { message, .. }
         | LlmError::StreamRead { message }
         | LlmError::ProtocolLimit { message }
+        | LlmError::RequestBudgetExceeded { message }
         | LlmError::Other(message) => *message = redact(message),
         LlmError::Projection(_) => {}
     }
@@ -743,13 +746,9 @@ pub(crate) struct RequestEndpoint<'a> {
     pub(crate) chatgpt_auth: &'a crate::auth::ChatgptAuth,
     pub(crate) roots: &'a [reqwest::Certificate],
     pub(crate) client: Arc<TurnClient>,
-    pub(crate) output_limit: Option<u64>,
-    pub(crate) model_reasoning: Option<bool>,
-    pub(crate) features: Features,
-    pub(crate) reasoning: Option<crate::reasoning::ReasoningPlan>,
 }
 
-fn build_protocol_request_body(
+pub(crate) fn build_protocol_request_body(
     protocol: Protocol,
     request: &ChatRequest,
     output_limit: Option<u64>,
@@ -804,7 +803,7 @@ fn build_protocol_request_body(
     }
 }
 
-fn request_has_user_images(request: &ChatRequest) -> bool {
+pub(crate) fn request_has_user_images(request: &ChatRequest) -> bool {
     request.messages.iter().any(|item| match item {
         lattice_conversation::ConversationItem::Message(message)
             if message.role == lattice_conversation::MessageRole::User =>
@@ -821,7 +820,9 @@ fn request_has_user_images(request: &ChatRequest) -> bool {
 }
 
 pub(crate) async fn dispatch(
-    request: ChatRequest,
+    body: protocol::encoding::RequestBody,
+    expected_len: usize,
+    client_request_id: Option<&str>,
     endpoint: RequestEndpoint<'_>,
     images: Arc<dyn crate::ImageSource>,
     control: StreamControl,
@@ -850,26 +851,9 @@ pub(crate) async fn dispatch(
         provider_id: endpoint.provider.clone(),
     };
     let url = parser.endpoint_url(endpoint.base_url, endpoint.model.as_str());
-    let client_request_id = request.client_request_id.clone();
 
-    let body_bytes = if request_has_user_images(&request) {
-        let protocol = endpoint.protocol;
-        let output_limit = endpoint.output_limit;
-        let model_reasoning = endpoint.model_reasoning;
-        let features = endpoint.features;
-        let reasoning = endpoint.reasoning;
-        let encode_origin = origin.clone();
+    let body_bytes = if body.has_user_images() {
         let bytes = tokio::task::spawn_blocking(move || -> Result<Vec<u8>, LlmError> {
-            let body = build_protocol_request_body(
-                protocol,
-                &request,
-                output_limit,
-                model_reasoning,
-                features,
-                reasoning,
-                &encode_origin,
-            )?;
-            let expected_len = protocol::encoding::encoded_len(&body)?;
             let mut encoded = None;
             images.with_reader(&mut |reader| {
                 if encoded.is_some() {
@@ -894,16 +878,6 @@ pub(crate) async fn dispatch(
         }
         bytes
     } else {
-        let body = parser.request_body(
-            &request,
-            endpoint.output_limit,
-            endpoint.model_reasoning,
-            endpoint.features,
-            endpoint.reasoning,
-            &origin,
-        )?;
-        let expected_len = protocol::encoding::encoded_len(&body)
-            .map_err(|error| redact_error(error, &credentials))?;
         protocol::encoding::encode_body_without_images(&body, expected_len)
             .map_err(|error| redact_error(error, &credentials))?
     };
@@ -924,8 +898,8 @@ pub(crate) async fn dispatch(
             protocol::anthropic_messages::ANTHROPIC_VERSION,
         );
     }
-    if let Some(id) = &client_request_id {
-        req_builder = req_builder.header("x-client-request-id", id.as_str());
+    if let Some(id) = client_request_id {
+        req_builder = req_builder.header("x-client-request-id", id);
     }
     for (name, value) in headers {
         req_builder = req_builder.header(name, value);

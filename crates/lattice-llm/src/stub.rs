@@ -48,6 +48,9 @@ pub enum LlmError {
     #[error("protocol limit exceeded: {message}")]
     ProtocolLimit { message: String },
 
+    #[error("{message}")]
+    RequestBudgetExceeded { message: String },
+
     #[error("provider projection error: {0}")]
     Projection(#[from] crate::protocol::projection::ProjectionError),
 
@@ -66,6 +69,7 @@ impl LlmError {
             Self::ProviderHttp { .. } => "provider_http",
             Self::StreamRead { .. } => "stream_read",
             Self::ProtocolLimit { .. } => "protocol_limit",
+            Self::RequestBudgetExceeded { .. } => "request_budget",
             Self::Projection(_) => "projection",
             Self::Other(_) => "other",
         }

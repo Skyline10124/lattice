@@ -23,7 +23,7 @@ status: active
 
 - **选择来源。** 缓存存在且能解析时整份使用缓存，否则使用内置快照；缓存中缺少某个 `catalog` 条目时，这个条目使用快照。`providers.toml` 中的 `catalog` 在缓存与快照中都没有时，要等下一次刷新才有元数据；在此之前，以及 models.dev 中没有这个条目时，这个 provider 只有手写的元数据。手写的元数据按字段覆盖上述结果，只写在 `providers.toml` 中的模型由手写值单独构成。
 - **保留的字段。** 模型 `id`、`name`、`limit.context`、`limit.output`、`reasoning`、`reasoning_options`、`tool_call`、`modalities.input`、`cost.input`、`cost.output`、`cost.cache_read`、`cost.cache_write` 与 `status`。其余字段丢弃。
-- **输入模态。** 目录条目的 `modalities.input` 经单一入口解析为 `Option<Vec<InputModality>>`：缺少 `modalities` 或 `input`（或 `input` 为 `null`）时为 `None`；存在数组时只保留 `text`、`image`、`audio`、`video` 四种取值并按首次出现顺序去重，忽略其他字符串（因此 `[]` 或仅含其他字符串时得到 `Some([])`）。`providers.toml` 中模型手写的 `input` 存在时整表覆盖目录的输入模态列表，只写在 `providers.toml` 中的模型同样按手写 `input` 生成。
+- **输入模态。** 目录条目的 `modalities.input` 经单一入口解析为 `Option<Vec<InputModality>>`：缺少 `modalities` 或 `input`（或 `input` 为 `null`）时为 `None`；存在数组时只保留 `text`、`image`、`audio`、`video` 四种取值并按首次出现顺序去重，忽略其他字符串（因此 `[]` 或仅含其他字符串时得到 `Some([])`）。`providers.toml` 中模型手写的 `input` 存在时整表覆盖目录的输入模态列表，只写在 `providers.toml` 中的模型同样按手写 `input` 生成。请求含图片时按与候选同源的 `input` 判定是否放行，见[发送前检查与大小限制](protocols.md#发送前检查与大小限制)。
 - **没有过期的概念。** 缓存旧了只影响列表与价格的准确性，不影响请求发往哪里，不提示过期。
 - **刷新失败**只记日志，继续使用上一份数据，并从 1 分钟起倍增重试，上限 1 小时。`lattice models refresh` 把失败原因返回给用户。拉取使用 HTTPS 与固定地址的连接，响应最多 32 MiB，30 秒内没有读完即放弃。新缓存先写临时文件再改名替换。
 - **按来源调度。** models.dev 与已经登录的账号目录由同一个后台任务调度，各自记录新鲜度、失败次数和下一次时间。同一来源的并发触发共享结果；一个来源成功不清除另一个的失败。显式刷新分别尝试两者，成功来源照常发布，部分失败返回来源、原因及已经更新的部分。`auto_refresh` 只影响自动触发，登录、手动刷新和缺目录补拉继续有效。

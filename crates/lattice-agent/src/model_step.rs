@@ -365,6 +365,80 @@ fn model_step_opening_error(error: Box<dyn std::error::Error + Send + Sync>) -> 
     }
 }
 
+#[cfg(test)]
+mod opening_error_tests {
+    use super::*;
+
+    struct FailingClient(lattice_llm::LlmError);
+
+    #[async_trait::async_trait]
+    impl LlmClient for FailingClient {
+        async fn stream_chat(
+            &self,
+            _request: ChatRequest,
+            _images: Arc<dyn lattice_llm::ImageSource>,
+            _control: StreamControl,
+        ) -> Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
+            Err(Box::new(self.0.clone()))
+        }
+    }
+
+    #[tokio::test]
+    async fn opening_budget_and_413_errors_are_non_retryable_and_preserve_messages() {
+        let budget_msg = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let http_413_msg = "HTTP 413 request_too_large: payload exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+
+        for (label, llm_error, expected_msg) in [
+            (
+                "本地请求体预算超限",
+                lattice_llm::LlmError::RequestBudgetExceeded {
+                    message: budget_msg.into(),
+                },
+                budget_msg,
+            ),
+            (
+                "远端 HTTP 413 拒绝",
+                lattice_llm::LlmError::ProviderHttp {
+                    status_code: 413,
+                    message: http_413_msg.into(),
+                    retryable: false,
+                    retry_after: None,
+                },
+                http_413_msg,
+            ),
+        ] {
+            let driver = ModelStepDriver::new(
+                Arc::new(FailingClient(llm_error)),
+                Arc::new(lattice_llm::NoImages),
+            );
+            let step_request = ModelStepRequest {
+                effort: None,
+                system_prompt: None,
+                history: Vec::new(),
+                model: lattice_conversation::ModelId::parse("test-model").unwrap(),
+                provider: lattice_conversation::ProviderId::parse("test").unwrap(),
+                tools: Vec::new(),
+                cancel: None,
+                deadline: None,
+                session_id: Some("session-1".into()),
+            };
+            let err = driver
+                .run(&step_request, None)
+                .await
+                .expect_err("打开阶段错误必须返回 Err");
+            assert_eq!(
+                err,
+                ModelStepError::OpeningFailed {
+                    message: expected_msg.into(),
+                    retryable: false,
+                    retry_after: None,
+                },
+                "{label} 应映射为不可重试且消息原样保留的 OpeningFailed"
+            );
+        }
+    }
+}
+
 #[cfg(all(test, feature = "test-utils"))]
 mod tests {
     use super::*;

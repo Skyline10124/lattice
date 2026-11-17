@@ -239,6 +239,7 @@ impl GatewayTurn {
             credentials,
             target,
             output_limit,
+            input,
             model_reasoning,
             reasoning,
         } = tokio::task::spawn_blocking(move || {
@@ -262,6 +263,7 @@ impl GatewayTurn {
             client,
             target,
             output_limit,
+            input,
             model_reasoning,
             reasoning,
         })
@@ -295,6 +297,7 @@ pub struct ResolvedRequest {
     client: Arc<TurnClient>,
     target: ModelTarget,
     output_limit: Option<u64>,
+    input: Option<Vec<lattice_conversation::InputModality>>,
     model_reasoning: Option<bool>,
     reasoning: Option<ReasoningPlan>,
 }
@@ -315,6 +318,58 @@ impl ResolvedRequest {
         self.provider.protocol
     }
 
+    fn features(&self) -> crate::protocol::Features {
+        self.provider
+            .models
+            .get(self.target.model.model())
+            .map_or(self.provider.features, |model| model.features)
+    }
+
+    fn prepare_body(
+        &self,
+        request: &ChatRequest,
+    ) -> Result<(crate::protocol::encoding::RequestBody, usize), LlmError> {
+        if request.target != self.target || request.client_request_id.is_none() {
+            return Err(configuration_error(
+                "resolved request requires its original target and a SessionId",
+            ));
+        }
+        if client::request_has_user_images(request)
+            && let Some(modalities) = &self.input
+            && !modalities.contains(&lattice_conversation::InputModality::Image)
+        {
+            return Err(LlmError::Config {
+                message: format!(
+                    "模型 {} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+                    self.target.model
+                ),
+            });
+        }
+        let body = client::build_protocol_request_body(
+            self.provider.protocol,
+            request,
+            self.output_limit,
+            self.model_reasoning,
+            self.features(),
+            self.reasoning,
+            &self.origin(),
+        )?;
+        let len = crate::protocol::encoding::encoded_len(&body)?;
+        if len > crate::protocol::encoding::MAX_MODEL_REQUEST_BYTES {
+            return Err(LlmError::RequestBudgetExceeded {
+                message: "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话"
+                    .into(),
+            });
+        }
+        Ok((body, len))
+    }
+
+    /// 执行模型输入能力与本地请求体预算两项检查，返回编码后的整包请求体字节数，供调用方在准入与每步发送前使用。
+    pub fn check_request(&self, request: &ChatRequest) -> Result<usize, LlmError> {
+        let (_, len) = self.prepare_body(request)?;
+        Ok(len)
+    }
+
     /// 发送沿用解析时取得的配置；调用方不能替换模型或省去 SessionId。
     pub async fn stream_chat(
         &self,
@@ -322,13 +377,11 @@ impl ResolvedRequest {
         images: Arc<dyn crate::ImageSource>,
         control: StreamControl,
     ) -> Result<LlmStream, LlmError> {
-        if request.target != self.target || request.client_request_id.is_none() {
-            return Err(configuration_error(
-                "resolved request requires its original target and a SessionId",
-            ));
-        }
+        let (body, expected_len) = self.prepare_body(&request)?;
         let input = client::dispatch(
-            request,
+            body,
+            expected_len,
+            request.client_request_id.as_deref(),
             RequestEndpoint {
                 provider: &self.provider.id,
                 model: self.target.model.model(),
@@ -339,14 +392,6 @@ impl ResolvedRequest {
                 chatgpt_auth: &self.configuration.chatgpt_auth,
                 roots: &self.configuration.roots,
                 client: self.client.clone(),
-                output_limit: self.output_limit,
-                model_reasoning: self.model_reasoning,
-                reasoning: self.reasoning,
-                features: self
-                    .provider
-                    .models
-                    .get(self.target.model.model())
-                    .map_or(self.provider.features, |model| model.features),
             },
             images,
             control,
@@ -397,6 +442,7 @@ struct PreparedProvider {
     credentials: Credentials,
     target: ModelTarget,
     output_limit: Option<u64>,
+    input: Option<Vec<lattice_conversation::InputModality>>,
     model_reasoning: Option<bool>,
     reasoning: Option<ReasoningPlan>,
 }
@@ -432,13 +478,14 @@ fn prepare_provider(
             let model_meta = models.get(model_id);
             let limits = model_meta.and_then(|entry| entry.limit.as_ref());
             let output_limit = limits.and_then(|limit| limit.output);
+            let input = model_meta.and_then(crate::metadata::Model::input_modalities);
             let model_reasoning = model_meta.and_then(|entry| entry.reasoning);
             let features = provider
                 .models
                 .get(model_id)
                 .map_or(provider.features, |entry| entry.features);
             let capabilities = ReasoningCapabilities::new(id, model_id, model_meta, features)?;
-            Ok((output_limit, model_reasoning, capabilities))
+            Ok((output_limit, input, model_reasoning, capabilities))
         });
     if availability != crate::Availability::Ready {
         return Err(PrepareError::Unavailable {
@@ -451,7 +498,7 @@ fn prepare_provider(
     if !has_usable_roots {
         require_endpoint_without_tls_roots(&provider.base_url)?;
     }
-    let (output_limit, model_reasoning, capabilities) =
+    let (output_limit, input, model_reasoning, capabilities) =
         loaded_model.expect("ready model availability yields loaded model configuration");
     let supported = capabilities.supported_efforts();
     let effort = crate::reasoning::select_effort(&policy, &supported).map_err(|effort| {
@@ -478,6 +525,7 @@ fn prepare_provider(
             effort,
         },
         output_limit,
+        input,
         model_reasoning,
         reasoning,
     })

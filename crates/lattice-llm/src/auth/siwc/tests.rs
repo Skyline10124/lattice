@@ -376,8 +376,25 @@ async fn inference_waits_for_refresh_publication_and_uses_its_header_and_redacti
         let target = crate::ModelTarget::test_target("chatgpt", "model");
         let mut request = crate::ChatRequest::new(vec![], target.clone());
         request.client_request_id = Some("session".into());
+        let origin = lattice_conversation::ReplayOrigin {
+            protocol: crate::protocol::Protocol::Responses,
+            provider_id: target.model.provider().clone(),
+        };
+        let body = crate::client::build_protocol_request_body(
+            crate::protocol::Protocol::Responses,
+            &request,
+            None,
+            None,
+            crate::protocol::Features::Responses,
+            None,
+            &origin,
+        )
+        .unwrap();
+        let expected_len = crate::protocol::encoding::encoded_len(&body).unwrap();
         crate::client::dispatch(
-            request,
+            body,
+            expected_len,
+            request.client_request_id.as_deref(),
             crate::client::RequestEndpoint {
                 provider: target.model.provider(),
                 model: target.model.model(),
@@ -388,10 +405,6 @@ async fn inference_waits_for_refresh_publication_and_uses_its_header_and_redacti
                 chatgpt_auth: &auth,
                 roots: &[],
                 client: Arc::default(),
-                output_limit: None,
-                model_reasoning: None,
-                features: crate::protocol::Features::Responses,
-                reasoning: None,
             },
             Arc::new(crate::NoImages),
             crate::StreamControl::default(),
