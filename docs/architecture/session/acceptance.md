@@ -10,6 +10,8 @@ status: active
 
 接受事务只作用于已有会话。执行核心持有 SessionExecutionLock 后核对请求身份、项目绑定、设置版本与输入，并验证用户消息、工具目录及执行限制；不创建 Session 记录，也不写会话设置。用户输入在进入接受事务前经 `TurnInput` 按[保序规范化规则](conversation.md#用户图片与单轮输入规范化)核验与规范化，规范化后为空或违反文本、图片上限时拒绝接受。
 
+在冻结配置与本轮工具目录之后、进入接受事务之前，执行核心在持有 `SessionExecutionLock` 期间以与实际首步相同的构造拼装本轮首步完整请求，经 [`ResolvedRequest::check_request`](../../../crates/lattice-llm/src/gateway.rs) 检查模型图片输入能力与本地请求体预算：当前路径历史或本轮输入包含图片而目标模型明确不支持图片时，按配置错误拒绝；编码后的请求体超过 `32 MiB` 本地请求体预算时，返回 `BadRequest` 并给出固定说明（见[发送前检查与大小限制](../llm/protocols.md#发送前检查与大小限制)）。预检未通过时不调用接受事务，不写入会话树与 `blobs` 表。
+
 接受事务写入以下事实：
 
 - 若规范化后的输入包含图片，先在同一写事务中按 SHA-256 摘要去重写入 `blobs` 表中尚无的原始图片字节；表中已有同一摘要时跳过写入。
@@ -82,7 +84,7 @@ status: active
 配置错误按发生时点分为两处拒绝，用户由此知道该改哪里。配置由后台读取，报错面向的是配置的主人，所以后台把原始诊断经脱敏后带回前端；同一问题在 CLI 与 TUI 中给出同一句说明，`kind` 为 `bad_request`，CLI 退出 2：
 
 - **`configure` 时拒绝**：profile 的查找、全局 `agents` 权限校验、未知或禁止的顶层节（如 `[lancet]`、`[tools]`）、TOML 解析与字段构造（给出文件路径、节名与字段名）、`[agent].name` 与所选不一致、系统提示文件缺失或超限、`providers.toml` 与模型元数据的解析失败，以及档位规则拒绝（模型为空时给出了 `effort`，或模型不支持所求档位，诊断来源为 `(from --effort)`、`(from [agent].effort in <路径>)` 或 `(from session settings)`，见[档位规则](settings.md#档位规则)）。
-- **提交时拒绝**：会话设置中的模型为空，`providers.toml` 或 `auth.json` 解析失败，provider 与模型未满足可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效），没有可用的根证书时所选 provider 的端点是 https，以及全局配置或元数据变更后模型不支持会话设置中的推理档位（诊断来源为 `(from session settings)`）。
+- **提交时拒绝**：会话设置中的模型为空，`providers.toml` 或 `auth.json` 解析失败，provider 与模型未满足可用性要求（未声明、未录入 API key、未登录 ChatGPT 或配置无效），没有可用的根证书时所选 provider 的端点是 https，全局配置或元数据变更后模型不支持会话设置中的推理档位（诊断来源为 `(from session settings)`），以及当前路径历史或本轮输入包含图片而目标模型明确不支持图片输入。
 
 说明由 [`ConfigRejection`](../../../crates/lattice-server/src/config_rejection.rs) 承载。它只有一个构造入口，文字在其中经 [`redact`](../../../crates/lattice-server/src/redact.rs) 处理，被替换处写作 `[REDACTED]`。脱敏按以下顺序执行：
 
@@ -99,11 +101,11 @@ status: active
 
 TOML 解析错误给出路径、行号与解析器的错误描述，不附源码行。说明是单行文字：控制字符换成空格，空白折叠，最多 1024 个字符，超出时以 `…` 截断。
 
-以下拒绝保持固定文本：提交输入超限或无法解析、持久配置校验，以及后台其余的 `ApiError::BadRequest(String)`。
+以下拒绝保持固定文本：提交输入超限或无法解析、首步模型请求超过 `32 MiB` 本地请求体预算（保留 `lattice-llm` 给出的固定说明）、持久配置校验，以及后台其余的 `ApiError::BadRequest(String)`。
 
 ## 模型请求与执行预算
 
-一次 provider 请求以 `ModelAttemptKey` 标识，包含 TurnId、步骤序号和该步骤的尝试序号。一次尝试对应一个被 provider 接收的请求：HTTP 库对 provider 明确没有处理的请求的重发（复用的空闲连接在请求发出前已被服务端关闭；HTTP/2 `GOAWAY(NO_ERROR)` 或 `REFUSED_STREAM`，RFC 9113 §8.7）计入同一次尝试，不另记尝试，只在日志中留下记录，见 [`lattice-llm`](../../../crates/lattice-llm/AGENTS.md)。协调层每次先在 Step 节点新增这次尝试并提交，此时它是 `Sent`，停在这里的结论为 `Stopped { ProcessExit }`；再让 ModelStepDriver 打开和消费流。暂行写法（见 #331）：尝试前重新解析配置失败时，仍写入一次 `Sent`，provider id 取自模型引用，协议取本 Turn 最近一次成功解析的结果，随即以不可重试的 `ProviderError` 结束且不发送请求。请求结束时，把这次尝试推进到 `Ended`，带上实际终态：
+一次 provider 请求以 `ModelAttemptKey` 标识，包含 TurnId、步骤序号和该步骤的尝试序号。一次尝试对应一个被 provider 接收的请求：HTTP 库对 provider 明确没有处理的请求的重发（复用的空闲连接在请求发出前已被服务端关闭；HTTP/2 `GOAWAY(NO_ERROR)` 或 `REFUSED_STREAM`，RFC 9113 §8.7）计入同一次尝试，不另记尝试，只在日志中留下记录，见 [`lattice-llm`](../../../crates/lattice-llm/AGENTS.md)。协调层每次先在 Step 节点新增这次尝试并提交，此时它是 `Sent`，停在这里的结论为 `Stopped { ProcessExit }`；再让 ModelStepDriver 打开和消费流。暂行写法（见 #331）：尝试前重新解析配置失败时，仍写入一次 `Sent`，provider id 取自模型引用，协议取本 Turn 最近一次成功解析的结果，随即以不可重试的 `ProviderError` 结束且不发送请求。每步实际发送模型请求前，`stream_chat` 仍执行与准入预检同一入口的 `ResolvedRequest::check_request` 检查（不读取图片字节）：若目标模型不再支持当前路径历史中的图片，或工具结果追加导致编码后的请求体超过 `32 MiB` 本地请求体预算，均不发起 HTTP 请求，直接以不可重试的 `ProviderError` 结束本次尝试并关闭 Step 与 Turn，提示[发送前检查与大小限制](../llm/protocols.md#发送前检查与大小限制)规定的固定说明。请求结束时，把这次尝试推进到 `Ended`，带上实际终态：
 
 ```text
 AttemptEnd = Completed { step }

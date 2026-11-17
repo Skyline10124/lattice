@@ -33,7 +33,8 @@ pub(crate) struct ExecutionInput {
 }
 
 pub(crate) struct PreparedModel {
-    target: lattice_llm::ModelTarget,
+    resolved: Arc<lattice_llm::ResolvedRequest>,
+    auth: lattice_llm::auth::AuthStore,
     execution: super::saga::ModelExecution,
 }
 
@@ -53,9 +54,11 @@ impl PreparedModel {
             )
             .await
             .map_err(|error| prepare_rejection(&error, Some(&auth)))?;
+        let execution = super::saga::ModelExecution::gateway(turn, &resolved);
         Ok(Self {
-            target: resolved.target().clone(),
-            execution: super::saga::ModelExecution::gateway(turn, &resolved),
+            resolved: Arc::new(resolved),
+            auth,
+            execution,
         })
     }
 }
@@ -80,6 +83,23 @@ fn prepare_rejection(
     ApiError::Configuration(crate::config_rejection::ConfigRejection::new(
         &message, auth,
     ))
+}
+
+/// 将首步请求预检返回的 `LlmError` 映射为后台准入错误。
+fn request_rejection(
+    error: lattice_llm::LlmError,
+    auth: Option<&lattice_llm::auth::AuthStore>,
+) -> ApiError {
+    match error {
+        lattice_llm::LlmError::UnsupportedInput { message }
+        | lattice_llm::LlmError::Config { message } => ApiError::Configuration(
+            crate::config_rejection::ConfigRejection::new(&message, auth),
+        ),
+        lattice_llm::LlmError::RequestBudgetExceeded { message } => {
+            ApiError::RequestBudgetExceeded(message)
+        }
+        other => ApiError::Internal(format!("构造本轮模型请求失败：{other}")),
+    }
 }
 
 /// 后台接管与持久接受不同。这个句柄的回执被释放也不撤销后台责任。
@@ -221,8 +241,12 @@ async fn execute_owned(
             (settings, version)
         }
     };
-    let (target, model) = match prepared_model {
-        Some(PreparedModel { target, execution }) => (target, execution),
+    let (target, model, precheck) = match prepared_model {
+        Some(PreparedModel {
+            resolved,
+            auth,
+            execution,
+        }) => (resolved.target().clone(), execution, Some((resolved, auth))),
         None => match request.injected_llm() {
             Some((client, protocol, supported)) => {
                 let chosen_model = require_settings_model(&settings, None)?;
@@ -251,6 +275,7 @@ async fn execute_owned(
                         )),
                         origin,
                     },
+                    None,
                 )
             }
             None => {
@@ -264,6 +289,29 @@ async fn execute_owned(
     let turn_tools: Arc<dyn TurnTools> = Arc::from(tools.open_turn(session_id, &workspace).await?);
     let config = super::live::freeze_config(&settings, &target, turn_tools.specs())?;
     let timeout = config.limits.timeout_secs;
+    if let Some((resolved, auth)) = precheck {
+        let precheck_config = config.clone();
+        let precheck_message = request.input.message().clone();
+        let chat = coordinator
+            .io
+            .read(move |read| {
+                super::request::first_step_chat_request(
+                    read,
+                    session_id,
+                    &precheck_config,
+                    &precheck_message,
+                )
+            })
+            .await?;
+        let check_result = tokio::task::spawn_blocking(move || {
+            resolved
+                .check_request(&chat)
+                .map_err(|error| request_rejection(error, Some(&auth)))
+        })
+        .await
+        .map_err(|error| ApiError::Internal(format!("构造本轮模型请求失败：{error}")))?;
+        check_result?;
+    }
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
     }
@@ -451,6 +499,65 @@ mod tests {
             message.contains(&unsupported.to_string())
                 && message.contains("(from session settings)"),
             "提交准入的档位拒绝必须归因为会话设置: {message}"
+        );
+    }
+
+    #[test]
+    fn request_rejection_maps_unsupported_input_budget_config_and_other_errors() {
+        use lattice_ipc::{LocalError, LocalErrorKind};
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().expect("创建临时凭据目录");
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700))
+            .expect("设置凭据目录权限");
+        let auth = lattice_llm::auth::AuthStore::new(dir.path().to_path_buf());
+        auth.set("openai", "secret-token-value")
+            .expect("写入测试凭据");
+
+        let unsupported_msg = "模型 local/text-only 不支持图片输入";
+        let ApiError::Configuration(unsupported) = request_rejection(
+            lattice_llm::LlmError::UnsupportedInput {
+                message: unsupported_msg.into(),
+            },
+            Some(&auth),
+        ) else {
+            panic!("UnsupportedInput 必须映射为配置拒绝");
+        };
+        assert_eq!(unsupported.to_string(), unsupported_msg);
+        let local_unsupported = LocalError::from(ApiError::Configuration(unsupported));
+        assert_eq!(local_unsupported.kind, LocalErrorKind::BadRequest);
+        assert_eq!(local_unsupported.message, unsupported_msg);
+
+        let budget_msg = "请求体超过本地预算";
+        let ApiError::RequestBudgetExceeded(mapped_budget) = request_rejection(
+            lattice_llm::LlmError::RequestBudgetExceeded {
+                message: budget_msg.into(),
+            },
+            Some(&auth),
+        ) else {
+            panic!("RequestBudgetExceeded 必须映射为 ApiError::RequestBudgetExceeded");
+        };
+        assert_eq!(mapped_budget, budget_msg);
+
+        let ApiError::Configuration(redacted_cfg) = request_rejection(
+            lattice_llm::LlmError::Config {
+                message: "配置错误携带 secret-token-value".into(),
+            },
+            Some(&auth),
+        ) else {
+            panic!("Config 必须映射为配置拒绝");
+        };
+        assert_eq!(redacted_cfg.to_string(), "配置错误携带 [REDACTED]");
+
+        let ApiError::Internal(internal_msg) = request_rejection(
+            lattice_llm::LlmError::Other("未知投影失败".into()),
+            Some(&auth),
+        ) else {
+            panic!("其他 LlmError 必须映射为内部错误");
+        };
+        assert!(
+            internal_msg.contains("构造本轮模型请求失败"),
+            "内部错误应包含中文失败说明：{internal_msg}"
         );
     }
 }

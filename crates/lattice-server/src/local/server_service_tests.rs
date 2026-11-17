@@ -7,27 +7,27 @@ use lattice_local::{LocalClient, new_session_id, new_turn_id};
 use lattice_session::store::{NodeId, PublicTurnOutcome};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
+pub(super) async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
     tokio::time::timeout(Duration::from_secs(10), future)
         .await
         .expect("局部调度超时")
 }
 
-struct TestEnv {
-    dir: tempfile::TempDir,
-    backend: Arc<Backend>,
-    service: super::super::service::Service,
-    client: LocalClient,
-    stop: tokio::sync::mpsc::Sender<()>,
-    serving: tokio::task::JoinHandle<Result<ServeExit>>,
+pub(super) struct TestEnv {
+    pub(super) dir: tempfile::TempDir,
+    pub(super) backend: Arc<Backend>,
+    pub(super) service: super::super::service::Service,
+    pub(super) client: LocalClient,
+    pub(super) stop: tokio::sync::mpsc::Sender<()>,
+    pub(super) serving: tokio::task::JoinHandle<Result<ServeExit>>,
 }
 
 impl TestEnv {
-    async fn start() -> Self {
+    pub(super) async fn start() -> Self {
         Self::start_with_drain(Duration::from_secs(60)).await
     }
 
-    async fn start_with_drain(drain_timeout: Duration) -> Self {
+    pub(super) async fn start_with_drain(drain_timeout: Duration) -> Self {
         let dir = tempfile::tempdir().expect("创建测试临时目录应成功");
         let layout = StateLayout::in_state_root(dir.path());
         let (stop, stop_rx) = tokio::sync::mpsc::channel(4);
@@ -71,14 +71,14 @@ impl TestEnv {
         }
     }
 
-    fn workspace(&self) -> std::path::PathBuf {
+    pub(super) fn workspace(&self) -> std::path::PathBuf {
         LocalWorkspaceRoot::from_path(self.dir.path())
             .expect("工作区解析应成功")
             .canonical_path()
             .to_path_buf()
     }
 
-    async fn wait_idle(&self) {
+    pub(super) async fn wait_idle(&self) {
         let mut changed = self.backend.changed.subscribe();
         bounded(async {
             while self.backend.has_active_work() {
@@ -88,7 +88,7 @@ impl TestEnv {
         .await;
     }
 
-    async fn shutdown(self) {
+    pub(super) async fn shutdown(self) {
         self.wait_idle().await;
         let _ = self.stop.send(()).await;
         let exit = bounded(self.serving)
@@ -104,7 +104,10 @@ impl TestEnv {
     }
 }
 
-fn configure_new_request(workspace: &std::path::Path, sid: SessionId) -> ConfigureRequest {
+pub(super) fn configure_new_request(
+    workspace: &std::path::Path,
+    sid: SessionId,
+) -> ConfigureRequest {
     ConfigureRequest {
         session: ConfigureSession::New(sid),
         workspace: workspace.to_path_buf(),
@@ -114,7 +117,11 @@ fn configure_new_request(workspace: &std::path::Path, sid: SessionId) -> Configu
     }
 }
 
-fn turn_request(workspace: &std::path::Path, sid: SessionId, input: &str) -> TurnRequest {
+pub(super) fn turn_request(
+    workspace: &std::path::Path,
+    sid: SessionId,
+    input: &str,
+) -> TurnRequest {
     TurnRequest {
         turn_id: new_turn_id(),
         session: sid,

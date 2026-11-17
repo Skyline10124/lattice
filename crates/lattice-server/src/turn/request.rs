@@ -4,7 +4,8 @@
 //! 模型步骤请求的组装：读取父链历史、转换冻结工具目录并构造步骤请求。
 
 use lattice_agent::ModelStepRequest;
-use lattice_conversation::{ConversationItem, SessionId};
+use lattice_conversation::{BoundToolCall, ConversationItem, NativeMessage, SessionId};
+use lattice_llm::ChatRequest;
 use lattice_session::store::*;
 
 pub(super) fn history(
@@ -77,6 +78,18 @@ pub(super) fn step_request(
         deadline: None,
         session_id: Some(session.to_string()),
     }
+}
+
+/// 本轮首步请求的预览：当前父链历史加上尚未写入的用户消息，与接受后首步实际发送的请求相同。
+pub(super) fn first_step_chat_request(
+    read: &SessionRead,
+    session: SessionId,
+    config: &FrozenTurnConfig,
+    message: &NativeMessage<BoundToolCall>,
+) -> lattice_session::store::Result<ChatRequest> {
+    let mut items = history(read, session)?;
+    items.push(ConversationItem::Message(message.clone()));
+    Ok(step_request(session, config, items).chat_request())
 }
 
 #[cfg(test)]
@@ -209,6 +222,165 @@ mod tests {
             request.chat_request(),
             expected_chat,
             "由步骤请求生成的 ChatRequest 必须与逐字段期望一致"
+        );
+    }
+
+    #[test]
+    fn preview_request_equals_first_persisted_request() {
+        let state = tempfile::tempdir().expect("创建临时状态目录");
+        let project = tempfile::tempdir().expect("创建临时项目目录");
+        let canonical_project = std::fs::canonicalize(project.path()).expect("规范化项目路径");
+        let layout = lattice_session::StateLayout::in_state_root(state.path());
+        let store = SessionStore::create(&layout).expect("创建测试会话库");
+        let session =
+            SessionId::parse("00000000000000000000000000000002").expect("解析测试会话标识");
+        let provider =
+            lattice_conversation::ProviderId::parse("openai").expect("解析测试 provider 标识");
+        let model = lattice_conversation::ModelId::parse("gpt-4o").expect("解析测试模型标识");
+        let project_path =
+            lattice_session::ProjectPath::from_path(&canonical_project).expect("合法规范项目路径");
+
+        let config = FrozenTurnConfig {
+            agent_name: lattice_session::AgentName::parse("reviewer").expect("解析测试 Agent 名"),
+            model,
+            provider: provider.clone(),
+            effort: Some(lattice_conversation::Effort::High),
+            system_prompt: Some("先核对图片细节，再调用只读工具。".to_string()),
+            catalog: ToolCatalogSnapshot::new(vec![ToolCatalogEntry {
+                name: "observe__workspace".to_string(),
+                tool_identity: "test:observe__workspace@1".to_string(),
+                description: "读取工作区文件".to_string(),
+                input_schema: serde_json::json!({
+                    "type": "object",
+                    "properties": { "path": { "type": "string" } },
+                    "required": ["path"]
+                }),
+            }])
+            .expect("构造测试工具目录快照"),
+            limits: TurnExecutionLimits {
+                timeout_secs: lattice_session::TurnTimeout::default(),
+                max_model_steps: MAX_MODEL_STEPS,
+                max_model_attempts: 3,
+            },
+        };
+        let settings = SessionSettings::for_test(&config);
+        let settings_version = settings.version().expect("计算设置版本");
+
+        let lock = store.try_lock_session(session).expect("获取会话执行锁");
+        store
+            .create_session(&lock, project_path.clone(), settings, chrono::Utc::now())
+            .expect("创建测试会话");
+
+        // 先完成一轮历史对话，验证预览与首步实际请求在非空历史链上同样一致。
+        let first_turn =
+            lattice_conversation::TurnId::parse("00000000-0000-4000-8000-000000000011")
+                .expect("解析首轮 TurnId");
+        store
+            .accept_turn(
+                &lock,
+                AcceptTurn {
+                    session_id: session,
+                    turn_id: first_turn,
+                    project_path: project_path.clone(),
+                    input: TurnInput::text("先看上一轮文本".into()).expect("构造首轮文本输入"),
+                    config: config.clone(),
+                    accepted_at: chrono::Utc::now(),
+                    settings_version,
+                },
+            )
+            .expect("接受首轮测试请求");
+        let first_key = lattice_conversation::ModelAttemptKey {
+            turn_id: first_turn,
+            model_step_ordinal: 0,
+            attempt_ordinal: 0,
+        };
+        let origin = AttemptOrigin {
+            protocol: AttemptProtocol::ChatCompletions,
+            provider_id: provider.clone(),
+        };
+        store
+            .start_request(&lock, first_key, origin.clone(), chrono::Utc::now())
+            .expect("记录首轮模型尝试开始");
+        store
+            .close_step(
+                &lock,
+                CloseStep::Finish(CompleteReply {
+                    key: first_key,
+                    origin,
+                    usage: None,
+                    usage_kind: lattice_conversation::UsageCompleteness::Partial,
+                    cost: None,
+                    message: NativeMessage::new(
+                        lattice_conversation::MessageRole::Assistant,
+                        Some(lattice_conversation::ReplayOrigin {
+                            protocol: lattice_conversation::Protocol::ChatCompletions,
+                            provider_id: provider,
+                        }),
+                        vec![lattice_conversation::MessagePart::semantic_only(
+                            lattice_conversation::MessageSemantic::Text {
+                                text: "首轮已回复".to_string(),
+                            },
+                        )],
+                    ),
+                }),
+                chrono::Utc::now(),
+            )
+            .expect("关闭首轮步骤");
+
+        // 第二轮提交图文交错的用户消息，比较接受前预览与接受后首步实际请求。
+        let png = b"\x89PNG\r\n\x1a\npreview-png".to_vec();
+        let jpeg = b"\xff\xd8\xff\xe0preview-jpeg".to_vec();
+        let second_input = TurnInput::new(vec![
+            TurnInputPart::Text {
+                text: "第一段文字".into(),
+            },
+            TurnInputPart::Image { bytes: png },
+            TurnInputPart::Text {
+                text: "中间文字".into(),
+            },
+            TurnInputPart::Image { bytes: jpeg },
+            TurnInputPart::Text {
+                text: "末尾文字".into(),
+            },
+        ])
+        .expect("构造图文交错输入");
+
+        let preview = {
+            let read = store.begin_read().expect("打开接受前读事务");
+            first_step_chat_request(&read, session, &config, second_input.message())
+                .expect("构造接受前首步预览请求")
+        };
+
+        let second_turn =
+            lattice_conversation::TurnId::parse("00000000-0000-4000-8000-000000000012")
+                .expect("解析第二轮 TurnId");
+        store
+            .accept_turn(
+                &lock,
+                AcceptTurn {
+                    session_id: session,
+                    turn_id: second_turn,
+                    project_path,
+                    input: second_input,
+                    config,
+                    accepted_at: chrono::Utc::now(),
+                    settings_version,
+                },
+            )
+            .expect("接受第二轮测试请求");
+
+        let persisted = {
+            let read = store.begin_read().expect("打开接受后读事务");
+            let persisted_config = read
+                .turn_config(session, second_turn)
+                .expect("读取已持久化的冻结配置");
+            let items = history(&read, session).expect("读取接受后的父链历史");
+            step_request(session, &persisted_config, items).chat_request()
+        };
+
+        assert_eq!(
+            preview, persisted,
+            "接受前由 first_step_chat_request 生成的预览必须与接受后首步实际请求完全相等"
         );
     }
 }

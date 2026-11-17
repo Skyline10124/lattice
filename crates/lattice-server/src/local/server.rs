@@ -32,6 +32,9 @@ use tokio::{
 #[path = "server_configure_tests.rs"]
 mod configure_tests;
 #[cfg(test)]
+#[path = "server_image_tests.rs"]
+mod image_tests;
+#[cfg(test)]
 #[path = "server_models_tests.rs"]
 mod models_tests;
 #[cfg(test)]

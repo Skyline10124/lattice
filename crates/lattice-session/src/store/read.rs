@@ -544,6 +544,14 @@ impl SessionRead {
         Ok(consume(bytes))
     }
 
+    /// 仅供测试统计 `blobs` 表中的图片条目总数，核验内容寻址去重与准入前拒绝未写库。
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn blob_count(&self) -> Result<usize> {
+        use redb::ReadableTableMetadata;
+        let table = self.tx.open_table(BLOBS).map_err(table_error)?;
+        Ok(table.len()? as usize)
+    }
+
     pub fn stored_config(&self, digest: &[u8; 32]) -> Result<StoredTurnConfig> {
         let key = config_key(digest);
         let stored: StoredTurnConfig = self.decode(

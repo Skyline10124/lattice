@@ -66,15 +66,34 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
         .await
         .expect("局部调度超时")
 }
+#[derive(Debug, Default)]
+pub(in crate::local) struct ProviderStats {
+    pub bodies: Vec<serde_json::Value>,
+    pub lengths: Vec<usize>,
+}
+
+impl ProviderStats {
+    pub(in crate::local) fn request_count(&self) -> usize {
+        self.lengths.len()
+    }
+}
+
 pub(in crate::local) struct Provider {
     pub(in crate::local) endpoint: String,
     pub(super) arrived: oneshot::Receiver<()>,
     pub(super) release: watch::Sender<bool>,
     shutdown: oneshot::Sender<()>,
-    task: tokio::task::JoinHandle<Vec<serde_json::Value>>,
+    task: tokio::task::JoinHandle<ProviderStats>,
 }
 impl Provider {
     pub(in crate::local) async fn start() -> Self {
+        Self::start_with(Some(4 * 1024 * 1024), true).await
+    }
+
+    pub(in crate::local) async fn start_with(
+        max_body_bytes: Option<usize>,
+        keep_body: bool,
+    ) -> Self {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let endpoint = format!("http://{}/v1", listener.local_addr().unwrap());
@@ -83,7 +102,7 @@ impl Provider {
         let (shutdown, mut stopping) = oneshot::channel();
         let task = tokio::spawn(async move {
             let mut arrival = Some(arrival);
-            let mut requests = Vec::new();
+            let mut stats = ProviderStats::default();
             loop {
                 let (mut socket, _) = tokio::select! { accepted = listener.accept() => accepted.unwrap(), _ = &mut stopping => break };
                 bounded(async {
@@ -91,9 +110,26 @@ impl Provider {
                     while !headers.ends_with(b"\r\n\r\n") { headers.push(socket.read_u8().await.unwrap()); assert!(headers.len() <= 65_536); }
                     let headers = String::from_utf8(headers).unwrap();
                     let length: usize = headers.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").map(|n| n.trim().parse().unwrap())).unwrap();
-                    assert!(length < 4 * 1024 * 1024);
-                    let mut body = vec![0; length]; socket.read_exact(&mut body).await.unwrap();
-                    requests.push(serde_json::from_slice(&body).unwrap());
+                    if let Some(limit) = max_body_bytes {
+                        assert!(
+                            length < limit,
+                            "测试请求体长度 {length} 达到或超过上限 {limit}"
+                        );
+                    }
+                    stats.lengths.push(length);
+                    if keep_body {
+                        let mut body = vec![0; length];
+                        socket.read_exact(&mut body).await.unwrap();
+                        stats.bodies.push(serde_json::from_slice(&body).unwrap());
+                    } else {
+                        let mut remaining = length;
+                        let mut scratch = [0u8; 64 * 1024];
+                        while remaining > 0 {
+                            let chunk = remaining.min(scratch.len());
+                            socket.read_exact(&mut scratch[..chunk]).await.unwrap();
+                            remaining -= chunk;
+                        }
+                    }
                     if let Some(arrival) = arrival.take() { let _ = arrival.send(()); }
                     while !*gate.borrow_and_update() { gate.changed().await.unwrap(); }
                     let body = "data: {\"choices\":[{\"delta\":{\"content\":\"完成\"},\"finish_reason\":null}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n";
@@ -102,7 +138,7 @@ impl Provider {
                     let _ = socket.write_all(format!("HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n{body}").as_bytes()).await;
                 }).await;
             }
-            requests
+            stats
         });
         Self {
             endpoint,
@@ -113,6 +149,9 @@ impl Provider {
         }
     }
     pub(in crate::local) async fn finish(self) -> Vec<serde_json::Value> {
+        self.finish_stats().await.bodies
+    }
+    pub(in crate::local) async fn finish_stats(self) -> ProviderStats {
         self.release.send_replace(true);
         self.shutdown.send(()).unwrap();
         bounded(self.task).await.unwrap()
