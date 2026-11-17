@@ -32,7 +32,16 @@ status: active
 
 ### 适配器的职责
 
-- **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 写成请求体；工具名原样发送，generateContent 的工具 schema 放在 `parametersJsonSchema`，Chat Completions 总是发送 `stream_options: {"include_usage": true}`。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](../session/conversation.md#回放与跨-provider-投影)维护。
+- **请求。** 把当前路径上的对话、系统提示、工具定义和推理档位按协议与 features 通过一次序列化写出整包请求体，计长与实际写出共用同一套协议序列化器，请求字节以 `Content-Type: application/json` 发送；工具名原样发送，generateContent 的工具 schema 放在 `parametersJsonSchema`，Chat Completions 总是发送 `stream_options: {"include_usage": true}`。不发送采样参数（`temperature`、`top_p` 等），由服务端按模型默认值处理。投影规则与回放材料的处理由[会话合同的回放与跨 provider 投影](../session/conversation.md#回放与跨-provider-投影)维护。
+- **用户消息与图片线格式。** 不含图片的用户消息保持单文本格式（Messages 空文本写作 `"(empty message)"`）。用户消息含 `Image` 时，投影先经 `validate_image_placement` 校验，再按 `parts` 顺序输出内容数组，对象键按字典序排列，`<mime>` 取 `ImageMediaType::mime_type()`，`<b64>` 为标准带填充无换行 base64：
+
+  | 协议 | 消息外层 | 文本块 | 图片块 |
+  | --- | --- | --- | --- |
+  | `chat-completions` | `{"content":[...],"role":"user"}` | `{"text":"...","type":"text"}` | `{"image_url":{"url":"data:<mime>;base64,<b64>"},"type":"image_url"}` |
+  | `responses` | `{"content":[...],"role":"user"}` | `{"text":"...","type":"input_text"}` | `{"detail":"auto","image_url":"data:<mime>;base64,<b64>","type":"input_image"}` |
+  | `anthropic-messages` | `{"content":[...],"role":"user"}` | `{"text":"...","type":"text"}` | `{"source":{"data":"<b64>","media_type":"<mime>","type":"base64"},"type":"image"}` |
+  | `generate-content` | `{"parts":[...],"role":"user"}` | `{"text":"..."}` | `{"inlineData":{"data":"<b64>","mimeType":"<mime>"}}` |
+  | `interactions` | `{"content":[...],"type":"user_input"}` | `{"text":"...","type":"text"}` | `{"data":"<b64>","mime_type":"<mime>","type":"image"}` |
 - **流式事件。** 把线上事件翻译为正文、reasoning 与工具调用的部件增量，交给 #312 的累积器组装完整回复。解析端对无歧义的厂商差异直接兼容，例如 `reasoning_content` 与 `reasoning` 两种字段都读取，Mistral 的 `content` 为分块数组时读取其中的 `thinking` 块。不认识的内容块或增量类型按不可重试的协议错误停止这次尝试，不静默丢弃；诊断只写协议、位置与类型名。
 - **推理文字。** 仅在模型元数据明确 `reasoning = true` 时请求：Interactions 写 `generation_config.thinking_summaries: "auto"`；generateContent 在推理未关闭时写 `generationConfig.thinkingConfig.includeThoughts: true`，`thinkingBudget: 0` 和 toggle 关闭均不写。这两项与是否选档位无关，分别与现有 generation_config、thinkingConfig 字段合并。Messages 在同一元数据条件且 thinking 为 adaptive 时写 `display: "summarized"`，budget 和 disabled 不写；不选档位时不发 `thinking`，具体写法与原因见[档位映射](reasoning.md#档位映射)。`false` 或没有该标志时均不请求推理文字，所选档位照常发送。
 - **Responses 的不完整回复。** `response.incomplete` 先更新用量；原因是 `max_output_tokens` 或 `content_filter` 时按完成处理，分别记 `finish_reason = length` 或 `content_filter`，关闭仍打开的 item 并保存回复，允许缺少 `output_item.done`。半截工具参数仍由累积器的批次校验拒绝，不执行工具；完整调用沿用 Chat Completions 在 `length` 下的处理。其他或未知原因按 provider 错误停止，不保存回复。
@@ -67,7 +76,7 @@ feature 由协议适配器的代码定义，配置只能在已有取值中选择
 | `thinking_toggle` | `none`、`thinking-type`、`enable-thinking` | `none` | 关闭与开启推理的写法：`none` 时来自 toggle 项的 `off` 与 `high` 不可用；`thinking-type` 写 `thinking: {"type": "enabled" \| "disabled"}`；`enable-thinking` 写 `enable_thinking: true \| false` |
 | `thinking_budget` | `none`、`thinking-budget`、`reasoning-max-tokens` | `none` | 按 token 数限制推理的写法：顶层 `thinking_budget: N`，或 OpenRouter 的 `reasoning: {"max_tokens": N}` |
 | `reasoning_replay` | `none`、`reasoning-content`、`content-chunks` | `none` | 同来源回放时，助手消息中的 reasoning 怎样发回：不发；写作 `reasoning_content` 字段（内置表中需要它的厂商启用 `reasoning-content`）；写作 Mistral 的 `content` 分块（`thinking` 块在前） |
-| `cache_markers` | 布尔 | `false` | 在系统提示与最后一条消息的末尾内容块上加 `cache_control: {"type": "ephemeral"}`，用于阿里云的显式缓存 |
+| `cache_markers` | 布尔 | `false` | 在系统提示与最后一条消息的末尾文本内容块上加 `cache_control: {"type": "ephemeral"}`（最后一条为含图用户消息且末块为图片时不加，也不前移到较早的文本块），用于阿里云的显式缓存 |
 
 推理参数各部分的组合见[档位映射](reasoning.md#档位映射)。
 

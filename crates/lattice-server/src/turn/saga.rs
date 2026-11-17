@@ -68,7 +68,10 @@ impl ModelExecution {
                         *last_origin = resolved.origin();
                         (
                             last_origin.clone(),
-                            Ok(Arc::new(ModelStepDriver::new(Arc::new(resolved)))),
+                            Ok(Arc::new(ModelStepDriver::new(
+                                Arc::new(resolved),
+                                Arc::new(lattice_llm::NoImages),
+                            ))),
                         )
                     }
                     Err(error) => {

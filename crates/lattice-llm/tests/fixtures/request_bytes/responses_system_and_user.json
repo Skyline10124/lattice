@@ -1,0 +1,1 @@
+{"input":[{"content":[{"text":"请检查当前目录。","type":"input_text"}],"role":"user"}],"instructions":"你是严谨的代码助手。\n\n回答保持简洁。","model":"test-model","prompt_cache_key":"3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c","store":false,"stream":true}

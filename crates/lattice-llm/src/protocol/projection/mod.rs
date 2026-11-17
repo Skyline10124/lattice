@@ -29,10 +29,11 @@ use crate::reply::{PartDelta, ReplyAccumulator, ReplyOutcome, ReplyStop, StreamS
 use std::collections::BTreeSet;
 
 use crate::protocol::ReasoningReplay;
+use crate::protocol::encoding::{UserPart, UserWire, WireItem, items_to_values};
 use lattice_conversation::{
-    AttemptInterruption, BoundToolCall, MessageRole, MessageSemantic, NativeMessage, Protocol,
-    ReplayOrigin, TokenUsage, ToolCallState, ToolCallValidation, ToolResultOutcome,
-    UnboundToolCall,
+    AttemptInterruption, BoundToolCall, ImagePlacementError, MessageRole, MessageSemantic,
+    NativeMessage, Protocol, ReplayOrigin, TokenUsage, ToolCallState, ToolCallValidation,
+    ToolResultOutcome, UnboundToolCall, validate_image_placement,
 };
 use lattice_conversation::{
     ConversationItem, MAX_TOOL_CONTENT_BYTES, ResultPayload, StoredToolResult, SuccessContent,
@@ -88,6 +89,12 @@ pub enum ProjectionError {
     /// invalid (ADR 0005 §7).
     #[error("invalid tool call: {0}")]
     InvalidToolCall(#[from] ToolCallValidation),
+    /// 消息中的图片片段违反了角色或无回放状态约束。
+    #[error("{0}")]
+    InvalidImagePlacement(#[from] ImagePlacementError),
+    /// 纯文本投影入口遇到了需要图片来源才能编码的图片消息。
+    #[error("纯文本投影入口不持有图片来源，含图消息需经请求编码器配合 ImageSource 输出")]
+    ImageSourceRequired,
     /// Assembling the wire body crossed a protocol hard limit (ADR 0005 §10).
     /// The message is rejected whole; no partial conversation is returned.
     #[error("{provider} wire exceeds a protocol limit: {interruption:?}")]
@@ -242,41 +249,46 @@ pub fn project_cross_provider<S: ToolCallState>(
 
 /// Provider request messages projected from durable bound conversation history.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RequestMessages {
+pub struct RequestMessages<M = Value> {
     /// Provider system-instruction text, merged in source order.
     pub system: Option<String>,
     /// Provider-native non-system message objects in conversation order.
-    pub messages: Vec<Value>,
+    pub messages: Vec<M>,
 }
 
-/// 请求编码入口，固定不回放 Chat Completions reasoning（ReasoningReplay::None）。
-/// 按 features 选择回放方式时用 request_messages_with_replay；Chat Completions 请求构造走那条入口。
-/// 两条入口都按完整来源决定回放材料，原样保留 call ID，不补造目标 provider 身份。
+/// 纯文本请求投影测试入口，固定不回放 Chat Completions reasoning（ReasoningReplay::None）。
+/// 按 features 选择回放方式及含图流式编码的生产入口是 request_messages_with_replay。
+/// 两条入口共用同一份投影实现，按完整来源决定回放材料，原样保留 call ID，不补造目标 provider 身份。
 pub fn request_messages_to_wire(
     origin: &ReplayOrigin,
     history: &[ConversationItem],
 ) -> Result<RequestMessages, ProjectionError> {
-    request_messages_with_replay(origin, history, ReasoningReplay::None)
+    let projected = request_messages_with_replay(origin, history, ReasoningReplay::None)?;
+    let messages = items_to_values(&projected.messages)?;
+    Ok(RequestMessages {
+        system: projected.system,
+        messages,
+    })
 }
 
-/// 按调用方给出的 ReasoningReplay 编码请求。Chat Completions 构造按 features 传入回放方式。
+/// 按调用方给出的 ReasoningReplay 投影请求消息列表。
 pub(crate) fn request_messages_with_replay(
     origin: &ReplayOrigin,
     history: &[ConversationItem],
     replay: ReasoningReplay,
-) -> Result<RequestMessages, ProjectionError> {
+) -> Result<RequestMessages<WireItem>, ProjectionError> {
     let mut system = None;
     let mut messages = Vec::new();
     for item in history {
         match item {
             ConversationItem::Message(message) => match message.role {
                 MessageRole::System => {
-                    push_system_text(&mut system, &plain_text(origin.protocol, message)?)
+                    validate_image_placement(message)?;
+                    push_system_text(&mut system, &plain_text(origin.protocol, message)?);
                 }
-                MessageRole::User => messages.push(user_to_wire(
-                    origin.protocol,
-                    &plain_text(origin.protocol, message)?,
-                )),
+                MessageRole::User => {
+                    messages.push(user_message_to_wire(origin.protocol, message)?);
+                }
                 _ => {
                     return Err(ProjectionError::InvalidStep {
                         detail: "standalone message must be system or user",
@@ -287,12 +299,53 @@ pub(crate) fn request_messages_with_replay(
                 let projected = project_cross_provider(&step.assistant, origin);
                 // 先核完整配对，再生成 wire；不从相邻历史修补结果。
                 let results = tool_results_to_wire(origin.protocol, &projected, &step.results)?;
-                messages.extend(native_to_wire_with_replay(origin, &projected, replay)?);
-                messages.extend(results);
+                messages.extend(
+                    native_to_wire_with_replay(origin, &projected, replay)?
+                        .into_iter()
+                        .map(WireItem::Json),
+                );
+                messages.extend(results.into_iter().map(WireItem::Json));
             }
         }
     }
     Ok(RequestMessages { system, messages })
+}
+
+fn user_message_to_wire(
+    origin: Protocol,
+    message: &NativeMessage<BoundToolCall>,
+) -> Result<WireItem, ProjectionError> {
+    validate_image_placement(message)?;
+    let has_image = message
+        .parts
+        .iter()
+        .any(|part| matches!(part.semantic, MessageSemantic::Image { .. }));
+    if !has_image {
+        return Ok(WireItem::Json(user_to_wire(
+            origin,
+            &plain_text(origin, message)?,
+        )));
+    }
+    let mut parts = Vec::with_capacity(message.parts.len());
+    for (ordinal, part) in message.parts.iter().enumerate() {
+        if part.replay_state.is_some() {
+            return Err(ProjectionError::UnsupportedPart {
+                provider: origin,
+                part_ordinal: ordinal,
+            });
+        }
+        match &part.semantic {
+            MessageSemantic::Text { text } => parts.push(UserPart::Text(text.clone())),
+            MessageSemantic::Image { image } => parts.push(UserPart::Image(*image)),
+            MessageSemantic::Reasoning { .. } | MessageSemantic::ToolCall { .. } => {
+                return Err(ProjectionError::UnsupportedPart {
+                    provider: origin,
+                    part_ordinal: ordinal,
+                });
+            }
+        }
+    }
+    Ok(WireItem::UserImages(UserWire::new(origin, parts)))
 }
 
 fn plain_text(

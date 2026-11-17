@@ -282,7 +282,7 @@ impl GatewayTurn {
     ) -> Result<LlmStream, LlmError> {
         self.resolve(&request.target)
             .await?
-            .stream_chat(request, control)
+            .stream_chat(request, Arc::new(crate::NoImages), control)
             .await
     }
 }
@@ -319,6 +319,7 @@ impl ResolvedRequest {
     pub async fn stream_chat(
         &self,
         request: ChatRequest,
+        images: Arc<dyn crate::ImageSource>,
         control: StreamControl,
     ) -> Result<LlmStream, LlmError> {
         if request.target != self.target || request.client_request_id.is_none() {
@@ -347,6 +348,7 @@ impl ResolvedRequest {
                     .get(self.target.model.model())
                     .map_or(self.provider.features, |model| model.features),
             },
+            images,
             control,
         )
         .await?;

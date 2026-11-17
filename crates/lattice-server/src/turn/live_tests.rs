@@ -72,6 +72,7 @@ async fn projection_failures_use_a_generic_non_retryable_diagnostic() {
         async fn stream_chat(
             &self,
             _request: lattice_llm::ChatRequest,
+            _images: Arc<dyn lattice_llm::ImageSource>,
             _control: lattice_llm::StreamControl,
         ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
         {

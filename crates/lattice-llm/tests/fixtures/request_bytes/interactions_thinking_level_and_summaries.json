@@ -1,0 +1,1 @@
+{"generation_config":{"thinking_level":"medium","thinking_summaries":"auto"},"input":[{"content":[{"text":"测试思考等级与摘要","type":"text"}],"type":"user_input"}],"model":"test-model","store":false,"stream":true,"system_instruction":"保持简洁"}

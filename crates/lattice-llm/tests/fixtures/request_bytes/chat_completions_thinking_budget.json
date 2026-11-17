@@ -1,0 +1,1 @@
+{"enable_thinking":true,"messages":[{"content":"顶层思考预算","role":"user"}],"model":"test-model","stream":true,"stream_options":{"include_usage":true},"thinking_budget":4096}

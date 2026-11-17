@@ -556,7 +556,7 @@ async fn finished_cost_uses_current_merged_prices_without_requiring_current_cred
         let release = price_response(&server, DONE);
         let gateway = RequestGateway::new(directory.path().into(), vec![]).unwrap();
         let resolved = gateway.open_turn().resolve(&request("test").target).await.unwrap();
-        let mut stream = resolved.stream_chat(request("test"), StreamControl::default()).await.unwrap();
+        let mut stream = resolved.stream_chat(request("test"), Arc::new(crate::NoImages), StreamControl::default()).await.unwrap();
         assert_eq!(stream.next().await, Some(LlmEvent::Started));
         assert_eq!(stream.next().await, Some(LlmEvent::Delta(crate::LiveDelta::Text("priced".into()))));
         price_configuration(directory.path(), &server.url, "input = 2\noutput = 10\ncache_read = 0.5\n");
@@ -1137,7 +1137,7 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     let mut changed = request.clone();
     changed.target.effort = Some(lattice_conversation::Effort::Off);
     let error = match resolved
-        .stream_chat(changed, StreamControl::default())
+        .stream_chat(changed, Arc::new(crate::NoImages), StreamControl::default())
         .await
     {
         Err(error) => error,
@@ -1146,7 +1146,11 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     assert!(matches!(error, crate::LlmError::Config { .. }));
     complete(
         resolved
-            .stream_chat(request.clone(), StreamControl::default())
+            .stream_chat(
+                request.clone(),
+                Arc::new(crate::NoImages),
+                StreamControl::default(),
+            )
             .await
             .unwrap(),
     )
@@ -1162,7 +1166,7 @@ async fn resolved_request_keeps_its_protocol_endpoint_and_credentials_until_sent
     );
     complete(
         resolved
-            .stream_chat(request, StreamControl::default())
+            .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
             .await
             .unwrap(),
     )
@@ -1195,9 +1199,13 @@ async fn reasoning_plan_reloads_metadata_and_model_features_for_each_resolution(
     let old = turn.resolve(&request.target).await.unwrap();
     configure_model(24576, "enable-thinking", "thinking-budget");
     complete(
-        old.stream_chat(request.clone(), StreamControl::default())
-            .await
-            .unwrap(),
+        old.stream_chat(
+            request.clone(),
+            Arc::new(crate::NoImages),
+            StreamControl::default(),
+        )
+        .await
+        .unwrap(),
     )
     .await;
     let body = server.next().await.body;
@@ -1541,7 +1549,7 @@ async fn chat_replay_defaults_to_no_reasoning() {
         std::fs::write(directory.path().join("providers.toml"), &base).unwrap();
         complete(
             resolved
-                .stream_chat(request, StreamControl::default())
+                .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
                 .await
                 .unwrap(),
         )
@@ -1727,9 +1735,13 @@ async fn messages_use_merged_output_limits_at_resolution_and_reload_on_the_next_
     let old = turn.resolve(&request.target).await.unwrap();
     write_cache(65536);
     complete(
-        old.stream_chat(request.clone(), StreamControl::default())
-            .await
-            .unwrap(),
+        old.stream_chat(
+            request.clone(),
+            Arc::new(crate::NoImages),
+            StreamControl::default(),
+        )
+        .await
+        .unwrap(),
     )
     .await;
     assert_eq!(server.next().await.body["max_tokens"], 8192);
@@ -2423,7 +2435,11 @@ async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_
         gateway.chatgpt_auth().stop_logins();
         complete(
             resolved
-                .stream_chat(request("chatgpt"), StreamControl::default())
+                .stream_chat(
+                    request("chatgpt"),
+                    Arc::new(crate::NoImages),
+                    StreamControl::default(),
+                )
                 .await
                 .unwrap(),
         )
@@ -2439,7 +2455,11 @@ async fn expired_login_can_resolve_and_old_resolved_request_uses_current_tokens_
     gateway.chatgpt_auth().shutdown().await.unwrap();
     assert!(
         resolved
-            .stream_chat(request("chatgpt"), StreamControl::default())
+            .stream_chat(
+                request("chatgpt"),
+                Arc::new(crate::NoImages),
+                StreamControl::default(),
+            )
             .await
             .is_err()
     );
@@ -2612,7 +2632,7 @@ async fn builtin_candidates_and_efforts_match_the_requests_they_resolve() {
                 );
                 complete(
                     resolved
-                        .stream_chat(request, StreamControl::default())
+                        .stream_chat(request, Arc::new(crate::NoImages), StreamControl::default())
                         .await
                         .unwrap(),
                 )

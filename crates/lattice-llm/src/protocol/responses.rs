@@ -9,6 +9,7 @@ use lattice_conversation::{Effort, Protocol, ReplayOrigin};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use super::encoding::RequestBody;
 use super::projection::{ProjectionError, request_messages_with_replay};
 use crate::reasoning::ReasoningPlan;
 use crate::reply::{PartDelta, PartKind, ProtocolEvent, StringPatch};
@@ -19,12 +20,13 @@ pub(crate) fn build_request_json(
     reasoning: Option<ReasoningPlan>,
     model_reasoning: Option<bool>,
     origin: &ReplayOrigin,
-) -> Result<Value, ProjectionError> {
+) -> Result<RequestBody, ProjectionError> {
     let projected =
         request_messages_with_replay(origin, &request.messages, super::ReasoningReplay::None)?;
     let mut body = json!({
-        "model":request.target.model.model(), "input":projected.messages,
-        "stream":true, "store":false,
+        "model": request.target.model.model(),
+        "stream": true,
+        "store": false,
     });
     if let Some(system) = projected.system {
         body["instructions"] = system.into();
@@ -58,7 +60,10 @@ pub(crate) fn build_request_json(
             })
             .collect();
     }
-    Ok(body)
+    let Value::Object(fields) = body else {
+        unreachable!("请求顶层固定为 JSON 对象");
+    };
+    Ok(RequestBody::new(fields, "input", projected.messages))
 }
 
 // 仅解码参与协议转换的字段；回显的 instructions、tools 等由 serde 跳过。

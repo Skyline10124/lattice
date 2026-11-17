@@ -366,6 +366,7 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         async fn stream_chat(
             &self,
             request: ChatRequest,
+            _images: Arc<dyn lattice_llm::ImageSource>,
             control: lattice_llm::StreamControl,
         ) -> std::result::Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
             let mut requests = self.0.lock().unwrap();
@@ -454,7 +455,10 @@ async fn live_multicall_closes_continue_then_finish_from_structured_history() {
         tid(1),
         LiveExecution {
             model: crate::turn::saga::ModelExecution::Injected {
-                driver: Arc::new(ModelStepDriver::new(llm.clone())),
+                driver: Arc::new(ModelStepDriver::new(
+                    llm.clone(),
+                    Arc::new(lattice_llm::NoImages),
+                )),
                 origin: AttemptOrigin {
                     provider_id: lattice_conversation::ProviderId::parse("openai-compatible")
                         .unwrap(),
@@ -743,7 +747,10 @@ async fn stop_at_execution_boundary(boundary: StopBoundary, cancelled: bool) {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     let live = LiveExecution {
         model: crate::turn::saga::ModelExecution::Injected {
-            driver: Arc::new(ModelStepDriver::new(llm.clone())),
+            driver: Arc::new(ModelStepDriver::new(
+                llm.clone(),
+                Arc::new(lattice_llm::NoImages),
+            )),
             origin: AttemptOrigin {
                 provider_id: lattice_conversation::ProviderId::parse("openai").unwrap(),
                 protocol: AttemptProtocol::ChatCompletions,
@@ -1156,6 +1163,7 @@ mod fake_tools_tests {
             async fn stream_chat(
                 &self,
                 request: lattice_llm::ChatRequest,
+                _images: Arc<dyn lattice_llm::ImageSource>,
                 control: lattice_llm::StreamControl,
             ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>>
             {

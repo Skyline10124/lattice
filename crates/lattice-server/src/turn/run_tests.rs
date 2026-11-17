@@ -126,6 +126,7 @@ impl LlmClient for CancelOnDone {
     async fn stream_chat(
         &self,
         request: lattice_llm::ChatRequest,
+        _images: Arc<dyn lattice_llm::ImageSource>,
         control: lattice_llm::StreamControl,
     ) -> std::result::Result<lattice_llm::LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let cancel = self.0.clone();

@@ -1,0 +1,1 @@
+{"messages":[{"content":"关闭思考开关","role":"user"}],"model":"test-model","stream":true,"stream_options":{"include_usage":true},"thinking":{"type":"disabled"}}

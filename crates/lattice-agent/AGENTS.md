@@ -7,7 +7,7 @@
 | 模块 | 负责 |
 | --- | --- |
 | `src/lib.rs` | 重导出 `ModelStepDriver`、`LlmClient` 与尝试请求、事件、结果类型 |
-| `src/model_step.rs` | 从类型化历史组装 `ModelStepRequest`、轮询打开阶段取消与 deadline、转发流增量并映射 `ModelStepAttempt` |
+| `src/model_step.rs` | 持有 `LlmClient` 与 `ImageSource`，从类型化历史组装 `ModelStepRequest`、轮询打开阶段取消与 deadline、转发流增量并映射 `ModelStepAttempt` |
 | `src/testing.rs` | `test-utils` feature 启用的确定性 `LlmClient` 测试替身 |
 
 ## 先读
@@ -21,7 +21,7 @@
 ## 约束
 
 - `Cargo.toml` 的工作区依赖限定为 `lattice-llm` 与 `lattice-conversation`，消费类型化流事件并产出类型化 `ModelStepAttempt`，使单次尝试驱动独立于存储和工具运行时。
-- `ModelStepDriver` 在流打开阶段按固定间隔轮询取消与 deadline，`LlmClient` 实现把同一 `control` 交给 `lattice_llm::assemble_reply_stream` 并沿用同一轮询间隔处理流中取消与 deadline；打开失败返回 `ModelStepError::OpeningFailed`，流中取消、超时、限额或传输错误归入 `ModelStepAttempt`，以精确区分请求未打开与流中终止。
+- `ModelStepDriver::new(llm, images)` 持有可注入的 `LlmClient` 与 `Arc<dyn lattice_llm::ImageSource>`，每次尝试将同一图片来源连同 `control` 传给 `LlmClient::stream_chat(request, images, control)`；驱动在流打开阶段按固定间隔轮询取消与 deadline，`LlmClient` 实现把同一 `control` 交给 `lattice_llm::assemble_reply_stream` 并沿用同一轮询间隔处理流中取消与 deadline；打开失败返回 `ModelStepError::OpeningFailed`，流中取消、超时、限额或传输错误归入 `ModelStepAttempt`，以精确区分请求未打开与流中终止。
 - `ModelStepDriver` 通过同步非阻塞回调交出与完整回复同源的显示增量，调用方先将正文与 reasoning 增量追加到当前尝试的段列表再唤醒观察者，保证通知合并时显示文字完整连续，见[观察与重连](../../docs/architecture/session/recovery.md#观察与重连)。
 - 本 crate 之外：provider wire 协议编解码由 `lattice-llm` 负责；持久会话记录由 `lattice-session` 负责；模型循环与重试预算、`InvocationId` 分配、Tool 绑定与分发、槽位登记及 Step/Turn 关闭由 `lattice-server` 负责。
 

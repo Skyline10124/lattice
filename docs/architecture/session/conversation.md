@@ -33,6 +33,6 @@ Tool 参数经 [`lattice-conversation`](../../../crates/lattice-conversation/src
 - **保序规范化。** `normalize_user_message` 只接受 `Text` 与 `Image` 片段，先核验上述四项单轮上限，再剔除空字符串 `Text` 片段（仅剔除 `text.is_empty()`，不裁剪空白字符）、合并剔除后相邻的 `Text` 片段（不跨 `Image` 合并，原样保留每个 `Image` 的顺序与重复），并要求规范化后的片段列表非空；生成的 `NativeMessage` 角色为 `User`、`provider_origin` 为 `None`、每个片段 `replay_state` 为 `None`。
 
 ## 回放与跨 provider 投影
-每次尝试记录来源：协议与 provider `id`。适配层按[回放来源](../llm/protocols.md#回放来源)的规则生成投影：协议与 provider `id` 都相同时保留 reasoning 和回放状态，否则去除。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除；旧历史缺少 ID 时省略对应字段，不合成 ID，由目标 API 判断是否接受。切回原来源时使用树中保存的原消息。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
+每次尝试记录来源：协议与 provider `id`。适配层按[回放来源](../llm/protocols.md#回放来源)的规则生成投影：协议与 provider `id` 都相同时保留 reasoning 和回放状态，否则去除。来源不含 endpoint：同一 provider `id` 在 `providers.toml` 中改了 `base_url` 之后仍回放此前的签名，新 endpoint 可能拒绝这些签名；要换 endpoint 时使用新的 provider `id`。provider call ID 在工具调用与工具结果两侧原样保留，切换协议或 provider 都不去除；旧历史缺少 ID 时省略对应字段，不合成 ID，由目标 API 判断是否接受。用户消息中的 `ImageRef` 是厂商中立载荷，回放时按目标协议直接投影，不随来源裁剪。切回原来源时使用树中保存的原消息。不透明回放材料逐片段原样保留，单片段上限 64 KiB；即使片段正文为空，也保留其回放状态。连续两个 UserMessage 由投影按适配器要求合并或原样传递。
 
 类型和编码由 [`lattice-conversation`](../../../crates/lattice-conversation/src/lib.rs) 维护。provider Tool Call ID 仅是 provider 协议材料，不参与会话登记或执行身份分配；跨 provider 投影不伪造目标 provider 身份材料。发给模型的对话是当前位置从根到该节点的路径，provider 投影是纯函数，不在请求时扫描或补齐缺失结果。

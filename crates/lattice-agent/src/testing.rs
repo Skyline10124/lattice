@@ -77,6 +77,7 @@ impl LlmClient for FakeStreamingLlmClient {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        _images: std::sync::Arc<dyn lattice_llm::ImageSource>,
         control: StreamControl,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         self.call_count.fetch_add(1, Ordering::Relaxed);

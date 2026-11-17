@@ -1,0 +1,1 @@
+{"include":["reasoning.encrypted_content"],"input":[{"content":[{"text":"开启高推理档位与加密回放","type":"input_text"}],"role":"user"}],"instructions":"回答准确","model":"test-model","prompt_cache_key":"3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c","reasoning":{"effort":"high","summary":"auto"},"store":false,"stream":true}

@@ -27,6 +27,7 @@ impl LlmClient for OpenAiFrames {
     async fn stream_chat(
         &self,
         request: ChatRequest,
+        _images: Arc<dyn lattice_llm::ImageSource>,
         control: lattice_llm::StreamControl,
     ) -> Result<LlmStream, Box<dyn std::error::Error + Send + Sync>> {
         let mut parser = OpenAiSseParser::new();
@@ -74,10 +75,13 @@ fn finish(frames: &mut Vec<String>) {
 
 async fn run(frames: Vec<String>) -> (ModelStepAttempt, usize) {
     let consumed = Arc::new(AtomicUsize::new(0));
-    let driver = ModelStepDriver::new(Arc::new(OpenAiFrames {
-        frames,
-        consumed: consumed.clone(),
-    }));
+    let driver = ModelStepDriver::new(
+        Arc::new(OpenAiFrames {
+            frames,
+            consumed: consumed.clone(),
+        }),
+        Arc::new(lattice_llm::NoImages),
+    );
     let attempt = driver
         .run(
             &ModelStepRequest {

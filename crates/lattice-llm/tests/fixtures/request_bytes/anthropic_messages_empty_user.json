@@ -1,0 +1,1 @@
+{"max_tokens":4096,"messages":[{"content":[{"text":"(empty message)","type":"text"}],"role":"user"}],"model":"test-model","stream":true,"thinking":{"type":"disabled"}}

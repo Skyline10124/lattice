@@ -1,0 +1,1 @@
+{"cache_control":{"type":"ephemeral"},"max_tokens":16384,"messages":[{"content":[{"text":"自适应思考与输出配置","type":"text"}],"role":"user"}],"model":"test-model","output_config":{"effort":"high"},"stream":true,"system":[{"cache_control":{"type":"ephemeral"},"text":"系统缓存断点","type":"text"}],"thinking":{"display":"summarized","type":"adaptive"}}

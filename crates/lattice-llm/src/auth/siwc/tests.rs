@@ -393,6 +393,7 @@ async fn inference_waits_for_refresh_publication_and_uses_its_header_and_redacti
                 features: crate::protocol::Features::Responses,
                 reasoning: None,
             },
+            Arc::new(crate::NoImages),
             crate::StreamControl::default(),
         )
         .await

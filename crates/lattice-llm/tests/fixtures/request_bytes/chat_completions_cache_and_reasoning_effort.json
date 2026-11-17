@@ -1,0 +1,1 @@
+{"messages":[{"content":[{"cache_control":{"type":"ephemeral"},"text":"系统指令","type":"text"}],"role":"system"},{"content":[{"cache_control":{"type":"ephemeral"},"text":"开启显式缓存与推理档位","type":"text"}],"role":"user"}],"model":"test-model","reasoning_effort":"high","stream":true,"stream_options":{"include_usage":true},"thinking":{"type":"enabled"}}

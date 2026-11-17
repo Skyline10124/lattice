@@ -1751,9 +1751,10 @@ fn replay_origin(protocol: Protocol) -> ReplayOrigin {
 }
 
 #[test]
-fn assistant_and_user_image_parts_return_unsupported_part_across_all_protocols() {
+fn assistant_and_invalid_image_placements_are_rejected_across_all_protocols() {
     use lattice_conversation::{
-        BoundToolCall, ConversationItem, ImageMediaType, ImageRef, MessagePart, MessageRole,
+        BoundToolCall, ConversationItem, ImageMediaType, ImagePlacementError, ImageRef,
+        MessagePart, MessageRole,
     };
     use lattice_llm::protocol::projection::{native_to_wire, request_messages_to_wire};
 
@@ -1790,18 +1791,36 @@ fn assistant_and_user_image_parts_return_unsupported_part_across_all_protocols()
             "{protocol:?} 无回放状态助手图片必须返回 UnsupportedPart"
         );
 
-        let user = NativeMessage::<BoundToolCall>::new(
+        let user_with_replay = NativeMessage::<BoundToolCall>::new(
             MessageRole::User,
+            None,
+            vec![MessagePart {
+                semantic: MessageSemantic::Image { image },
+                replay_state: Some(OpaqueProviderState::new("sig").unwrap()),
+            }],
+        );
+        assert_eq!(
+            request_messages_to_wire(&origin, &[ConversationItem::Message(user_with_replay)]),
+            Err(ProjectionError::InvalidImagePlacement(
+                ImagePlacementError::UnexpectedReplayState { part: 1 }
+            )),
+            "{protocol:?} 携带回放状态的用户图片必须拒绝"
+        );
+
+        let system_with_image = NativeMessage::<BoundToolCall>::new(
+            MessageRole::System,
             None,
             vec![MessagePart::semantic_only(MessageSemantic::Image { image })],
         );
         assert_eq!(
-            request_messages_to_wire(&origin, &[ConversationItem::Message(user)]),
-            Err(ProjectionError::UnsupportedPart {
-                provider: protocol,
-                part_ordinal: 0,
-            }),
-            "{protocol:?} 本批用户图片投影仍应返回 UnsupportedPart"
+            request_messages_to_wire(&origin, &[ConversationItem::Message(system_with_image)]),
+            Err(ProjectionError::InvalidImagePlacement(
+                ImagePlacementError::DisallowedRole {
+                    role: MessageRole::System,
+                    part: 1,
+                }
+            )),
+            "{protocol:?} 系统消息包含图片必须拒绝"
         );
     }
 
