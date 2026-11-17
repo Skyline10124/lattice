@@ -19,7 +19,7 @@
 | `src/local/auth.rs`、`src/local/auth/login.rs` | 后台凭据命令存储调用、错误映射，以及后台同连接 SIWC 登录交换（登录成功帧经 `presentation` 转换 `ProviderAuthStatus`，授权链接以 `AuthKey` 发送） |
 | `src/local/metadata.rs` | `models.dev` 与 ChatGPT 账号目录的单任务调度、按来源共享在途刷新及停机排空 |
 | `src/turn/mod.rs`、`src/turn/types.rs`、`src/turn/live.rs`、`src/turn/execute.rs` | Turn 准入（按会话设置与 `expected_settings` 核对版本、经 `GatewayTurn::prepare` 严格核对可用性与已存档位、接受前调用 `ToolExecutor::open_turn` 冻结本轮工具目录）、后台生产执行入口 `start_execution`、测试入口 `start_turn` 及仅限内部单元测试（`#[cfg(test)]`）的 `run_turn` |
-| `src/turn/coordinator.rs`、`src/turn/saga.rs` | 全 Turn `SessionExecutionLock` 持有、`spawn_blocking` 存储适配、`ModelStepDriver` 组装（生产路径注入 `lattice_llm::NoImages`）、模型重试、顺序调用分发及 Step/Turn 关闭 |
+| `src/turn/coordinator.rs`、`src/turn/request.rs`、`src/turn/saga.rs` | 全 Turn `SessionExecutionLock` 持有、`spawn_blocking` 存储适配、`request.rs` 负责父链历史读取、工具定义转换与步骤请求组装、`ModelStepDriver` 组装（生产路径注入 `lattice_llm::NoImages`）、模型重试、顺序调用分发及 Step/Turn 关闭 |
 | `src/turn/tools.rs` | `ToolExecutor` / `TurnTools` / `ToolSpec` / `ToolOutcome` 工具执行接缝、生产默认注入私有 `NoTools`，以及 `test-fake-tools` feature 下的假执行器 `FakeToolExecutor`（按后台启动环境 `LATTICE_TEST_TOOLS` 启用） |
 | `src/turn/observer.rs` | 当前尝试的生成中文字段列表、按固定 `TurnId` 提取的纯文本草稿快照，以及各观察者待推节点与文字游标 |
 | `src/turn/crash_barrier.rs` | `test-crash-barriers` feature 控制的提交后停点（经 `libc::raise(SIGSTOP)` 只向调用线程发送停止信号）、基于 Step/槽位标识的 marker 写入与观察调度插桩 |

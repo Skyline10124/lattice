@@ -7,7 +7,7 @@
 | 模块 | 负责 |
 | --- | --- |
 | `src/lib.rs` | 重导出 `ModelStepDriver`、`LlmClient` 与尝试请求、事件、结果类型 |
-| `src/model_step.rs` | 持有 `LlmClient` 与 `ImageSource`，从类型化历史组装 `ModelStepRequest`、轮询打开阶段取消与 deadline、转发流增量并映射 `ModelStepAttempt` |
+| `src/model_step.rs` | 持有 `LlmClient` 与 `ImageSource`，从类型化历史组装 `ModelStepRequest`（`ModelStepRequest::chat_request` 是模型请求的唯一构造入口）、轮询打开阶段取消与 deadline、转发流增量并映射 `ModelStepAttempt` |
 | `src/testing.rs` | `test-utils` feature 启用的确定性 `LlmClient` 测试替身 |
 
 ## 先读

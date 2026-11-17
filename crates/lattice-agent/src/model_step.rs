@@ -166,6 +166,37 @@ pub struct ModelStepRequest {
     pub session_id: Option<String>,
 }
 
+impl ModelStepRequest {
+    /// 由步骤请求得到发给模型的完整请求；准入预检与实际发送共用这一个构造入口。
+    pub fn chat_request(&self) -> ChatRequest {
+        let mut messages = Vec::with_capacity(self.history.len() + 1);
+        if let Some(system) = &self.system_prompt {
+            messages.push(lattice_conversation::ConversationItem::Message(
+                NativeMessage::new(
+                    MessageRole::System,
+                    None,
+                    vec![MessagePart::semantic_only(MessageSemantic::Text {
+                        text: system.clone(),
+                    })],
+                ),
+            ));
+        }
+        messages.extend(self.history.iter().cloned());
+        ChatRequest {
+            messages,
+            tools: self.tools.clone(),
+            target: ModelTarget {
+                model: lattice_conversation::ModelRef::new(
+                    self.provider.clone(),
+                    self.model.clone(),
+                ),
+                effort: self.effort,
+            },
+            client_request_id: self.session_id.clone(),
+        }
+    }
+}
+
 /// 单次尝试的模型步骤驱动，持有可注入的客户端与图片来源。
 pub struct ModelStepDriver {
     llm: Arc<dyn LlmClient>,
@@ -185,31 +216,7 @@ impl ModelStepDriver {
         request: &ModelStepRequest,
         live: Option<&mut (dyn FnMut(ModelStepEvent) + Send)>,
     ) -> Result<ModelStepAttempt, ModelStepError> {
-        let mut messages = Vec::with_capacity(request.history.len() + 1);
-        if let Some(system) = &request.system_prompt {
-            messages.push(lattice_conversation::ConversationItem::Message(
-                NativeMessage::new(
-                    MessageRole::System,
-                    None,
-                    vec![MessagePart::semantic_only(MessageSemantic::Text {
-                        text: system.clone(),
-                    })],
-                ),
-            ));
-        }
-        messages.extend(request.history.iter().cloned());
-        let chat = ChatRequest {
-            messages,
-            tools: request.tools.clone(),
-            target: ModelTarget {
-                model: lattice_conversation::ModelRef::new(
-                    request.provider.clone(),
-                    request.model.clone(),
-                ),
-                effort: request.effort,
-            },
-            client_request_id: request.session_id.clone(),
-        };
+        let chat = request.chat_request();
 
         let control = StreamControl {
             cancel: request.cancel.clone(),
@@ -436,6 +443,168 @@ mod opening_error_tests {
                 "{label} 应映射为不可重试且消息原样保留的 OpeningFailed"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod chat_request_tests {
+    use super::*;
+    use lattice_conversation::{
+        ConversationItem, Effort, ModelId, ModelRef, Protocol, ProviderId, ReplayOrigin,
+        StepContent,
+    };
+
+    fn sample_history(provider: &ProviderId) -> Vec<ConversationItem> {
+        vec![
+            ConversationItem::Message(NativeMessage::new(
+                MessageRole::User,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "第一条用户消息".into(),
+                })],
+            )),
+            ConversationItem::Step(StepContent {
+                assistant: NativeMessage::new(
+                    MessageRole::Assistant,
+                    Some(ReplayOrigin {
+                        protocol: Protocol::ChatCompletions,
+                        provider_id: provider.clone(),
+                    }),
+                    vec![MessagePart::semantic_only(MessageSemantic::Text {
+                        text: "第一条助手回复".into(),
+                    })],
+                ),
+                results: Vec::new(),
+            }),
+            ConversationItem::Message(NativeMessage::new(
+                MessageRole::User,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "第二条用户消息".into(),
+                })],
+            )),
+        ]
+    }
+
+    fn sample_tools() -> Vec<ToolDefinition> {
+        vec![
+            ToolDefinition::new(
+                "read_file",
+                "读取文件内容",
+                serde_json::json!({"type": "object", "properties": {"path": {"type": "string"}}}),
+            ),
+            ToolDefinition::new(
+                "search_code",
+                "搜索代码内容",
+                serde_json::json!({"type": "object", "properties": {"query": {"type": "string"}}}),
+            ),
+        ]
+    }
+
+    #[test]
+    fn chat_request_prepends_system_prompt_once_and_preserves_fields() {
+        let provider = ProviderId::parse("openai").expect("解析测试 provider 标识");
+        let model = ModelId::parse("gpt-4o").expect("解析测试模型标识");
+        let history = sample_history(&provider);
+        let tools = sample_tools();
+        let request = ModelStepRequest {
+            system_prompt: Some("你是严谨的编程助手".into()),
+            history: history.clone(),
+            model: model.clone(),
+            provider: provider.clone(),
+            effort: Some(Effort::High),
+            tools: tools.clone(),
+            cancel: Some(Arc::new(AtomicBool::new(false))),
+            deadline: Some(Instant::now()),
+            session_id: Some("session-with-system".into()),
+        };
+
+        let chat = request.chat_request();
+        let system_count = chat
+            .messages
+            .iter()
+            .filter(|item| {
+                matches!(
+                    item,
+                    ConversationItem::Message(message) if message.role == MessageRole::System
+                )
+            })
+            .count();
+        assert_eq!(system_count, 1, "系统提示消息必须只出现一次");
+        assert_eq!(
+            chat.messages.first(),
+            Some(&ConversationItem::Message(NativeMessage::new(
+                MessageRole::System,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::Text {
+                    text: "你是严谨的编程助手".into(),
+                })],
+            ))),
+            "系统提示必须位于消息列表最前"
+        );
+        assert_eq!(
+            &chat.messages[1..],
+            history.as_slice(),
+            "系统提示之后必须原样保留历史消息顺序"
+        );
+        assert_eq!(chat.tools, tools, "工具定义必须与输入一致");
+        assert_eq!(
+            chat.target,
+            ModelTarget {
+                model: ModelRef::new(provider, model),
+                effort: Some(Effort::High),
+            },
+            "模型目标与推理档位必须与输入一致"
+        );
+        assert_eq!(
+            chat.client_request_id.as_deref(),
+            Some("session-with-system"),
+            "client_request_id 必须与 session_id 一致"
+        );
+    }
+
+    #[test]
+    fn chat_request_without_system_prompt_preserves_history_and_target() {
+        let provider = ProviderId::parse("anthropic").expect("解析测试 provider 标识");
+        let model = ModelId::parse("claude-sonnet").expect("解析测试模型标识");
+        let history = sample_history(&provider);
+        let tools = sample_tools();
+        let request = ModelStepRequest {
+            system_prompt: None,
+            history: history.clone(),
+            model: model.clone(),
+            provider: provider.clone(),
+            effort: None,
+            tools: tools.clone(),
+            cancel: None,
+            deadline: None,
+            session_id: None,
+        };
+
+        let chat = request.chat_request();
+        assert!(
+            !chat.messages.iter().any(|item| {
+                matches!(
+                    item,
+                    ConversationItem::Message(message) if message.role == MessageRole::System
+                )
+            }),
+            "无系统提示时不应插入 System 消息"
+        );
+        assert_eq!(chat.messages, history, "无系统提示时消息必须与历史完全一致");
+        assert_eq!(chat.tools, tools, "工具定义必须与输入一致");
+        assert_eq!(
+            chat.target,
+            ModelTarget {
+                model: ModelRef::new(provider, model),
+                effort: None,
+            },
+            "无系统提示时模型目标与推理档位必须与输入一致"
+        );
+        assert_eq!(
+            chat.client_request_id, None,
+            "未提供 session_id 时 client_request_id 必须为空"
+        );
     }
 }
 

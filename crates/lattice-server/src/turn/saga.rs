@@ -6,13 +6,13 @@
 use super::{
     coordinator::{CoordinatorIoError, TurnCoordinator},
     observer::ObserverSink,
+    request,
     types::{TurnEvent, TurnRef},
 };
 use lattice_agent::{
-    ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
-    ModelStopCause,
+    ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStopCause,
 };
-use lattice_conversation::{ConversationItem, ModelAttemptKey, TurnId};
+use lattice_conversation::{ModelAttemptKey, TurnId};
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -166,18 +166,6 @@ pub(crate) async fn run_coordinator_saga(
         .io
         .read(move |read| read.turn_config(session, turn_id))
         .await?;
-    let tools = config
-        .catalog
-        .entries
-        .iter()
-        .map(|tool| {
-            lattice_llm::ToolDefinition::new(
-                tool.name.clone(),
-                tool.description.clone(),
-                tool.input_schema.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
     let mut ordinal = 0;
     loop {
         live.healthy()?;
@@ -190,7 +178,7 @@ pub(crate) async fn run_coordinator_saga(
         }
         let history = coordinator
             .io
-            .read(move |read| history(read, session))
+            .read(move |read| request::history(read, session))
             .await?;
         let mut attempt = 0;
         let mut delay = live.retry.initial_delay_ms().min(live.retry.max_delay_ms());
@@ -240,17 +228,9 @@ pub(crate) async fn run_coordinator_saga(
                 model: config.model.as_str().to_owned(),
             });
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
-            let request = ModelStepRequest {
-                system_prompt: config.system_prompt.clone(),
-                history: history.clone(),
-                model: config.model.clone(),
-                provider: config.provider.clone(),
-                effort: config.effort,
-                tools: tools.clone(),
-                cancel: Some(cancellation.clone()),
-                deadline: Some(live.deadline),
-                session_id: Some(session.to_string()),
-            };
+            let mut request = request::step_request(session, &config, history.clone());
+            request.cancel = Some(cancellation.clone());
+            request.deadline = Some(live.deadline);
             let observer = live.observer.clone();
             live.healthy()?;
             let result = match driver {
@@ -648,44 +628,6 @@ fn map_stop(cause: ModelStopCause) -> StopCause {
         ModelStopCause::OutputLimit => StopCause::OutputLimit,
         ModelStopCause::InvalidBatch => StopCause::InvalidBatch,
     }
-}
-
-fn history(
-    read: &SessionRead,
-    session_id: lattice_conversation::SessionId,
-) -> lattice_session::store::Result<Vec<ConversationItem>> {
-    let mut current = read.session(session_id)?.current;
-    let mut items = Vec::new();
-    while current != NodeId(0) {
-        let node = read.node(NodeRef {
-            session_id,
-            node: current,
-        })?;
-        let content = node.step_content();
-        match node {
-            Node::UserMessage {
-                parent, message, ..
-            } => {
-                items.push(ConversationItem::Message(message));
-                current = parent;
-            }
-            Node::Step { parent, .. } => {
-                if let Some(content) = content {
-                    items.push(ConversationItem::Step(content));
-                }
-                current = parent;
-            }
-            Node::Root => {
-                return Err(StoreError::Corruption {
-                    table: "nodes".into(),
-                    key: current.0.to_string(),
-                    detail: "nonzero root".into(),
-                });
-            }
-        }
-    }
-    items.reverse();
-    Ok(items)
 }
 
 async fn publish_closed(
