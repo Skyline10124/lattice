@@ -439,7 +439,7 @@ fn comment_missing_step_discards_drafts_and_comment_only_queue_but_keeps_text() 
     assert_eq!(
         app.queue
             .messages()
-            .map(|m| m.text.as_str())
+            .map(|m| m.input.text())
             .collect::<Vec<_>>(),
         ["kept text"]
     );
@@ -478,7 +478,7 @@ fn comment_rewind_during_queue_edit_preserves_remaining_order() {
     assert_eq!(
         app.queue
             .messages()
-            .map(|m| m.text.as_str())
+            .map(|m| m.input.text())
             .collect::<Vec<_>>(),
         ["middle", "last"]
     );
@@ -724,7 +724,7 @@ fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
         assert_eq!(
             app.queue
                 .messages()
-                .map(|m| m.text.as_str())
+                .map(|m| m.input.text())
                 .collect::<Vec<_>>(),
             [
                 " q0\nraw ",
@@ -771,7 +771,7 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
             assert!(app.input.is_empty(), "接受后这一轮在运行，Enter 入队");
             assert!(app.queue.is_full());
             assert_eq!(
-                app.queue.messages().last().unwrap().text,
+                app.queue.messages().last().unwrap().input.text(),
                 "new queued input"
             );
         } else {
@@ -901,7 +901,7 @@ fn completion_waits_for_editor_then_sends_one_on_save_or_discard() {
         assert_eq!(edited_req.workspace, h.options.project_root);
         assert_eq!(edited_req.expected_settings, Some(settings_version(0x01)));
         assert_eq!(
-            app.queue.messages().last().unwrap().text,
+            app.queue.messages().last().unwrap().input.text(),
             if save { " q4\nraw !" } else { " q4\nraw " }
         );
         assert!(app.auto_submit().is_none());
@@ -3031,7 +3031,14 @@ async fn idle_submit_preflight_failure_preserves_input_draft_and_never_sends() {
     assert_eq!(h.app.input.text(), body, "输入区文字应保持原样");
     assert_eq!(h.app.queue.draft_count(), 1, "评论草稿应保持原样");
     assert!(
-        h.app.queue.preview_message(&body).encode().len() > 2_097_152,
+        compose_parts(&h.app.input, &h.app.queue.draft_comments())
+            .iter()
+            .map(|part| match part {
+                UserInputPart::Text { text } => text.len(),
+                UserInputPart::Image { .. } => 0,
+            })
+            .sum::<usize>()
+            > 2_097_152,
         "输入文字加评论草稿编码后应超过上限"
     );
     assert_eq!(h.app.history.prev(), None, "输入历史不应新增记录");
@@ -3150,7 +3157,14 @@ async fn running_enqueue_preflight_failure_preserves_input_draft_and_skips_queue
     assert_eq!(h.app.input.text(), body, "输入区文字应保持原样");
     assert_eq!(h.app.queue.draft_count(), 1, "评论草稿应保持原样");
     assert!(
-        h.app.queue.preview_message(&body).encode().len() > 2_097_152,
+        compose_parts(&h.app.input, &h.app.queue.draft_comments())
+            .iter()
+            .map(|part| match part {
+                UserInputPart::Text { text } => text.len(),
+                UserInputPart::Image { .. } => 0,
+            })
+            .sum::<usize>()
+            > 2_097_152,
         "输入文字加评论草稿编码后应超过上限"
     );
     assert!(
@@ -3160,4 +3174,530 @@ async fn running_enqueue_preflight_failure_preserves_input_draft_and_skips_queue
             .any(|b| matches!(b, Block::Status(s) if s.level == NoticeLevel::Error)),
         "应记录错误等级的状态消息"
     );
+}
+
+#[tokio::test]
+async fn paste_interleaved_text_and_image_submits_exact_parts_in_order() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let png_bytes = b"\x89PNG\r\n\x1a\ninterleaved-payload".to_vec();
+    let image_path = h.options.project_root.join("shot.png");
+    std::fs::write(&image_path, &png_bytes).expect("写入测试图片文件");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+
+    let driver = async {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("前缀文字".into())))
+            .expect("发送前段文字粘贴事件");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str.clone())))
+            .expect("发送图片路径粘贴事件");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("后缀文字".into())))
+            .expect("发送后段文字粘贴事件");
+
+        remote
+            .wait(|f| f.panel.contains("前缀文字[IMAGE 1 · png · 27 B]后缀文字"))
+            .await;
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let submitted_frame = remote
+            .wait(|f| f.text.contains("前缀文字 [IMAGE 1 · png · 27 B] 后缀文字"))
+            .await;
+        assert_eq!(submitted_frame.phase, TurnPhase::Streaming);
+
+        peer.wait(|s| count(s, "submit") == 1).await;
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+
+    let seen = peer.seen.borrow().clone();
+    let submit_val = &requests(&seen, "submit")
+        .next()
+        .expect("假后台应收到一次提交")["request"];
+    let decoded: TurnRequest =
+        serde_json::from_value(submit_val.clone()).expect("反序列化提交请求");
+    assert_eq!(decoded.parts.len(), 3, "提交片段应保持三段交错顺序");
+    assert!(
+        matches!(&decoded.parts[0], UserInputPart::Text { text } if text == "前缀文字"),
+        "首段应为前缀文字"
+    );
+    assert!(
+        matches!(&decoded.parts[1], UserInputPart::Image { image } if *image == png_bytes),
+        "中段应为与原文件完全一致的图片字节"
+    );
+    assert!(
+        matches!(&decoded.parts[2], UserInputPart::Text { text } if text == "后缀文字"),
+        "末段应为后缀文字"
+    );
+    assert_eq!(
+        h.app.history.prev(),
+        Some("前缀文字后缀文字"),
+        "输入历史只记录文字部分"
+    );
+}
+
+#[tokio::test]
+async fn modified_image_file_after_paste_blocks_submit_and_preserves_input() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let image_path = h.options.project_root.join("mutated.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nversion-1").expect("写入初始 PNG");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+    let image_path_for_driver = image_path.clone();
+
+    let driver = async move {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("请看图".into())))
+            .expect("粘贴文字");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str)))
+            .expect("粘贴图片路径");
+        remote
+            .wait(|f| f.panel.contains("请看图[IMAGE 1 · png · 17 B]"))
+            .await;
+
+        // 改写为相同字节长度、相同 PNG 魔数但内容不同的图片。
+        std::fs::write(&image_path_for_driver, b"\x89PNG\r\n\x1a\nversion-2")
+            .expect("改写同长度同魔数的不同 PNG 内容");
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "图片内容改变时应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("在预检后已改变") && shown.dock.contains("输入已保留"),
+            "错误文案应指出图片在预检后已改变且输入已保留：{}",
+            shown.dock
+        );
+
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote
+            .wait(|f| f.dock.is_empty() && f.panel.contains("请看图[IMAGE 1 · png · 17 B]"))
+            .await;
+
+        remote.keys.close_channel();
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "图片被改写时不应发出提交请求"
+    );
+    assert_eq!(h.app.input.text(), "请看图", "输入区文字应保持原样");
+    assert_eq!(h.app.input.image_count(), 1, "输入区图片原子应保持原样");
+}
+
+#[tokio::test]
+async fn deleted_image_file_after_paste_blocks_submit_and_preserves_input() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let image_path = h.options.project_root.join("deleted.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\npayload").expect("写入初始 PNG");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+    let image_path_for_driver = image_path.clone();
+
+    let driver = async move {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("截图说明".into())))
+            .expect("粘贴文字");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str)))
+            .expect("粘贴图片路径");
+        remote
+            .wait(|f| f.panel.contains("截图说明[IMAGE 1 · png · 15 B]"))
+            .await;
+
+        std::fs::remove_file(&image_path_for_driver).expect("删除粘贴后的图片文件");
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "图片被删除时应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        let (_, after_prefix) = shown
+            .dock
+            .split_once("无法读取第 1 张图片：")
+            .unwrap_or_else(|| panic!("错误应包含读取失败前缀：{}", shown.dock));
+        let (reason, _) = after_prefix
+            .split_once("；输入已保留")
+            .unwrap_or_else(|| panic!("错误应说明输入已保留：{}", shown.dock));
+        assert!(!reason.trim().is_empty(), "错误应保留具体读取失败原因");
+
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote
+            .wait(|f| f.dock.is_empty() && f.panel.contains("截图说明[IMAGE 1 · png · 15 B]"))
+            .await;
+
+        remote.keys.close_channel();
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "图片删除后不应发出提交请求"
+    );
+    assert_eq!(h.app.input.text(), "截图说明", "输入区文字应保持原样");
+    assert_eq!(h.app.input.image_count(), 1, "输入区图片原子应保持原样");
+}
+
+#[tokio::test]
+async fn nine_pasted_images_fail_preflight_preserve_input_and_never_submit() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let mut paths = Vec::new();
+    for idx in 1..=9u8 {
+        let path = h.options.project_root.join(format!("small_{idx}.png"));
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.push(idx);
+        std::fs::write(&path, bytes).expect("写入小图片文件");
+        paths.push(path.to_str().expect("路径应为有效 UTF-8").to_owned());
+    }
+
+    let driver = async move {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        for path in paths {
+            remote
+                .keys
+                .unbounded_send(Ok(Event::Paste(path)))
+                .expect("粘贴小图片路径");
+        }
+        remote
+            .wait(|f| f.panel.contains("[IMAGE 9 · png · 9 B]"))
+            .await;
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "超过 8 张图片应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("单轮图片为 9 张，不能超过 8 张")
+                && shown.dock.contains("输入已保留"),
+            "错误文案应说明单轮图片张数超限且保留输入：{}",
+            shown.dock
+        );
+
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "超过单轮图片张数上限时不应发出提交请求"
+    );
+    assert_eq!(
+        h.app.input.image_count(),
+        9,
+        "预检未通过时 9 张图片原子应原样保留在输入区"
+    );
+}
+
+#[tokio::test]
+async fn queued_image_deleted_before_auto_send_returns_to_front_pauses_and_errors() {
+    let running = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let image_path = h.options.project_root.join("queued_shot.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nqueued").expect("写入排队测试图片");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+    let image_path_for_driver = image_path.clone();
+
+    let driver = async move {
+        view_tx.push([
+            head_reply(head(2, Some(running), true)),
+            entry_reply(user(1, running, 1, "running prompt")),
+            entry_reply(step(2, running, 0).sent().entry()),
+        ]);
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("排队说明".into())))
+            .expect("粘贴排队文字");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str)))
+            .expect("粘贴排队图片路径");
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .wait(|f| f.text.contains("排队") && f.text.contains("排队说明 [IMAGE 1 · png · 14 B]"))
+            .await;
+
+        std::fs::remove_file(&image_path_for_driver).expect("在当前轮完成前删除排队图片文件");
+
+        view_tx.push([
+            head_reply(head(2, Some(running), false)),
+            entry_reply(step(2, running, 0).text("done").finished().entry()),
+        ]);
+
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "自动发送读取图片失败应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("无法读取第 1 张图片：") && shown.dock.contains("已放回队首并暂停"),
+            "错误应说明读取失败原因且已放回队首并暂停：{}",
+            shown.dock
+        );
+        assert!(
+            shown.text.contains("暂停") && shown.text.contains("排队说明 [IMAGE 1 · png · 14 B]"),
+            "含图排队消息应回到队首并显示暂停状态：{}",
+            shown.text
+        );
+
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "队首图片读取失败时不应发出提交请求"
+    );
+    assert!(h.app.queue.is_paused(), "自动发送失败后队列应保持暂停");
+    assert_eq!(
+        h.app.history.prev(),
+        Some("排队说明"),
+        "退出转存排队历史时只写入文字部分"
+    );
+}
+
+#[test]
+fn image_submission_rejection_restores_when_empty_and_distinguishes_pure_image_vs_text_draft() {
+    // 1. 手动提交含图消息被拒且输入区为空：完整图文按原顺序放回输入区。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("restore.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nrestore!").expect("写入图片");
+        let app = &mut h.app;
+        app.apply_action(KeyAction::Paste("前文".into()));
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        app.apply_action(KeyAction::Paste("后文".into()));
+        app.submit().expect("空闲手动提交含图消息应返回请求");
+        let id = app.own_turn.expect("应记录本客户端提交身份");
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        reject(app, id, how);
+        assert_eq!(app.input.image_count(), 1, "输入区为空时图片原子应完整放回");
+        assert_eq!(app.input.text(), "前文后文", "输入区为空时文字应放回");
+        assert_eq!(
+            crate::view::input_visual(&app.input, 200).0,
+            vec!["前文[IMAGE 1 · png · 16 B]后文".to_owned()],
+            "放回后的图文应保持原有交错顺序"
+        );
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+
+    // 2. 输入区已有新草稿时，纯图片消息被拒：新草稿不动，提示写明图片未放回且不含 Ctrl+↑，历史为空。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("pure.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\npure-img").expect("写入纯图片");
+        let app = &mut h.app;
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        app.submit().expect("空闲手动提交纯图片应返回请求");
+        let id = app.own_turn.expect("应记录本客户端提交身份");
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        app.input.set_text("用户新草稿");
+        reject(app, id, how);
+        assert_eq!(
+            app.input.text(),
+            "用户新草稿",
+            "输入区已有新草稿时不得覆盖新草稿"
+        );
+        assert_eq!(app.input.image_count(), 0, "纯图片不应覆盖新草稿");
+        let status_msg = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .next_back()
+            .expect("应生成拒绝或未接受状态消息");
+        assert!(
+            status_msg.contains("图片未放回")
+                && !status_msg.contains("Ctrl+↑")
+                && !status_msg.contains("输入已保留"),
+            "纯图片被拒且有新草稿时不应提示 Ctrl+↑ 或输入已保留：{status_msg}"
+        );
+        assert_eq!(app.history.prev(), None, "纯图片消息不应写入输入历史");
+    }
+
+    // 3. 输入区已有新草稿时，图文混排消息被拒：新草稿不动，提示含 Ctrl+↑，输入历史只含文字。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("mixed.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nmixed-img").expect("写入图文混排图片");
+        let app = &mut h.app;
+        app.apply_action(KeyAction::Paste("图文里的文字".into()));
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        app.submit().expect("空闲手动提交图文混排消息应返回请求");
+        let id = app.own_turn.expect("应记录本客户端提交身份");
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        app.input.set_text("另一份新草稿");
+        reject(app, id, how);
+        assert_eq!(app.input.text(), "另一份新草稿", "新草稿应保持原样");
+        assert_eq!(app.input.image_count(), 0, "原图片不应混入新草稿");
+        let status_msg = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .next_back()
+            .expect("应生成拒绝或未接受状态消息");
+        assert!(
+            status_msg.contains("Ctrl+↑") && !status_msg.contains("输入已保留"),
+            "图文消息被拒且有新草稿时应提示按 Ctrl+↑ 从历史找回文字：{status_msg}"
+        );
+        assert_eq!(
+            app.history.prev(),
+            Some("图文里的文字"),
+            "输入历史应只包含图文消息中的文字部分"
+        );
+    }
+
+    // 4. 自动发送遇 Unknown 释放名额后迟到确定拒绝：纯图片提示图片未放回，含文字提示 Ctrl+↑。
+    for with_text in [false, true] {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("auto_late.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nauto").expect("写入自动发送图片");
+        let app = &mut h.app;
+        app.input.set_text("先跑一轮");
+        app.submit().expect("提交第一轮");
+        let first = app.own_turn.expect("第一轮身份");
+        app.apply_submission(receipt(first, accepted(first)));
+        if with_text {
+            app.apply_action(KeyAction::Paste("排队里的文字".into()));
+        }
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        assert!(app.submit().is_none(), "运行中按回车应入队");
+        finish(app, first, "先跑一轮");
+        app.auto_submit().expect("完成后应自动发送队首");
+        let auto_id = app.own_turn.expect("自动发送身份");
+        app.apply_submission(receipt(auto_id, SubmissionResult::Unknown { error: None }));
+        app.apply_submission(receipt(
+            auto_id,
+            SubmissionResult::Rejected {
+                error: local_error(LocalErrorKind::BadRequest, "迟到拒绝"),
+            },
+        ));
+        let err = app.dock.message().expect("迟到拒绝应暂驻错误");
+        if with_text {
+            assert!(
+                err.text.contains("Ctrl+↑"),
+                "含文字的自动发送迟到拒绝应提示 Ctrl+↑：{}",
+                err.text
+            );
+            assert_eq!(app.history.prev(), Some("排队里的文字"));
+        } else {
+            assert!(
+                err.text.contains("图片未放回") && !err.text.contains("Ctrl+↑"),
+                "纯图片的自动发送迟到拒绝应说明图片未放回且不提 Ctrl+↑：{}",
+                err.text
+            );
+            assert_eq!(app.history.prev(), Some("先跑一轮"));
+        }
+    }
 }

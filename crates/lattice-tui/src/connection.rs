@@ -99,6 +99,8 @@ pub(crate) enum KeptInput {
     Restored,
     /// 没有放回：输入区已有用户的草稿，或结果未知的自动发送不再放回队首；原输入在输入历史中。
     History,
+    /// 没有放回且没有文字历史：纯图片消息未覆盖新草稿，或结果未知的自动发送已释放名额；图片未放回。
+    Discarded,
     /// 没有可归还的输入：这次提交已经有过确定结果，或不是本客户端在等结果的提交。
     Nothing,
 }
@@ -107,6 +109,7 @@ fn history_hint(kept: KeptInput) -> &'static str {
     match kept {
         KeptInput::Restored | KeptInput::Nothing => "",
         KeptInput::History => "；原输入未放回，可按 Ctrl+↑ 从输入历史找回",
+        KeptInput::Discarded => "；图片未放回",
     }
 }
 
@@ -116,9 +119,17 @@ pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
     let notice = not_accepted_notice(turn_id);
     let kept = match kept {
         KeptInput::Restored => "，输入已保留",
-        KeptInput::History | KeptInput::Nothing => history_hint(kept),
+        KeptInput::History | KeptInput::Discarded | KeptInput::Nothing => history_hint(kept),
     };
     status(NoticeLevel::Error, format!("{notice}{kept}"))
+}
+
+/// 粘贴本机图片文件失败，不插入任何内容。
+pub(crate) fn paste_image_failed_status(error: &LocalError) -> Status {
+    status(
+        NoticeLevel::Error,
+        format!("无法粘贴图片：{}", error.message),
+    )
 }
 
 /// 提交、入队或发出队首前本地预检未通过，请求尚未发出。

@@ -344,45 +344,69 @@ fn append_messages(
     }
 }
 
-fn append_user_message(
-    blocks: &mut BlockList,
-    message: lattice_local::NativeMessage<lattice_local::BoundToolCall>,
-) {
+pub(crate) enum UserPartRef<'a> {
+    Text(&'a str),
+    Image(&'a lattice_local::ImageRef),
+}
+
+/// 按片段顺序拼接用户消息的文字与 `[IMAGE n · <ext> · <size>]` 标记：
+/// 标记与无空白交界的相邻片段之间补单个空格，首尾或已有空白处不额外补空格。
+pub(crate) fn format_user_parts<'a>(parts: impl IntoIterator<Item = UserPartRef<'a>>) -> String {
     let mut out = String::new();
-    let mut has_content = false;
     let mut prev_was_image = false;
     let mut image_ordinal: usize = 0;
 
-    for part in message.parts {
-        match part.semantic {
-            MessageSemantic::Text { text } => {
-                has_content = true;
+    for part in parts {
+        match part {
+            UserPartRef::Text(text) => {
                 if !text.is_empty() {
                     if prev_was_image && !text.chars().next().is_some_and(char::is_whitespace) {
                         out.push(' ');
                     }
-                    out.push_str(&text);
+                    out.push_str(text);
                     prev_was_image = false;
                 }
             }
-            MessageSemantic::Image { image } => {
-                has_content = true;
+            UserPartRef::Image(image) => {
                 image_ordinal = image_ordinal.saturating_add(1);
                 let ordinal = std::num::NonZeroUsize::new(image_ordinal)
                     .expect("图片序号从 1 开始递增，必定非零");
                 if !out.is_empty() && !out.chars().next_back().is_some_and(char::is_whitespace) {
                     out.push(' ');
                 }
-                out.push_str(&lattice_local::format_image_marker(ordinal, &image));
+                out.push_str(&lattice_local::format_image_marker(ordinal, image));
                 prev_was_image = true;
             }
-            MessageSemantic::ToolCall { .. } | MessageSemantic::Reasoning { .. } => {}
         }
     }
 
-    if has_content {
-        blocks.push(user_block(out));
+    out
+}
+
+fn append_user_message(
+    blocks: &mut BlockList,
+    message: lattice_local::NativeMessage<lattice_local::BoundToolCall>,
+) {
+    let has_content = message.parts.iter().any(|part| {
+        matches!(
+            part.semantic,
+            MessageSemantic::Text { .. } | MessageSemantic::Image { .. }
+        )
+    });
+    if !has_content {
+        return;
     }
+    let out = format_user_parts(
+        message
+            .parts
+            .iter()
+            .filter_map(|part| match &part.semantic {
+                MessageSemantic::Text { text } => Some(UserPartRef::Text(text)),
+                MessageSemantic::Image { image } => Some(UserPartRef::Image(image)),
+                MessageSemantic::ToolCall { .. } | MessageSemantic::Reasoning { .. } => None,
+            }),
+    );
+    blocks.push(user_block(out));
 }
 
 /// 隐藏 reasoning 不应在生成中的文字由回复取代时引入原来没有的换行。

@@ -526,7 +526,16 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant)))),
             );
         } else {
-            lines.extend(body(&message.text, content_w, role_style(Role::DimMeta)));
+            let parts = message.input.parts();
+            let rendered = crate::session::format_user_parts(parts.iter().map(|part| match part {
+                lattice_local::UserInputPart::Text { text } => {
+                    crate::session::UserPartRef::Text(text)
+                }
+                lattice_local::UserInputPart::Image { image } => {
+                    crate::session::UserPartRef::Image(&image.meta)
+                }
+            }));
+            lines.extend(body(&rendered, content_w, role_style(Role::DimMeta)));
         }
         owners.extend((start..lines.len()).map(|row| BlockPosition {
             id: message.id,
@@ -703,30 +712,56 @@ impl InputVisual {
             positions: Vec::new(),
             cursor: (0, 0),
         };
+        let mut image_ordinal = 0usize;
         for (source_row, line) in input.lines.iter().enumerate() {
             visual.lines.push(String::new());
             let mut col = 0usize;
-            let chars: Vec<_> = line.chars().collect();
-            for (source_col, ch) in chars.iter().copied().enumerate() {
-                let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
-                if col > 0 && col.saturating_add(cells) > width {
-                    visual.lines.push(String::new());
-                    col = 0;
+            let mut source_col = 0usize;
+            for part in line {
+                match part {
+                    lattice_local::UserInputPart::Text { text } => {
+                        for ch in text.chars() {
+                            let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+                            if col > 0 && col.saturating_add(cells) > width {
+                                visual.lines.push(String::new());
+                                col = 0;
+                            }
+                            visual.record((source_row, source_col), col, input.cursor);
+                            visual.lines.last_mut().expect("当前视觉行").push(ch);
+                            col = col.saturating_add(cells);
+                            source_col = source_col.saturating_add(1);
+                        }
+                    }
+                    lattice_local::UserInputPart::Image { image } => {
+                        image_ordinal = image_ordinal.saturating_add(1);
+                        let ordinal = std::num::NonZeroUsize::new(image_ordinal)
+                            .expect("图片序号从 1 开始递增，必定非零");
+                        let marker = lattice_local::format_image_marker(ordinal, &image.meta);
+                        let marker_cells = display_width(&marker);
+                        if col > 0 && col.saturating_add(marker_cells) > width {
+                            visual.lines.push(String::new());
+                            col = 0;
+                        }
+                        visual.record((source_row, source_col), col, input.cursor);
+                        for ch in marker.chars() {
+                            let cells = UnicodeWidthChar::width(ch).unwrap_or(0);
+                            if col > 0 && col.saturating_add(cells) > width {
+                                visual.lines.push(String::new());
+                                col = 0;
+                            }
+                            visual.lines.last_mut().expect("当前视觉行").push(ch);
+                            col = col.saturating_add(cells);
+                        }
+                        source_col = source_col.saturating_add(1);
+                    }
                 }
-                visual.record((source_row, source_col), col, input.cursor);
-                visual
-                    .lines
-                    .last_mut()
-                    .expect("current visual row")
-                    .push(ch);
-                col = col.saturating_add(cells);
             }
             // 行尾占满时为插入光标保留下一行，与绘制和移动使用同一映射。
             if col >= width {
                 visual.lines.push(String::new());
                 col = 0;
             }
-            visual.record((source_row, chars.len()), col, input.cursor);
+            visual.record((source_row, source_col), col, input.cursor);
         }
         visual
     }
@@ -740,7 +775,7 @@ impl InputVisual {
     }
 }
 
-fn input_visual(input: &InputBuffer, content_w: u16) -> (Vec<String>, usize, usize) {
+pub(crate) fn input_visual(input: &InputBuffer, content_w: u16) -> (Vec<String>, usize, usize) {
     let visual = InputVisual::new(input, content_w);
     (visual.lines, visual.cursor.0, visual.cursor.1)
 }
@@ -1025,6 +1060,63 @@ mod tests {
                 terminal.draw(|frame| draw(frame, &mut app))?;
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn image_marker_wraps_as_atomic_unit_and_places_cursor_at_edges() -> anyhow::Result<()> {
+        let pending = crate::input::PendingImage {
+            meta: lattice_local::ImageRef {
+                sha256: [0x33; 32],
+                media_type: lattice_local::ImageMediaType::Png,
+                byte_length: 2048,
+            },
+            source: crate::input::ImageSource::File(std::path::PathBuf::from("demo.png")),
+        };
+        let marker = lattice_local::format_image_marker(
+            std::num::NonZeroUsize::new(1).expect("非零序号"),
+            &pending.meta,
+        );
+        let w = display_width(&marker);
+        let content_w = u16::try_from(w + 1).expect("标记宽度加一可放入 u16");
+
+        let mut app = test_app();
+        app.term_width = content_w;
+        app.term_height = 10;
+        app.input.insert_char('中');
+        app.input.insert_image(pending);
+
+        let (lines, row_after, col_after) = input_visual(&app.input, content_w);
+        assert_eq!(
+            lines,
+            vec!["中".to_owned(), marker],
+            "图片前有双宽字符且行宽为 W+1 时，标记应整体换到下一行"
+        );
+        assert_eq!(
+            (row_after, col_after),
+            (1, w),
+            "标记后的光标应停在第二行标记右端"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(content_w, 10))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let after_pos = terminal.get_cursor_position()?;
+        assert_eq!(
+            after_pos.x,
+            u16::try_from(w).expect("光标列可放入 u16"),
+            "终端光标在标记后应位于第 W 列"
+        );
+
+        app.input.move_left();
+        assert_eq!(
+            input_cursor(&app.input, content_w),
+            (1, 0),
+            "标记前的光标应停在第二行标记起点"
+        );
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let before_pos = terminal.get_cursor_position()?;
+        assert_eq!(before_pos.x, 0, "终端光标在标记前应位于第二行第 0 列");
+        assert_eq!(before_pos.y, after_pos.y, "标记前后的光标应位于同一视觉行");
         Ok(())
     }
 }

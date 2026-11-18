@@ -1641,7 +1641,7 @@ fn settings_changed_rejection_restores_input_and_pauses_queue() {
         "自动发送被拒不覆盖输入区草稿"
     );
     assert!(manual.queue.is_paused(), "SettingsChanged 应暂停队列");
-    let queued: Vec<_> = manual.queue.messages().map(|m| m.text.as_str()).collect();
+    let queued: Vec<_> = manual.queue.messages().map(|m| m.input.text()).collect();
     assert_eq!(queued, vec!["queued later"], "被拒的排队消息放回队首");
     let auto_msg = manual.dock.message().expect("SettingsChanged 应暂驻 Error");
     assert_eq!(auto_msg.level, NoticeLevel::Error);

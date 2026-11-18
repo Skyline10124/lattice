@@ -110,6 +110,11 @@ _Avoid_: production fallback tool, mock LLM server
 它与尚未保存的临时流式文字分开，见[用户读到的几种事实](../architecture/session/flow.md#用户读到的几种事实)。
 _Avoid_: token replay, layout body width, frozen configuration
 
+**图片引用**:
+英文名 Image reference（`ImageRef`）。用户消息图片片段中与存储解耦的内容寻址元数据，由原始字节的 SHA-256 摘要、前 12 字节魔数判定的媒体类型（PNG、JPEG、WebP、GIF）与原始字节长度组成；会话树节点与视图推送只携带它，已接受图片的原始字节独立存入会话库 `blobs` 表。
+见[用户图片与单轮输入规范化](../architecture/session/conversation.md#用户图片与单轮输入规范化)。
+_Avoid_: 内联 base64 节点, 路径引用, 扩展名格式
+
 **视图**:
 后台按会话推送的“这个会话现在的样子”：会话头（当前 agent、会话设置中的模型与推理档位、设置版本、当前位置及其所属那一轮有没有 Owner、执行诊断等，完整字段清单见[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)）、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字。观察者变慢时只少收中间版本，不需要重新同步。
 见[观察与重连](../architecture/session/recovery.md#观察与重连)。
@@ -144,6 +149,11 @@ _Avoid_: ModelRouter, connection material, per-Turn LlmConnection
 `off`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max` 七档之一，表示一轮使用的推理强度；适配器按协议与 features 换成请求参数，模型不支持的档位不可选。
 见[推理档位](../architecture/llm/reasoning.md#推理档位)。
 _Avoid_: thinking budget, reasoning mode, effort string
+
+**输入模态**:
+英文名 Input modality（`InputModality`）。模型可接收的用户输入内容类别（`text`、`image`、`audio`、`video`），由模型目录的 `modalities.input` 与 `providers.toml` 手写的 `input` 合并得出；目标模型声明了输入模态且不含 `image` 时，含图片的请求在发送前被拒绝。
+见[元数据的来源与合并](../architecture/llm/models.md#元数据的来源与合并)。
+_Avoid_: voice 模态, 布尔图片开关, 输出模态
 
 **会话设置**:
 英文名 Session settings。会话保存在会话库中的下一轮配置记录（`SessionSettings`），含有效 profile、内联系统提示、可选的模型与可选推理档位，内容摘要构成设置版本（`SettingsVersion`）；由 `configure` 写入或更新，接受一轮时从中冻结本轮配置。provider 配置与凭据不在会话设置中。

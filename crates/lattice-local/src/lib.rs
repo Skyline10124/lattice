@@ -18,7 +18,7 @@ pub use client::LocalWatch;
 pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
-pub use image_file::{image_file_ref, read_verified_image};
+pub use image_file::{image_file_ref, probe_image_file, read_verified_image};
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
     InvocationId, MAX_IMAGE_BYTES, MessageRole, MessageSemantic, ModelAttemptKey, ModelId,

@@ -7,15 +7,19 @@ use std::time::Duration;
 
 use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
-use crate::comment::Message;
+use crate::comment::Comment;
 use crate::connection::{
     KeptInput, Viewed, cancellation_status, configure_failed_status, detach_lines,
     discarded_comments_status, effort_changed_status, execution_diagnostic_status, handoff_status,
     model_query_failed_status, model_query_notice, not_accepted_status, not_submitted_status,
     observation_lost_status, older_turns_unavailable_status, orphaned_turn_status,
-    preflight_failed_status, recovered_status, rejected_status, submission_unknown_status,
+    paste_image_failed_status, preflight_failed_status, recovered_status, rejected_status,
+    submission_unknown_status,
 };
-use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
+use crate::input::{
+    CTRL_C_WINDOW, History, ImageSource, InputBuffer, KeyAction, PendingImage, push_part,
+    resolve_key,
+};
 use crate::session::{Generating, SessionContext};
 use crate::view::{
     Dock, DockIntent, DockState, Focus, ModelQuery, Panel, PanelChoice, Transcript, Viewport,
@@ -107,8 +111,8 @@ pub(crate) enum TurnPhase {
 enum UnknownSubmission {
     /// 手动提交的原文：与直接被拒一样，输入区为空时放回。
     Manual(crate::queue::Outgoing),
-    /// 自动发送的一条已让出排队名额，不再放回队首，免得队列超过上限；原文只在输入历史中。
-    Automatic,
+    /// 自动发送的一条已让出排队名额，不再放回队首，免得队列超过上限；记下原消息是否有文字。
+    Automatic { has_text: bool },
 }
 
 /// 首次 Ctrl+C 取消的那一轮。
@@ -331,6 +335,13 @@ impl App {
                         }
                         return self.auto_submit();
                     }
+                    KeyAction::Paste(raw) if self.queue.queued_editor_mut().is_some() => {
+                        if let Some(editor) = self.queue.queued_editor_mut()
+                            && let Err(error) = editor.paste(&raw)
+                        {
+                            self.push_status(paste_image_failed_status(&error));
+                        }
+                    }
                     action => self.queue.edit(&action, transcript.editor_width(width)),
                 }
                 let transcript = self.prepare_transcript();
@@ -451,6 +462,11 @@ impl App {
                         };
                         if let Some(entry) = entry {
                             self.input.set_text(entry);
+                        }
+                    }
+                    KeyAction::Paste(raw) => {
+                        if let Err(error) = self.input.paste(&raw) {
+                            self.push_status(paste_image_failed_status(&error));
                         }
                     }
                     action => self.input.edit(&action, width),
@@ -816,7 +832,9 @@ impl App {
                 let automatic = self.queue.release(turn_id);
                 if let Some((_, message)) = self.submitted.take_if(|(id, _)| *id == turn_id) {
                     let held = if automatic {
-                        UnknownSubmission::Automatic
+                        UnknownSubmission::Automatic {
+                            has_text: !message.input.text().trim().is_empty(),
+                        }
                     } else {
                         UnknownSubmission::Manual(message)
                     };
@@ -1056,34 +1074,65 @@ impl App {
         self.banner = Some((self.blocks.allocate_id(), startup_banner()));
     }
 
-    /// 由待发消息构造本轮请求并做本地预检；不改动输入、草稿与队列。
-    fn prepare_request(
+    /// 第一步：由待发片段构造计划请求并做本地上限与帧长度预检；不读图片字节，不改动输入与队列。
+    fn plan_request(
         &self,
         turn_id: TurnId,
-        message: &Message,
+        parts: &[UserInputPart<PendingImage>],
         expected_settings: SettingsVersion,
-    ) -> lattice_local::Result<TurnRequest> {
-        let text = message.encode();
+    ) -> lattice_local::Result<PlannedTurnRequest> {
         let plan = PlannedTurnRequest {
             turn_id,
             session: self.session_id,
             workspace: self.project_root.clone(),
-            parts: vec![UserInputPart::Text { text: text.clone() }],
+            parts: parts
+                .iter()
+                .map(|part| match part {
+                    UserInputPart::Text { text } => UserInputPart::Text { text: text.clone() },
+                    UserInputPart::Image { image } => UserInputPart::Image { image: image.meta },
+                })
+                .collect(),
             expected_settings: Some(expected_settings),
         };
         lattice_local::check_turn_plan(&plan)?;
+        Ok(plan)
+    }
+
+    /// 第二步：重读并核对每张待发图片的字节，构造实发请求。
+    fn materialize_request(
+        plan: &PlannedTurnRequest,
+        parts: &[UserInputPart<PendingImage>],
+    ) -> lattice_local::Result<TurnRequest> {
+        let mut image_ordinal = 0usize;
+        let mut loaded = Vec::with_capacity(parts.len());
+        for part in parts {
+            match part {
+                UserInputPart::Text { text } => {
+                    loaded.push(UserInputPart::Text { text: text.clone() });
+                }
+                UserInputPart::Image { image } => {
+                    image_ordinal = image_ordinal.saturating_add(1);
+                    let bytes = match &image.source {
+                        ImageSource::File(path) => {
+                            lattice_local::read_verified_image(image_ordinal, path, &image.meta)?
+                        }
+                    };
+                    loaded.push(UserInputPart::Image { image: bytes });
+                }
+            }
+        }
         Ok(TurnRequest {
             turn_id: plan.turn_id,
             session: plan.session,
-            workspace: plan.workspace,
-            parts: vec![UserInputPart::Text { text }],
+            workspace: plan.workspace.clone(),
+            parts: loaded,
             expected_settings: plan.expected_settings,
         })
     }
 
     fn submit(&mut self) -> Option<TurnRequest> {
         let raw = self.input.text();
-        if raw.trim().is_empty() && self.queue.draft_count() == 0 {
+        if self.input.is_blank() && self.queue.draft_count() == 0 {
             if self.phase == TurnPhase::Idle
                 && self.configure_in_flight.is_empty()
                 && self.input.is_empty()
@@ -1093,7 +1142,7 @@ impl App {
             }
             return None;
         }
-        if self.apply_builtin(raw.trim()) {
+        if self.input.image_count() == 0 && self.apply_builtin(raw.trim()) {
             self.history.push(raw.trim());
             self.input.clear();
             return None;
@@ -1115,17 +1164,21 @@ impl App {
                 crate::queue::QueuedSettings::Snapshot(version) => version,
                 crate::queue::QueuedSettings::PendingConfigure { fallback, .. } => fallback,
             };
-            let preview = self.queue.preview_message(&raw);
+            let comments = self.queue.draft_comments();
+            let parts = compose_parts(&self.input, &comments);
             if let Err(error) =
-                self.prepare_request(lattice_local::new_turn_id(), &preview, expected_settings)
+                self.plan_request(lattice_local::new_turn_id(), &parts, expected_settings)
             {
                 self.push_status(preflight_failed_status(&error, false));
                 return None;
             }
-            let id = self.blocks.allocate_id();
-            if self.queue.enqueue(id, raw, settings) {
-                self.input.clear();
-                if self.phase == TurnPhase::Idle && !self.configure_in_flight.is_empty() {
+            if !self.queue.is_full() {
+                let id = self.blocks.allocate_id();
+                let input = std::mem::take(&mut self.input);
+                if self.queue.enqueue(id, input, settings)
+                    && self.phase == TurnPhase::Idle
+                    && !self.configure_in_flight.is_empty()
+                {
                     self.send_after_configure = true;
                 }
             }
@@ -1134,17 +1187,23 @@ impl App {
         self.check_comments_before_send();
         let turn_id = lattice_local::new_turn_id();
         let expected_settings = self.current_settings_version();
-        let preview = self.queue.preview_message(&raw);
-        let request = match self.prepare_request(turn_id, &preview, expected_settings) {
-            Ok(request) => request,
+        let comments = self.queue.draft_comments();
+        let parts = compose_parts(&self.input, &comments);
+        let (plan, request) = match self
+            .plan_request(turn_id, &parts, expected_settings)
+            .and_then(|plan| {
+                let request = Self::materialize_request(&plan, &parts)?;
+                Ok((plan, request))
+            }) {
+            Ok(pair) => pair,
             Err(error) => {
                 self.push_status(preflight_failed_status(&error, false));
                 return None;
             }
         };
-        self.input.clear();
-        let message = self.queue.take_message(raw, expected_settings);
-        Some(self.start_submission(message, request))
+        let input = std::mem::take(&mut self.input);
+        let message = self.queue.take_message(input, expected_settings);
+        Some(self.start_submission(message, &plan, request))
     }
 
     fn auto_submit(&mut self) -> Option<TurnRequest> {
@@ -1183,27 +1242,38 @@ impl App {
         self.check_comments_before_send();
         let id = lattice_local::new_turn_id();
         let message = self.queue.start_send(id)?;
-        let request = match self.prepare_request(id, &message, message.expected_settings) {
-            Ok(request) => request,
+        let parts = compose_parts(&message.input, &message.comments);
+        let (plan, request) = match self
+            .plan_request(id, &parts, message.expected_settings)
+            .and_then(|plan| {
+                let request = Self::materialize_request(&plan, &parts)?;
+                Ok((plan, request))
+            }) {
+            Ok(pair) => pair,
             Err(error) => {
                 self.queue.reject(id);
                 self.push_status(preflight_failed_status(&error, true));
                 return None;
             }
         };
-        Some(self.start_submission(message, request))
+        Some(self.start_submission(message, &plan, request))
     }
 
     // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
     fn start_submission(
         &mut self,
         message: crate::queue::Outgoing,
+        plan: &PlannedTurnRequest,
         request: TurnRequest,
     ) -> TurnRequest {
         let id = request.turn_id;
         self.send_after_configure = false;
-        self.history.push(message.text.trim());
-        let raw = message.encode();
+        let text = message.input.text();
+        self.history.push(text.trim());
+        let echo = crate::session::format_user_parts(plan.parts.iter().map(|part| match part {
+            UserInputPart::Text { text } => crate::session::UserPartRef::Text(text),
+            UserInputPart::Image { image } => crate::session::UserPartRef::Image(image),
+        }));
         self.cancel_status = None;
         self.own_turn = Some(id);
         self.submitted = Some((id, message));
@@ -1213,7 +1283,7 @@ impl App {
             ordinal: None,
             agent: self.current_agent(),
         });
-        self.blocks.push(crate::session::user_block(raw));
+        self.blocks.push(crate::session::user_block(echo));
         self.refresh_phase();
         request
     }
@@ -1243,8 +1313,8 @@ impl App {
         }
     }
 
-    /// 自动发送的一条放回队首且不进输入区；手动提交的文字在输入区为空时放回，
-    /// 输入区已有用户的草稿时不覆盖，原文留在提交时记下的输入历史中。两者都回到空闲。
+    /// 自动发送的一条放回队首且不进输入区；手动提交的内容在输入区为空时完整放回，
+    /// 输入区已有用户的草稿时不覆盖：有文字时留在输入历史中，纯图片时标记为未放回。两者都回到空闲。
     /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，
     /// 不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
@@ -1252,8 +1322,12 @@ impl App {
         let mut kept = KeptInput::Restored;
         let manual = match self.unknown_submission.take_if(|(id, _)| *id == turn_id) {
             Some((_, UnknownSubmission::Manual(message))) => Some(message),
-            Some((_, UnknownSubmission::Automatic)) => {
-                kept = KeptInput::History;
+            Some((_, UnknownSubmission::Automatic { has_text })) => {
+                kept = if has_text {
+                    KeptInput::History
+                } else {
+                    KeptInput::Discarded
+                };
                 None
             }
             // 自动发送的一条也记在 submitted 中，原文以排队中的为准。
@@ -1269,11 +1343,14 @@ impl App {
         self.mark_rejected_comments(turn_id);
         // 评论不进输入历史，总是恢复为草稿。
         if let Some(message) = manual {
-            let text = self.queue.restore(message, &mut self.blocks);
+            let input = self.queue.restore(message, &mut self.blocks);
             if self.input.is_empty() {
-                self.input.set_text(&text);
-            } else if !text.trim().is_empty() {
+                self.input = input;
+                self.input.move_to_end();
+            } else if !input.text().trim().is_empty() {
                 kept = KeptInput::History;
+            } else if input.image_count() > 0 {
+                kept = KeptInput::Discarded;
             }
         }
         self.discard_missing_comments();
@@ -1732,6 +1809,32 @@ fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
         ConversationEntry::UserMessage { content, .. }
         | ConversationEntry::Step { content, .. } => content.turn_id(),
     }
+}
+
+/// 由输入缓冲与已排序的评论草稿组装有序片段：评论编码在前，正文非空时以 `"\n\n"` 分隔并合并相邻文字。
+pub(crate) fn compose_parts(
+    input: &InputBuffer,
+    comments: &[Comment],
+) -> Vec<UserInputPart<PendingImage>> {
+    let prefix = crate::comment::encode_comments(comments);
+    let body = if input.is_blank() {
+        Vec::new()
+    } else {
+        input.parts()
+    };
+    let mut out = Vec::new();
+    if !prefix.is_empty() {
+        let text = if body.is_empty() {
+            prefix
+        } else {
+            format!("{prefix}\n\n")
+        };
+        push_part(&mut out, UserInputPart::Text { text });
+    }
+    for part in body {
+        push_part(&mut out, part);
+    }
+    out
 }
 
 /// 进入 raw 模式后并行接收视图推送与按键；启动不等待条目读取。
