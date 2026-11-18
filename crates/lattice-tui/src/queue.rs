@@ -294,6 +294,18 @@ impl Queue {
             .saturating_add(usize::from(self.awaiting.is_some()))
             >= LIMIT
     }
+    pub(crate) fn preview_message(&self, text: &str) -> Message {
+        let mut comments: Vec<Comment> = self.drafts.iter().map(|d| d.comment.clone()).collect();
+        comments.sort_by_key(|c| c.n);
+        Message {
+            text: if text.trim().is_empty() {
+                String::new()
+            } else {
+                text.to_owned()
+            },
+            comments,
+        }
+    }
     fn drain_message(&mut self, text: String) -> Message {
         self.drafts.sort_by_key(|d| d.comment.n);
         Message {

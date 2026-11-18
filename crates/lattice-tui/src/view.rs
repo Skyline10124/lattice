@@ -931,6 +931,7 @@ mod tests {
             },
             false,
             std::path::Path::new("/nonexistent-tui-test-history"),
+            std::path::PathBuf::from("/nonexistent-tui-test-workspace"),
         )
     }
 

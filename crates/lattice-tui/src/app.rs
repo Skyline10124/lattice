@@ -2,17 +2,18 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
+use crate::comment::Message;
 use crate::connection::{
     KeptInput, Viewed, cancellation_status, configure_failed_status, detach_lines,
     discarded_comments_status, effort_changed_status, execution_diagnostic_status, handoff_status,
     model_query_failed_status, model_query_notice, not_accepted_status, not_submitted_status,
     observation_lost_status, older_turns_unavailable_status, orphaned_turn_status,
-    recovered_status, rejected_status, submission_unknown_status,
+    preflight_failed_status, recovered_status, rejected_status, submission_unknown_status,
 };
 use crate::input::{CTRL_C_WINDOW, History, InputBuffer, KeyAction, resolve_key};
 use crate::session::{Generating, SessionContext};
@@ -29,9 +30,9 @@ use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered}
 use lattice_local::{
     CancelStatus, ConfigureReply, ConfigureRequest, ConfigureSession, ConnectionStatus,
     ConversationEntry, DetachReport, LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate,
-    Node, NodeId, NoticeLevel, PublicTurnOutcome, SessionHead, SessionId, StepKey,
-    SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment, TextUpdate, TurnId,
-    TurnRequest, UserInputPart, ViewUpdate,
+    Node, NodeId, NoticeLevel, PlannedTurnRequest, PublicTurnOutcome, SessionHead, SessionId,
+    SettingsVersion, StepKey, SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment,
+    TextUpdate, TurnId, TurnRequest, UserInputPart, ViewUpdate,
 };
 use lattice_local::{Effort, ModelCandidateQuery, ModelRef, UsageSummary};
 #[cfg(test)]
@@ -137,6 +138,7 @@ pub(crate) struct PendingConfigure {
 
 pub(crate) struct App {
     pub(crate) session_id: SessionId,
+    project_root: PathBuf,
     pub(crate) blocks: BlockList,
     /// 启动横幅固定在对话记录最上方。它不是状态消息，也不在 `blocks` 中，
     /// 条目替换与 Dock 都碰不到它；身份只供浏览光标锚定。
@@ -215,7 +217,12 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(ctx: SessionContext, kitty_keyboard: bool, session_dir: &Path) -> Self {
+    pub(crate) fn new(
+        ctx: SessionContext,
+        kitty_keyboard: bool,
+        session_dir: &Path,
+        project_root: PathBuf,
+    ) -> Self {
         let SessionContext {
             session_id,
             initial_head,
@@ -230,6 +237,7 @@ impl App {
             configure_request: None,
             send_after_configure: false,
             session_id,
+            project_root,
             blocks: BlockList::default(),
             banner: None,
             markdown_cache: Default::default(),
@@ -280,7 +288,7 @@ impl App {
     }
 
     /// 保留键先执行；其余动作交给 Dock 栈顶解释，模块不接触 LocalTurn。
-    pub(crate) fn apply_action(&mut self, action: KeyAction) -> Option<String> {
+    pub(crate) fn apply_action(&mut self, action: KeyAction) -> Option<TurnRequest> {
         let width = frame_layout(self.term_width, self.term_height).content_w;
         let transcript = self.prepare_transcript();
         let lines = &transcript.lines;
@@ -1048,7 +1056,32 @@ impl App {
         self.banner = Some((self.blocks.allocate_id(), startup_banner()));
     }
 
-    fn submit(&mut self) -> Option<String> {
+    /// 由待发消息构造本轮请求并做本地预检；不改动输入、草稿与队列。
+    fn prepare_request(
+        &self,
+        turn_id: TurnId,
+        message: &Message,
+        expected_settings: SettingsVersion,
+    ) -> lattice_local::Result<TurnRequest> {
+        let text = message.encode();
+        let plan = PlannedTurnRequest {
+            turn_id,
+            session: self.session_id,
+            workspace: self.project_root.clone(),
+            parts: vec![UserInputPart::Text { text: text.clone() }],
+            expected_settings: Some(expected_settings),
+        };
+        lattice_local::check_turn_plan(&plan)?;
+        Ok(TurnRequest {
+            turn_id: plan.turn_id,
+            session: plan.session,
+            workspace: plan.workspace,
+            parts: vec![UserInputPart::Text { text }],
+            expected_settings: plan.expected_settings,
+        })
+    }
+
+    fn submit(&mut self) -> Option<TurnRequest> {
         let raw = self.input.text();
         if raw.trim().is_empty() && self.queue.draft_count() == 0 {
             if self.phase == TurnPhase::Idle
@@ -1066,7 +1099,6 @@ impl App {
             return None;
         }
         if self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty() {
-            let id = self.blocks.allocate_id();
             let current_version = self.current_settings_version();
             let settings = if self
                 .configure_in_flight
@@ -1079,6 +1111,18 @@ impl App {
             } else {
                 crate::queue::QueuedSettings::Snapshot(current_version)
             };
+            let expected_settings = match settings {
+                crate::queue::QueuedSettings::Snapshot(version) => version,
+                crate::queue::QueuedSettings::PendingConfigure { fallback, .. } => fallback,
+            };
+            let preview = self.queue.preview_message(&raw);
+            if let Err(error) =
+                self.prepare_request(lattice_local::new_turn_id(), &preview, expected_settings)
+            {
+                self.push_status(preflight_failed_status(&error, false));
+                return None;
+            }
+            let id = self.blocks.allocate_id();
             if self.queue.enqueue(id, raw, settings) {
                 self.input.clear();
                 if self.phase == TurnPhase::Idle && !self.configure_in_flight.is_empty() {
@@ -1087,15 +1131,23 @@ impl App {
             }
             return None;
         }
-        self.input.clear();
         self.check_comments_before_send();
-        let message = self
-            .queue
-            .take_message(raw, self.current_settings_version());
-        Some(self.start_submission(message, lattice_local::new_turn_id()))
+        let turn_id = lattice_local::new_turn_id();
+        let expected_settings = self.current_settings_version();
+        let preview = self.queue.preview_message(&raw);
+        let request = match self.prepare_request(turn_id, &preview, expected_settings) {
+            Ok(request) => request,
+            Err(error) => {
+                self.push_status(preflight_failed_status(&error, false));
+                return None;
+            }
+        };
+        self.input.clear();
+        let message = self.queue.take_message(raw, expected_settings);
+        Some(self.start_submission(message, request))
     }
 
-    fn auto_submit(&mut self) -> Option<String> {
+    fn auto_submit(&mut self) -> Option<TurnRequest> {
         if self.should_quit || self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty()
         {
             return None;
@@ -1118,24 +1170,37 @@ impl App {
         if !(completed && self.turn_ended(turn)) || self.auto_sent_after.contains(&turn) {
             return None;
         }
-        let raw = self.send_queue_head()?;
+        let request = self.send_queue_head()?;
         self.auto_sent_after.insert(turn);
-        Some(raw)
+        Some(request)
     }
 
-    fn send_queue_head(&mut self) -> Option<String> {
+    fn send_queue_head(&mut self) -> Option<TurnRequest> {
         if self.should_quit || self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty()
         {
             return None;
         }
         self.check_comments_before_send();
         let id = lattice_local::new_turn_id();
-        let raw = self.queue.start_send(id)?;
-        Some(self.start_submission(raw, id))
+        let message = self.queue.start_send(id)?;
+        let request = match self.prepare_request(id, &message, message.expected_settings) {
+            Ok(request) => request,
+            Err(error) => {
+                self.queue.reject(id);
+                self.push_status(preflight_failed_status(&error, true));
+                return None;
+            }
+        };
+        Some(self.start_submission(message, request))
     }
 
     // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
-    fn start_submission(&mut self, message: crate::queue::Outgoing, id: TurnId) -> String {
+    fn start_submission(
+        &mut self,
+        message: crate::queue::Outgoing,
+        request: TurnRequest,
+    ) -> TurnRequest {
+        let id = request.turn_id;
         self.send_after_configure = false;
         self.history.push(message.text.trim());
         let raw = message.encode();
@@ -1148,9 +1213,9 @@ impl App {
             ordinal: None,
             agent: self.current_agent(),
         });
-        self.blocks.push(crate::session::user_block(raw.clone()));
+        self.blocks.push(crate::session::user_block(raw));
         self.refresh_phase();
-        raw
+        request
     }
 
     fn cancel_or_clear(&mut self) {
@@ -1605,6 +1670,7 @@ impl App {
     }
 
     /// 这次提交的身份：会话在启动时已存在或经 `configure(New)` 建立。
+    #[cfg(test)]
     pub(crate) fn submission_identity(&self) -> Option<(TurnId, SessionId)> {
         let (turn_id, _) = self.submitted.as_ref()?;
         Some((*turn_id, self.session_id))
@@ -1682,7 +1748,12 @@ pub(crate) async fn run_app(
     cleanup.kitty = kitty;
     enable_terminal_modes(&mut std::io::stdout(), kitty)?;
 
-    let mut app = App::new(ctx, kitty, &options.session_dir);
+    let mut app = App::new(
+        ctx,
+        kitty,
+        &options.session_dir,
+        options.project_root.clone(),
+    );
     app.show_banner();
     let mut exit = run_loop(&options, &mut app, &client, EventStream::new(), |app| {
         terminal.draw(|f| crate::view::draw(f, app))?;
@@ -1799,11 +1870,11 @@ where
         if app.should_quit {
             break Ok(());
         }
-        let mut prompt = None;
+        let mut request = None;
         tokio::select! {
             event = events.next() => {
                 match event {
-                    Some(Ok(event)) => prompt = handle_input_event(app, event),
+                    Some(Ok(event)) => request = handle_input_event(app, event),
                     Some(Err(_)) | None => app.should_quit = true,
                 }
             }
@@ -1848,12 +1919,12 @@ where
             }
         }
         dirty = true;
-        if let Some(prompt) = prompt.or_else(|| app.auto_submit()) {
+        if let Some(request) = request.or_else(|| app.auto_submit()) {
             if let Some(old) = turn.take() {
                 handoffs.push(old.detach().boxed());
             }
-            turn = begin_turn(options, app, prompt).map(|request| client.start_submission(request));
-            turn_open = turn.is_some();
+            turn = Some(client.start_submission(request));
+            turn_open = true;
         }
     };
     // 输入结束、普通退出和绘制失败都保存尚未发送的原文；不保存编辑器草稿。
@@ -1868,7 +1939,7 @@ where
 }
 
 #[rustfmt::skip]
-fn handle_input_event(app: &mut App, event: Event) -> Option<String> {
+fn handle_input_event(app: &mut App, event: Event) -> Option<TurnRequest> {
     match event {
         Event::Paste(text) => {
             app.apply_action(KeyAction::Paste(text));
@@ -1908,18 +1979,6 @@ fn ctrl_c_action(app: &mut App) -> KeyAction {
     } else {
         KeyAction::CancelOrClear
     }
-}
-
-fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<TurnRequest> {
-    let (turn_id, session) = app.submission_identity()?;
-    let (_, message) = app.submitted.as_ref().filter(|(id, _)| *id == turn_id)?;
-    Some(TurnRequest {
-        turn_id,
-        session,
-        workspace: options.project_root.clone(),
-        parts: vec![UserInputPart::Text { text: prompt }],
-        expected_settings: Some(message.expected_settings),
-    })
 }
 
 #[rustfmt::skip]

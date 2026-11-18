@@ -251,8 +251,18 @@ fn own_submission_user_block_is_replaced_by_its_user_message() {
     let mut app = test_app(true);
     open_view(&mut app, head(0, None, false), Vec::new());
     app.input.set_text("hello there");
-    assert_eq!(app.submit().as_deref(), Some("hello there"));
+    let req = app.submit().expect("空闲提交应返回请求");
+    assert!(
+        req.parts
+            == [UserInputPart::Text {
+                text: "hello there".into()
+            }]
+    );
+    assert_eq!(req.session, sid());
+    assert_eq!(req.workspace, Path::new("/nonexistent-tui-test-workspace"));
+    assert_eq!(req.expected_settings, Some(settings_version(0x11)));
     let (t, session) = app.submission_identity().unwrap();
+    assert_eq!(req.turn_id, t);
     assert_eq!(session, sid());
     let user_line = |app: &App| {
         transcript(app)
@@ -301,9 +311,8 @@ fn own_submission_stays_busy_until_its_head_is_confirmed() {
     app.apply_submission(receipt(b, accepted(b)));
     let busy = |app: &mut App, when: &str| {
         assert_eq!(app.phase, TurnPhase::Streaming, "{when}");
-        assert_eq!(
-            app.auto_submit(),
-            None,
+        assert!(
+            app.auto_submit().is_none(),
             "{when}: 不能凭上一轮的完成发送排队"
         );
     };
@@ -316,7 +325,7 @@ fn own_submission_stays_busy_until_its_head_is_confirmed() {
     app.apply_action(KeyAction::CancelOrClear);
     assert_eq!(app.cancel_requested.take(), Some(CancelTarget::Own));
     app.apply_view(entry_update(step(4, b, 0).sent().entry()));
-    assert_eq!(app.auto_submit(), None);
+    assert!(app.auto_submit().is_none());
     assert_eq!(app.queue.messages().count(), 1);
 }
 
@@ -1457,6 +1466,7 @@ fn configure_adjustment_shows_info_and_busy_shows_warn() {
         },
         false,
         Path::new("/nonexistent-tui-test-history"),
+        PathBuf::from("/nonexistent-tui-test-workspace"),
     );
     assert!(
         startup.dock.message().is_none(),
@@ -1569,7 +1579,19 @@ fn settings_changed_rejection_restores_input_and_pauses_queue() {
     let mut direct = test_app(true);
     open_view(&mut direct, head(0, None, false), Vec::new());
     direct.input.set_text("manual prompt");
-    assert_eq!(direct.submit().as_deref(), Some("manual prompt"));
+    let direct_req = direct.submit().expect("空闲手动提交应返回请求");
+    assert!(
+        direct_req.parts
+            == [UserInputPart::Text {
+                text: "manual prompt".into()
+            }]
+    );
+    assert_eq!(direct_req.session, sid());
+    assert_eq!(
+        direct_req.workspace,
+        Path::new("/nonexistent-tui-test-workspace")
+    );
+    assert_eq!(direct_req.expected_settings, Some(settings_version(0x11)));
     let (manual_turn, _) = direct.submission_identity().unwrap();
     direct.apply_submission(receipt(
         manual_turn,
@@ -1593,8 +1615,19 @@ fn settings_changed_rejection_restores_input_and_pauses_queue() {
 
     // 自动发送排队消息遇到 SettingsChanged：消息回到队首、不覆盖草稿、暂停队列并显示说明。
     manual.input.set_text("user draft");
-    let auto_prompt = manual.auto_submit().expect("上一轮完成后自动发送队首");
-    assert_eq!(auto_prompt, "queued later");
+    let auto_req = manual.auto_submit().expect("上一轮完成后自动发送队首");
+    assert!(
+        auto_req.parts
+            == [UserInputPart::Text {
+                text: "queued later".into()
+            }]
+    );
+    assert_eq!(auto_req.session, sid());
+    assert_eq!(
+        auto_req.workspace,
+        Path::new("/nonexistent-tui-test-workspace")
+    );
+    assert_eq!(auto_req.expected_settings, Some(settings_version(0x11)));
     let (auto_turn, _) = manual.submission_identity().unwrap();
     manual.apply_submission(receipt(
         auto_turn,

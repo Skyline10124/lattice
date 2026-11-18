@@ -121,6 +121,19 @@ pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
     status(NoticeLevel::Error, format!("{notice}{kept}"))
 }
 
+/// 提交、入队或发出队首前本地预检未通过，请求尚未发出。
+pub(crate) fn preflight_failed_status(error: &LocalError, from_queue: bool) -> Status {
+    let kept = if from_queue {
+        "已放回队首并暂停"
+    } else {
+        "输入已保留"
+    };
+    status(
+        NoticeLevel::Error,
+        format!("无法提交：{}；{kept}", error.message),
+    )
+}
+
 pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError, kept: KeptInput) -> Status {
     let text = if error.conflict == Some(lattice_local::ConflictReason::SettingsChanged) {
         format!(
