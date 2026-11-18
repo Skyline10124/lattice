@@ -16,6 +16,8 @@ pub enum ApiError {
     BadRequest(String),
     #[error("{0}")]
     Configuration(crate::config_rejection::ConfigRejection),
+    #[error("{0}")]
+    RequestBudgetExceeded(String),
     #[error("conflict: {0}")]
     Conflict(RequestConflict),
     #[error("internal error: {0}")]
@@ -45,15 +47,41 @@ impl From<crate::turn::coordinator::CoordinatorIoError> for ApiError {
 }
 impl ApiError {
     pub(crate) fn requires_reopen(&self) -> bool {
-        matches!(self, Self::WorkerFailed)
-            || matches!(self, Self::Store(error) if matches!(error.as_ref(),
-            StoreError::CommitFailed { .. } | StoreError::WriteDisabled | StoreError::CreationDurabilityUnknown { .. }))
+        match self {
+            Self::WorkerFailed => true,
+            Self::Store(error) => matches!(
+                error.as_ref(),
+                StoreError::CommitFailed { .. }
+                    | StoreError::WriteDisabled
+                    | StoreError::CreationDurabilityUnknown { .. }
+            ),
+            Self::NotFound(_)
+            | Self::BadRequest(_)
+            | Self::Configuration(_)
+            | Self::RequestBudgetExceeded(_)
+            | Self::Conflict(_)
+            | Self::Internal(_)
+            | Self::Busy(_)
+            | Self::StoreUnavailable(_) => false,
+        }
     }
     /// 失败的写入可能已经生效。禁写在写事务开始前拒绝，确定未生效，不属于此类。
     pub(crate) fn outcome_unknown(&self) -> bool {
-        matches!(self, Self::WorkerFailed)
-            || matches!(self, Self::Store(error) if matches!(error.as_ref(),
-            StoreError::CommitFailed { .. } | StoreError::CreationDurabilityUnknown { .. }))
+        match self {
+            Self::WorkerFailed => true,
+            Self::Store(error) => matches!(
+                error.as_ref(),
+                StoreError::CommitFailed { .. } | StoreError::CreationDurabilityUnknown { .. }
+            ),
+            Self::NotFound(_)
+            | Self::BadRequest(_)
+            | Self::Configuration(_)
+            | Self::RequestBudgetExceeded(_)
+            | Self::Conflict(_)
+            | Self::Internal(_)
+            | Self::Busy(_)
+            | Self::StoreUnavailable(_) => false,
+        }
     }
 }
 pub(crate) type Result<T> = std::result::Result<T, ApiError>;

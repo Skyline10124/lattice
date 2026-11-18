@@ -263,6 +263,22 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     Ok(())
 }
 
+fn user_message(s: SessionId, n: NodeId, message: &NativeMessage<BoundToolCall>) -> Result<()> {
+    let semantics = message
+        .parts
+        .iter()
+        .map(|part| part.semantic.clone())
+        .collect();
+    match lattice_conversation::normalize_user_message(semantics) {
+        Ok(normalized) if normalized == *message => Ok(()),
+        Ok(_) | Err(_) => Err(corrupt(
+            "nodes",
+            &format!("{s}/{}", n.0),
+            "用户消息不符合规范化形态",
+        )),
+    }
+}
+
 fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
     let err = || {
         corrupt(
@@ -296,17 +312,7 @@ fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
             if user_ref.node != n {
                 return Err(err());
             }
-            if message
-                .parts
-                .iter()
-                .any(|part| matches!(part.semantic, MessageSemantic::Image { .. }))
-            {
-                return Err(corrupt(
-                    "nodes",
-                    &format!("{s}/{}", n.0),
-                    "会话库格式 9 的用户消息不能包含图片",
-                ));
-            }
+            user_message(s, n, message)?;
         }
         Node::Step { step_ordinal, .. } => {
             let expected = user_ref
@@ -369,21 +375,25 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
         }
     }
     let mut ids = BTreeSet::new();
-    for ((node_session, _), n) in &r.nodes {
+    for ((node_session, node_id), n) in &r.nodes {
         if *node_session != s {
             return Err(err());
         }
-        if let Node::Step { slots, .. } = n {
-            for slot in slots {
-                let id = slot.binding.invocation_id;
-                if !ids.insert(id) {
-                    return Err(err());
-                }
-                let index = r.index.get(&id).ok_or_else(err)?;
-                if index.address != slot.binding.identity.address() {
-                    return Err(err());
+        match n {
+            Node::UserMessage { message, .. } => user_message(s, *node_id, message)?,
+            Node::Step { slots, .. } => {
+                for slot in slots {
+                    let id = slot.binding.invocation_id;
+                    if !ids.insert(id) {
+                        return Err(err());
+                    }
+                    let index = r.index.get(&id).ok_or_else(err)?;
+                    if index.address != slot.binding.identity.address() {
+                        return Err(err());
+                    }
                 }
             }
+            Node::Root => {}
         }
     }
     Ok(())
@@ -436,7 +446,29 @@ pub(super) fn records(r: &Records) -> Result<()> {
         node(r, *s, *n)?;
         match value {
             Node::Root => {}
-            Node::UserMessage { turn_id, .. } => {
+            Node::UserMessage {
+                turn_id, message, ..
+            } => {
+                for part in &message.parts {
+                    if let MessageSemantic::Image { image } = &part.semantic {
+                        let Some(meta) = r.blobs.get(&image.sha256) else {
+                            return Err(err(
+                                "nodes",
+                                format!("{s}/{}", n.0),
+                                "用户消息引用的图片在 blobs 表中不存在",
+                            ));
+                        };
+                        if meta.media_type != image.media_type
+                            || meta.byte_length != image.byte_length
+                        {
+                            return Err(err(
+                                "nodes",
+                                format!("{s}/{}", n.0),
+                                "用户消息引用的图片元数据与 blobs 表不一致",
+                            ));
+                        }
+                    }
+                }
                 if user_nodes
                     .insert(
                         *turn_id,

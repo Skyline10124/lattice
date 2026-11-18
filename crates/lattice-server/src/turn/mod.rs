@@ -10,8 +10,10 @@ pub(crate) mod coordinator;
 #[cfg(feature = "test-crash-barriers")]
 pub(crate) mod crash_barrier;
 pub(crate) mod execute;
+mod images;
 mod live;
 pub(crate) mod observer;
+mod request;
 mod saga;
 pub(crate) mod tools;
 mod types;

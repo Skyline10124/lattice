@@ -6,13 +6,13 @@
 use super::{
     coordinator::{CoordinatorIoError, TurnCoordinator},
     observer::ObserverSink,
+    request,
     types::{TurnEvent, TurnRef},
 };
 use lattice_agent::{
-    ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStepRequest,
-    ModelStopCause,
+    ModelStepAttempt, ModelStepDriver, ModelStepError, ModelStepEvent, ModelStopCause,
 };
-use lattice_conversation::{ConversationItem, ModelAttemptKey, TurnId};
+use lattice_conversation::{ModelAttemptKey, TurnId};
 use lattice_session::store::*;
 use std::sync::{
     Arc,
@@ -57,6 +57,7 @@ impl ModelExecution {
     async fn resolve(
         &mut self,
         target: &lattice_llm::ModelTarget,
+        images: &Arc<dyn lattice_llm::ImageSource>,
     ) -> (
         AttemptOrigin,
         std::result::Result<Arc<ModelStepDriver>, crate::config_rejection::ConfigRejection>,
@@ -70,7 +71,7 @@ impl ModelExecution {
                             last_origin.clone(),
                             Ok(Arc::new(ModelStepDriver::new(
                                 Arc::new(resolved),
-                                Arc::new(lattice_llm::NoImages),
+                                images.clone(),
                             ))),
                         )
                     }
@@ -162,22 +163,11 @@ pub(crate) async fn run_coordinator_saga(
     mut live: LiveExecution,
 ) -> Result<TurnDetail> {
     let session = coordinator.io.session_id();
+    let images = coordinator.io.image_source();
     let config = coordinator
         .io
         .read(move |read| read.turn_config(session, turn_id))
         .await?;
-    let tools = config
-        .catalog
-        .entries
-        .iter()
-        .map(|tool| {
-            lattice_llm::ToolDefinition::new(
-                tool.name.clone(),
-                tool.description.clone(),
-                tool.input_schema.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
     let mut ordinal = 0;
     loop {
         live.healthy()?;
@@ -190,7 +180,7 @@ pub(crate) async fn run_coordinator_saga(
         }
         let history = coordinator
             .io
-            .read(move |read| history(read, session))
+            .read(move |read| request::history(read, session))
             .await?;
         let mut attempt = 0;
         let mut delay = live.retry.initial_delay_ms().min(live.retry.max_delay_ms());
@@ -215,7 +205,7 @@ pub(crate) async fn run_coordinator_saga(
                 ),
                 effort: config.effort,
             };
-            let (origin, driver) = live.model.resolve(&target).await;
+            let (origin, driver) = live.model.resolve(&target, &images).await;
             live.healthy()?;
             if let Some(cause) = live.stop() {
                 let closed = coordinator
@@ -240,17 +230,9 @@ pub(crate) async fn run_coordinator_saga(
                 model: config.model.as_str().to_owned(),
             });
             let cancellation = Arc::new(AtomicBool::new(live.cancel.load(Ordering::Acquire)));
-            let request = ModelStepRequest {
-                system_prompt: config.system_prompt.clone(),
-                history: history.clone(),
-                model: config.model.clone(),
-                provider: config.provider.clone(),
-                effort: config.effort,
-                tools: tools.clone(),
-                cancel: Some(cancellation.clone()),
-                deadline: Some(live.deadline),
-                session_id: Some(session.to_string()),
-            };
+            let mut request = request::step_request(session, &config, history.clone());
+            request.cancel = Some(cancellation.clone());
+            request.deadline = Some(live.deadline);
             let observer = live.observer.clone();
             live.healthy()?;
             let result = match driver {
@@ -650,44 +632,6 @@ fn map_stop(cause: ModelStopCause) -> StopCause {
     }
 }
 
-fn history(
-    read: &SessionRead,
-    session_id: lattice_conversation::SessionId,
-) -> lattice_session::store::Result<Vec<ConversationItem>> {
-    let mut current = read.session(session_id)?.current;
-    let mut items = Vec::new();
-    while current != NodeId(0) {
-        let node = read.node(NodeRef {
-            session_id,
-            node: current,
-        })?;
-        let content = node.step_content();
-        match node {
-            Node::UserMessage {
-                parent, message, ..
-            } => {
-                items.push(ConversationItem::Message(message));
-                current = parent;
-            }
-            Node::Step { parent, .. } => {
-                if let Some(content) = content {
-                    items.push(ConversationItem::Step(content));
-                }
-                current = parent;
-            }
-            Node::Root => {
-                return Err(StoreError::Corruption {
-                    table: "nodes".into(),
-                    key: current.0.to_string(),
-                    detail: "nonzero root".into(),
-                });
-            }
-        }
-    }
-    items.reverse();
-    Ok(items)
-}
-
 async fn publish_closed(
     coordinator: &TurnCoordinator,
     observer: &ObserverSink,
@@ -782,12 +726,13 @@ mod resolution_tests {
         );
         let initial = turn.resolve(&target).await.unwrap();
         let mut execution = ModelExecution::gateway(turn, &initial);
+        let images: Arc<dyn lattice_llm::ImageSource> = Arc::new(lattice_llm::NoImages);
         configure("generate-content");
-        let (latest, ready) = execution.resolve(&target).await;
+        let (latest, ready) = execution.resolve(&target, &images).await;
         assert!(ready.is_ok());
         assert_eq!(latest.protocol, AttemptProtocol::GenerateContent);
         std::fs::write(path, "invalid configuration").unwrap();
-        let (failed, request) = execution.resolve(&target).await;
+        let (failed, request) = execution.resolve(&target, &images).await;
         assert!(
             request
                 .err()

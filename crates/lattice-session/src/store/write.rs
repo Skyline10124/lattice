@@ -4,8 +4,8 @@
 use super::local::Selection;
 use super::*;
 use lattice_conversation::{
-    InvocationId, MessagePart, MessageRole, MessageSemantic, ModelAttemptKey, ModelMessageAddress,
-    NativeMessage, ToolCallAddress,
+    BoundToolCall, InvocationId, MessagePart, MessageSemantic, ModelAttemptKey,
+    ModelMessageAddress, NativeMessage, ToolCallAddress,
 };
 use redb::ReadableTable;
 use std::collections::BTreeSet;
@@ -96,7 +96,11 @@ impl Records {
         })
     }
 
-    pub(super) fn turn_input(&self, s: SessionId, t: TurnId) -> Result<String> {
+    pub(super) fn turn_input(
+        &self,
+        s: SessionId,
+        t: TurnId,
+    ) -> Result<Vec<MessagePart<BoundToolCall>>> {
         let user_ref = self
             .turn_index
             .get(&t)
@@ -109,18 +113,14 @@ impl Records {
                 "missing turn user node",
             ));
         };
-        let Some(MessagePart {
-            semantic: MessageSemantic::Text { text },
-            ..
-        }) = message.parts.first()
-        else {
+        if message.parts.is_empty() {
             return Err(corrupt(
                 "nodes",
                 &format!("{s}/{}", user_ref.node.0),
                 "invalid user message parts",
             ));
-        };
-        Ok(text.clone())
+        }
+        Ok(message.parts.clone())
     }
 
     fn active_step(&self, s: SessionId, t: TurnId) -> Result<(NodeId, FrozenTurnConfig, Node)> {
@@ -375,7 +375,7 @@ impl SessionStore {
         input: AcceptTurn,
     ) -> Result<AcceptedTurn> {
         self.check_lock(lock, input.session_id)?;
-        self.write(lock, Selection::Accept(input.turn_id), |r, _| {
+        self.write(lock, Selection::Accept(input.turn_id), |r, tx| {
             if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
                 let s = node_ref.session_id;
                 let existing_session = r
@@ -384,7 +384,7 @@ impl SessionStore {
                     .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
                 let existing_input = r.turn_input(s, input.turn_id)?;
                 if s != input.session_id
-                    || existing_input != input.input
+                    || existing_input != input.input.message().parts
                     || existing_session.project_path != input.project_path
                 {
                     return Err(StoreError::Conflict {
@@ -392,9 +392,6 @@ impl SessionStore {
                     });
                 }
                 return Ok(AcceptedTurn::Existing(r.turn_detail(s, input.turn_id)?));
-            }
-            if input.input.len() > lattice_conversation::MAX_USER_TEXT_BYTES {
-                return Err(invalid("input", "user input exceeds byte bound"));
             }
             validate::config(&input.config)?;
             let s = input.session_id;
@@ -424,6 +421,18 @@ impl SessionStore {
             let config_digest = stored
                 .digest()
                 .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
+            let (message, blobs) = input.input.into_parts();
+            if !blobs.is_empty() {
+                let mut table = tx.open_table(codec::BLOBS).map_err(codec::table_error)?;
+                for (digest, bytes) in &blobs {
+                    let key = codec::blob_key(digest);
+                    let missing = table.get(key.as_str())?.is_none();
+                    if missing {
+                        let encoded = codec::encode_blob(bytes);
+                        table.insert(key.as_str(), encoded.as_slice())?;
+                    }
+                }
+            }
             r.configs.entry(config_digest).or_insert(stored);
             r.nodes.insert(
                 (s, user_node),
@@ -437,13 +446,7 @@ impl SessionStore {
                     effort: input.config.effort,
                     limits: input.config.limits,
                     config_digest,
-                    message: NativeMessage::new(
-                        MessageRole::User,
-                        None,
-                        vec![MessagePart::semantic_only(MessageSemantic::Text {
-                            text: input.input,
-                        })],
-                    ),
+                    message,
                 },
             );
             r.turn_index.insert(

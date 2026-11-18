@@ -67,7 +67,8 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
         )
         .unwrap();
     let request = RunTurnRequest {
-        input: " original \n".into(),
+        input: lattice_session::store::TurnInput::text(" original \n".into())
+            .expect("构造测试输入"),
         session_id,
         expected_settings: None,
         cancel_flag: None,
@@ -118,7 +119,14 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
     let read = store.begin_read().unwrap();
     assert_eq!(read.list(None, 10).unwrap().items.len(), 1);
     assert_eq!(read.log(session_id).unwrap().nodes.len(), 3);
-    assert_eq!(read.turn_input(session_id, id).unwrap(), " original \n");
+    assert_eq!(
+        read.turn_input(session_id, id).unwrap(),
+        vec![lattice_conversation::MessagePart::semantic_only(
+            lattice_conversation::MessageSemantic::Text {
+                text: " original \n".into()
+            }
+        )]
+    );
     let config = read.turn_config(session_id, id).unwrap();
     assert_eq!(config.agent_name, "alpha");
     assert_eq!(config.model, "test");

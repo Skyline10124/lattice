@@ -6,13 +6,13 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 决策记录：[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0011](../adr/0011-im-gateway-inside-backend.md)
+> 决策记录：[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0011](../adr/0011-im-gateway-inside-backend.md)、[ADR 0013](../adr/0013-user-image-input.md)
 
 ## 目的与范围
 
 本合同规定私有状态寻址、会话库的使用条件、创建与打开、锁和持久性验证边界。`lattice-store` 提供状态布局、私有目录与单分量私有文件的严格打开/限量读取/同目录临时文件原子替换、Linux 文件锁、`fsync` 与位置能力探测，不依赖其他项目 crate，会话库表与事务由 `lattice-session` 维护。
 
-私有状态目录下的存储包括全局会话库 `lattice.redb`（保存 Session、会话树、会话设置、配置表与各索引，由 `lattice-session` 维护）以及 IM 台账 `im/ledger`（保存会话绑定与入站事件相位，由 `lattice-im` 维护，见[IM 网关](im.md)）。
+私有状态目录下的存储包括全局会话库 `lattice.redb`（保存 Session、会话树、会话设置、配置表、图片字节表 `blobs` 与各索引，由 `lattice-session` 维护）以及 IM 台账 `im/ledger`（保存会话绑定与入站事件相位，由 `lattice-im` 维护，见[IM 网关](im.md)）。
 
 会话记录与事务序列见[会话合同](session/README.md)，调用槽位推进与结果载荷见[调用槽位](session/steps.md#调用槽位)。
 
@@ -96,16 +96,22 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 身份、版本与打开
 
-会话库保存一张元信息表，记录库格式版本（当前为 `9`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md)）。
+会话库保存一张元信息表，记录库格式版本（当前为 `10`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md)、[ADR 0013](../adr/0013-user-image-input.md#2-会话库-v10-内容寻址-blobs-表)）。
 
 | 打开时的状态 | 处理 |
 | --- | --- |
 | 存在 `sessions.git` 或 `projects/*/invocations.git` | 拒绝打开，错误列出路径 |
 | 库文件不存在 | 返回未初始化；是否创建由调用路径决定，见[首次创建](#首次创建) |
-| 不是 redb 库、元信息缺失或格式版本不符 | 拒绝打开并报告损坏或版本不兼容 |
-| 记录无法解码或违反业务不变量 | 领域返回类型化损坏，停止受影响路径 |
+| 不是 redb 库、元信息缺失或格式版本不符（含版本 `9` 及更早旧库） | 拒绝打开并报告损坏或 `UnsupportedVersion` |
+| 记录无法解码、图片条目损坏或违反业务不变量 | 领域返回类型化损坏，停止受影响路径 |
 
-打开不初始化、不修复我们自己的记录，不回退旧路径，也不替换为空库。redb 在异常退出后打开时执行的自身崩溃恢复属于库的提交协议，不是记录修复。不符合当前格式的库需要另行获准处理。
+会话库包含 8 张表：`meta`、`sessions`、`session_settings`、`nodes`、`configs`、`turn_index`、`invocation_index` 与第 8 张表 `blobs`：
+
+- **`blobs` 表格式**：键为 64 位小写十六进制 SHA-256 摘要字符串；值为 4 字节大端格式版本头（`10`）后接原始图片字节，不做 JSON 包装。
+- **打开时逐条流式核验**：遍历 `blobs` 表时只借用 redb 只读切片而不拷贝进长期内存：先解码键（非 64 位小写十六进制报 `Corruption`），再校验 4 字节版本头（短于 4 字节报 `Corruption`，版本号不等于 `10` 报 `UnsupportedVersion`），接着用 `ImageRef::from_bytes` 核验正文长度落在 `(0, MAX_IMAGE_BYTES]` 内且文件头魔数受支持（空正文、超长或未知格式报 `Corruption`），最后核对算出的 SHA-256 与键一致（不符报 `Corruption`）。核验后立即释放切片，内存中只保留 `(media_type, byte_length)` 元数据，不常驻图片字节。
+- **全库用户消息与图片引用核对**：全库校验遍历全部会话、全部分支（不仅限于当前路径）上的 `UserMessage` 节点，核对消息保持[规范化形态](session/conversation.md#用户图片与单轮输入规范化)，且其中每个 `ImageRef` 在 `blobs` 元数据表中均存在并具有相同的 `media_type` 与 `byte_length`；缺失或不一致时返回 `Corruption` 并指出对应的 `nodes` 键。
+
+打开不初始化、不修复我们自己的记录，不回退旧路径，也不迁移或替换旧版本库。redb 在异常退出后打开时执行的自身崩溃恢复属于库的提交协议，不是记录修复。不符合当前格式的库需要另行获准处理。
 
 ### 首次创建
 
@@ -145,7 +151,7 @@ guard 是显式持有凭据，不由线程 ID 或任务 ID 推定所有权。最
 
 ## 保留、索引与演化
 
-已使用会话的树只追加、不删除，只有末端未关闭的 Step 节点会被改写，配置表只增不改；草稿会话在满足清理条件时由后台整体删除，同一事务删除 Session 记录、根节点与会话设置三项，资格条件见[会话状态与草稿清理](session/concurrency.md#会话状态与草稿清理)。本阶段没有压缩或备份机制。全部会话集中在一个库文件，文件损坏影响所有 Session；redb 自身提供崩溃恢复与完整性检查。
+已使用会话的树只追加、不删除，只有末端未关闭的 Step 节点会被改写；配置表 `configs` 与图片字节表 `blobs` 按内容摘要去重只追加、不改不删（接受含图轮次时若 `blobs` 已有同一摘要则跳过写入）。草稿会话在满足清理条件时由后台整体删除，同一事务删除 Session 记录、根节点与会话设置三项，资格条件见[会话状态与草稿清理](session/concurrency.md#会话状态与草稿清理)；`delete_draft` 与 `rewind` 均不回收 `configs` 与 `blobs` 中的条目。本阶段没有压缩或备份机制。全部会话集中在一个库文件，文件损坏影响所有 Session；redb 自身提供崩溃恢复与完整性检查。
 
 会话库中的 TurnId 索引与 InvocationId 索引是派生记录，与其权威记录在同一写事务中更新，不另设修复流程；两者不一致视为损坏。
 

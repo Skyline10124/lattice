@@ -24,7 +24,7 @@ Tool 参数经 [`lattice-conversation`](../../../crates/lattice-conversation/src
 
 `MessageSemantic<ToolCallState>` 包含图片变体 `Image { image: ImageRef }`。`ImageRef` 由 64 位小写十六进制编码的 `sha256: [u8; 32]`、`media_type: ImageMediaType`（`png`、`jpeg`、`webp`、`gif`，仅由 `ImageMediaType::sniff` 读取前 12 字节文件头魔数识别，忽略文件扩展名与外部声明的 MIME）和原始字节长度 `byte_length: u64` 组成。
 
-- **放置约束。** `MessageSemantic::Image` 只允许出现在 `MessageRole::User` 消息中，且所在 `MessagePart` 的 `replay_state` 必须为 `None`（由 `validate_image_placement` 核验）；助手、系统或工具消息包含图片，或图片片段携带回放状态时均拒绝。格式 9 会话库中用户消息不包含图片；打开格式 9 会话库时遇到含 `Image` 片段的 `Node::UserMessage` 按存储损坏拒绝。
+- **放置约束。** `MessageSemantic::Image` 只允许出现在 `MessageRole::User` 消息中，且所在 `MessagePart` 的 `replay_state` 必须为 `None`（由 `validate_image_placement` 核验）；助手、系统或工具消息包含图片，或图片片段携带回放状态时均拒绝。消息中每个 `ImageRef` 在会话库打开与全库校验时的核对规则见[会话库身份、版本与打开](../storage.md#身份版本与打开)。
 - **单轮上限。** 由 [`lattice-conversation`](../../../crates/lattice-conversation/src/limits.rs) 统一定义：
   - `MAX_IMAGE_BYTES = 3_932_160`（3.75 MiB）：单张原始图片字节长度必须满足 `0 < byte_length <= MAX_IMAGE_BYTES`；
   - `MAX_USER_IMAGES_PER_TURN = 8`：单轮用户消息按出现次数计最多 8 张图片（相同摘要重复出现按出现次数累计）；

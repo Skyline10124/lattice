@@ -52,7 +52,7 @@ fn seed(
                 session_id: sid,
                 turn_id: turn,
                 project_path: fixture.root.project_path(),
-                input: "old request".into(),
+                input: TurnInput::text("old request".into()).expect("构造测试输入"),
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
@@ -263,7 +263,7 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
         ))
     ));
     assert!(execution.completion.await.unwrap().is_err());
-    retry.input.push(' ');
+    retry.input = TurnInput::text("hello ".into()).expect("构造测试输入");
     let conflict = start_turn(
         fixture.api.clone(),
         first.turn_id,

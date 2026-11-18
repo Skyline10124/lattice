@@ -128,7 +128,7 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
         )
         .unwrap();
     let request = RunTurnRequest {
-        input: "hello".into(),
+        input: lattice_session::store::TurnInput::text("hello".into()).expect("构造测试输入"),
         session_id,
         expected_settings: None,
         cancel_flag: None,

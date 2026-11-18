@@ -45,7 +45,9 @@ pub use digest::arguments_digest;
 pub use effort::{Effort, ParseEffortError};
 pub use history::ConversationItem;
 pub use identity::{IdParseError, InvocationId, SessionId, TurnId};
-pub use image::{ImageMediaType, ImagePlacementError, ImageRef, validate_image_placement};
+pub use image::{
+    ImageBytesError, ImageMediaType, ImagePlacementError, ImageRef, validate_image_placement,
+};
 pub use input_modality::InputModality;
 pub use limits::{
     AttemptAssembly, LimitKind, MAX_ASSISTANT_CONTENT_BYTES, MAX_IMAGE_BYTES,

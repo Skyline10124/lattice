@@ -4,9 +4,10 @@
 //! 用户输入图片媒体类型、内容寻址引用与消息位置校验。
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-use crate::{MessageRole, MessageSemantic, NativeMessage, ToolCallState};
+use crate::{MAX_IMAGE_BYTES, MessageRole, MessageSemantic, NativeMessage, ToolCallState};
 
 /// 受支持的用户输入图片媒体类型，仅按文件头前 12 字节魔数识别。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -64,6 +65,42 @@ pub struct ImageRef {
     pub sha256: [u8; 32],
     pub media_type: ImageMediaType,
     pub byte_length: u64,
+}
+
+/// 由原始图片字节构造 [`ImageRef`] 失败的原因。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Error)]
+pub enum ImageBytesError {
+    /// 图片字节数为零或超过单图上限。
+    #[error("图片为 {actual} 字节，必须大于 0 且不能超过 3,932,160 字节（3.75 MiB）")]
+    InvalidLength {
+        /// 图片的原始字节长度。
+        actual: u64,
+    },
+    /// 文件头魔数不属于受支持的图片格式。
+    #[error("图片不是受支持的格式，仅支持 PNG、JPEG、WebP、GIF")]
+    UnsupportedFormat,
+}
+
+/// 校验单张图片的原始字节长度是否落在 `(0, MAX_IMAGE_BYTES]` 内。
+pub(crate) fn is_valid_image_length(byte_length: u64) -> bool {
+    usize::try_from(byte_length).is_ok_and(|len| len > 0 && len <= MAX_IMAGE_BYTES)
+}
+
+impl ImageRef {
+    /// 由原始图片字节构造引用：长度必须在 (0, MAX_IMAGE_BYTES] 内且魔数受支持，随后计算 SHA-256。
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, ImageBytesError> {
+        let actual = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
+        if !is_valid_image_length(actual) {
+            return Err(ImageBytesError::InvalidLength { actual });
+        }
+        let media_type = ImageMediaType::sniff(bytes).ok_or(ImageBytesError::UnsupportedFormat)?;
+        let sha256: [u8; 32] = Sha256::digest(bytes).into();
+        Ok(Self {
+            sha256,
+            media_type,
+            byte_length: actual,
+        })
+    }
 }
 
 fn role_label(role: MessageRole) -> &'static str {
@@ -318,5 +355,69 @@ mod tests {
             "回放状态错误应返回从 1 开始的片段序号"
         );
         assert_eq!(err.to_string(), "第 2 个片段为图片，不能携带回放状态");
+    }
+
+    #[test]
+    fn from_bytes_validates_length_magic_and_computes_sha256() {
+        let cases: &[(&[u8], ImageMediaType)] = &[
+            (b"\x89PNG\r\n\x1a\npayload", ImageMediaType::Png),
+            (b"\xff\xd8\xff\xe0jpeg-body", ImageMediaType::Jpeg),
+            (b"RIFF\x24\x00\x00\x00WEBPbody", ImageMediaType::Webp),
+            (b"GIF87a\x01\x00\x01\x00", ImageMediaType::Gif),
+            (b"GIF89a\x01\x00\x01\x00", ImageMediaType::Gif),
+        ];
+        for &(bytes, expected_type) in cases {
+            let image = ImageRef::from_bytes(bytes).expect("受支持的图片字节应构造成功");
+            let expected_digest: [u8; 32] = Sha256::digest(bytes).into();
+            assert_eq!(image.sha256, expected_digest, "图片摘要必须等于 SHA-256");
+            assert_eq!(image.media_type, expected_type, "图片媒体类型不匹配");
+            assert_eq!(image.byte_length, bytes.len() as u64, "图片长度不匹配");
+        }
+
+        assert_eq!(
+            ImageRef::from_bytes(b""),
+            Err(ImageBytesError::InvalidLength { actual: 0 }),
+            "空字节必须报长度无效"
+        );
+
+        let mut max_png = vec![0xAB; MAX_IMAGE_BYTES];
+        max_png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        let max_ref = ImageRef::from_bytes(&max_png).expect("恰好 MAX_IMAGE_BYTES 的图片应通过");
+        assert_eq!(max_ref.byte_length, MAX_IMAGE_BYTES as u64);
+        assert_eq!(max_ref.media_type, ImageMediaType::Png);
+        assert_eq!(max_ref.sha256, <[u8; 32]>::from(Sha256::digest(&max_png)));
+
+        let mut over_max = vec![0xAB; MAX_IMAGE_BYTES + 1];
+        over_max[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+        assert_eq!(
+            ImageRef::from_bytes(&over_max),
+            Err(ImageBytesError::InvalidLength {
+                actual: (MAX_IMAGE_BYTES + 1) as u64
+            }),
+            "超出单图上限一字节必须报长度无效"
+        );
+
+        let mut bad_over_max = vec![0x00; MAX_IMAGE_BYTES + 1];
+        bad_over_max[..4].copy_from_slice(b"WAVE");
+        assert_eq!(
+            ImageRef::from_bytes(&bad_over_max),
+            Err(ImageBytesError::InvalidLength {
+                actual: (MAX_IMAGE_BYTES + 1) as u64
+            }),
+            "超限输入应先按长度拒绝"
+        );
+
+        for unsupported in [
+            b"<svg></svg>".as_slice(),
+            b"BM\x36\x00\x0c\x00\x00\x00\x00\x00\x36\x00".as_slice(),
+            b"RIFF\x24\x00\x00\x00WAVEfmt ".as_slice(),
+            b"\x89PNG\r\n\x1a".as_slice(),
+        ] {
+            assert_eq!(
+                ImageRef::from_bytes(unsupported),
+                Err(ImageBytesError::UnsupportedFormat),
+                "不受支持的魔数必须拒绝"
+            );
+        }
     }
 }

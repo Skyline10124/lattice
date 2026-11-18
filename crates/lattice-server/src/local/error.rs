@@ -14,6 +14,7 @@ impl From<ApiError> for LocalError {
         let (kind, message) = match &error {
             ApiError::NotFound(_) => (NotFound, "session or Turn not found"),
             ApiError::Configuration(reason) => return Self::new(BadRequest, &reason.to_string()),
+            ApiError::RequestBudgetExceeded(message) => return Self::new(BadRequest, message),
             ApiError::BadRequest(_) => (BadRequest, "request or frozen configuration is invalid"),
             ApiError::Conflict(reason) => {
                 return Self {
@@ -188,5 +189,39 @@ mod tests {
             "request or frozen configuration is invalid"
         );
         assert!(!bad_request.message.contains("sk-private-input"));
+    }
+
+    #[test]
+    fn request_budget_exceeded_preserves_message_and_bad_request_stays_generic() {
+        let budget_msg = "编码后的模型请求超过 LATTICE 本地请求体预算，请减少图片";
+        let api_err = ApiError::RequestBudgetExceeded(budget_msg.into());
+        assert!(!api_err.requires_reopen(), "请求预算超限不应触发会话库重开");
+        assert!(!api_err.outcome_unknown(), "请求预算超限在写库前确定未生效");
+        assert_eq!(api_err.to_string(), budget_msg, "Display 应原样输出文案");
+        let mapped = LocalError::from(api_err);
+        assert_eq!(
+            mapped.kind,
+            LocalErrorKind::BadRequest,
+            "请求预算超限应映射为 BadRequest"
+        );
+        assert_eq!(
+            mapped.message, budget_msg,
+            "请求预算超限映射后的错误文案必须原样保留"
+        );
+
+        let generic = LocalError::from(ApiError::BadRequest("包含内部上下文的字符串".into()));
+        assert_eq!(
+            generic.kind,
+            LocalErrorKind::BadRequest,
+            "普通请求错误应映射为 BadRequest"
+        );
+        assert_eq!(
+            generic.message, "request or frozen configuration is invalid",
+            "普通 BadRequest 必须继续使用通用固定文案"
+        );
+        assert!(
+            !generic.message.contains("包含内部上下文的字符串"),
+            "普通 BadRequest 不得透传内部字符串"
+        );
     }
 }

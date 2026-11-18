@@ -267,7 +267,7 @@ pub struct AcceptTurn {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub project_path: ProjectPath,
-    pub input: String,
+    pub input: super::TurnInput,
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
     pub settings_version: super::SettingsVersion,
