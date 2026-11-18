@@ -679,6 +679,19 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ctrl_v_resolves_clipboard_paste() {
+        for event in [
+            key(KeyCode::Char('v'), KeyModifiers::CONTROL),
+            key(KeyCode::Char('\u{16}'), KeyModifiers::NONE),
+        ] {
+            assert!(
+                matches!(resolve_key(event, false, false), KeyAction::ClipboardPaste),
+                "Ctrl+V 应解析为读取剪贴板"
+            );
+        }
+    }
+
     fn sample_pending_image(
         seed: u8,
         media_type: lattice_local::ImageMediaType,

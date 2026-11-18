@@ -18,7 +18,7 @@ use tokio::process::Command;
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(1);
 const IMAGE_TYPES: &[&str] = &["image/png", "image/webp", "image/jpeg", "image/gif"];
 const WAYLAND_TEXT_TYPES: &[&str] = &["text/plain;charset=utf-8", "text/plain"];
-const X11_TEXT_TYPES: &[&str] = &["UTF8_STRING"];
+const X11_TEXT_TYPES: &[&str] = &["UTF8_STRING", "text/plain;charset=utf-8"];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -93,26 +93,29 @@ pub(crate) async fn read(
         .filter(|line| !line.is_empty())
         .collect();
 
-    if let Some(mime) = IMAGE_TYPES
-        .iter()
-        .copied()
-        .find(|candidate| available.contains(candidate))
-    {
+    if let Some(mime) = listed_type(&available, IMAGE_TYPES) {
         let bytes = read_mime(backend, program, mime, timeout).await?;
         return Ok(Content::Image(bytes));
     }
 
-    if let Some(mime) = backend
-        .text_types()
-        .iter()
-        .copied()
-        .find(|candidate| available.contains(candidate))
-    {
+    if let Some(mime) = listed_type(&available, backend.text_types()) {
         let bytes = read_mime(backend, program, mime, timeout).await?;
-        return Ok(Content::Text(String::from_utf8_lossy(&bytes).into_owned()));
+        let text = String::from_utf8(bytes)
+            .map_err(|_| ClipboardError::Failed("剪贴板文字不是有效的 UTF-8".into()))?;
+        return Ok(Content::Text(text));
     }
 
     Err(ClipboardError::Failed("剪贴板中没有图片或文字".into()))
+}
+
+/// 按 `candidates` 的优先级找出剪贴板列出的类型；类型名不区分 ASCII 大小写，返回列出的原串。
+fn listed_type<'a>(available: &[&'a str], candidates: &[&str]) -> Option<&'a str> {
+    candidates.iter().find_map(|candidate| {
+        available
+            .iter()
+            .copied()
+            .find(|listed| listed.eq_ignore_ascii_case(candidate))
+    })
 }
 
 async fn read_mime(
@@ -210,21 +213,19 @@ async fn run_command(
                 Err(ClipboardError::Failed(format!("{name} 执行失败（{code}）")))
             }
         }
+        // `kill` 发信号后等待回收；发信号失败时不再等待，避免超出时限。
         Ok(Outcome::TooLarge) => {
             let _ = child.kill().await;
-            let _ = child.wait().await;
             Err(ClipboardError::TooLarge)
         }
         Ok(Outcome::Io(err)) => {
             let _ = child.kill().await;
-            let _ = child.wait().await;
             Err(ClipboardError::Failed(format!(
                 "读取 {name} 输出失败：{err}"
             )))
         }
         Err(_) => {
             let _ = child.kill().await;
-            let _ = child.wait().await;
             Err(ClipboardError::Failed(format!("{name} 读取超时")))
         }
     }
@@ -330,14 +331,15 @@ exit 2"#,
     #[tokio::test]
     async fn falls_back_to_utf8_plain_text_when_no_image_type_is_present() {
         let dir = tempfile::tempdir().expect("创建测试临时目录");
+        // 类型名不区分大小写，读取时使用剪贴板列出的原串。
         let script = write_script(
             dir.path(),
             "wl-paste",
             r#"if [ "$*" = "--list-types" ]; then
-  printf 'text/plain\ntext/plain;charset=utf-8\n'
+  printf 'text/plain\ntext/plain;charset=UTF-8\n'
   exit 0
 fi
-if [ "$*" = "--no-newline --type text/plain;charset=utf-8" ]; then
+if [ "$*" = "--no-newline --type text/plain;charset=UTF-8" ]; then
   printf '剪贴板文字内容'
   exit 0
 fi
@@ -350,6 +352,29 @@ exit 2"#,
         assert!(
             text == "剪贴板文字内容",
             "没有图片类型时应返回 text/plain;charset=utf-8 文字"
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_utf8_text_is_reported_instead_of_rewritten() {
+        let dir = tempfile::tempdir().expect("创建测试临时目录");
+        let script = write_script(
+            dir.path(),
+            "wl-paste",
+            r#"if [ "$*" = "--list-types" ]; then
+  printf 'text/plain\n'
+  exit 0
+fi
+if [ "$*" = "--no-newline --type text/plain" ]; then
+  printf 'ab\377cd'
+  exit 0
+fi
+exit 2"#,
+        );
+        let result = read(Backend::Wayland, &script, Duration::from_secs(1)).await;
+        assert!(
+            matches!(&result, Err(ClipboardError::Failed(detail)) if detail.contains("UTF-8")),
+            "无效 UTF-8 文字应返回写明 UTF-8 的 Failed"
         );
     }
 
@@ -385,7 +410,7 @@ exit 2"#,
     #[tokio::test]
     async fn slow_command_times_out_and_returns_failed_quickly() {
         let dir = tempfile::tempdir().expect("创建测试临时目录");
-        let script = write_script(dir.path(), "wl-paste", "sleep 5");
+        let script = write_script(dir.path(), "wl-paste", "exec sleep 5");
         let started = Instant::now();
         let result = read(Backend::Wayland, &script, Duration::from_secs(1)).await;
         assert!(
@@ -434,7 +459,7 @@ exit 2"#,
         );
         assert_eq!(
             path.file_name().and_then(|s| s.to_str()),
-            Some(hex_sha256(&image.sha256).as_str()),
+            Some("705dcb14b507f4cd79c38627774b39eda6fac464609ffaec6d87e8240321e923"),
             "暂存文件名必须为图片 SHA-256 的 64 位小写十六进制"
         );
         let file_mode = std::fs::metadata(&path)
@@ -443,11 +468,8 @@ exit 2"#,
             .mode()
             & 0o777;
         assert_eq!(file_mode, 0o600, "暂存文件权限模式必须为 0600");
-        assert_eq!(
-            std::fs::read(&path).expect("读取暂存文件内容"),
-            bytes,
-            "暂存文件内容应与写入字节一致"
-        );
+        let stored = std::fs::read(&path).expect("读取暂存文件内容");
+        assert!(stored == bytes, "暂存文件内容应与写入字节一致");
 
         drop(staging);
         assert!(!staging_dir.exists(), "丢弃 Staging 后暂存目录应被删除");
