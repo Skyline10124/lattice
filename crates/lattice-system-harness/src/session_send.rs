@@ -642,7 +642,8 @@ fn message_segments(message: &Value) -> Result<Vec<Segment>, String> {
             (SegmentKind::Text, string(text, "text")?)
         } else if let Some(reasoning) = semantic.get("reasoning") {
             (SegmentKind::Reasoning, string(reasoning, "text")?)
-        } else if semantic.get("tool_call").is_some() {
+        } else if semantic.get("tool_call").is_some() || semantic.get("image").is_some() {
+            // 工具调用与用户图片不产生文本段；场景需要时从条目的原始 JSON 核对。
             continue;
         } else {
             return Err("未知的消息片段类别".into());
