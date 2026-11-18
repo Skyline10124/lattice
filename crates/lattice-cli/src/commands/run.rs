@@ -427,26 +427,26 @@ pub(super) async fn run_session_prompt_with_io(
     }
     for (index, (path, expected)) in args.images.iter().zip(&planned_refs).enumerate() {
         let ordinal = index + 1;
-        let bytes = match read_image(ordinal, path) {
-            Ok((actual, bytes)) if actual == *expected => bytes,
-            Ok(_) | Err(_) => {
-                return finish_submit_receipt(
-                    id,
-                    SubmissionResult::Rejected {
-                        error: LocalError::new(
-                            LocalErrorKind::BadRequest,
-                            &format!("第 {ordinal} 张图片在预检后已改变，请重新提交"),
-                        ),
-                    },
-                    &mut state,
-                    out,
-                    err,
-                    verbose,
-                    json,
-                );
+        let error = match read_image(ordinal, path) {
+            Ok((actual, bytes)) if actual == *expected => {
+                parts.push(UserInputPart::Image { image: bytes });
+                continue;
             }
+            Ok(_) => LocalError::new(
+                LocalErrorKind::BadRequest,
+                &format!("第 {ordinal} 张图片在预检后已改变，请重新提交"),
+            ),
+            Err(error) => error,
         };
-        parts.push(UserInputPart::Image { image: bytes });
+        return finish_submit_receipt(
+            id,
+            SubmissionResult::Rejected { error },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        );
     }
     let request = TurnRequest {
         turn_id: id,

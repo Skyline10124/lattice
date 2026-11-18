@@ -634,7 +634,8 @@ fn retry_notice(value: &Value) -> Result<RetryNotice, String> {
         text: string(notice, "text")?.into(),
     })
 }
-fn message_segments(message: &Value) -> Result<Vec<Segment>, String> {
+/// `user` 为真时允许结构化图片引用：图片只能出现在用户消息里。
+fn message_segments(message: &Value, user: bool) -> Result<Vec<Segment>, String> {
     let mut segments = Vec::new();
     for part in array(message, "parts")? {
         let semantic = &part["semantic"];
@@ -642,7 +643,9 @@ fn message_segments(message: &Value) -> Result<Vec<Segment>, String> {
             (SegmentKind::Text, string(text, "text")?)
         } else if let Some(reasoning) = semantic.get("reasoning") {
             (SegmentKind::Reasoning, string(reasoning, "text")?)
-        } else if semantic.get("tool_call").is_some() || semantic.get("image").is_some() {
+        } else if semantic.get("tool_call").is_some()
+            || (user && semantic["image"]["image"].is_object())
+        {
             // 工具调用与用户图片不产生文本段；场景需要时从条目的原始 JSON 核对。
             continue;
         } else {
@@ -693,7 +696,7 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
             if ordinal == 0 {
                 return Err("用户消息序号必须从 1 起算".into());
             }
-            let text = message_segments(&content["message"])?
+            let text = message_segments(&content["message"], true)?
                 .into_iter()
                 .filter(|segment| segment.kind == SegmentKind::Text)
                 .map(|segment| segment.text)
@@ -732,7 +735,7 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                     if origin != &stored["origin"] || origin != &detailed["origin"] {
                         return Err("回复来源与已完成尝试不一致".into());
                     }
-                    message_segments(reply)?
+                    message_segments(reply, false)?
                 }
             };
             let detail = &value["step"];

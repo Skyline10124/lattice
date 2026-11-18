@@ -242,7 +242,10 @@ fn user_images_replay_after_daemon_restart() {
             .unwrap();
             let second_request = conversation(protocol, &captures[1].raw);
             require(
-                second_request.len() == 3 && second_request[0] == first_request[0],
+                second_request.len() == 3
+                    && second_request[0] == first_request[0]
+                    && second_request[1].to_string().contains("第一轮回复")
+                    && second_request[2].to_string().contains("继续"),
                 format!("{label} 重启后的请求应按原顺序重放首轮用户消息、首轮回复与本轮文本"),
             )
             .unwrap();
@@ -293,11 +296,20 @@ fn user_image_budget_recovers_after_rewind() {
         let first = run("第一轮", &["第一轮", "--agent", "vision"]);
         evidence.record_command("第一轮发送三张 3 MiB 图片", &first);
         let first = accepted(first).unwrap();
-        require(first.has_completed(), "第一轮应完成").unwrap();
+        require(
+            first.is_clean_exit(0) && first.has_completed(),
+            "第一轮应退出 0 并完成",
+        )
+        .unwrap();
         let sid = first.accepted_session_id().unwrap().to_owned();
         let second = run("第二轮", &["第二轮", "--session", &sid]);
         evidence.record_command("第二轮续接三张 3 MiB 图片", &second);
-        require(accepted(second).unwrap().has_completed(), "第二轮应完成").unwrap();
+        let second = accepted(second).unwrap();
+        require(
+            second.is_clean_exit(0) && second.has_completed(),
+            "第二轮应退出 0 并完成",
+        )
+        .unwrap();
         let lengths: Vec<usize> = server
             .captured_requests()
             .iter()
@@ -364,9 +376,10 @@ fn user_image_budget_recovers_after_rewind() {
         require(rewind.is_clean_exit(0), "rewind 到根节点应退出 0").unwrap();
         let fourth = run("退回后重发", &["退回后重发", "--session", &sid]);
         evidence.record_command("退回后重新发送三张 3 MiB 图片", &fourth);
+        let fourth = accepted(fourth).unwrap();
         require(
-            accepted(fourth).unwrap().has_completed(),
-            "退回后重发应完成",
+            fourth.is_clean_exit(0) && fourth.has_completed(),
+            "退回后重发应退出 0 并完成",
         )
         .unwrap();
         let captures = server.captured_requests();

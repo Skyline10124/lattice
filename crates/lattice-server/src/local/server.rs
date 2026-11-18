@@ -1014,24 +1014,26 @@ impl Backend {
         if record.project_path != workspace.project_path() {
             return Err(conflict(ConflictReason::BindingMismatch));
         }
+        let parts = request
+            .parts
+            .into_iter()
+            .map(|part| match part {
+                UserInputPart::Text { text } => {
+                    lattice_session::store::TurnInputPart::Text { text }
+                }
+                UserInputPart::Image { image } => {
+                    lattice_session::store::TurnInputPart::Image { bytes: image }
+                }
+            })
+            .collect();
+        // 图片摘要在准入锁外计算；输入无效的拒绝仍排在同会话 Busy 之后。
+        let input = lattice_session::store::TurnInput::new(parts);
         let input = {
             let mut state = lock(&self.admission);
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            let parts = request
-                .parts
-                .into_iter()
-                .map(|part| match part {
-                    UserInputPart::Text { text } => {
-                        lattice_session::store::TurnInputPart::Text { text }
-                    }
-                    UserInputPart::Image { image } => {
-                        lattice_session::store::TurnInputPart::Image { bytes: image }
-                    }
-                })
-                .collect();
-            let input = lattice_session::store::TurnInput::new(parts)
+            let input = input
                 .map_err(|_| LocalError::new(LocalErrorKind::BadRequest, "invalid Turn request"))?;
             state.sessions.insert(sid, owner.clone());
             owner.observer.owner_changed();
