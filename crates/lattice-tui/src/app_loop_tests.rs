@@ -3601,20 +3601,39 @@ fn image_submission_rejection_restores_when_empty_and_distinguishes_pure_image_v
         );
     }
 
-    // 4. 自动发送遇 Unknown 释放名额后迟到确定拒绝：纯图片提示图片未放回，含文字提示 Ctrl+↑。
-    for with_text in [false, true] {
-        let mut h = Harness::new(true);
+    // 4. 自动发送遇 Unknown 释放名额后迟到确定拒绝：纯图片提示图片未放回，含文字提示 Ctrl+↑，只带评论两者都不提示。
+    enum AutoLateKind {
+        PureImage,
+        TextAndImage,
+        CommentOnly,
+    }
+    for kind in [
+        AutoLateKind::PureImage,
+        AutoLateKind::TextAndImage,
+        AutoLateKind::CommentOnly,
+    ] {
+        let mut h = comment_app();
         let img_path = h.options.project_root.join("auto_late.png");
         std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nauto").expect("写入自动发送图片");
         let app = &mut h.app;
+        app.focus = Focus::Dock;
         app.input.set_text("先跑一轮");
         app.submit().expect("提交第一轮");
         let first = app.own_turn.expect("第一轮身份");
         app.apply_submission(receipt(first, accepted(first)));
-        if with_text {
-            app.apply_action(KeyAction::Paste("排队里的文字".into()));
+        match kind {
+            AutoLateKind::PureImage => {
+                app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+            }
+            AutoLateKind::TextAndImage => {
+                app.apply_action(KeyAction::Paste("排队里的文字".into()));
+                app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+            }
+            AutoLateKind::CommentOnly => {
+                save_comment(app, "排队里的评论");
+                app.focus = Focus::Dock;
+            }
         }
-        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
         assert!(app.submit().is_none(), "运行中按回车应入队");
         finish(app, first, "先跑一轮");
         app.auto_submit().expect("完成后应自动发送队首");
@@ -3627,20 +3646,33 @@ fn image_submission_rejection_restores_when_empty_and_distinguishes_pure_image_v
             },
         ));
         let err = app.dock.message().expect("迟到拒绝应暂驻错误");
-        if with_text {
-            assert!(
-                err.text.contains("Ctrl+↑"),
-                "含文字的自动发送迟到拒绝应提示 Ctrl+↑：{}",
-                err.text
-            );
-            assert_eq!(app.history.prev(), Some("排队里的文字"));
-        } else {
-            assert!(
-                err.text.contains("图片未放回") && !err.text.contains("Ctrl+↑"),
-                "纯图片的自动发送迟到拒绝应说明图片未放回且不提 Ctrl+↑：{}",
-                err.text
-            );
-            assert_eq!(app.history.prev(), Some("先跑一轮"));
+        match kind {
+            AutoLateKind::TextAndImage => {
+                assert!(
+                    err.text.contains("Ctrl+↑"),
+                    "含文字的自动发送迟到拒绝应提示 Ctrl+↑：{}",
+                    err.text
+                );
+                assert_eq!(app.history.prev(), Some("排队里的文字"));
+            }
+            AutoLateKind::PureImage => {
+                assert!(
+                    err.text.contains("图片未放回") && !err.text.contains("Ctrl+↑"),
+                    "纯图片的自动发送迟到拒绝应说明图片未放回且不提 Ctrl+↑：{}",
+                    err.text
+                );
+                assert_eq!(app.history.prev(), Some("先跑一轮"));
+            }
+            AutoLateKind::CommentOnly => {
+                assert!(
+                    err.text.contains("迟到拒绝")
+                        && !err.text.contains("图片未放回")
+                        && !err.text.contains("Ctrl+↑"),
+                    "只带评论的自动发送迟到拒绝不应提示图片未放回或 Ctrl+↑：{}",
+                    err.text
+                );
+                assert_eq!(app.history.prev(), Some("先跑一轮"));
+            }
         }
     }
 }
@@ -3709,6 +3741,108 @@ fn initial_replay_manual_submit_preflight_failure_preserves_comment_draft_until_
         transcript(app).contains("草稿 · #1"),
         "草稿卡片应重新显示在锚点下方"
     );
+}
+
+#[test]
+fn initial_replay_configure_bound_comment_only_queue_sends_after_step_arrives() {
+    use lattice_local::ModelCandidates;
+
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.term_width = 100;
+    app.term_height = 40;
+    let target = numbered_turn(1);
+    let failed_step = || {
+        step(2, target, 0)
+            .text("comment target")
+            .stopped("failed")
+            .entry()
+    };
+
+    // 1. 会话空闲，队列未暂停，最近一轮以失败结束（不满足上一轮完成后自动发出的条件）。
+    open_view(
+        app,
+        head(2, Some(target), false),
+        vec![user(1, target, 1, "original prompt"), failed_step()],
+    );
+    assert_eq!(app.phase, TurnPhase::Idle, "初始会话应处于空闲状态");
+    assert!(!app.queue.is_paused(), "初始回放的失败轮次不应暂停队列");
+
+    // 2. configure 在途时提交一条只带评论的消息，绑定在途代次进入队列。
+    save_comment(app, "等待锚点回放的评论");
+    app.focus = Focus::Dock;
+    app.apply_builtin("/model");
+    let query = app.model_query.take().expect("打开模型面板应发起候选查询");
+    app.apply_models(
+        query,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "chosen", &[])],
+            warnings: vec![],
+        }),
+    );
+    assert!(
+        app.apply_action(KeyAction::Submit).is_none(),
+        "选定模型只发出设置修改请求，不提交对话"
+    );
+    let pending = app
+        .configure_request
+        .take()
+        .expect("选定模型应登记待发出的 configure 请求");
+    assert!(
+        app.apply_action(KeyAction::Submit).is_none(),
+        "configure 在途时提交纯评论应进入队列"
+    );
+    assert_eq!(app.queue.messages().count(), 1, "纯评论消息应已进入队列");
+
+    // 3. 开始初始回放：用户消息已回放，评论所指的 Step 尚未回放。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(2, Some(target), false)));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
+    assert!(app.initial, "末尾 Step 尚未到达时仍处于初始回放期间");
+    assert!(app.present_steps().is_empty(), "此时评论锚点 Step 尚未回放");
+
+    // 4. configure 成功回复到达后，auto_submit() 返回 None，消息仍在队列中。
+    let mut configured = head(2, Some(target), false);
+    configured.provider = Some(ProviderId::parse("p").expect("解析测试供应商标识"));
+    configured.model = Some(ModelId::parse("chosen").expect("解析测试模型标识"));
+    configured.settings_version = settings_version(0x22);
+    app.apply_configure(
+        pending.generation,
+        Ok(ConfigureReply {
+            head: configured,
+            adjustment: None,
+        }),
+    );
+    assert!(
+        app.auto_submit().is_none(),
+        "锚点 Step 尚未回放时不应发出纯评论消息"
+    );
+    assert_eq!(
+        app.queue.messages().count(),
+        1,
+        "未发出的纯评论消息应继续留在队列中"
+    );
+
+    // 5. 该 Step 到达后，auto_submit() 返回含该评论的请求。
+    app.apply_view(entry_update(failed_step()));
+    assert!(!app.initial, "末尾 Step 到达后初始回放应结束");
+    let req = app
+        .auto_submit()
+        .expect("锚点 Step 回放后应自动发出绑定 configure 的纯评论消息");
+    assert_eq!(
+        req.expected_settings,
+        Some(settings_version(0x22)),
+        "自动发出的请求应携带绑定的 configure 新版本"
+    );
+    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+        panic!("纯评论提交请求应只包含一段文本");
+    };
+    let parsed = crate::comment::Message::parse(wire).expect("提交文本应可解析为评论消息");
+    assert_eq!(parsed.comments.len(), 1, "提交请求应携带 1 条评论");
+    assert_eq!(parsed.comments[0].text, "等待锚点回放的评论");
+    assert_eq!(parsed.comments[0].quote, "comment target");
+    assert!(parsed.text.is_empty(), "纯评论消息不应包含额外正文");
+    assert_eq!(app.queue.messages().count(), 0, "发出后队列应为空");
 }
 
 #[test]

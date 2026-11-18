@@ -151,7 +151,7 @@ _Avoid_: ModelRouter, connection material, per-Turn LlmConnection
 _Avoid_: thinking budget, reasoning mode, effort string
 
 **输入模态**:
-英文名 Input modality（`InputModality`）。模型可接收的用户输入内容类别（`text`、`image`、`audio`、`video`），由模型目录的 `modalities.input` 与 `providers.toml` 手写的 `input` 合并得出；目标模型声明了输入模态且不含 `image` 时，含图片的请求在发送前被拒绝。
+英文名 Input modality（`InputModality`）。模型可接收的用户输入内容类别（`text`、`image`、`audio`、`video`），由模型目录的 `modalities.input` 得出；`providers.toml` 中手写的 `input` 存在时，整表覆盖目录的列表。目标模型声明了输入模态且不含 `image` 时，含图片的请求在发送前被拒绝。
 见[元数据的来源与合并](../architecture/llm/models.md#元数据的来源与合并)。
 _Avoid_: voice 模态, 布尔图片开关, 输出模态
 

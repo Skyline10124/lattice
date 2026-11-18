@@ -112,8 +112,8 @@ pub(crate) enum TurnPhase {
 enum UnknownSubmission {
     /// 手动提交的原文：与直接被拒一样，输入区为空时放回。
     Manual(crate::queue::Outgoing),
-    /// 自动发送的一条已让出排队名额，不再放回队首，免得队列超过上限；记下原消息是否有文字。
-    Automatic { has_text: bool },
+    /// 自动发送的一条已让出排队名额，不再放回队首，免得队列超过上限；记下迟到拒绝时应给出的保留提示。
+    Automatic { kept: KeptInput },
 }
 
 /// 首次 Ctrl+C 取消的那一轮。
@@ -843,9 +843,14 @@ impl App {
                 let automatic = self.queue.release(turn_id);
                 if let Some((_, message)) = self.submitted.take_if(|(id, _)| *id == turn_id) {
                     let held = if automatic {
-                        UnknownSubmission::Automatic {
-                            has_text: !message.input.text().trim().is_empty(),
-                        }
+                        let kept = if !message.input.text().trim().is_empty() {
+                            KeptInput::History
+                        } else if message.input.image_count() > 0 {
+                            KeptInput::Discarded
+                        } else {
+                            KeptInput::Nothing
+                        };
+                        UnknownSubmission::Automatic { kept }
                     } else {
                         UnknownSubmission::Manual(message)
                     };
@@ -1231,8 +1236,12 @@ impl App {
             if self.queue.is_editing() {
                 return None;
             }
-            self.send_after_configure = false;
-            return self.send_queue_head();
+            let request = self.send_queue_head();
+            // 初始回放期间，队首评论的锚点可能尚未到达，保留发送意图等后续条目回放。
+            if request.is_none() && !self.initial {
+                self.send_after_configure = false;
+            }
+            return request;
         }
         let turn = self.head.as_ref()?.turn_id?;
         let completed = self
@@ -1342,12 +1351,8 @@ impl App {
         let mut kept = KeptInput::Restored;
         let manual = match self.unknown_submission.take_if(|(id, _)| *id == turn_id) {
             Some((_, UnknownSubmission::Manual(message))) => Some(message),
-            Some((_, UnknownSubmission::Automatic { has_text })) => {
-                kept = if has_text {
-                    KeptInput::History
-                } else {
-                    KeptInput::Discarded
-                };
+            Some((_, UnknownSubmission::Automatic { kept: held })) => {
+                kept = held;
                 None
             }
             // 自动发送的一条也记在 submitted 中，原文以排队中的为准。

@@ -30,10 +30,17 @@ pub fn image_bytes_ref(bytes: &[u8], existing: &[ImageRef]) -> Result<ImageRef> 
 /// 不存在、不是常规文件、读取失败或魔数不是 PNG/JPEG/WebP/GIF 时返回 `Ok(None)`；
 /// 单张长度不合规或加入后超过单轮张数、总量上限时返回 `BadRequest`（说明取 `UserInputError`，图片序号为 `existing.len() + 1`）。
 pub fn probe_image_file(path: &Path, existing: &[ImageRef]) -> Result<Option<ImageRef>> {
-    let Ok((file_len, bytes)) = read_bounded(path) else {
+    let Ok((file_len, mut file)) = open_bounded(path) else {
         return Ok(None);
     };
-    if ImageMediaType::sniff(&bytes).is_none() {
+    // 先只读文件头判断是不是图片，粘贴普通大文件的路径时不必读满上限。
+    let mut bytes = Vec::new();
+    if (&mut file).take(12).read_to_end(&mut bytes).is_err()
+        || ImageMediaType::sniff(&bytes).is_none()
+    {
+        return Ok(None);
+    }
+    if file.read_to_end(&mut bytes).is_err() {
         return Ok(None);
     }
     checked_image_ref(file_len, &bytes, existing).map(Some)
@@ -57,18 +64,24 @@ enum BoundedReadError {
     Io(std::io::Error),
 }
 
-/// 取路径元数据、核验为常规文件，并最多读取 `MAX_IMAGE_BYTES + 1` 字节。
-fn read_bounded(path: &Path) -> std::result::Result<(u64, Vec<u8>), BoundedReadError> {
+/// 取路径元数据、核验为常规文件并打开，返回文件长度与最多读取 `MAX_IMAGE_BYTES + 1` 字节的读取端。
+fn open_bounded(
+    path: &Path,
+) -> std::result::Result<(u64, std::io::Take<std::fs::File>), BoundedReadError> {
     let metadata = std::fs::metadata(path).map_err(BoundedReadError::Io)?;
     if !metadata.is_file() {
         return Err(BoundedReadError::NotRegularFile);
     }
     let file = std::fs::File::open(path).map_err(BoundedReadError::Io)?;
+    Ok((metadata.len(), file.take(MAX_IMAGE_BYTES as u64 + 1)))
+}
+
+/// 经 `open_bounded` 读取文件，最多 `MAX_IMAGE_BYTES + 1` 字节。
+fn read_bounded(path: &Path) -> std::result::Result<(u64, Vec<u8>), BoundedReadError> {
+    let (file_len, mut file) = open_bounded(path)?;
     let mut bytes = Vec::new();
-    file.take(MAX_IMAGE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(BoundedReadError::Io)?;
-    Ok((metadata.len(), bytes))
+    file.read_to_end(&mut bytes).map_err(BoundedReadError::Io)?;
+    Ok((file_len, bytes))
 }
 
 fn checked_image_ref(actual_len: u64, bytes: &[u8], existing: &[ImageRef]) -> Result<ImageRef> {
