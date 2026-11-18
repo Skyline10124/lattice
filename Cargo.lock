@@ -2322,6 +2322,7 @@ dependencies = [
 name = "lattice-ipc"
 version = "0.1.0"
 dependencies = [
+ "base64",
  "chrono",
  "lattice-conversation",
  "lattice-session",

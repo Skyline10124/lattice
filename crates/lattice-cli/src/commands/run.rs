@@ -324,24 +324,50 @@ pub(super) async fn run_session_prompt_with_io(
                 Some(Err(error)) => SubmissionResult::Rejected { error },
                 _ => SubmissionResult::NotAccepted,
             };
-            let code = receipt_exit(&result);
-            render_update(
-                &LocalUpdate::Submit {
-                    update: SubmissionUpdate::Receipt(SubmissionReceipt {
-                        turn_id: id,
-                        result,
-                        recovered: false,
-                    }),
-                },
-                &mut state,
-                out,
-                err,
-                verbose,
-                json,
-            )?;
-            return Ok(code);
+            return finish_submit_receipt(id, result, &mut state, out, err, verbose, json);
         }
     };
+    let mut planned_refs = Vec::new();
+    let mut plan_parts = Vec::new();
+    if let Some(text) = &args.prompt {
+        plan_parts.push(UserInputPart::Text { text: text.clone() });
+    }
+    for (index, path) in args.images.iter().enumerate() {
+        let (image, _bytes) = match read_image(index + 1, path) {
+            Ok(pair) => pair,
+            Err(error) => {
+                return finish_submit_receipt(
+                    id,
+                    SubmissionResult::Rejected { error },
+                    &mut state,
+                    out,
+                    err,
+                    verbose,
+                    json,
+                );
+            }
+        };
+        planned_refs.push(image);
+        plan_parts.push(UserInputPart::Image { image });
+    }
+    let plan = PlannedTurnRequest {
+        turn_id: id,
+        session: session_id,
+        workspace: workspace.clone(),
+        parts: plan_parts,
+        expected_settings: None,
+    };
+    if let Err(error) = lattice_local::check_turn_plan(&plan) {
+        return finish_submit_receipt(
+            id,
+            SubmissionResult::Rejected { error },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        );
+    }
     let configure_session = if args.session_id.is_none() {
         Some(ConfigureSession::New(session_id))
     } else if args.agent.is_some() || args.model.is_some() || args.effort.is_some() {
@@ -372,52 +398,132 @@ pub(super) async fn run_session_prompt_with_io(
         match configure_result {
             ConfigureResult::Configured { .. } => {}
             ConfigureResult::Rejected { error } => {
-                let result = SubmissionResult::Rejected { error };
-                let code = receipt_exit(&result);
-                render_update(
-                    &LocalUpdate::Submit {
-                        update: SubmissionUpdate::Receipt(SubmissionReceipt {
-                            turn_id: id,
-                            result,
-                            recovered: false,
-                        }),
-                    },
+                return finish_submit_receipt(
+                    id,
+                    SubmissionResult::Rejected { error },
                     &mut state,
                     out,
                     err,
                     verbose,
                     json,
-                )?;
-                return Ok(code);
+                );
             }
             ConfigureResult::Unknown { .. } => {
-                render_update(
-                    &LocalUpdate::Submit {
-                        update: SubmissionUpdate::Receipt(SubmissionReceipt {
-                            turn_id: id,
-                            result: SubmissionResult::NotAccepted,
-                            recovered: false,
-                        }),
-                    },
+                return finish_submit_receipt(
+                    id,
+                    SubmissionResult::NotAccepted,
                     &mut state,
                     out,
                     err,
                     verbose,
                     json,
-                )?;
-                return Ok(std::process::ExitCode::from(1));
+                );
             }
         }
+    }
+    let mut parts = Vec::new();
+    if let Some(text) = args.prompt {
+        parts.push(UserInputPart::Text { text });
+    }
+    for (index, (path, expected)) in args.images.iter().zip(&planned_refs).enumerate() {
+        let ordinal = index + 1;
+        let error = match read_image(ordinal, path) {
+            Ok((actual, bytes)) if actual == *expected => {
+                parts.push(UserInputPart::Image { image: bytes });
+                continue;
+            }
+            Ok(_) => LocalError::new(
+                LocalErrorKind::BadRequest,
+                &format!("第 {ordinal} 张图片在预检后已改变，请重新提交"),
+            ),
+            Err(error) => error,
+        };
+        return finish_submit_receipt(
+            id,
+            SubmissionResult::Rejected { error },
+            &mut state,
+            out,
+            err,
+            verbose,
+            json,
+        );
     }
     let request = TurnRequest {
         turn_id: id,
         session: session_id,
         workspace,
-        input: args.prompt,
+        parts,
         expected_settings: None,
     };
     let turn = api.start_turn(request);
     consume(turn, None, state, verbose, json, signal, out, err).await
+}
+
+/// 读取第 `ordinal` 张图片（从 1 起）：须为常规文件，最多读取 `MAX_IMAGE_BYTES + 1` 字节，
+/// 由 `ImageRef::from_bytes` 核验长度、魔数并计算摘要。
+fn read_image(
+    ordinal: usize,
+    path: &std::path::Path,
+) -> std::result::Result<(ImageRef, Vec<u8>), LocalError> {
+    use std::io::Read;
+    let read_err = |error: std::io::Error| {
+        LocalError::new(
+            LocalErrorKind::BadRequest,
+            &format!("无法读取第 {ordinal} 张图片：{error}"),
+        )
+    };
+    let metadata = std::fs::metadata(path).map_err(read_err)?;
+    if !metadata.is_file() {
+        return Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            &format!("第 {ordinal} 张图片不是常规文件"),
+        ));
+    }
+    let file = std::fs::File::open(path).map_err(read_err)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_IMAGE_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(read_err)?;
+    let image = ImageRef::from_bytes(&bytes).map_err(|err| {
+        let user_err = match err {
+            ImageBytesError::InvalidLength { .. } => UserInputError::InvalidImageLength {
+                image: ordinal,
+                actual: metadata.len(),
+            },
+            ImageBytesError::UnsupportedFormat => {
+                UserInputError::UnsupportedImageFormat { image: ordinal }
+            }
+        };
+        LocalError::new(LocalErrorKind::BadRequest, &user_err.to_string())
+    })?;
+    Ok((image, bytes))
+}
+
+fn finish_submit_receipt(
+    turn_id: TurnId,
+    result: SubmissionResult,
+    state: &mut RunRenderState,
+    out: &mut impl Write,
+    err: &mut impl Write,
+    verbose: bool,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    let code = receipt_exit(&result);
+    render_update(
+        &LocalUpdate::Submit {
+            update: SubmissionUpdate::Receipt(SubmissionReceipt {
+                turn_id,
+                result,
+                recovered: false,
+            }),
+        },
+        state,
+        out,
+        err,
+        verbose,
+        json,
+    )?;
+    Ok(code)
 }
 async fn configure_once_or_interrupt(
     api: &LocalClient,

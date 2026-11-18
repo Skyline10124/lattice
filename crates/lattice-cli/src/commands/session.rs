@@ -45,7 +45,11 @@ pub(crate) async fn local_client() -> Result<lattice_local::LocalClient> {
 
 #[derive(clap::Args, Debug)]
 pub struct SendArgs {
-    pub prompt: String,
+    #[arg(required_unless_present = "images")]
+    pub prompt: Option<String>,
+    /// Image file to attach (PNG, JPEG, WebP or GIF); repeat to attach several, sent after the message in the given order.
+    #[arg(long = "image", value_name = "PATH")]
+    pub images: Vec<PathBuf>,
     /// Existing session to continue, by ID or unique prefix; omit to start a new session.
     #[arg(long = "session")]
     pub session_id: Option<String>,

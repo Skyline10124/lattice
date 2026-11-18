@@ -8,7 +8,8 @@ pub(crate) use lattice_ipc::{
     ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus, ImCredentialStatus, ImMountResult,
     ImPlatformAuthStatus, LocalError, LocalErrorKind, LocalHistory, MAX_HISTORY_TURNS,
     ModelCandidateQuery, RecoveryCause, Request, Response, Result, SessionHead, SessionListRow,
-    StoreDiagnostic, TextUpdate, TurnLookup, TurnRequest, TurnView, ViewUpdate, WATCH_TURNS,
+    StoreDiagnostic, TextUpdate, TurnLookup, TurnRequest, TurnView, UserInputPart, ViewUpdate,
+    WATCH_TURNS,
 };
 pub(crate) use lattice_session::store::Page;
 

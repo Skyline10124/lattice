@@ -8,6 +8,7 @@ authors.workspace = true
 description = "LATTICE 本地 IPC 协议类型、分帧编解码与对端身份核验"
 
 [dependencies]
+base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
 lattice-conversation = { workspace = true }
 lattice-session = { workspace = true }

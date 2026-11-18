@@ -16,7 +16,7 @@ use std::{
 use chrono::Utc;
 use lattice_ipc::{
     ConfigureRequest, ConfigureSession, LocalErrorKind, LocalUpdate, PublicTurnOutcome,
-    SubmissionResult, SubmissionUpdate, TurnRequest,
+    SubmissionResult, SubmissionUpdate, TurnRequest, UserInputPart,
 };
 use lattice_local::LocalClient;
 use lattice_server::{
@@ -1153,7 +1153,9 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
         turn_id: turn_reg_accepted,
         session: session_a,
         workspace: harness.workspace.clone(),
-        input: "遗留已接受但台账停在 Registered".into(),
+        parts: vec![UserInputPart::Text {
+            text: "遗留已接受但台账停在 Registered".into(),
+        }],
         expected_settings: None,
     });
     let model_a = async {
@@ -1170,7 +1172,9 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
         turn_id: turn_accepted,
         session: session_b,
         workspace: harness.workspace.clone(),
-        input: "遗留 Accepted 待补发".into(),
+        parts: vec![UserInputPart::Text {
+            text: "遗留 Accepted 待补发".into(),
+        }],
         expected_settings: None,
     });
     let model_b = async {
@@ -1190,7 +1194,9 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
             turn_id: turn_hanging,
             session: session_a,
             workspace: harness.workspace.clone(),
-            input: "挂起中的长轮次".into(),
+            parts: vec![UserInputPart::Text {
+                text: "挂起中的长轮次".into(),
+            }],
             expected_settings: None,
         })
         .await
@@ -1218,7 +1224,9 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
                 turn_id: turn_c_inflight,
                 session: session_c,
                 workspace: ws_c,
-                input: "准入途中的遗留 Registered 轮次".into(),
+                parts: vec![UserInputPart::Text {
+                    text: "准入途中的遗留 Registered 轮次".into(),
+                }],
                 expected_settings: None,
             })
             .await
@@ -1657,7 +1665,9 @@ async fn handles_busy_and_cancel_across_im_new_session_and_external_local_client
         turn_id: ipc_tid,
         session: bound_sid,
         workspace: harness.workspace.clone(),
-        input: "来自 CLI/TUI 的并发请求".into(),
+        parts: vec![UserInputPart::Text {
+            text: "来自 CLI/TUI 的并发请求".into(),
+        }],
         expected_settings: None,
     });
 

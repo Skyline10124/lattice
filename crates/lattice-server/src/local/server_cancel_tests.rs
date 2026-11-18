@@ -227,7 +227,9 @@ fn raw_request(dir: &std::path::Path, sid: SessionId) -> TurnRequest {
         turn_id: new_turn_id(),
         session: sid,
         workspace: dir.into(),
-        input: "测试".into(),
+        parts: vec![UserInputPart::Text {
+            text: "测试".into(),
+        }],
         expected_settings: None,
     }
 }
@@ -1960,10 +1962,20 @@ async fn dispatch_submit_without_submitter_is_an_internal_error() {
 #[tokio::test]
 async fn invalid_request_is_rejected_before_claiming_session() {
     let (dir, backend, client, task) = backend().await;
-    for bad_input in [String::new(), "x".repeat(2 * 1024 * 1024 + 1)] {
+    for bad_parts in [
+        vec![UserInputPart::Text {
+            text: String::new(),
+        }],
+        vec![UserInputPart::Text {
+            text: "x".repeat(2 * 1024 * 1024 + 1),
+        }],
+        vec![UserInputPart::Image {
+            image: b"not an image".to_vec(),
+        }],
+    ] {
         config(dir.path(), "http://127.0.0.1:1/v1");
         let mut input = create_request(&client, dir.path()).await;
-        input.input = bad_input;
+        input.parts = bad_parts;
         let sid = input.session;
         let (entered, release) = arm(&backend.gates.registered);
         let submitting = {

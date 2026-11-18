@@ -9,6 +9,7 @@ mod endpoint;
 mod logging;
 mod login;
 mod operation;
+mod turn_plan;
 
 pub use client::LocalClient;
 #[cfg(any(test, feature = "test-utils"))]
@@ -17,11 +18,11 @@ pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
 pub use lattice_conversation::{
-    BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
-    InvocationId, MessageRole, MessageSemantic, ModelAttemptKey, ModelId, ModelIdError, ModelRef,
-    ModelRefError, NativeMessage, ProviderId, ProviderIdError, ResultPayload, SessionId,
-    StepContent, StoredToolResult, SuccessContent, TokenSummary, TokenUsage, ToolError,
-    ToolResultOutcome, TurnId, UsageCompleteness,
+    BoundToolCall, CostEstimate, CostSummary, Effort, ImageBytesError, ImageMediaType, ImageRef,
+    InputModality, InvocationId, MAX_IMAGE_BYTES, MessageRole, MessageSemantic, ModelAttemptKey,
+    ModelId, ModelIdError, ModelRef, ModelRefError, NativeMessage, ProviderId, ProviderIdError,
+    ResultPayload, SessionId, StepContent, StoredToolResult, SuccessContent, TokenSummary,
+    TokenUsage, ToolError, ToolResultOutcome, TurnId, UsageCompleteness, UserInputError,
 };
 pub use lattice_ipc::{
     Acceptance, AgentName, AgentNameError, AttemptProgress, AuthCatalogOutcome, AuthLoginOutcome,
@@ -32,19 +33,20 @@ pub use lattice_ipc::{
     ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, LocalError, LocalErrorKind,
     LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary, ModelCandidate,
     ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning, Node, NodeId, NodeKind,
-    NodeRef, Notice, NoticeLevel, Page, ProjectPath, ProviderAuthStatus, PublicTurnOutcome,
-    RecoveryCause, RecoveryNeed, RequestConflict, Result, RetryNotice, RetryPolicy,
-    RetryPolicyError, RevocationStatus, SessionHead, SessionListRow, SessionLog, SessionRecord,
-    SessionUsage, SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail, StepEnd,
-    StepKey, StepProgress, StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate,
-    TextSegment, TextUpdate, TurnDetail, TurnLookup, TurnRef, TurnRequest, TurnSummary,
-    TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary, ViewUpdate, WATCH_TURNS,
-    parse_drain_timeout,
+    NodeRef, Notice, NoticeLevel, Page, PlannedTurnRequest, ProjectPath, ProviderAuthStatus,
+    PublicTurnOutcome, RecoveryCause, RecoveryNeed, RequestConflict, Result, RetryNotice,
+    RetryPolicy, RetryPolicyError, RevocationStatus, SessionHead, SessionListRow, SessionLog,
+    SessionRecord, SessionUsage, SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail,
+    StepEnd, StepKey, StepProgress, StoreDiagnostic, SubmissionReceipt, SubmissionResult,
+    SubmissionUpdate, TextSegment, TextUpdate, TurnDetail, TurnLookup, TurnRef, TurnRequest,
+    TurnSummary, TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary,
+    UserInputPart, ViewUpdate, WATCH_TURNS, parse_drain_timeout,
 };
 pub use lattice_store::{StateLayout, xdg_state_root};
 pub use logging::init_logging;
 pub use login::{AuthLoginEvent, LocalAuthLogin, SensitiveLoginUrl};
 pub use operation::{ConfigureOutcome, DetachReport, LocalTurn, STREAM_IDLE_TIMEOUT_SECS};
+pub use turn_plan::check_turn_plan;
 
 pub fn new_session_id() -> SessionId {
     SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).expect("生成的 SessionId 格式合法")

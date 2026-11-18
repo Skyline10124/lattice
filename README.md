@@ -176,9 +176,11 @@ lattice im --help
 
 ```sh
 lattice session send "概括项目用途。" --agent reader
+lattice session send "这张截图里的报错是什么？" --image ./error.png --agent reader
+lattice session send --session <session_id> --image ./a.png --image ./b.png
 ```
 
-后续发送改用 `--session <session_id>`。顶层 `lattice run` 与 `session send` 相同。
+`--image <PATH>` 可重复传入，附带的图片按给出顺序排在文本之后；只传 `--image` 时可省略文本。后续发送改用 `--session <session_id>`。顶层 `lattice run` 与 `session send` 相同。
 
 `--model <provider>/<model>` 与 `--effort` 可覆盖本次提交的模型和推理档位；模型名可含后续 `/`。先用 `lattice models` 查看候选及其 `EFFORTS` 列，再选择模型支持的档位，例如：
 
@@ -200,7 +202,7 @@ lattice session usage <session_id>
 lattice --json session usage <session_id>
 ```
 
-由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。跨本地 IPC 协议版本（当前为 `65`）升级或从旧版本迁移时，若新前端与运行中旧后台报 `incompatible_backend`，先执行 `systemctl --user stop lattice`（手动运行后台时用旧二进制执行 `lattice daemon stop`），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
+由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。跨本地 IPC 协议版本（当前为 `66`）升级或从旧版本迁移时，若新前端与运行中旧后台报 `incompatible_backend`，先执行 `systemctl --user stop lattice`（手动运行后台时用旧二进制执行 `lattice daemon stop`），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 

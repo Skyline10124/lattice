@@ -43,8 +43,9 @@ pub use types::{
     ConfigureReply, ConfigureRequest, ConfigureResult, ConfigureSession, ConflictReason,
     ConnectionStatus, DaemonStatus, EffortAdjustment, HISTORY_TURNS, ImAuthRemoveReply,
     ImAuthSetReply, ImAuthStatus, ImCredentialStatus, ImMountResult, ImPlatformAuthStatus,
-    LocalError, LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, RecoveryCause,
-    RecoveryNeed, Request, RequestConflict, Response, Result, SessionHead, SessionListRow,
-    StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment,
-    TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, ViewUpdate, WATCH_TURNS,
+    LocalError, LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, PlannedTurnRequest,
+    RecoveryCause, RecoveryNeed, Request, RequestConflict, Response, Result, SessionHead,
+    SessionListRow, StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate,
+    TextSegment, TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, UserInputPart, ViewUpdate,
+    WATCH_TURNS,
 };

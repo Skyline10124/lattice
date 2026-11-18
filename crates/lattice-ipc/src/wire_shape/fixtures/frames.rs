@@ -31,7 +31,7 @@ use crate::{
     ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, LocalError, LocalErrorKind,
     LocalHistory, LoginAction, LoginResponse, ModelCandidateQuery, RecoveryCause, RecoveryNeed,
     Request, Response, RevocationStatus, SessionHead, SessionListRow, StoreDiagnostic, TextSegment,
-    TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, ViewUpdate,
+    TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, UserInputPart, ViewUpdate,
 };
 
 fn daemon_status_sample() -> DaemonStatus {
@@ -190,7 +190,20 @@ fn turn_request_full() -> TurnRequest {
         turn_id: turn_id_1(),
         session: session_id_primary(),
         workspace: non_utf8_workspace_path(),
-        input: "请查看 Cargo.toml 的行数".to_owned(),
+        parts: vec![
+            UserInputPart::Text {
+                text: "请结合这两张截图查看 Cargo.toml".to_owned(),
+            },
+            UserInputPart::Image {
+                image: b"\x89PNG\r\n\x1a\n".to_vec(),
+            },
+            UserInputPart::Text {
+                text: "并比较依赖差异".to_owned(),
+            },
+            UserInputPart::Image {
+                image: b"\xff\xd8\xff\xe0".to_vec(),
+            },
+        ],
         expected_settings: Some(settings_version_fixed()),
     }
 }
@@ -200,7 +213,9 @@ fn turn_request_minimal() -> TurnRequest {
         turn_id: turn_id_1(),
         session: session_id_primary(),
         workspace: non_utf8_workspace_path(),
-        input: "请查看 Cargo.toml 的行数".to_owned(),
+        parts: vec![UserInputPart::Text {
+            text: "请查看 Cargo.toml 的行数".to_owned(),
+        }],
         expected_settings: None,
     }
 }
@@ -272,6 +287,25 @@ pub(super) fn register(book: &mut CaseBook) {
                 "reasoning",
                 TextSegment::Reasoning { .. } => TextSegment::Reasoning {
                     text: "先核对工作区成员列表".to_owned(),
+                }
+            ),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "user_input_part",
+        UserInputPart {
+            (
+                "text",
+                UserInputPart::Text { .. } => UserInputPart::Text {
+                    text: "请查看 Cargo.toml 的行数".to_owned(),
+                }
+            ),
+            (
+                "image",
+                UserInputPart::Image { .. } => UserInputPart::Image {
+                    image: b"\x89PNG\r\n\x1a\n".to_vec(),
                 }
             ),
         }

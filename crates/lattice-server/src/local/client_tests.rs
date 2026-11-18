@@ -396,7 +396,9 @@ fn request(peer: &Peer, id: TurnId) -> TurnRequest {
         turn_id: id,
         session: sid(),
         workspace: peer._directory.path().into(),
-        input: "原始输入".into(),
+        parts: vec![UserInputPart::Text {
+            text: "原始输入".into(),
+        }],
         expected_settings: None,
     }
 }

@@ -159,7 +159,9 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
             turn_id: first_turn,
             session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
-            input: "第一轮对话".into(),
+            parts: vec![UserInputPart::Text {
+                text: "第一轮对话".into(),
+            }],
             expected_settings: None,
         })
         .await
@@ -175,7 +177,9 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
             turn_id: second_turn,
             session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
-            input: "第二轮续写".into(),
+            parts: vec![UserInputPart::Text {
+                text: "第二轮续写".into(),
+            }],
             expected_settings: None,
         })
         .await
@@ -247,7 +251,9 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
             turn_id: first_turn,
             session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
-            input: "新建会话".into(),
+            parts: vec![UserInputPart::Text {
+                text: "新建会话".into(),
+            }],
             expected_settings: None,
         })
         .await
@@ -261,7 +267,9 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
             turn_id: second_turn,
             session: session_id,
             workspace: workspace.canonical_path().to_path_buf(),
-            input: "续写会话".into(),
+            parts: vec![UserInputPart::Text {
+                text: "续写会话".into(),
+            }],
             expected_settings: None,
         })
         .await

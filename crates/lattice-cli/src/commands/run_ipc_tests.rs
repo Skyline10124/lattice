@@ -787,7 +787,9 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
         turn_id: id,
         session: sid(),
         workspace: peer._root.path().into(),
-        input: "input".into(),
+        parts: vec![UserInputPart::Text {
+            text: "input".into(),
+        }],
         expected_settings: None,
     });
     let mut submit = peer.request("submit").await;
@@ -867,7 +869,8 @@ async fn send_configure_outcomes_and_exit_codes() {
             let send = run_session_prompt_with_io(
                 &peer.client,
                 super::super::session::SendArgs {
-                    prompt: "hello".into(),
+                    prompt: Some("hello".into()),
+                    images: Vec::new(),
                     session_id: None,
                     agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                     model: None,
@@ -958,7 +961,8 @@ async fn send_configure_outcomes_and_exit_codes() {
             let send = run_session_prompt_with_io(
                 &peer.client,
                 super::super::session::SendArgs {
-                    prompt: "reply lost".into(),
+                    prompt: Some("reply lost".into()),
+                    images: Vec::new(),
                     session_id: existing.then(|| "1111".into()),
                     agent: (!existing).then(|| lattice_local::AgentName::parse("test").unwrap()),
                     model: existing
@@ -1054,7 +1058,8 @@ async fn send_configure_outcomes_and_exit_codes() {
             let send = run_session_prompt_with_io(
                 &peer.client,
                 super::super::session::SendArgs {
-                    prompt: "interrupted configure".into(),
+                    prompt: Some("interrupted configure".into()),
+                    images: Vec::new(),
                     session_id: None,
                     agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                     model: None,
@@ -1133,7 +1138,8 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
         let send = run_session_prompt(
             &peer.client,
             super::super::session::SendArgs {
-                prompt: "original input".into(),
+                prompt: Some("original input".into()),
+                images: Vec::new(),
                 session_id: existing.then(|| "1111".into()),
                 agent: (!existing).then(|| lattice_local::AgentName::parse("test").unwrap()),
                 model: explicit.then(|| lattice_local::ModelRef::parse("local/org/model").unwrap()),
@@ -1177,7 +1183,10 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
             };
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];
-            assert_eq!(request["input"], "original input");
+            assert_eq!(
+                request["parts"],
+                json!([{"kind":"text","text":"original input"}])
+            );
             assert_eq!(request["session"], expected_sid.to_string());
             assert!(request["expected_settings"].is_null());
             assert!(TurnId::parse(request["turn_id"].as_str().unwrap()).is_ok());
@@ -1229,4 +1238,272 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
             assert_eq!(records[0]["turn_id"], records[2]["turn_id"]);
         }
     }
+}
+
+fn write_test_png(path: &std::path::Path, total_len: usize, fill: u8) {
+    const HEADER: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+    assert!(total_len >= HEADER.len(), "测试 PNG 字节数不能小于文件头");
+    let mut bytes = vec![fill; total_len];
+    bytes[..HEADER.len()].copy_from_slice(HEADER);
+    std::fs::write(path, bytes).expect("写入测试图片文件应成功");
+}
+
+#[tokio::test]
+async fn send_rejects_oversized_ipc_frame_before_configure_and_submit() {
+    let _guard = signal_guard().await;
+    let peer = Peer::new();
+    let p1 = peer._root.path().join("img1.png");
+    let p2 = peer._root.path().join("img2.png");
+    let p3 = peer._root.path().join("img3.png");
+    write_test_png(&p1, 3_932_160, 0x11);
+    write_test_png(&p2, 3_932_160, 0x22);
+    write_test_png(&p3, 2_621_440, 0x33);
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let workspace = peer._root.path().to_path_buf();
+    let result = {
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: Some("\"".repeat(2_097_152)),
+                images: vec![p1, p2, p3],
+                session_id: None,
+                agent: Some(lattice_local::AgentName::parse("test").unwrap()),
+                model: None,
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        tokio::pin!(send);
+        tokio::time::timeout(Duration::from_secs(5), async {
+            tokio::select! {
+                res = &mut send => res,
+                extra = peer.next_request() => {
+                    panic!(
+                        "超帧预检失败后不应发出 configure 或 submit，实际收到 IPC 请求：{}",
+                        extra.request["operation"]
+                    );
+                }
+            }
+        })
+        .await
+        .expect("超帧预检失败后命令未在时限内退出")
+    };
+    peer.assert_no_pending_request().await;
+    assert_eq!(
+        result.expect("命令应返回退出码"),
+        std::process::ExitCode::from(2),
+        "超帧被拒必须退出 2"
+    );
+    assert!(err.is_empty(), "JSON 模式下标准错误应为空");
+    let records: Vec<Value> = String::from_utf8(out)
+        .expect("输出应为有效 UTF-8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("每行应为有效 JSON"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        2,
+        "超帧被拒应只输出 sending 与 submit(rejected) 两条记录：{records:?}"
+    );
+    assert_eq!(records[0]["type"], "submit");
+    assert_eq!(records[0]["stage"], "sending");
+    assert_eq!(records[1]["type"], "submit");
+    assert_eq!(records[1]["stage"], "receipt");
+    assert_eq!(records[1]["turn_id"], records[0]["turn_id"]);
+    assert_eq!(records[1]["result"], "rejected");
+    assert_eq!(records[1]["recovered"], false);
+    assert_eq!(records[1]["error"]["kind"], "bad_request");
+    assert!(
+        records[1]["error"]["message"]
+            .as_str()
+            .expect("错误消息应为字符串")
+            .contains("16,777,216"),
+        "超帧错误消息应指出 16 MiB 上限：{records:?}"
+    );
+}
+
+#[tokio::test]
+async fn send_rejects_image_modified_after_configure_before_submit() {
+    let _guard = signal_guard().await;
+    let peer = Peer::new();
+    let img_path = peer._root.path().join("changed.png");
+    write_test_png(&img_path, 128, 0x11);
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let workspace = peer._root.path().to_path_buf();
+    let (result, new_sid) = {
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: Some("检查图片".into()),
+                images: vec![img_path.clone()],
+                session_id: None,
+                agent: Some(lattice_local::AgentName::parse("test").unwrap()),
+                model: None,
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        tokio::pin!(send);
+        let new_sid = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                res = &mut send => panic!("configure 回复前命令不应提前退出：{res:?}"),
+                mut cfg = peer.request("configure") => {
+                    let sid_str = cfg.request["request"]["session"]["new"]
+                        .as_str()
+                        .expect("新建会话必须发送 configure(new)")
+                        .to_string();
+                    let target_sid: SessionId = sid_str.parse().expect("SessionId 格式应合法");
+                    // 在配置回复前改写文件为同长度、同魔数但内容不同的字节，触发配置后核对失败。
+                    write_test_png(&img_path, 128, 0x22);
+                    let mut configured_head = head(lattice_local::new_turn_id(), false);
+                    configured_head.session_id = target_sid;
+                    cfg.reply(
+                        "configure",
+                        json!({"head": configured_head, "adjustment": null}),
+                    )
+                    .await;
+                    sid_str
+                }
+            }
+        })
+        .await
+        .expect("等待 configure 请求超时");
+        let result = tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                res = &mut send => res,
+                extra = peer.next_request() => {
+                    panic!(
+                        "配置后图片发生变化时不应发出 submit，实际收到 IPC 请求：{}",
+                        extra.request["operation"]
+                    );
+                }
+            }
+        })
+        .await
+        .expect("图片改变被拒后命令未在时限内退出");
+        (result, new_sid)
+    };
+    peer.assert_no_pending_request().await;
+    assert_eq!(
+        result.expect("命令应返回退出码"),
+        std::process::ExitCode::from(2),
+        "图片改变被拒必须退出 2"
+    );
+    assert!(err.is_empty(), "JSON 模式下标准错误应为空");
+    let records: Vec<Value> = String::from_utf8(out)
+        .expect("输出应为有效 UTF-8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("每行应为有效 JSON"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        3,
+        "应输出 sending、configure(configured) 与 submit(rejected) 三条记录：{records:?}"
+    );
+    assert_eq!(records[0]["type"], "submit");
+    assert_eq!(records[0]["stage"], "sending");
+    assert_eq!(records[0]["session_id"], new_sid);
+    assert_eq!(records[1]["type"], "configure");
+    assert_eq!(records[1]["session_id"], new_sid);
+    assert_eq!(records[1]["result"], "configured");
+    assert_eq!(records[2]["type"], "submit");
+    assert_eq!(records[2]["stage"], "receipt");
+    assert_eq!(records[2]["turn_id"], records[0]["turn_id"]);
+    assert_eq!(records[2]["result"], "rejected");
+    assert_eq!(records[2]["recovered"], false);
+    assert_eq!(records[2]["error"]["kind"], "bad_request");
+    assert!(
+        records[2]["error"]["message"]
+            .as_str()
+            .expect("错误消息应为字符串")
+            .contains("在预检后已改变"),
+        "错误说明应指出图片在预检后已改变：{records:?}"
+    );
+}
+
+#[tokio::test]
+async fn send_rejects_unreadable_image_path_before_configure() {
+    let _guard = signal_guard().await;
+    let peer = Peer::new();
+    let missing_path = peer._root.path().join("missing.png");
+
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let workspace = peer._root.path().to_path_buf();
+    let result = {
+        let send = run_session_prompt_with_io(
+            &peer.client,
+            super::super::session::SendArgs {
+                prompt: Some("hello".into()),
+                images: vec![missing_path],
+                session_id: None,
+                agent: Some(lattice_local::AgentName::parse("test").unwrap()),
+                model: None,
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace),
+            &mut out,
+            &mut err,
+        );
+        tokio::pin!(send);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            tokio::select! {
+                res = &mut send => res,
+                extra = peer.next_request() => {
+                    panic!(
+                        "图片路径不可读时不应发出 configure，实际收到 IPC 请求：{}",
+                        extra.request["operation"]
+                    );
+                }
+            }
+        })
+        .await
+        .expect("图片路径不可读被拒后命令未在时限内退出")
+    };
+    peer.assert_no_pending_request().await;
+    assert_eq!(
+        result.expect("命令应返回退出码"),
+        std::process::ExitCode::from(2),
+        "路径不可读必须退出 2"
+    );
+    assert!(err.is_empty(), "JSON 模式下标准错误应为空");
+    let records: Vec<Value> = String::from_utf8(out)
+        .expect("输出应为有效 UTF-8")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("每行应为有效 JSON"))
+        .collect();
+    assert_eq!(
+        records.len(),
+        2,
+        "路径不可读应只输出 sending 与 submit(rejected) 两条记录：{records:?}"
+    );
+    assert_eq!(records[0]["type"], "submit");
+    assert_eq!(records[0]["stage"], "sending");
+    assert_eq!(records[1]["type"], "submit");
+    assert_eq!(records[1]["stage"], "receipt");
+    assert_eq!(records[1]["turn_id"], records[0]["turn_id"]);
+    assert_eq!(records[1]["result"], "rejected");
+    assert_eq!(records[1]["recovered"], false);
+    assert_eq!(records[1]["error"]["kind"], "bad_request");
+    assert!(
+        records[1]["error"]["message"]
+            .as_str()
+            .expect("错误消息应为字符串")
+            .contains("无法读取第 1 张图片"),
+        "错误说明应指出无法读取第 1 张图片：{records:?}"
+    );
 }

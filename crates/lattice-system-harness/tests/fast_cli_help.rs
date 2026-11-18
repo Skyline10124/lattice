@@ -167,6 +167,8 @@ fn fast_cli_help_lists_public_commands() {
         (
             vec!["run", "--help"],
             vec![
+                "--image",
+                "<PATH>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",
@@ -177,6 +179,8 @@ fn fast_cli_help_lists_public_commands() {
         (
             vec!["session", "send", "--help"],
             vec![
+                "--image",
+                "<PATH>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",

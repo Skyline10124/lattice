@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-use lattice_conversation::{Effort, ModelId, ModelRef, ProviderId, SessionId, TurnId};
+use lattice_conversation::{Effort, ImageRef, ModelId, ModelRef, ProviderId, SessionId, TurnId};
 use lattice_session::{
     AgentName,
     store::{
@@ -440,17 +440,108 @@ pub struct ConfigureReply {
     pub adjustment: Option<EffortAdjustment>,
 }
 
+mod image_field {
+    use base64::{Engine, display::Base64Display, engine::general_purpose::STANDARD};
+    use lattice_conversation::ImageRef;
+    use serde::{Deserializer, Serializer};
+
+    pub trait Encode {
+        fn encode_image<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error>;
+    }
+
+    impl Encode for Vec<u8> {
+        fn encode_image<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_str(&Base64Display::new(self, &STANDARD))
+        }
+    }
+
+    impl Encode for ImageRef {
+        fn encode_image<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.serialize_str("")
+        }
+    }
+
+    pub trait Decode: Sized {
+        fn decode_image<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error>;
+    }
+
+    struct Base64Visitor;
+
+    impl serde::de::Visitor<'_> for Base64Visitor {
+        type Value = Vec<u8>;
+
+        fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            formatter.write_str("标准 base64 编码的图片字符串")
+        }
+
+        fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+            STANDARD
+                .decode(value)
+                .map_err(|_| E::custom("图片字段不是合法的标准 base64 字符串"))
+        }
+    }
+
+    impl Decode for Vec<u8> {
+        fn decode_image<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            deserializer.deserialize_str(Base64Visitor)
+        }
+    }
+
+    pub(super) fn serialize<I: Encode, S: Serializer>(
+        image: &I,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        image.encode_image(serializer)
+    }
+
+    pub(super) fn deserialize<'de, I: Decode, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<I, D::Error> {
+        I::decode_image(deserializer)
+    }
+}
+
+/// 私有请求片段不实现正文 Debug；图片在线上按标准 base64 编码。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    tag = "kind",
+    rename_all = "snake_case",
+    deny_unknown_fields,
+    bound(
+        serialize = "I: image_field::Encode",
+        deserialize = "I: image_field::Decode",
+    )
+)]
+pub enum UserInputPart<I = Vec<u8>> {
+    Text {
+        text: String,
+    },
+    Image {
+        #[serde(with = "image_field")]
+        image: I,
+    },
+}
+
 /// 私有请求不实现正文 Debug；两种身份均在发送之前确定。
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub struct TurnRequest {
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "UserInputPart<I>: Serialize",
+        deserialize = "UserInputPart<I>: Deserialize<'de>",
+    )
+)]
+pub struct TurnRequest<I = Vec<u8>> {
     pub turn_id: TurnId,
     pub session: SessionId,
     #[serde(with = "path_bytes")]
     pub workspace: PathBuf,
-    pub input: String,
+    pub parts: Vec<UserInputPart<I>>,
     pub expected_settings: Option<SettingsVersion>,
 }
+
+/// 读取图片字节之前的待发请求，图片段只持 `ImageRef`，只用于 `ipc::encoded_submit_len` 计长。
+pub type PlannedTurnRequest = TurnRequest<ImageRef>;
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "acceptance", rename_all = "snake_case")]
@@ -612,6 +703,13 @@ pub enum Request {
     },
 }
 
+/// 与 `Request::Submit` 同构的计长包装；与 `Request` 的一致性由计长精确性测试守卫。
+#[derive(Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub(crate) enum PlannedSubmit<'a> {
+    Submit { request: &'a PlannedTurnRequest },
+}
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(tag = "response", content = "value", rename_all = "snake_case")]
 pub enum Response {
@@ -705,11 +803,20 @@ mod tests {
             );
         }
         for expected_settings in [None, Some(version)] {
+            let png_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
             let request = TurnRequest {
                 turn_id: tid,
                 session: sid,
                 workspace: non_utf8_ws.clone(),
-                input: "original".into(),
+                parts: vec![
+                    UserInputPart::Text {
+                        text: "前文".into(),
+                    },
+                    UserInputPart::Image { image: png_bytes },
+                    UserInputPart::Text {
+                        text: "后文".into(),
+                    },
+                ],
                 expected_settings,
             };
             let wire = serde_json::to_value(&request).unwrap();
@@ -719,13 +826,31 @@ mod tests {
                 "submit 请求的 workspace 线上表示应为原始字节数组"
             );
             assert_eq!(wire["session"], sid.to_string());
+            assert_eq!(
+                wire["parts"][1],
+                serde_json::json!({"kind": "image", "image": "iVBORw0KGgo="}),
+                "图片片段线上字段应为标准 base64 字符串"
+            );
             let submit = serde_json::json!({"operation":"submit","request":wire});
             assert!(
-                matches!(serde_json::from_value::<Request>(submit.clone()).unwrap(), Request::Submit { request: decoded } if decoded == request)
+                matches!(serde_json::from_value::<Request>(submit.clone()).unwrap(), Request::Submit { request: decoded } if decoded == request),
+                "submit 请求往返解码后应保持一致"
             );
             assert_eq!(
                 serde_json::to_value(Request::Submit { request }).unwrap(),
                 submit
+            );
+            let mut bad_base64 = submit.clone();
+            bad_base64["request"]["parts"][1]["image"] = serde_json::json!("not-valid-base64!");
+            assert!(
+                serde_json::from_value::<Request>(bad_base64).is_err(),
+                "非法 base64 图片字段必须被拒绝"
+            );
+            let mut extra_part = submit.clone();
+            extra_part["request"]["parts"][0]["extra"] = serde_json::json!(1);
+            assert!(
+                serde_json::from_value::<Request>(extra_part).is_err(),
+                "UserInputPart 必须拒绝未知字段"
             );
             let mut extra = submit;
             extra["configuration"] = serde_json::json!({"profile_toml":"untrusted"});

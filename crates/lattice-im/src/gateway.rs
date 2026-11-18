@@ -15,7 +15,7 @@ use std::{
 use chrono::Utc;
 use lattice_ipc::{
     ConfigureRequest, ConfigureSession, ConflictReason, LocalError, LocalErrorKind, SessionId,
-    TurnId, TurnLookup, TurnRequest,
+    TurnId, TurnLookup, TurnRequest, UserInputPart,
 };
 use lattice_server::{InProcessTurn, Service};
 use lattice_store::StateLayout;
@@ -1134,7 +1134,9 @@ impl GatewayRuntime {
                 turn_id,
                 session: session_id,
                 workspace: self.config.workspace.clone(),
-                input: text.to_owned(),
+                parts: vec![UserInputPart::Text {
+                    text: text.to_owned(),
+                }],
                 expected_settings: None,
             })
             .await
