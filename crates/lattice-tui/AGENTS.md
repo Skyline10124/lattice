@@ -12,6 +12,7 @@
 | `src/connection.rs` | 将回执、`configure` 回复、会话头、连接与查询异常、重试提示、Turn 结局及 `DetachReport` 转换为定级状态消息与退出文案 |
 | `src/blocks.rs` | 扁平显示 `Block` 列表与按 `NodeId`、`InvocationId` 原位更新 |
 | `src/input.rs` | 输入区缓冲、图片原子与路径粘贴识别、按键处理及 `<session_dir>/repl_history.txt` 纯文本历史读写 |
+| `src/clipboard.rs` | `Ctrl+V` 经 `wl-paste` 或 `xclip` 有界读取剪贴板，以及剪贴板图片在 `/tmp` 下本进程私有目录的暂存 |
 | `src/comment.rs` | 助手正文块级锚定、`<lattice-comment>` 消息编解码与草稿管理 |
 | `src/queue.rs` | 运行中排队消息缓冲、入队设置版本记录、原地编辑、暂停与自动发出控制 |
 | `src/markdown.rs`、`src/wrapping.rs` | GFM 正文、代码块高亮、diff、表格解析及按显示宽度的统一折行 |

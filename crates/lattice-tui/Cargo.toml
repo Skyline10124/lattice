@@ -18,12 +18,12 @@ ratatui        = { workspace = true }
 crossterm      = { workspace = true, features = ["event-stream", "use-dev-tty"] }
 unicode-width  = { workspace = true }
 pulldown-cmark = { workspace = true }
-syntect       = { workspace = true }
-two-face      = { workspace = true }
+syntect        = { workspace = true }
+two-face       = { workspace = true }
+tempfile       = { workspace = true }
 
 [dev-dependencies]
 lattice-local = { workspace = true, features = ["test-utils"] }
-tempfile = { workspace = true }
 serde_json = { workspace = true }
 # `test-util` (paused clock) is not part of tokio's `full`; it is what lets the
 # idle-deadline regression test advance 300 s without sleeping.

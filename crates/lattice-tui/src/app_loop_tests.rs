@@ -3798,3 +3798,91 @@ fn initial_replay_queue_head_preflight_failure_preserves_messages_and_comments_a
     assert_eq!(after[0].comments.len(), 1);
     assert_eq!(after[1].comments.len(), 1);
 }
+
+#[test]
+fn apply_clipboard_stages_image_in_private_tmp_submits_bytes_and_removes_dir_on_drop() {
+    let mut h = Harness::new(false);
+    let png = b"\x89PNG\r\n\x1a\nclipboard-png".to_vec();
+    h.app
+        .apply_clipboard(Ok(crate::clipboard::Content::Image(png.clone())));
+
+    let parts = h.app.input.parts();
+    let [
+        UserInputPart::Image {
+            image:
+                PendingImage {
+                    source: ImageSource::Temp(temp_path),
+                    ..
+                },
+        },
+    ] = &parts[..]
+    else {
+        panic!("输入区应含 1 个 Temp 图片原子");
+    };
+    let staging_dir = temp_path
+        .parent()
+        .expect("暂存图片文件应有父目录")
+        .to_path_buf();
+    assert_eq!(
+        staging_dir.parent(),
+        Some(Path::new("/tmp")),
+        "暂存目录应位于 /tmp 下"
+    );
+    let dir_name = staging_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .expect("暂存目录名应为 UTF-8");
+    assert!(
+        dir_name.starts_with("lattice-tui-"),
+        "暂存目录名应以 lattice-tui- 开头：{dir_name}"
+    );
+    assert!(staging_dir.exists(), "丢弃 App 前暂存目录应存在");
+
+    let req = h
+        .app
+        .apply_action(KeyAction::Submit)
+        .expect("按 Enter 应返回提交请求");
+    assert!(
+        req.parts == [UserInputPart::Image { image: png }],
+        "提交请求应携带剪贴板图片的原始字节"
+    );
+
+    drop(h);
+    assert!(!staging_dir.exists(), "丢弃 App 后暂存目录应被删除");
+}
+
+#[test]
+fn apply_clipboard_invalid_image_pushes_error_and_no_session_pushes_warn() {
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.input.set_text("原有草稿");
+    let before = app.input.clone();
+
+    app.apply_clipboard(Ok(crate::clipboard::Content::Image(
+        b"not an image".to_vec(),
+    )));
+    let err = app
+        .dock
+        .message()
+        .expect("剪贴板返回非图片字节时应在 Dock 暂驻错误");
+    assert_eq!(err.level, NoticeLevel::Error, "非图片字节应推 Error");
+    assert!(
+        err.text.contains("无法粘贴图片："),
+        "错误文案应说明无法粘贴图片：{}",
+        err.text
+    );
+    assert!(app.input == before, "推 Error 后输入区应保持不变");
+
+    release_dock(app);
+    app.apply_clipboard(Err(crate::clipboard::ClipboardError::NoSession));
+    let warn = app
+        .dock
+        .message()
+        .expect("未检测到图形会话时应在 Dock 暂驻警告");
+    assert_eq!(warn.level, NoticeLevel::Warn, "无图形会话应推 Warn");
+    assert_eq!(
+        warn.text,
+        "未检测到图形会话（WAYLAND_DISPLAY 或 DISPLAY），无法读取剪贴板；可直接粘贴本地图片路径"
+    );
+    assert!(app.input == before, "推 Warn 后输入区应保持不变");
+}

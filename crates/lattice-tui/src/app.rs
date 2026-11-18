@@ -7,14 +7,15 @@ use std::time::Duration;
 
 use crate::TuiOptions;
 use crate::blocks::{BlockId, BlockList, IdentifiedBlock};
+use crate::clipboard::{ClipboardError, Content, Staging};
 use crate::comment::Comment;
 use crate::connection::{
-    KeptInput, Viewed, cancellation_status, configure_failed_status, detach_lines,
-    discarded_comments_status, effort_changed_status, execution_diagnostic_status, handoff_status,
-    model_query_failed_status, model_query_notice, not_accepted_status, not_submitted_status,
-    observation_lost_status, older_turns_unavailable_status, orphaned_turn_status,
-    paste_image_failed_status, preflight_failed_status, recovered_status, rejected_status,
-    submission_unknown_status,
+    KeptInput, Viewed, cancellation_status, clipboard_failed_status, clipboard_stage_failed_status,
+    configure_failed_status, detach_lines, discarded_comments_status, effort_changed_status,
+    execution_diagnostic_status, handoff_status, model_query_failed_status, model_query_notice,
+    not_accepted_status, not_submitted_status, observation_lost_status,
+    older_turns_unavailable_status, orphaned_turn_status, paste_image_failed_status,
+    preflight_failed_status, recovered_status, rejected_status, submission_unknown_status,
 };
 use crate::input::{
     CTRL_C_WINDOW, History, ImageSource, InputBuffer, KeyAction, PendingImage, push_part,
@@ -169,6 +170,8 @@ pub(crate) struct App {
     pub(crate) cancel_requested: Option<CancelTarget>,
     pub(crate) view_wanted: bool,
     pub(crate) older_request: Option<OlderRequest>,
+    clipboard_request: bool,
+    staging: Option<Staging>,
     cancelling: bool,
     /// 最新收到的会话头（来自启动读取/configure、运行中 configure 回复或视图推送），
     /// 供状态行、选择面板和 expected_settings 读取。
@@ -258,6 +261,8 @@ impl App {
             context_tokens: None,
             cancel_requested: None,
             older_request: None,
+            clipboard_request: false,
+            staging: None,
             cancelling: false,
             latest_head: initial_head,
             head: None,
@@ -341,6 +346,9 @@ impl App {
                         {
                             self.push_status(paste_image_failed_status(&error));
                         }
+                    }
+                    KeyAction::ClipboardPaste if self.queue.queued_editor_mut().is_some() => {
+                        self.clipboard_request = true;
                     }
                     action => self.queue.edit(&action, transcript.editor_width(width)),
                 }
@@ -468,6 +476,9 @@ impl App {
                         if let Err(error) = self.input.paste(&raw) {
                             self.push_status(paste_image_failed_status(&error));
                         }
+                    }
+                    KeyAction::ClipboardPaste => {
+                        self.clipboard_request = true;
                     }
                     action => self.input.edit(&action, width),
                 },
@@ -1113,7 +1124,7 @@ impl App {
                 UserInputPart::Image { image } => {
                     image_ordinal = image_ordinal.saturating_add(1);
                     let bytes = match &image.source {
-                        ImageSource::File(path) => {
+                        ImageSource::File(path) | ImageSource::Temp(path) => {
                             lattice_local::read_verified_image(image_ordinal, path, &image.meta)?
                         }
                     };
@@ -1792,6 +1803,64 @@ impl App {
             self.discard_missing_comments();
         }
     }
+
+    fn apply_clipboard(&mut self, result: Result<Content, ClipboardError>) {
+        match result {
+            Ok(Content::Text(text)) => {
+                self.apply_action(KeyAction::Paste(text));
+            }
+            Ok(Content::Image(bytes)) => {
+                let existing = match self.queue.queued_editor_mut() {
+                    Some(editor) => editor.image_refs(),
+                    None => self.input.image_refs(),
+                };
+                let meta = match lattice_local::image_bytes_ref(&bytes, &existing) {
+                    Ok(meta) => meta,
+                    Err(error) => {
+                        self.push_status(paste_image_failed_status(&error));
+                        return;
+                    }
+                };
+                let path = match self.stage_clipboard_image(&meta, &bytes) {
+                    Ok(path) => path,
+                    Err(error) => {
+                        self.push_status(clipboard_stage_failed_status(&error));
+                        return;
+                    }
+                };
+                let pending = PendingImage {
+                    meta,
+                    source: ImageSource::Temp(path),
+                };
+                if let Some(editor) = self.queue.queued_editor_mut() {
+                    editor.insert_image(pending);
+                    let transcript = self.prepare_transcript();
+                    if let Some((row, _)) = transcript.editor_cursor {
+                        self.viewport.reveal(row);
+                    }
+                } else {
+                    self.input.insert_image(pending);
+                }
+            }
+            Err(error) => {
+                self.push_status(clipboard_failed_status(&error));
+            }
+        }
+    }
+
+    fn stage_clipboard_image(
+        &mut self,
+        meta: &lattice_local::ImageRef,
+        bytes: &[u8],
+    ) -> anyhow::Result<PathBuf> {
+        if self.staging.is_none() {
+            self.staging = Some(Staging::create_in(Path::new("/tmp"))?);
+        }
+        self.staging
+            .as_ref()
+            .expect("已创建剪贴板暂存目录")
+            .store(meta, bytes)
+    }
 }
 
 /// 块自己的各行在对话记录中的位置，按行序；不含穿插其间、属于别的块的行。
@@ -1979,6 +2048,11 @@ where
                 .boxed(),
             );
         }
+        if std::mem::take(&mut app.clipboard_request) {
+            let result = crate::clipboard::read_system().await;
+            app.apply_clipboard(result);
+            dirty = true;
+        }
         if app.should_quit {
             break Ok(());
         }
@@ -2106,6 +2180,7 @@ fn help_lines(kitty: bool) -> Vec<String> {
         "Space  关闭警告或错误，移入对话记录".into(),
         "Ctrl+C  取消运行中 Turn；空闲清空输入；两秒内再按退出".into(),
         "Ctrl+↑/↓  输入历史".into(),
+        "Ctrl+V  粘贴剪贴板中的图片或文字".into(),
         "Enter  提交".into(),
         nl.into(),
     ]

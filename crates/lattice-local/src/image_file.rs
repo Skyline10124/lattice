@@ -1,7 +1,7 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 图片文件的有界读取、核验与重读比对，供 CLI 与 TUI 共用。
+//! 图片字节与文件的有界读取、核验与重读比对，供 CLI 与 TUI 共用。
 
 use std::{io::Read, path::Path};
 
@@ -17,6 +17,15 @@ pub fn image_file_ref(ordinal: usize, path: &Path) -> Result<ImageRef> {
     Ok(image)
 }
 
+/// 核验内存中的图片字节，并连同 `existing` 检查单轮张数与总字节上限（图片序号为 `existing.len() + 1`）。
+pub fn image_bytes_ref(bytes: &[u8], existing: &[ImageRef]) -> Result<ImageRef> {
+    checked_image_ref(
+        u64::try_from(bytes.len()).unwrap_or(u64::MAX),
+        bytes,
+        existing,
+    )
+}
+
 /// 判断路径是否指向受支持的图片，并连同 `existing` 核验单轮张数与总字节上限：
 /// 不存在、不是常规文件、读取失败或魔数不是 PNG/JPEG/WebP/GIF 时返回 `Ok(None)`；
 /// 单张长度不合规或加入后超过单轮张数、总量上限时返回 `BadRequest`（说明取 `UserInputError`，图片序号为 `existing.len() + 1`）。
@@ -27,17 +36,7 @@ pub fn probe_image_file(path: &Path, existing: &[ImageRef]) -> Result<Option<Ima
     if ImageMediaType::sniff(&bytes).is_none() {
         return Ok(None);
     }
-    let ordinal = existing.len().saturating_add(1);
-    let image = parse_image_ref(ordinal, file_len, &bytes)?;
-    let parts = existing
-        .iter()
-        .copied()
-        .chain(std::iter::once(image))
-        .map(|image| MessageSemantic::<BoundToolCall>::Image { image })
-        .collect();
-    normalize_user_message(parts)
-        .map_err(|error| LocalError::new(LocalErrorKind::BadRequest, &error.to_string()))?;
-    Ok(Some(image))
+    checked_image_ref(file_len, &bytes, existing).map(Some)
 }
 
 /// 重读第 `ordinal` 张图片，与 `expected` 完全一致时返回字节；读取失败保留原因，
@@ -70,6 +69,20 @@ fn read_bounded(path: &Path) -> std::result::Result<(u64, Vec<u8>), BoundedReadE
         .read_to_end(&mut bytes)
         .map_err(BoundedReadError::Io)?;
     Ok((metadata.len(), bytes))
+}
+
+fn checked_image_ref(actual_len: u64, bytes: &[u8], existing: &[ImageRef]) -> Result<ImageRef> {
+    let ordinal = existing.len().saturating_add(1);
+    let image = parse_image_ref(ordinal, actual_len, bytes)?;
+    let parts = existing
+        .iter()
+        .copied()
+        .chain(std::iter::once(image))
+        .map(|image| MessageSemantic::<BoundToolCall>::Image { image })
+        .collect();
+    normalize_user_message(parts)
+        .map_err(|error| LocalError::new(LocalErrorKind::BadRequest, &error.to_string()))?;
+    Ok(image)
 }
 
 fn parse_image_ref(ordinal: usize, file_len: u64, bytes: &[u8]) -> Result<ImageRef> {

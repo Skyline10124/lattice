@@ -6,6 +6,7 @@
 //! 不调度请求、订阅或退出交接。
 
 use crate::app::Status;
+use crate::clipboard::{Backend, ClipboardError};
 use lattice_local::{
     CancelStatus, ConnectionStatus, DetachReport, LocalError, ModelAttemptKey, Notice, NoticeLevel,
     PublicTurnOutcome, SubmissionResult, TurnId, TurnSummary,
@@ -130,6 +131,35 @@ pub(crate) fn paste_image_failed_status(error: &LocalError) -> Status {
         NoticeLevel::Error,
         format!("无法粘贴图片：{}", error.message),
     )
+}
+
+pub(crate) fn clipboard_failed_status(error: &ClipboardError) -> Status {
+    match error {
+        ClipboardError::NoSession => status(
+            NoticeLevel::Warn,
+            "未检测到图形会话（WAYLAND_DISPLAY 或 DISPLAY），无法读取剪贴板；可直接粘贴本地图片路径"
+                .into(),
+        ),
+        ClipboardError::Missing(Backend::Wayland) => status(
+            NoticeLevel::Warn,
+            "未找到 wl-paste，请安装 wl-clipboard，或直接粘贴本地图片路径".into(),
+        ),
+        ClipboardError::Missing(Backend::X11) => status(
+            NoticeLevel::Warn,
+            "未找到 xclip，请安装 xclip，或直接粘贴本地图片路径".into(),
+        ),
+        ClipboardError::TooLarge => status(
+            NoticeLevel::Error,
+            "剪贴板内容超过 3,932,160 字节（3.75 MiB），未插入".into(),
+        ),
+        ClipboardError::Failed(detail) => {
+            status(NoticeLevel::Warn, format!("无法读取剪贴板：{detail}"))
+        }
+    }
+}
+
+pub(crate) fn clipboard_stage_failed_status(error: &anyhow::Error) -> Status {
+    status(NoticeLevel::Error, format!("无法暂存剪贴板图片：{error}"))
 }
 
 /// 提交、入队或发出队首前本地预检未通过，请求尚未发出。

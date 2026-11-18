@@ -13,6 +13,7 @@ use lattice_local::{ImageRef, UserInputPart};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ImageSource {
     File(PathBuf),
+    Temp(PathBuf),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -118,6 +119,17 @@ impl InputBuffer {
             .flatten()
             .filter(|part| matches!(part, UserInputPart::Image { .. }))
             .count()
+    }
+
+    pub(crate) fn image_refs(&self) -> Vec<ImageRef> {
+        self.lines
+            .iter()
+            .flatten()
+            .filter_map(|part| match part {
+                UserInputPart::Image { image } => Some(image.meta),
+                UserInputPart::Text { .. } => None,
+            })
+            .collect()
     }
 
     pub(crate) fn text(&self) -> String {
@@ -235,15 +247,7 @@ impl InputBuffer {
     /// 总量均合规时插入图片原子，图片超限时返回错误，其余按普通文字粘贴。
     pub(crate) fn paste(&mut self, raw: &str) -> lattice_local::Result<()> {
         if let Some(path) = pasted_path(raw) {
-            let existing: Vec<ImageRef> = self
-                .lines
-                .iter()
-                .flatten()
-                .filter_map(|part| match part {
-                    UserInputPart::Image { image } => Some(image.meta),
-                    UserInputPart::Text { .. } => None,
-                })
-                .collect();
+            let existing = self.image_refs();
             if let Some(meta) = lattice_local::probe_image_file(&path, &existing)? {
                 self.insert_image(PendingImage {
                     meta,
@@ -436,6 +440,7 @@ pub(crate) enum KeyAction {
     Insert(char),
     ModifiedSpace,
     Paste(String),
+    ClipboardPaste,
     Newline,
     Submit,
     Backspace,
@@ -480,9 +485,11 @@ pub(crate) fn resolve_key(key: KeyEvent, kitty: bool, buffer_empty: bool) -> Key
         KeyCode::Enter => KeyAction::Submit,
         KeyCode::Char('\u{3}') => KeyAction::CancelOrClear,
         KeyCode::Char('\u{4}') => ctrl_d(buffer_empty),
+        KeyCode::Char('\u{16}') => KeyAction::ClipboardPaste,
         KeyCode::Char(c) if mods.contains(KeyModifiers::CONTROL) => match c {
             'c' | 'C' => KeyAction::CancelOrClear,
             'd' | 'D' => ctrl_d(buffer_empty),
+            'v' | 'V' => KeyAction::ClipboardPaste,
             _ => KeyAction::Ignored,
         },
         KeyCode::Char(_) if mods.contains(KeyModifiers::ALT) => KeyAction::Ignored,

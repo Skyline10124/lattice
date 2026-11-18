@@ -6,8 +6,8 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 扁平显式重导出客户端句柄、`check_turn_plan`、`format_image_marker`、`image_file_ref`、`probe_image_file`、`read_verified_image`、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`（含组件与 IM 凭据/挂载状态展示类型及 `PlannedTurnRequest`）、`lattice-conversation`（含图片、`MAX_IMAGE_BYTES` 与输入模态原语）、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
-| `src/image_file.rs` | 图片文件的有界读取、粘贴探测核验与重读比对（`image_file_ref`、`probe_image_file`、`read_verified_image`），CLI 与 TUI 共用 |
+| `src/lib.rs` | 扁平显式重导出客户端句柄、`check_turn_plan`、`format_image_marker`、`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`（含组件与 IM 凭据/挂载状态展示类型及 `PlannedTurnRequest`）、`lattice-conversation`（含图片、`MAX_IMAGE_BYTES` 与输入模态原语）、`PrivateDirectory`、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
+| `src/image_file.rs` | 图片字节与文件的有界读取、粘贴探测核验与重读比对（`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`），CLI 与 TUI 共用 |
 | `src/display.rs` | 面向人阅读的图片占位标记格式化 `format_image_marker`（`[IMAGE n · <ext> · <size>]` 整数二进制单位换算） |
 | `src/endpoint.rs` | 本地 Unix socket 端点路径校验、客户端建连与对端有效 UID 核验，以及等待 socket 撤下与 `owner.lock` 释放的 `Departure` |
 | `src/client.rs` | `LocalClient`（连接已运行后台完成单次请求/查询、`status_with_peer_pid` 经同一连接的 `SO_PEERCRED` 读取对端进程号、`stop` 后等待 `Departure`、`auth_login` 握手、`im_auth_set` / `im_auth_remove` / `im_auth_status` / `im_reload` 调用；不自动启动后台）与 `LocalWatch`（持续读取任务、观察流驱动与按 `STREAM_IDLE_TIMEOUT_SECS` 的有执行者观察 idle 判定） |
