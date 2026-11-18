@@ -8,7 +8,7 @@
 | --- | --- |
 | `src/main.rs` | `lattice` 前端入口、显式多线程 Tokio runtime 构建、`clap` 命令定义、参数解析错误脱敏与 `lattice_local::init_logging` 日志初始化 |
 | `src/commands/mod.rs` | 子命令模块导出 |
-| `src/commands/run.rs` | 请求身份预生成与输出、`current_dir()` 读取与透传、图片文件读取与提交前本地预检（`check_turn_plan`）、`configure` 会话创建/设置更新、配置后图片重读核对、`LocalTurn` 提交/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
+| `src/commands/run.rs` | 请求身份预生成与输出、`current_dir()` 读取与透传、经 `lattice-local` 的 `image_file_ref` / `read_verified_image` 读取图片与提交前本地预检（`check_turn_plan`）、`configure` 会话创建/设置更新、配置后图片重读核对、`LocalTurn` 提交/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
 | `src/commands/session.rs` | `session` 子命令（`send`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）先经 `LocalClient::status` 检查已运行后台，再完成参数处理、后台调用与用量费用渲染 |
 | `src/commands/daemon.rs`、`src/commands/daemon/install.rs` | `lattice daemon` 子命令组中文帮助与分派（含 JSON 模式中文参数错误与 `install --json` 拒绝）、`daemon status`（含受托管组件运行状态渲染）/ `daemon stop` 人类可读中文输出与 `--json` 状态输出，以及 `daemon install`（同目录有效用户可执行 `lattice-daemon` 核验、`TimeoutStopSec` 计算、`ExecStart` 可执行路径与后续参数分开转义、`lattice.service` 原子写入、`systemctl --user` 调用与启动失败时的对端进程号诊断） |
 | `src/commands/im.rs` | `lattice im` 子命令组中文帮助与分派（`reload`、`auth set`、`auth remove`、`auth status`，支持 `--json`、中文 JSON 参数错误、无回显终端或管道读取平台凭据及 `0`/`1`/`2` 退出码映射） |

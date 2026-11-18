@@ -333,8 +333,8 @@ pub(super) async fn run_session_prompt_with_io(
         plan_parts.push(UserInputPart::Text { text: text.clone() });
     }
     for (index, path) in args.images.iter().enumerate() {
-        let (image, _bytes) = match read_image(index + 1, path) {
-            Ok(pair) => pair,
+        let image = match lattice_local::image_file_ref(index + 1, path) {
+            Ok(image) => image,
             Err(error) => {
                 return finish_submit_receipt(
                     id,
@@ -426,27 +426,20 @@ pub(super) async fn run_session_prompt_with_io(
         parts.push(UserInputPart::Text { text });
     }
     for (index, (path, expected)) in args.images.iter().zip(&planned_refs).enumerate() {
-        let ordinal = index + 1;
-        let error = match read_image(ordinal, path) {
-            Ok((actual, bytes)) if actual == *expected => {
-                parts.push(UserInputPart::Image { image: bytes });
-                continue;
+        match lattice_local::read_verified_image(index + 1, path, expected) {
+            Ok(bytes) => parts.push(UserInputPart::Image { image: bytes }),
+            Err(error) => {
+                return finish_submit_receipt(
+                    id,
+                    SubmissionResult::Rejected { error },
+                    &mut state,
+                    out,
+                    err,
+                    verbose,
+                    json,
+                );
             }
-            Ok(_) => LocalError::new(
-                LocalErrorKind::BadRequest,
-                &format!("第 {ordinal} 张图片在预检后已改变，请重新提交"),
-            ),
-            Err(error) => error,
-        };
-        return finish_submit_receipt(
-            id,
-            SubmissionResult::Rejected { error },
-            &mut state,
-            out,
-            err,
-            verbose,
-            json,
-        );
+        }
     }
     let request = TurnRequest {
         turn_id: id,
@@ -457,46 +450,6 @@ pub(super) async fn run_session_prompt_with_io(
     };
     let turn = api.start_turn(request);
     consume(turn, None, state, verbose, json, signal, out, err).await
-}
-
-/// 读取第 `ordinal` 张图片（从 1 起）：须为常规文件，最多读取 `MAX_IMAGE_BYTES + 1` 字节，
-/// 由 `ImageRef::from_bytes` 核验长度、魔数并计算摘要。
-fn read_image(
-    ordinal: usize,
-    path: &std::path::Path,
-) -> std::result::Result<(ImageRef, Vec<u8>), LocalError> {
-    use std::io::Read;
-    let read_err = |error: std::io::Error| {
-        LocalError::new(
-            LocalErrorKind::BadRequest,
-            &format!("无法读取第 {ordinal} 张图片：{error}"),
-        )
-    };
-    let metadata = std::fs::metadata(path).map_err(read_err)?;
-    if !metadata.is_file() {
-        return Err(LocalError::new(
-            LocalErrorKind::BadRequest,
-            &format!("第 {ordinal} 张图片不是常规文件"),
-        ));
-    }
-    let file = std::fs::File::open(path).map_err(read_err)?;
-    let mut bytes = Vec::new();
-    file.take(MAX_IMAGE_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .map_err(read_err)?;
-    let image = ImageRef::from_bytes(&bytes).map_err(|err| {
-        let user_err = match err {
-            ImageBytesError::InvalidLength { .. } => UserInputError::InvalidImageLength {
-                image: ordinal,
-                actual: metadata.len(),
-            },
-            ImageBytesError::UnsupportedFormat => {
-                UserInputError::UnsupportedImageFormat { image: ordinal }
-            }
-        };
-        LocalError::new(LocalErrorKind::BadRequest, &user_err.to_string())
-    })?;
-    Ok((image, bytes))
 }
 
 fn finish_submit_receipt(
