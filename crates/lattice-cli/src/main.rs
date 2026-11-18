@@ -486,6 +486,59 @@ mod tests {
                 Cli::try_parse_from(missing_agent).err().unwrap().kind(),
                 clap::error::ErrorKind::MissingRequiredArgument
             );
+
+            let image_only = Cli::try_parse_from(
+                ["lattice"]
+                    .into_iter()
+                    .chain(command.clone())
+                    .chain(["--image", "a.png", "--agent", "coder"]),
+            )
+            .expect("只传 --image 与 --agent 时应可解析");
+            let image_only = match image_only.command.unwrap() {
+                Commands::Run(args)
+                | Commands::Session {
+                    action: super::session_cmd::SessionAction::Send(args),
+                } => args,
+                _ => panic!("预期为提交命令"),
+            };
+            assert_eq!(image_only.prompt, None, "只传 --image 时 prompt 应为 None");
+            assert_eq!(image_only.images, vec![std::path::PathBuf::from("a.png")]);
+
+            let text_and_images =
+                Cli::try_parse_from(["lattice"].into_iter().chain(command.clone()).chain([
+                    "hello", "--image", "a.png", "--image", "b.png", "--agent", "coder",
+                ]))
+                .expect("文本与多张 --image 应可解析");
+            let text_and_images = match text_and_images.command.unwrap() {
+                Commands::Run(args)
+                | Commands::Session {
+                    action: super::session_cmd::SessionAction::Send(args),
+                } => args,
+                _ => panic!("预期为提交命令"),
+            };
+            assert_eq!(text_and_images.prompt.as_deref(), Some("hello"));
+            assert_eq!(
+                text_and_images.images,
+                vec![
+                    std::path::PathBuf::from("a.png"),
+                    std::path::PathBuf::from("b.png"),
+                ],
+                "多张图片必须按命令行出现顺序保留"
+            );
+
+            let neither = Cli::try_parse_from(
+                ["lattice"]
+                    .into_iter()
+                    .chain(command.clone())
+                    .chain(["--agent", "coder"]),
+            )
+            .err()
+            .expect("既没有文本也没有 --image 时必须解析失败");
+            assert_eq!(
+                neither.kind(),
+                clap::error::ErrorKind::MissingRequiredArgument
+            );
+
             let mut root = Cli::command();
             let mut subcommand = &mut root;
             for name in command {
@@ -493,6 +546,8 @@ mod tests {
             }
             let help = subcommand.render_long_help().to_string();
             for text in [
+                "--image",
+                "<PATH>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",

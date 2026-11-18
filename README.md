@@ -176,9 +176,11 @@ lattice im --help
 
 ```sh
 lattice session send "概括项目用途。" --agent reader
+lattice session send "这张截图里的报错是什么？" --image ./error.png --agent reader
+lattice session send --session <session_id> --image ./a.png --image ./b.png
 ```
 
-后续发送改用 `--session <session_id>`。顶层 `lattice run` 与 `session send` 相同。
+`--image <PATH>` 可重复传入，附带的图片按给出顺序排在文本之后；只传 `--image` 时可省略文本。后续发送改用 `--session <session_id>`。顶层 `lattice run` 与 `session send` 相同。
 
 `--model <provider>/<model>` 与 `--effort` 可覆盖本次提交的模型和推理档位；模型名可含后续 `/`。先用 `lattice models` 查看候选及其 `EFFORTS` 列，再选择模型支持的档位，例如：
 
