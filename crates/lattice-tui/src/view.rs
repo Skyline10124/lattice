@@ -1119,4 +1119,67 @@ mod tests {
         assert_eq!(before_pos.y, after_pos.y, "标记前后的光标应位于同一视觉行");
         Ok(())
     }
+
+    #[test]
+    fn transcript_and_queue_image_markers_wrap_whole_while_plain_spaces_still_break() {
+        let pending = crate::input::PendingImage {
+            meta: lattice_local::ImageRef {
+                sha256: [0x44; 32],
+                media_type: lattice_local::ImageMediaType::Png,
+                byte_length: 2048,
+            },
+            source: crate::input::ImageSource::File(std::path::PathBuf::from("wrap.png")),
+        };
+        let nbsp_marker =
+            crate::session::format_user_parts([crate::session::UserPartRef::Image(&pending.meta)]);
+        let rendered = crate::session::format_user_parts([
+            crate::session::UserPartRef::Text("前缀"),
+            crate::session::UserPartRef::Image(&pending.meta),
+        ]);
+        let tight_width =
+            u16::try_from(display_width(&rendered).saturating_sub(1)).expect("宽度可放入 u16");
+
+        let mut app = test_app();
+        app.blocks.push(Block::User(rendered));
+        let plain_marker = lattice_local::format_image_marker(
+            std::num::NonZeroUsize::new(1).expect("非零序号"),
+            &pending.meta,
+        );
+        app.blocks.push(Block::User(format!("前缀 {plain_marker}")));
+
+        let mut queued_input = crate::input::InputBuffer::new();
+        queued_input.set_text("前缀");
+        queued_input.insert_image(pending);
+        let queue_id = app.blocks.allocate_id();
+        assert!(
+            app.queue.enqueue(
+                queue_id,
+                queued_input,
+                crate::queue::QueuedSettings::Snapshot(
+                    serde_json::from_value(serde_json::json!("11".repeat(32))).unwrap()
+                ),
+            ),
+            "测试消息应成功入队"
+        );
+
+        let lines: Vec<String> = transcript_lines(&app, tight_width)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect();
+        assert_eq!(
+            &lines[1..3],
+            &["前缀".to_owned(), nbsp_marker.clone()],
+            "对话记录中含 U+00A0 的图片标记在恰好放不下时应整体换到下一行：{lines:#?}"
+        );
+        assert_eq!(
+            &lines[5..7],
+            &["前缀 [IMAGE 1 · png · 2".to_owned(), "KiB]".to_owned()],
+            "普通空格的分词断行规则应保持不变：{lines:#?}"
+        );
+        assert_eq!(
+            &lines[9..11],
+            &["前缀".to_owned(), nbsp_marker],
+            "排队区只读显示的图片标记在恰好放不下时同样应整体换到下一行：{lines:#?}"
+        );
+    }
 }

@@ -1184,10 +1184,10 @@ impl App {
             }
             return None;
         }
-        self.check_comments_before_send();
         let turn_id = lattice_local::new_turn_id();
         let expected_settings = self.current_settings_version();
-        let comments = self.queue.draft_comments();
+        let steps = self.initial.then(|| self.present_steps());
+        let comments = self.queue.draft_comments_in(steps.as_ref());
         let parts = compose_parts(&self.input, &comments);
         let (plan, request) = match self
             .plan_request(turn_id, &parts, expected_settings)
@@ -1201,6 +1201,7 @@ impl App {
                 return None;
             }
         };
+        self.check_comments_before_send();
         let input = std::mem::take(&mut self.input);
         let message = self.queue.take_message(input, expected_settings);
         Some(self.start_submission(message, &plan, request))
@@ -1239,23 +1240,28 @@ impl App {
         {
             return None;
         }
-        self.check_comments_before_send();
+        let steps = self.initial.then(|| self.present_steps());
+        let candidate = self.queue.send_candidate(steps.as_ref())?;
         let id = lattice_local::new_turn_id();
-        let message = self.queue.start_send(id)?;
-        let parts = compose_parts(&message.input, &message.comments);
+        let parts = compose_parts(&candidate.input, &candidate.comments);
         let (plan, request) = match self
-            .plan_request(id, &parts, message.expected_settings)
+            .plan_request(id, &parts, candidate.expected_settings)
             .and_then(|plan| {
                 let request = Self::materialize_request(&plan, &parts)?;
                 Ok((plan, request))
             }) {
             Ok(pair) => pair,
             Err(error) => {
-                self.queue.reject(id);
+                self.queue.pause();
                 self.push_status(preflight_failed_status(&error, true));
                 return None;
             }
         };
+        self.check_comments_before_send();
+        let message = self
+            .queue
+            .start_send(id)
+            .expect("副本检查通过后清理出的队首必定可发出");
         Some(self.start_submission(message, &plan, request))
     }
 
@@ -1298,15 +1304,18 @@ impl App {
         }
     }
 
-    fn discard_missing_comments(&mut self) {
-        let steps = self
-            .blocks
+    fn present_steps(&self) -> std::collections::BTreeSet<lattice_local::StepKey> {
+        self.blocks
             .iter()
             .filter_map(|block| match block {
                 Block::Step { key, .. } => Some(*key),
                 _ => None,
             })
-            .collect();
+            .collect()
+    }
+
+    fn discard_missing_comments(&mut self) {
+        let steps = self.present_steps();
         let dropped = self.queue.retain_steps(&steps);
         if !dropped.is_empty() {
             self.push_status(discarded_comments_status(&dropped));

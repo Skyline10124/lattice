@@ -3153,7 +3153,7 @@ async fn running_enqueue_preflight_failure_preserves_input_draft_and_skips_queue
         0,
         "入队预检失败时假后台不应收到提交请求"
     );
-    assert_eq!(h.app.queue.messages().count(), 0, "队列不应新增消息");
+    assert_eq!(h.app.history.prev(), None, "输入历史应为空");
     assert_eq!(h.app.input.text(), body, "输入区文字应保持原样");
     assert_eq!(h.app.queue.draft_count(), 1, "评论草稿应保持原样");
     assert!(
@@ -3215,7 +3215,10 @@ async fn paste_interleaved_text_and_image_submits_exact_parts_in_order() {
 
         remote.press(KeyCode::Enter, KeyModifiers::NONE);
         let submitted_frame = remote
-            .wait(|f| f.text.contains("前缀文字 [IMAGE 1 · png · 27 B] 后缀文字"))
+            .wait(|f| {
+                f.text
+                    .contains("前缀文字 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}27\u{00a0}B] 后缀文字")
+            })
             .await;
         assert_eq!(submitted_frame.phase, TurnPhase::Streaming);
 
@@ -3397,74 +3400,6 @@ async fn deleted_image_file_after_paste_blocks_submit_and_preserves_input() {
 }
 
 #[tokio::test]
-async fn nine_pasted_images_fail_preflight_preserve_input_and_never_submit() {
-    let views = Views::default();
-    let view_tx = views.clone();
-    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
-        "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
-        _ => Reply::Never,
-    });
-    let mut h = Harness::new(false);
-    let remote = h.remote.clone();
-    let mut paths = Vec::new();
-    for idx in 1..=9u8 {
-        let path = h.options.project_root.join(format!("small_{idx}.png"));
-        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
-        bytes.push(idx);
-        std::fs::write(&path, bytes).expect("写入小图片文件");
-        paths.push(path.to_str().expect("路径应为有效 UTF-8").to_owned());
-    }
-
-    let driver = async move {
-        view_tx.push([head_reply(head(0, None, false))]);
-        remote.wait(|f| f.phase == TurnPhase::Idle).await;
-
-        for path in paths {
-            remote
-                .keys
-                .unbounded_send(Ok(Event::Paste(path)))
-                .expect("粘贴小图片路径");
-        }
-        remote
-            .wait(|f| f.panel.contains("[IMAGE 9 · png · 9 B]"))
-            .await;
-
-        remote.press(KeyCode::Enter, KeyModifiers::NONE);
-        let shown = remote.wait(|f| !f.dock.is_empty()).await;
-        assert!(
-            shown.panel.contains("── ERROR ─"),
-            "超过 8 张图片应在 Dock 暂驻错误：{}",
-            shown.panel
-        );
-        assert!(
-            shown.dock.contains("单轮图片为 9 张，不能超过 8 张")
-                && shown.dock.contains("输入已保留"),
-            "错误文案应说明单轮图片张数超限且保留输入：{}",
-            shown.dock
-        );
-
-        remote.ctrl('c');
-        remote.ctrl('c');
-    };
-    let ((), exit) = bounded(LOOP_LIMIT, async {
-        tokio::join!(driver, h.run(&peer.client))
-    })
-    .await;
-    assert!(exit.result.is_ok());
-    assert_eq!(
-        count(&peer.seen.borrow(), "submit"),
-        0,
-        "超过单轮图片张数上限时不应发出提交请求"
-    );
-    assert_eq!(
-        h.app.input.image_count(),
-        9,
-        "预检未通过时 9 张图片原子应原样保留在输入区"
-    );
-}
-
-#[tokio::test]
 async fn queued_image_deleted_before_auto_send_returns_to_front_pauses_and_errors() {
     let running = numbered_turn(1);
     let views = Views::default();
@@ -3499,7 +3434,12 @@ async fn queued_image_deleted_before_auto_send_returns_to_front_pauses_and_error
             .expect("粘贴排队图片路径");
         remote.press(KeyCode::Enter, KeyModifiers::NONE);
         remote
-            .wait(|f| f.text.contains("排队") && f.text.contains("排队说明 [IMAGE 1 · png · 14 B]"))
+            .wait(|f| {
+                f.text.contains("排队")
+                    && f.text.contains(
+                        "排队说明 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}14\u{00a0}B]",
+                    )
+            })
             .await;
 
         std::fs::remove_file(&image_path_for_driver).expect("在当前轮完成前删除排队图片文件");
@@ -3521,7 +3461,10 @@ async fn queued_image_deleted_before_auto_send_returns_to_front_pauses_and_error
             shown.dock
         );
         assert!(
-            shown.text.contains("暂停") && shown.text.contains("排队说明 [IMAGE 1 · png · 14 B]"),
+            shown.text.contains("暂停")
+                && shown.text.contains(
+                    "排队说明 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}14\u{00a0}B]"
+                ),
             "含图排队消息应回到队首并显示暂停状态：{}",
             shown.text
         );
@@ -3700,4 +3643,158 @@ fn image_submission_rejection_restores_when_empty_and_distinguishes_pure_image_v
             assert_eq!(app.history.prev(), Some("先跑一轮"));
         }
     }
+}
+
+#[test]
+fn initial_replay_manual_submit_preflight_failure_preserves_comment_draft_until_step_arrives() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let target = app
+        .head
+        .as_ref()
+        .expect("初始会话头")
+        .turn_id
+        .expect("被评论轮次");
+    save_comment(app, "重连前草稿");
+    app.focus = Focus::Dock;
+    assert_eq!(app.queue.draft_count(), 1, "保存后应有 1 条评论草稿");
+
+    // 重连后开始初始回放：用户消息已回放，被评论的 Step 尚未回放。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(2, Some(target), false)));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
+    assert!(app.initial, "末尾 Step 尚未到达时仍处于初始回放期间");
+    assert!(app.present_steps().is_empty(), "此时对话记录中尚无 Step");
+
+    let oversized = "x".repeat(2_097_153);
+    app.input.set_text(&oversized);
+    assert!(app.submit().is_none(), "超过 2 MiB 的消息预检应拒绝提交");
+
+    let err = app.dock.message().expect("预检失败应在 Dock 暂驻错误");
+    assert_eq!(err.level, NoticeLevel::Error);
+    assert!(
+        err.text.contains("2,097,152") && err.text.contains("输入已保留"),
+        "错误文案应说明单轮文本超限且输入已保留：{}",
+        err.text
+    );
+    assert_eq!(app.input.text(), oversized, "预检失败后输入区文字应保留");
+    assert_eq!(
+        app.queue.draft_count(),
+        1,
+        "预检失败时不得提前丢弃锚点暂未回放的评论草稿"
+    );
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|b| matches!(b, Block::Status(s) if s.level == NoticeLevel::Warn)),
+        "预检失败时不应产生丢弃评论的警告"
+    );
+
+    // 随后被评论的 Step 到达，初始回放结束，草稿仍保留并重新挂回锚点。
+    app.apply_view(entry_update(
+        step(2, target, 0).text("comment target").finished().entry(),
+    ));
+    assert!(!app.initial, "末尾 Step 到达后初始回放应结束");
+    assert_eq!(app.queue.draft_count(), 1, "Step 到达后评论草稿仍应为 1 条");
+    assert_eq!(
+        app.queue
+            .drafts()
+            .next()
+            .expect("保留的草稿")
+            .comment()
+            .text,
+        "重连前草稿"
+    );
+    assert!(
+        transcript(app).contains("草稿 · #1"),
+        "草稿卡片应重新显示在锚点下方"
+    );
+}
+
+#[test]
+fn initial_replay_queue_head_preflight_failure_preserves_messages_and_comments_and_pauses() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let target = app
+        .head
+        .as_ref()
+        .expect("初始会话头")
+        .turn_id
+        .expect("被评论轮次");
+    app.input.set_text("running");
+    app.submit().expect("发起运行中轮次");
+    let running = app.own_turn.expect("运行中轮次身份");
+
+    save_comment(app, "队首评论");
+    app.focus = Focus::Dock;
+    app.input.set_text("队首初稿");
+    assert!(app.submit().is_none(), "运行中提交应进入队列");
+
+    save_comment(app, "次条评论");
+    app.focus = Focus::Dock;
+    assert!(app.submit().is_none(), "纯评论消息在运行中同样进入队列");
+    assert_eq!(
+        app.queue.messages().count(),
+        2,
+        "队列中应有两条带评论的消息"
+    );
+
+    app.apply_submission(receipt(running, accepted(running)));
+    stop(app, running, "running", "failed");
+    release_dock(app);
+    assert!(app.queue.is_paused(), "上一轮失败结束后队列应暂停");
+
+    // 原地把队首正文改成超过 2 MiB，保存编辑后触发重连初始回放。
+    let oversized = "x".repeat(2_097_153);
+    let first_id = app.queue.messages().next().expect("队首消息").id;
+    assert!(app.queue.start_edit(first_id), "应能进入队首原地编辑");
+    app.queue
+        .queued_editor_mut()
+        .expect("队首编辑器")
+        .set_text(&oversized);
+    app.queue.finish_edit(true);
+
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(running), false)));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
+    assert!(app.initial, "仅回放首条用户消息时仍处于初始回放期间");
+    assert!(app.present_steps().is_empty(), "被评论的 Step 尚未回放");
+    assert_eq!(app.phase, TurnPhase::Idle);
+
+    // 空输入按回车恢复并尝试发出队首：副本预检失败，不应清理评论也不应取出消息。
+    assert!(app.submit().is_none(), "队首预检失败不应返回提交请求");
+    let err = app.dock.message().expect("队首预检失败应在 Dock 暂驻错误");
+    assert_eq!(err.level, NoticeLevel::Error);
+    assert!(
+        err.text.contains("2,097,152") && err.text.contains("已放回队首并暂停"),
+        "错误文案应说明原因并提示已放回队首并暂停：{}",
+        err.text
+    );
+    assert!(app.queue.is_paused(), "队首预检失败后队列应暂停");
+
+    let queued: Vec<_> = app.queue.messages().collect();
+    assert_eq!(queued.len(), 2, "两条排队消息都应保留在队列中");
+    assert_eq!(queued[0].input.text(), oversized, "队首超限正文应保留");
+    assert_eq!(queued[0].comments.len(), 1, "队首评论不应在预检失败时丢失");
+    assert_eq!(queued[0].comments[0].text, "队首评论");
+    assert!(queued[1].input.is_blank(), "次条仍为纯评论排队消息");
+    assert_eq!(queued[1].comments.len(), 1, "次条评论不应在预检失败时丢失");
+    assert_eq!(queued[1].comments[0].text, "次条评论");
+
+    // 随后其余条目回放完毕，两条排队消息及其评论依旧完整保留。
+    app.apply_view(entry_update(
+        step(2, target, 0).text("comment target").finished().entry(),
+    ));
+    app.apply_view(entry_update(user(3, running, 2, "running")));
+    app.apply_view(entry_update(
+        step(4, running, 0)
+            .text("live body")
+            .stopped("failed")
+            .entry(),
+    ));
+    assert!(!app.initial, "全部初始条目到达后回放应结束");
+    let after: Vec<_> = app.queue.messages().collect();
+    assert_eq!(after.len(), 2, "回放完成后两条排队消息仍应都在");
+    assert_eq!(after[0].comments.len(), 1);
+    assert_eq!(after[1].comments.len(), 1);
 }

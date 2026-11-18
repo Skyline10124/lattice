@@ -87,8 +87,12 @@ fn push(line: &mut Line<'static>, glyph: &StyledGrapheme<'_>) {
     }
 }
 
+// U+00A0 为不换行空格，在折行时与两侧字符保持粘连，不作为断点。
 fn whitespace(glyph: &StyledGrapheme<'_>) -> bool {
-    glyph.symbol.chars().all(char::is_whitespace)
+    glyph
+        .symbol
+        .chars()
+        .all(|ch| ch.is_whitespace() && ch != '\u{00a0}')
 }
 
 fn wrap_line(source: &[StyledGrapheme<'_>], width: usize, lines: &mut Vec<Line<'static>>) {

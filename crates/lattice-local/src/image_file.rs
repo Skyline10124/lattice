@@ -6,7 +6,8 @@
 use std::{io::Read, path::Path};
 
 use lattice_conversation::{
-    ImageBytesError, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, UserInputError,
+    BoundToolCall, ImageBytesError, ImageMediaType, ImageRef, MAX_IMAGE_BYTES, MessageSemantic,
+    UserInputError, normalize_user_message,
 };
 use lattice_ipc::{LocalError, LocalErrorKind, Result};
 
@@ -16,16 +17,26 @@ pub fn image_file_ref(ordinal: usize, path: &Path) -> Result<ImageRef> {
     Ok(image)
 }
 
-/// 判断路径是否指向受支持的图片：不存在、不是常规文件、读取失败或魔数不是 PNG/JPEG/WebP/GIF 时返回 `Ok(None)`；
-/// 是图片但长度不合规时返回 `BadRequest`（说明与 `image_file_ref` 相同）。
-pub fn probe_image_file(ordinal: usize, path: &Path) -> Result<Option<ImageRef>> {
+/// 判断路径是否指向受支持的图片，并连同 `existing` 核验单轮张数与总字节上限：
+/// 不存在、不是常规文件、读取失败或魔数不是 PNG/JPEG/WebP/GIF 时返回 `Ok(None)`；
+/// 单张长度不合规或加入后超过单轮张数、总量上限时返回 `BadRequest`（说明取 `UserInputError`，图片序号为 `existing.len() + 1`）。
+pub fn probe_image_file(path: &Path, existing: &[ImageRef]) -> Result<Option<ImageRef>> {
     let Ok((file_len, bytes)) = read_bounded(path) else {
         return Ok(None);
     };
     if ImageMediaType::sniff(&bytes).is_none() {
         return Ok(None);
     }
+    let ordinal = existing.len().saturating_add(1);
     let image = parse_image_ref(ordinal, file_len, &bytes)?;
+    let parts = existing
+        .iter()
+        .copied()
+        .chain(std::iter::once(image))
+        .map(|image| MessageSemantic::<BoundToolCall>::Image { image })
+        .collect();
+    normalize_user_message(parts)
+        .map_err(|error| LocalError::new(LocalErrorKind::BadRequest, &error.to_string()))?;
     Ok(Some(image))
 }
 

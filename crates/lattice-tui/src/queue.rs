@@ -37,8 +37,34 @@ pub(crate) struct QueuedMessage {
 
 impl QueuedMessage {
     fn is_empty(&self) -> bool {
-        self.input.is_blank() && self.comments.is_empty()
+        is_blank_parts(&self.input, &self.comments)
     }
+}
+
+fn is_blank_parts(input: &InputBuffer, comments: &[Comment]) -> bool {
+    input.is_blank() && comments.is_empty()
+}
+
+fn step_present(
+    comment: &Comment,
+    steps: &std::collections::BTreeSet<lattice_local::StepKey>,
+) -> bool {
+    let fragment = &comment.location.fragment;
+    steps.contains(&lattice_local::StepKey {
+        turn_id: fragment.turn,
+        ordinal: fragment.step,
+    })
+}
+
+fn retain_comments(
+    comments: &[Comment],
+    steps: Option<&std::collections::BTreeSet<lattice_local::StepKey>>,
+) -> Vec<Comment> {
+    comments
+        .iter()
+        .filter(|comment| steps.is_none_or(|steps| step_present(comment, steps)))
+        .cloned()
+        .collect()
 }
 
 fn normalized_input(mut input: InputBuffer) -> InputBuffer {
@@ -93,6 +119,33 @@ impl Queue {
     }
     pub(crate) fn is_editing(&self) -> bool {
         self.editor.is_some()
+    }
+
+    pub(crate) fn send_candidate(
+        &self,
+        steps: Option<&std::collections::BTreeSet<lattice_local::StepKey>>,
+    ) -> Option<Outgoing> {
+        if self.paused || self.is_editing() || self.awaiting.is_some() {
+            return None;
+        }
+        if !matches!(self.messages.front()?.settings, QueuedSettings::Snapshot(_)) {
+            return None;
+        }
+        for message in &self.messages {
+            let comments = retain_comments(&message.comments, steps);
+            if is_blank_parts(&message.input, &comments) {
+                continue;
+            }
+            let QueuedSettings::Snapshot(expected_settings) = message.settings else {
+                return None;
+            };
+            return Some(Outgoing {
+                input: message.input.clone(),
+                comments,
+                expected_settings,
+            });
+        }
+        None
     }
 
     pub(crate) fn start_send(&mut self, turn: lattice_local::TurnId) -> Option<Outgoing> {
@@ -306,7 +359,19 @@ impl Queue {
             >= LIMIT
     }
     pub(crate) fn draft_comments(&self) -> Vec<Comment> {
-        let mut comments: Vec<Comment> = self.drafts.iter().map(|d| d.comment.clone()).collect();
+        self.draft_comments_in(None)
+    }
+    pub(crate) fn draft_comments_in(
+        &self,
+        steps: Option<&std::collections::BTreeSet<lattice_local::StepKey>>,
+    ) -> Vec<Comment> {
+        let mut comments: Vec<Comment> = self
+            .drafts
+            .iter()
+            .map(|d| &d.comment)
+            .filter(|comment| steps.is_none_or(|steps| step_present(comment, steps)))
+            .cloned()
+            .collect();
         comments.sort_by_key(|c| c.n);
         comments
     }
@@ -396,11 +461,7 @@ impl Queue {
     ) -> Vec<usize> {
         let mut dropped = Vec::new();
         let mut keep = |comment: &Comment| {
-            let fragment = &comment.location.fragment;
-            let present = steps.contains(&lattice_local::StepKey {
-                turn_id: fragment.turn,
-                ordinal: fragment.step,
-            });
+            let present = step_present(comment, steps);
             if !present {
                 dropped.push(comment.n);
             }

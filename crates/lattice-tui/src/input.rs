@@ -231,12 +231,20 @@ impl InputBuffer {
         }
     }
 
-    /// 主输入区与排队编辑器的粘贴入口：可识别为本机受支持图片文件时插入图片原子，
-    /// 图片长度超限时返回错误，其余按普通文字粘贴。
+    /// 主输入区与排队编辑器的粘贴入口：可识别为本机受支持图片文件且单张及加入后的单轮张数、
+    /// 总量均合规时插入图片原子，图片超限时返回错误，其余按普通文字粘贴。
     pub(crate) fn paste(&mut self, raw: &str) -> lattice_local::Result<()> {
         if let Some(path) = pasted_path(raw) {
-            let ordinal = self.image_count().saturating_add(1);
-            if let Some(meta) = lattice_local::probe_image_file(ordinal, &path)? {
+            let existing: Vec<ImageRef> = self
+                .lines
+                .iter()
+                .flatten()
+                .filter_map(|part| match part {
+                    UserInputPart::Image { image } => Some(image.meta),
+                    UserInputPart::Text { .. } => None,
+                })
+                .collect();
+            if let Some(meta) = lattice_local::probe_image_file(&path, &existing)? {
                 self.insert_image(PendingImage {
                     meta,
                     source: ImageSource::File(path),
@@ -523,10 +531,11 @@ fn pasted_path(raw: &str) -> Option<PathBuf> {
         return None;
     }
     if let Some(rest) = candidate.strip_prefix("file://") {
-        if !rest.starts_with('/') {
+        let path = rest.strip_prefix("localhost").unwrap_or(rest);
+        if !path.starts_with('/') {
             return None;
         }
-        return decode_percent_path(rest.as_bytes());
+        return decode_percent_path(path.as_bytes());
     }
     if let Some(inner) = candidate
         .strip_prefix('\'')
@@ -796,6 +805,17 @@ mod tests {
         let misnamed_jpg = dir.path().join("disguised.txt");
         std::fs::write(&misnamed_jpg, b"\xff\xd8\xff\xe0jpeg-body").expect("写入伪装扩展名 JPEG");
 
+        assert_eq!(
+            pasted_path("file://localhost/tmp/with%20space.png"),
+            Some(PathBuf::from("/tmp/with space.png")),
+            "file://localhost/ URI 应解码为本地路径"
+        );
+        assert_eq!(
+            pasted_path("file://otherhost/tmp/with%20space.png"),
+            None,
+            "其他主机名的 file:// URI 不应识别为本地路径"
+        );
+
         let mut buf = InputBuffer::new();
         buf.paste(&escaped_png.to_str().unwrap().replace(' ', "\\ "))
             .expect("反斜杠转义空格路径应成功粘贴图片");
@@ -806,10 +826,15 @@ mod tests {
             uri_gif.to_str().unwrap().replace(' ', "%20")
         ))
         .expect("file:/// 加 %20 路径应成功粘贴图片");
+        buf.paste(&format!(
+            "file://localhost{}",
+            escaped_png.to_str().unwrap().replace(' ', "%20")
+        ))
+        .expect("file://localhost/ 加 %20 路径应成功粘贴图片");
         buf.paste(misnamed_jpg.to_str().unwrap())
             .expect("扩展名与内容不符的图片应按魔数识别");
 
-        assert_eq!(buf.image_count(), 4, "四种路径形式均应插入图片原子");
+        assert_eq!(buf.image_count(), 5, "五种路径形式均应插入图片原子");
         assert!(buf.text().is_empty(), "识别为图片时不应插入路径文字");
         let media_types: Vec<_> = buf
             .parts()
@@ -825,12 +850,13 @@ mod tests {
                 lattice_local::ImageMediaType::Png,
                 lattice_local::ImageMediaType::Webp,
                 lattice_local::ImageMediaType::Gif,
+                lattice_local::ImageMediaType::Png,
                 lattice_local::ImageMediaType::Jpeg,
             ],
             "识别出的图片媒体类型顺序应与文件头魔数一致"
         );
 
-        // 不存在的路径、目录、普通文本文件、超过 3.75 MiB 的普通文件、多行文字都按文字插入。
+        // 不存在的路径、目录、普通文本文件、超过 3.75 MiB 的普通文件、其他 authority 的 file:// URI、多行文字都按文字插入。
         let missing = dir.path().join("missing.png");
         let folder = dir.path().join("sub_folder");
         std::fs::create_dir(&folder).expect("创建子目录");
@@ -842,6 +868,10 @@ mod tests {
             vec![b'x'; lattice_local::MAX_IMAGE_BYTES + 128],
         )
         .expect("写入超限普通文件");
+        let otherhost_uri = format!(
+            "file://otherhost{}",
+            uri_gif.to_str().unwrap().replace(' ', "%20")
+        );
         let multiline = format!("{}\n第二行说明", escaped_png.display());
 
         for raw in [
@@ -849,6 +879,7 @@ mod tests {
             folder.to_str().unwrap().to_owned(),
             plain_text.to_str().unwrap().to_owned(),
             oversized_plain.to_str().unwrap().to_owned(),
+            otherhost_uri,
             multiline,
         ] {
             let mut text_buf = InputBuffer::new();
@@ -902,6 +933,42 @@ mod tests {
             parked.text.contains("3,932,160"),
             "错误状态应写明单图字节上限：{}",
             parked.text
+        );
+
+        // 释放错误后连续粘贴小图片：前 8 张正常插入，第 9 张因加入后超张数推 Error 且不插入。
+        app.apply_action(KeyAction::Insert(' '));
+        assert!(app.dock.message().is_none(), "空格应释放上一条错误状态");
+        for idx in 1..=8u8 {
+            let small = dir.path().join(format!("small_{idx}.png"));
+            let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+            bytes.push(idx);
+            std::fs::write(&small, bytes).expect("写入小图片");
+            app.apply_action(KeyAction::Paste(small.to_str().unwrap().to_owned()));
+        }
+        assert_eq!(app.input.image_count(), 8, "前 8 张小图片应全部插入");
+        assert!(app.dock.message().is_none(), "未超限时不应产生错误状态");
+
+        let ninth = dir.path().join("small_9.png");
+        std::fs::write(&ninth, b"\x89PNG\r\n\x1a\n\x09").expect("写入第 9 张小图片");
+        app.apply_action(KeyAction::Paste(ninth.to_str().unwrap().to_owned()));
+        assert_eq!(
+            app.input.image_count(),
+            8,
+            "第 9 张小图片超张数时不应插入输入缓冲"
+        );
+        assert!(
+            app.input.text().is_empty(),
+            "第 9 张小图片超张数时不应回退按文字插入路径"
+        );
+        let ninth_err = app
+            .dock
+            .message()
+            .expect("第 9 张小图片应在 Dock 暂驻一条错误状态");
+        assert_eq!(ninth_err.level, lattice_local::NoticeLevel::Error);
+        assert!(
+            ninth_err.text.contains("单轮图片为 9 张，不能超过 8 张"),
+            "错误状态应写明单轮图片张数超限：{}",
+            ninth_err.text
         );
     }
 }
