@@ -159,7 +159,8 @@ pub(super) enum OwnerReply {
 }
 
 pub(super) struct Owner {
-    identity: Option<TurnRequest>,
+    /// 提交操作的 TurnId；只保存身份，请求本身（含图片字节）交给准入路径按值消费。
+    turn_id: Option<TurnId>,
     pub(super) session: Option<SessionId>,
     reply: watch::Sender<Option<OwnerReply>>,
     pub(super) done: watch::Sender<Option<Result<()>>>,
@@ -561,7 +562,7 @@ impl Backend {
                     continue;
                 }
                 let owner = Arc::new(Owner {
-                    identity: None,
+                    turn_id: None,
                     session: Some(sid),
                     reply: watch::channel(None).0,
                     done: watch::channel(None).0,
@@ -663,22 +664,19 @@ impl Backend {
         }
     }
     pub(super) fn claim(self: &Arc<Self>, operation: BackendOperation) -> Result<Arc<Owner>> {
-        let (identity, session) = match &operation {
+        let (turn_id, session) = match &operation {
             BackendOperation::Submit { request, .. } => {
-                (Some(request.clone()), Some(request.session))
+                (Some(request.turn_id), Some(request.session))
             }
             BackendOperation::Rewind { session_id, .. } => (None, Some(*session_id)),
             BackendOperation::Configure { request } => (None, Some(request.session.id())),
         };
         let owner = {
             let mut state = lock(&self.admission);
-            if identity
-                .as_ref()
-                .is_some_and(|r| state.turns.contains_key(&r.turn_id))
-            {
+            if turn_id.is_some_and(|id| state.turns.contains_key(&id)) {
                 return Err(conflict(ConflictReason::TurnIdUsed));
             }
-            if identity.is_none() && session.is_some_and(|sid| state.sessions.contains_key(&sid)) {
+            if turn_id.is_none() && session.is_some_and(|sid| state.sessions.contains_key(&sid)) {
                 return Err(busy());
             }
             if state.stop.is_stopping() {
@@ -691,7 +689,7 @@ impl Backend {
                 return Err(busy());
             }
             let owner = Arc::new(Owner {
-                identity,
+                turn_id,
                 session,
                 reply: watch::channel(None).0,
                 done: watch::channel(None).0,
@@ -702,8 +700,8 @@ impl Backend {
                 store: Mutex::new(None),
                 operation: Arc::default(),
             });
-            if let Some(request) = &owner.identity {
-                state.turns.insert(request.turn_id, owner.clone());
+            if let Some(turn_id) = owner.turn_id {
+                state.turns.insert(turn_id, owner.clone());
             } else if let Some(sid) = session {
                 state.sessions.insert(sid, owner.clone());
                 owner.observer.owner_changed();
@@ -721,12 +719,13 @@ impl Backend {
             let completion = lock(&task_owner.core).take();
             // 回执转交失败不能等待模型或工具排空，也不能否认可能已提交的接受事务。
             if task_owner.reply.borrow().is_none() {
-                let response = if let Some(request) = &task_owner.identity
+                let response = if let (Some(turn_id), Some(session_id)) =
+                    (task_owner.turn_id, task_owner.session)
                     && completion.is_some()
                 {
                     OwnerReply::Submit(SubmitOutcome::ConfirmationUnknown {
-                        turn_id: request.turn_id,
-                        session_id: request.session,
+                        turn_id,
+                        session_id,
                         cause: RecoveryCause::WorkerFailed,
                     })
                 } else {
@@ -757,12 +756,12 @@ impl Backend {
                     && (task_owner.started.load(Ordering::Acquire) || error.recovery.is_some())
                 {
                     state.count_unconfirmed(&task_owner.operation);
-                    if let Some(request) = &task_owner.identity {
-                        state.diagnostics.insert(request.turn_id, error.clone());
+                    if let Some(turn_id) = task_owner.turn_id {
+                        state.diagnostics.insert(turn_id, error.clone());
                     }
                 }
-                if let Some(request) = &task_owner.identity {
-                    state.turns.remove(&request.turn_id);
+                if let Some(turn_id) = task_owner.turn_id {
+                    state.turns.remove(&turn_id);
                 }
                 if let Some(sid) = task_owner.session
                     && state
@@ -772,9 +771,7 @@ impl Backend {
                 {
                     state.sessions.remove(&sid);
                     task_owner.observer.owner_changed();
-                    task_owner
-                        .observer
-                        .release_turn(task_owner.identity.as_ref().map(|r| r.turn_id));
+                    task_owner.observer.release_turn(task_owner.turn_id);
                 }
                 state.owners.retain(|o| !Arc::ptr_eq(o, &task_owner));
                 task_owner.done.send_replace(Some(result));
@@ -1169,7 +1166,7 @@ impl Backend {
                     state
                         .sessions
                         .get(&session_id)
-                        .filter(|owner| owner.identity.is_none())
+                        .filter(|owner| owner.turn_id.is_none())
                         .cloned(),
                 )
             };
@@ -1505,7 +1502,7 @@ impl Backend {
                 match state
                     .sessions
                     .get(&session_id)
-                    .filter(|owner| owner.identity.is_none())
+                    .filter(|owner| owner.turn_id.is_none())
                     .cloned()
                 {
                     Some(owner) => Some(owner),
@@ -1566,7 +1563,7 @@ impl Backend {
                     state
                         .sessions
                         .get(&session_id)
-                        .filter(|owner| owner.identity.is_none())
+                        .filter(|owner| owner.turn_id.is_none())
                         .cloned(),
                 )
             };
