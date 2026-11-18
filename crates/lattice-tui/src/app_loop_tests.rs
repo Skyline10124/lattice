@@ -1915,7 +1915,10 @@ async fn completed_turn_sends_the_queue_through_the_real_loop_once() {
         ]);
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let request = requests(&seen, "submit").next().unwrap();
-        assert_eq!(request["request"]["input"], "queued via loop");
+        assert_eq!(
+            request["request"]["parts"],
+            json!([{"kind":"text","text":"queued via loop"}])
+        );
         assert_eq!(
             request["request"]["expected_settings"],
             json!(settings_version(0x11))
@@ -2151,7 +2154,10 @@ async fn model_and_effort_panels_configure_session_and_submit_uses_configured_he
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let request = &requests(&seen, "submit").next().unwrap()["request"];
         assert_eq!(request["session"], json!(sid()));
-        assert_eq!(request["input"], "selected prompt");
+        assert_eq!(
+            request["parts"],
+            json!([{"kind":"text","text":"selected prompt"}])
+        );
         assert_eq!(request["expected_settings"], json!(settings_version(0x33)));
         assert!(request.get("model").is_none());
         assert!(request.get("effort").is_none());
@@ -2516,7 +2522,10 @@ async fn configure_in_flight_enqueues_enter_and_sends_with_configured_version() 
                     .unwrap();
                 let seen = peer.wait(|s| count(s, "submit") == 1).await;
                 let submit = &requests(&seen, "submit").next().unwrap()["request"];
-                assert_eq!(submit["input"], "queued during configure");
+                assert_eq!(
+                    submit["parts"],
+                    json!([{"kind":"text","text":"queued during configure"}])
+                );
                 assert_eq!(
                     submit["expected_settings"],
                     json!(settings_version(0x99)),
@@ -2655,7 +2664,10 @@ async fn submit_before_first_watch_head_carries_startup_head_version() {
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let submit_req = requests(&seen, "submit").next().unwrap();
         let accepted_turn = request_turn(submit_req);
-        assert_eq!(submit_req["request"]["input"], "before first watch head");
+        assert_eq!(
+            submit_req["request"]["parts"],
+            json!([{"kind":"text","text":"before first watch head"}])
+        );
         assert_eq!(
             submit_req["request"]["expected_settings"],
             json!(settings_version(0x77)),
@@ -2718,7 +2730,10 @@ async fn queued_message_uses_enqueued_settings_version_across_later_head_pushes(
         ]);
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let submit = &requests(&seen, "submit").next().unwrap()["request"];
-        assert_eq!(submit["input"], "enqueued at 0x21");
+        assert_eq!(
+            submit["parts"],
+            json!([{"kind":"text","text":"enqueued at 0x21"}])
+        );
         assert_eq!(
             submit["expected_settings"],
             json!(settings_version(0x21)),

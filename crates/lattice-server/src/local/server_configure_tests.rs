@@ -198,7 +198,9 @@ async fn configure_during_running_turn_returns_busy() {
             turn_id: new_turn_id(),
             session: sid,
             workspace: workspace.clone(),
-            input: "执行中".into(),
+            parts: vec![UserInputPart::Text {
+                text: "执行中".into(),
+            }],
             expected_settings: None,
         })
         .await
@@ -328,7 +330,9 @@ async fn configure_succeeds_without_credentials_while_submit_rejects_missing_cre
             turn_id: new_turn_id(),
             session: sid,
             workspace,
-            input: "需要凭据".into(),
+            parts: vec![UserInputPart::Text {
+                text: "需要凭据".into(),
+            }],
             expected_settings: Some(reply.head.settings_version),
         })
         .await
@@ -385,7 +389,9 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
             turn_id: new_turn_id(),
             session: sid,
             workspace: workspace.clone(),
-            input: "旧设置提交".into(),
+            parts: vec![UserInputPart::Text {
+                text: "旧设置提交".into(),
+            }],
             expected_settings: Some(initial.head.settings_version),
         })
         .await
@@ -403,7 +409,9 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
             turn_id: accepted_tid,
             session: sid,
             workspace: workspace.clone(),
-            input: "新设置提交".into(),
+            parts: vec![UserInputPart::Text {
+                text: "新设置提交".into(),
+            }],
             expected_settings: Some(updated.head.settings_version),
         })
         .await
@@ -416,7 +424,9 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
             turn_id: accepted_tid,
             session: sid,
             workspace,
-            input: "重复 TurnId".into(),
+            parts: vec![UserInputPart::Text {
+                text: "重复 TurnId".into(),
+            }],
             expected_settings: Some(updated.head.settings_version),
         })
         .await
@@ -463,7 +473,9 @@ async fn submit_with_empty_settings_model_returns_configuration_rejection() {
             turn_id: new_turn_id(),
             session: sid,
             workspace,
-            input: "尝试发送".into(),
+            parts: vec![UserInputPart::Text {
+                text: "尝试发送".into(),
+            }],
             expected_settings: Some(created.head.settings_version),
         })
         .await
@@ -779,7 +791,9 @@ async fn cleanup_drafts_skips_when_session_slot_or_execution_lock_is_busy() {
                 turn_id: new_turn_id(),
                 session: slot_busy,
                 workspace: submit_workspace,
-                input: "占住会话槽".into(),
+                parts: vec![UserInputPart::Text {
+                    text: "占住会话槽".into(),
+                }],
                 expected_settings: None,
             })
             .await
@@ -1002,7 +1016,9 @@ async fn cleanup_drafts_keeps_session_accepted_between_scan_and_delete() {
             turn_id: new_turn_id(),
             session: candidate,
             workspace,
-            input: "扫描后接受首轮".into(),
+            parts: vec![UserInputPart::Text {
+                text: "扫描后接受首轮".into(),
+            }],
             expected_settings: None,
         })
         .await

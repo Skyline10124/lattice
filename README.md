@@ -200,7 +200,7 @@ lattice session usage <session_id>
 lattice --json session usage <session_id>
 ```
 
-由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。跨本地 IPC 协议版本（当前为 `65`）升级或从旧版本迁移时，若新前端与运行中旧后台报 `incompatible_backend`，先执行 `systemctl --user stop lattice`（手动运行后台时用旧二进制执行 `lattice daemon stop`），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
+由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。跨本地 IPC 协议版本（当前为 `66`）升级或从旧版本迁移时，若新前端与运行中旧后台报 `incompatible_backend`，先执行 `systemctl --user stop lattice`（手动运行后台时用旧二进制执行 `lattice daemon stop`），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 

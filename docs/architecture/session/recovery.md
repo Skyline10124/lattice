@@ -8,7 +8,7 @@ status: active
 
 ## 请求身份与找回
 
-客户端在提交前生成 TurnId，向已存在的会话 `SessionId` 发起 `submit`（携带 `input`、规范工作区与可选的 `expected_settings`）。新会话先通过 `configure(New)` 显式创建；`submit` 遇到不存在的会话 ID 时返回 NotFound，不会创建新会话。新 TurnId 表示独立请求，即使文本相同。
+客户端在提交前生成 TurnId，向已存在的会话 `SessionId` 发起 `submit`（携带保序输入片段 `parts`、规范工作区与可选的 `expected_settings`）。新会话先通过 `configure(New)` 显式创建；`submit` 遇到不存在的会话 ID 时返回 NotFound，不会创建新会话。新 TurnId 表示独立请求，即使文本相同。
 
 `submit` 只接受新请求。后台按严格解析校验身份的形状，不合格的在 IPC 解码时拒绝，下表列出提交时可能遇到的事实以及后台与前端的动作，后台检查的顺序见[实现模块与公开操作](operations.md#实现模块与公开操作)；Conflict 带上原因码（全系统共四种：`turn_id_used`、`session_exists`、`binding_mismatch`、`settings_changed`，其中 `session_exists` 只由 `configure(New)` 返回），前端据此区分：
 

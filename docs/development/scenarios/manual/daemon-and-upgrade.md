@@ -69,7 +69,7 @@ lattice --json daemon status
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `incompatible_backend` | 本地 IPC 协议版本（当前为 `65`）与运行中后台不一致；用 `systemctl --user stop lattice` 或旧二进制 `lattice daemon stop` 停止旧后台后再启动新版本 |
+| `incompatible_backend` | 本地 IPC 协议版本（当前为 `66`）与运行中后台不一致；用 `systemctl --user stop lattice` 或旧二进制 `lattice daemon stop` 停止旧后台后再启动新版本 |
 | `transport`（零字节断开） | 更早后台或崩溃断开；核对存活与版本 |
 | 拒绝格式版本较旧的库或 `*.git` 旧库 | 原库不变并列路径；存档或删除须获授权 |
 

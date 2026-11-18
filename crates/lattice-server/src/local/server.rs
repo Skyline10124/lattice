@@ -1022,7 +1022,19 @@ impl Backend {
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            let input = lattice_session::store::TurnInput::text(request.input)
+            let parts = request
+                .parts
+                .into_iter()
+                .map(|part| match part {
+                    UserInputPart::Text { text } => {
+                        lattice_session::store::TurnInputPart::Text { text }
+                    }
+                    UserInputPart::Image { image } => {
+                        lattice_session::store::TurnInputPart::Image { bytes: image }
+                    }
+                })
+                .collect();
+            let input = lattice_session::store::TurnInput::new(parts)
                 .map_err(|_| LocalError::new(LocalErrorKind::BadRequest, "invalid Turn request"))?;
             state.sessions.insert(sid, owner.clone());
             owner.observer.owner_changed();

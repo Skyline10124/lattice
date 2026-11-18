@@ -317,7 +317,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
 }
 
 /// 与 `lattice_local::test_support::FRAME_MAGIC` 相同；测试框架不能依赖产品 crate，用同一版本号拼出帧魔数。
-const PROTOCOL_VERSION: u8 = 65;
+const PROTOCOL_VERSION: u8 = 66;
 const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
 
 /// 公开本地 IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
@@ -424,7 +424,7 @@ pub(crate) fn submit_request(
     input: &str,
 ) -> Value {
     json!({"operation":"submit","request":{"turn_id":turn_id,"session":session_id,
-        "workspace":path_bytes(world.project_dir()),"input":input,"expected_settings":null}})
+        "workspace":path_bytes(world.project_dir()),"parts":[{"kind":"text","text":input}],"expected_settings":null}})
 }
 
 /// 按 `TurnId` 查询：已接受、在途，或 `not_found` 错误。

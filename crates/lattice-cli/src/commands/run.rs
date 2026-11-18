@@ -413,7 +413,7 @@ pub(super) async fn run_session_prompt_with_io(
         turn_id: id,
         session: session_id,
         workspace,
-        input: args.prompt,
+        parts: vec![UserInputPart::Text { text: args.prompt }],
         expected_settings: None,
     };
     let turn = api.start_turn(request);

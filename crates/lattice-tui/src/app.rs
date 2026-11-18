@@ -31,7 +31,7 @@ use lattice_local::{
     ConversationEntry, DetachReport, LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate,
     Node, NodeId, NoticeLevel, PublicTurnOutcome, SessionHead, SessionId, StepKey,
     SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment, TextUpdate, TurnId,
-    TurnRequest, ViewUpdate,
+    TurnRequest, UserInputPart, ViewUpdate,
 };
 use lattice_local::{Effort, ModelCandidateQuery, ModelRef, UsageSummary};
 #[cfg(test)]
@@ -1917,7 +1917,7 @@ fn begin_turn(options: &TuiOptions, app: &mut App, prompt: String) -> Option<Tur
         turn_id,
         session,
         workspace: options.project_root.clone(),
-        input: prompt,
+        parts: vec![UserInputPart::Text { text: prompt }],
         expected_settings: Some(message.expected_settings),
     })
 }

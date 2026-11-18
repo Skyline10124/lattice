@@ -38,8 +38,8 @@ pub use lattice_ipc::{
     SessionUsage, SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail, StepEnd,
     StepKey, StepProgress, StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate,
     TextSegment, TextUpdate, TurnDetail, TurnLookup, TurnRef, TurnRequest, TurnSummary,
-    TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary, ViewUpdate, WATCH_TURNS,
-    parse_drain_timeout,
+    TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary, UserInputPart, ViewUpdate,
+    WATCH_TURNS, parse_drain_timeout,
 };
 pub use lattice_store::{StateLayout, xdg_state_root};
 pub use logging::init_logging;

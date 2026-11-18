@@ -126,7 +126,7 @@ pub(super) fn turn_request(
         turn_id: new_turn_id(),
         session: sid,
         workspace: workspace.to_path_buf(),
-        input: input.into(),
+        parts: vec![UserInputPart::Text { text: input.into() }],
         expected_settings: None,
     }
 }

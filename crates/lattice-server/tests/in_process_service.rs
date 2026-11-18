@@ -6,7 +6,7 @@
 
 use lattice_local::{
     AgentName, ConfigureRequest, ConfigureSession, LocalClient, StateLayout, TurnLookup,
-    TurnRequest, new_session_id, new_turn_id,
+    TurnRequest, UserInputPart, new_session_id, new_turn_id,
 };
 use lattice_server::{
     DrainOutcome, InProcessTurn, InProcessTurnOutcome, LocalWorkspaceRoot, Service,
@@ -135,7 +135,9 @@ async fn serve_for_test_with_service_shares_backend_with_ipc_and_notifies_stop()
             turn_id,
             session: sid,
             workspace,
-            input: "跨接口核对".into(),
+            parts: vec![UserInputPart::Text {
+                text: "跨接口核对".into(),
+            }],
             expected_settings: None,
         })
         .await

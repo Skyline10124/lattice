@@ -787,7 +787,9 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
         turn_id: id,
         session: sid(),
         workspace: peer._root.path().into(),
-        input: "input".into(),
+        parts: vec![UserInputPart::Text {
+            text: "input".into(),
+        }],
         expected_settings: None,
     });
     let mut submit = peer.request("submit").await;
@@ -1177,7 +1179,10 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
             };
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];
-            assert_eq!(request["input"], "original input");
+            assert_eq!(
+                request["parts"],
+                json!([{"kind":"text","text":"original input"}])
+            );
             assert_eq!(request["session"], expected_sid.to_string());
             assert!(request["expected_settings"].is_null());
             assert!(TurnId::parse(request["turn_id"].as_str().unwrap()).is_ok());

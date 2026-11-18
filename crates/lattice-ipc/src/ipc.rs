@@ -16,10 +16,12 @@ use tokio::{
 };
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::types::{LocalError, LocalErrorKind, Result};
+use crate::types::{
+    LocalError, LocalErrorKind, PlannedSubmit, PlannedTurnRequest, Result, UserInputPart,
+};
 
 mod defs {
-    pub const PROTOCOL_VERSION: u8 = 65;
+    pub const PROTOCOL_VERSION: u8 = 66;
     pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
     /// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
     pub const fn magic_for_version(version: u8) -> [u8; 8] {
@@ -30,10 +32,11 @@ mod defs {
     pub const MAX_FRAME: usize = 16 * 1024 * 1024;
 }
 
+pub use defs::MAX_FRAME;
 #[cfg(not(any(test, feature = "test-utils")))]
-use defs::{MAGIC, MAX_FRAME, PROTOCOL_VERSION, magic_for_version};
+use defs::{MAGIC, PROTOCOL_VERSION, magic_for_version};
 #[cfg(any(test, feature = "test-utils"))]
-pub use defs::{MAGIC, MAX_FRAME, PROTOCOL_VERSION, magic_for_version};
+pub use defs::{MAGIC, PROTOCOL_VERSION, magic_for_version};
 
 const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
@@ -349,6 +352,36 @@ async fn write_wire<T: serde::Serialize>(
     tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&wire))
         .await
         .map_err(|_| LocalError::new(LocalErrorKind::Transport, "本地写入超时；回执状态可能未知"))
+}
+
+/// 实发 `Request::Submit` 的 JSON 正文字节数（不含 8 字节魔数与 4 字节长度头），与 `MAX_FRAME` 的口径一致。
+/// 图片按标准 base64 计入 `byte_length.div_ceil(3) * 4` 字节加两个引号，不分配正文。
+pub fn encoded_submit_len(plan: &PlannedTurnRequest) -> usize {
+    struct ByteCounter(usize);
+
+    impl std::io::Write for ByteCounter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, &PlannedSubmit::Submit { request: plan })
+        .expect("PlannedSubmit 序列化到字节计数器不应失败");
+    let images: u64 = plan
+        .parts
+        .iter()
+        .map(|part| match part {
+            UserInputPart::Image { image } => image.byte_length.div_ceil(3) * 4,
+            UserInputPart::Text { .. } => 0,
+        })
+        .sum();
+    counter.0 + images as usize
 }
 
 /// 每个连接独立编号；片段的 offset 按逻辑 JSON 的 UTF-8 字节计量。
@@ -859,6 +892,131 @@ mod frame_tests {
                 .await
                 .unwrap_err();
             assert_eq!(error.kind, LocalErrorKind::Protocol);
+        }
+    }
+
+    #[test]
+    fn encoded_submit_len_matches_actual_submit_json_bytes() {
+        use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::PathBuf};
+
+        use lattice_conversation::{ImageRef, SessionId, TurnId};
+        use lattice_session::store::SettingsVersion;
+
+        use crate::types::{Request, TurnRequest};
+
+        enum PartSpec {
+            Text(String),
+            Image(Vec<u8>),
+        }
+
+        fn png_with_len(total_len: usize, fill: u8) -> Vec<u8> {
+            const HEADER: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
+            assert!(total_len >= HEADER.len(), "PNG 测试字节长度不能小于魔数");
+            let mut bytes = vec![fill; total_len];
+            bytes[..HEADER.len()].copy_from_slice(HEADER);
+            bytes
+        }
+
+        let sid = SessionId::parse("3f8b2c1a7d4e4f5a8b9c0d1e2f3a4b5c").unwrap();
+        let tid = TurnId::parse("3f8b2c1a-7d4e-4f5a-8b9c-0d1e2f3a4b5c").unwrap();
+        let non_utf8_ws = PathBuf::from(OsStr::from_bytes(b"/workspace/proj-\xff\xfe/repo"));
+        let utf8_ws = PathBuf::from("/workspace/proj/repo");
+        let version: SettingsVersion =
+            serde_json::from_value(serde_json::json!("ab".repeat(32))).unwrap();
+
+        let img_mod0 = png_with_len(9, 0x11);
+        let img_mod1 = png_with_len(10, 0x22);
+        let img_mod2 = png_with_len(8, 0x33);
+        let img_large = png_with_len(300, 0x44);
+        let escaped_text = "\"\\\n\r\t\u{0001}\u{001f}中文测试😀🚀".repeat(32);
+
+        let cases = [
+            (
+                "纯文本_转义字符_非UTF8工作区_无设置版本",
+                non_utf8_ws.clone(),
+                None,
+                vec![PartSpec::Text(escaped_text.clone())],
+            ),
+            (
+                "纯图片_余数0_1_2_有设置版本",
+                non_utf8_ws.clone(),
+                Some(version),
+                vec![
+                    PartSpec::Image(img_mod0.clone()),
+                    PartSpec::Image(img_mod1.clone()),
+                    PartSpec::Image(img_mod2.clone()),
+                ],
+            ),
+            (
+                "图文交错_含大量转义与三种长度余数",
+                non_utf8_ws.clone(),
+                Some(version),
+                vec![
+                    PartSpec::Text(escaped_text),
+                    PartSpec::Image(img_mod0.clone()),
+                    PartSpec::Text("中间文本\\\"\n\u{1}".into()),
+                    PartSpec::Image(img_mod1),
+                    PartSpec::Image(img_mod2),
+                    PartSpec::Text("结尾文本🚀".into()),
+                ],
+            ),
+            (
+                "同一图片出现两次",
+                non_utf8_ws,
+                None,
+                vec![
+                    PartSpec::Image(img_large.clone()),
+                    PartSpec::Text("间隔文本\u{1}\\\"".into()),
+                    PartSpec::Image(img_large),
+                ],
+            ),
+            (
+                "UTF8工作区_单图余数0",
+                utf8_ws,
+                Some(version),
+                vec![PartSpec::Image(img_mod0)],
+            ),
+        ];
+
+        for (label, workspace, expected_settings, specs) in cases {
+            let mut real_parts = Vec::with_capacity(specs.len());
+            let mut plan_parts = Vec::with_capacity(specs.len());
+            for spec in specs {
+                match spec {
+                    PartSpec::Text(text) => {
+                        real_parts.push(UserInputPart::Text { text: text.clone() });
+                        plan_parts.push(UserInputPart::Text { text });
+                    }
+                    PartSpec::Image(bytes) => {
+                        let image_ref =
+                            ImageRef::from_bytes(&bytes).expect("构造测试图片引用应成功");
+                        real_parts.push(UserInputPart::Image { image: bytes });
+                        plan_parts.push(UserInputPart::Image { image: image_ref });
+                    }
+                }
+            }
+            let real = TurnRequest {
+                turn_id: tid,
+                session: sid,
+                workspace: workspace.clone(),
+                parts: real_parts,
+                expected_settings,
+            };
+            let plan = PlannedTurnRequest {
+                turn_id: tid,
+                session: sid,
+                workspace,
+                parts: plan_parts,
+                expected_settings,
+            };
+            let actual_len = serde_json::to_vec(&Request::Submit { request: real })
+                .expect("实发请求序列化不应失败")
+                .len();
+            assert_eq!(
+                encoded_submit_len(&plan),
+                actual_len,
+                "用例 {label} 的零载荷计长结果必须与实发 JSON 字节数完全一致"
+            );
         }
     }
 }
