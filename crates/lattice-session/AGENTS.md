@@ -15,7 +15,7 @@
 | `src/store/write.rs`、`src/store/close.rs` | 单步 `Durability::Immediate` 领域写事务（含 `accept_turn` 同事务去重追加写入 `blobs` 及草稿会话整体删除 `delete_draft`），`ToolReply` 终态准备（`prepare_terminal`），以及从持久 `progress` 推导尝试、槽位与 Step 结论的纯函数 |
 | `src/store/read.rs`、`src/store/local.rs` | 会话树、过期草稿会话候选扫描、当前路径对话条目、轮次序号、按轮分页、轮次详情、`turn_input` 返回完整保序片段、`with_blob` 借用图片字节（含 `test-utils` 下的 `blob_count`）与用量只读投影，以及按会话或 Turn 范围加载记录 |
 | `src/store/settings.rs`、`src/store/config.rs`、`src/store/hex_digest.rs` | 会话设置（`SessionSettings`、`SettingsVersion`、`EffectiveProfile`）、系统提示与工具目录（`tool_identity`）的内容摘要配置表及十六进制摘要编码 |
-| `src/store/tests.rs` | 会话库编码、校验、事务推进与读取投影单元测试 |
+| `src/store/tests.rs`、`src/store/tests/` | 会话库单元测试入口与共享夹具；子模块按编码、事务、读取投影等行为组织 |
 
 ## 先读
 
