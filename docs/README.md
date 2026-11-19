@@ -22,7 +22,7 @@
 - [会话与 Turn](architecture/session/README.md)：会话树、Step/Turn 与调用槽位、显式配置、会话设置与草稿会话、提交、会话视图与按轮分页、退回分叉及执行者消失后的结局。
 - [模型接入](architecture/llm/README.md)：协议适配器、provider 配置与 features、模型引用与元数据、推理档位、用量与费用估算、凭据与 Sign in with ChatGPT。
 - [TUI 交互与视觉](architecture/tui/README.md)：持久对话与临时文字、输入和后台接线、模型与推理档位的选择、重连与取消、工具显示、键位、布局与配色。
-- [IM 网关](architecture/im.md)：守护进程内置组件托管与重新挂载、`inotify` 配置重载、`lattice im` 凭据与重载命令、Telegram 私聊纯文本接入、台账相位与并行恢复、流式草稿与 4096 字符回复切分。
+- [IM 网关](architecture/im.md)：守护进程内置组件托管与重新挂载、`inotify` 配置重载、`lattice im` 凭据与重载命令、Telegram 私聊文本、单图与相册接入、台账相位与并行恢复、流式草稿与 4096 字符回复切分。
 
 ## 开发与验证
 

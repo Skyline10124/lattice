@@ -122,6 +122,23 @@ impl AlbumCollector {
         closed
     }
 
+    /// 若指定对话当前存在开放相册且其 `media_group_id` 与 `group_id` 不同，立即将其闭合返回。
+    pub(crate) fn close_if_different_group(
+        &mut self,
+        chat: &ChatKey,
+        group_id: &str,
+    ) -> Option<ClosedAlbum> {
+        if self
+            .open
+            .get(chat)
+            .is_some_and(|existing| existing.media_group_id != group_id)
+        {
+            self.close_for_chat(chat)
+        } else {
+            None
+        }
+    }
+
     /// 向指定对话推入一条相册分片。
     ///
     /// 返回 `(被新相册顶替提前闭合的旧相册, 因收满 10 项立即闭合的当前相册)`。
@@ -132,15 +149,7 @@ impl AlbumCollector {
         item: BufferedAlbumItem,
         now: Instant,
     ) -> (Option<ClosedAlbum>, Option<ClosedAlbum>) {
-        let displaced = if self
-            .open
-            .get(&chat)
-            .is_some_and(|existing| existing.media_group_id != group_id)
-        {
-            self.close_for_chat(&chat)
-        } else {
-            None
-        };
+        let displaced = self.close_if_different_group(&chat, &group_id);
 
         let reached_max = match self.open.get_mut(&chat) {
             Some(open) => {
@@ -429,15 +438,28 @@ mod tests {
         assert!(!collector.is_recently_closed(&chat_a, "ga-2"));
         assert!(!collector.is_recently_closed(&chat_b, "gb-1"));
 
-        // 手动闭合 chat_a 当前相册同样不干扰 chat_b
+        // 同组名调用 close_if_different_group 不闭合，不同组名调用立即闭合并记入近期已闭合集合
+        assert!(
+            collector
+                .close_if_different_group(&chat_a, "ga-2")
+                .is_none(),
+            "同 media_group_id 调用 close_if_different_group 不得提前闭合当前开放相册"
+        );
         let closed_a2_manual = collector
-            .close_for_chat(&chat_a)
-            .expect("ga-2 应处于开放态");
+            .close_if_different_group(&chat_a, "ga-1")
+            .expect("收到另一 media_group_id（含此前已闭合的组）时必须提前闭合 ga-2");
         assert_eq!(
             closed_a2_manual.primary_inbound_id,
             inbound_id_from_update_id(402)
         );
+        assert!(collector.is_recently_closed(&chat_a, "ga-1"));
         assert!(collector.is_recently_closed(&chat_a, "ga-2"));
+        assert!(
+            collector
+                .close_if_different_group(&chat_a, "ga-3")
+                .is_none(),
+            "无开放相册时调用 close_if_different_group 应返回 None"
+        );
         assert_eq!(
             collector.next_deadline(),
             Some(t0 + Duration::from_millis(700)),

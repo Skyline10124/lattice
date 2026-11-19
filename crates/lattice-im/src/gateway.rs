@@ -933,6 +933,11 @@ impl GatewayRuntime {
                             self.ack_update(&inbound_id);
                             return true;
                         }
+                        if let Some(displaced) =
+                            collector.close_if_different_group(&chat, &group_id)
+                        {
+                            self.enqueue_closed_album(displaced);
+                        }
                         if collector.is_recently_closed(&chat, &group_id) {
                             self.ack_update(&inbound_id);
                             let rt = Arc::clone(self);

@@ -798,6 +798,19 @@ impl ImTestHarness {
     }
 
     fn set_model_input_modalities(&self, modalities: &[&str]) {
+        self.set_agent_model_and_modalities("local-test", modalities);
+    }
+
+    fn set_agent_model_and_modalities(&self, model_id: &str, modalities: &[&str]) {
+        let agent_path = self.config_dir.join("agents/local-test/agent.toml");
+        let model_ref = format!("local/{model_id}");
+        std::fs::write(
+            &agent_path,
+            format!(
+                "schema_version = 1\n[agent]\nname = 'local-test'\nmodel = {model_ref:?}\n[prompt]\nsystem = 'test'\n"
+            ),
+        )
+        .unwrap();
         let endpoint = format!("http://{}/v1", self.listener.local_addr().unwrap());
         let mods = modalities
             .iter()
@@ -809,7 +822,7 @@ impl ImTestHarness {
             .replace(
                 OsStr::new("providers.toml"),
                 format!(
-                    "[providers.local]\nprotocol='chat-completions'\nbase_url='{endpoint}'\nauth='none'\n\n[providers.local.models.\"local-test\"]\ninput = [{mods}]\n"
+                    "[providers.local]\nprotocol='chat-completions'\nbase_url='{endpoint}'\nauth='none'\n\n[providers.local.models.{model_id:?}]\ninput = [{mods}]\n"
                 )
                 .as_bytes(),
             )
@@ -5438,6 +5451,14 @@ async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redeli
     let io1 = Arc::new(FakeTelegramIo::default());
     let png_1 = b"\x89PNG\r\n\x1a\nLATE_TEST_1".to_vec();
     let png_2 = b"\x89PNG\r\n\x1a\nLATE_TEST_2".to_vec();
+    // 另一对话 OTHER_UID 的更小更新 tg:5000 全程处于下载限流退避未确认状态，使第一实例从未向平台推进越过 5002 的 offset
+    io1.push_download_outcome(
+        "hold_5000_io1",
+        Err(TelegramDownloadError::Api(TelegramApiError::RateLimited {
+            retry_after: Some(Duration::from_secs(60)),
+            diagnostic: "第一实例保持队首 5000 未确认以阻断平台游标推进".into(),
+        })),
+    );
     io1.set_download_bytes("late_f1", png_1);
     io1.set_download_bytes("late_f2", png_2);
     io1.set_download_bytes("late_tail_f3", b"\x89PNG\r\n\x1a\nNEVER_DL_LATE".to_vec());
@@ -5446,6 +5467,13 @@ async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redeli
     let _ = io1.wait_poll_count(1).await;
 
     io1.push_updates(vec![
+        private_photo_update(
+            5000,
+            OTHER_UID,
+            OTHER_UID,
+            &[("hold_5000_io1", Some(19))],
+            None,
+        ),
         private_album_photo_update(
             5001,
             PRIVATE_CHAT_ID,
@@ -5464,6 +5492,7 @@ async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redeli
         ),
     ]);
     let _ = io1.wait_poll_count(2).await;
+    let _ = io1.wait_download_count(1).await;
     tokio::time::advance(Duration::from_millis(600)).await;
 
     let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
@@ -5471,8 +5500,15 @@ async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redeli
     write_sse_complete(&mut sock, None, "首轮正常相册回复", None).await;
     let msgs1 = io1.wait_message_count(1).await;
     assert_eq!(msgs1[0].1, "首轮正常相册回复");
-    io1.wait_offset(Some(5003)).await;
-    assert_eq!(io1.download_calls().len(), 2);
+    assert_eq!(
+        io1.download_calls().len(),
+        3,
+        "第一实例应仅发起 hold_5000_io1、late_f1 与 late_f2 三次下载"
+    );
+    assert!(io1.is_acknowledged(&inbound_id_from_update_id(5001)));
+    assert!(io1.is_acknowledged(&inbound_id_from_update_id(5002)));
+    assert!(!io1.is_acknowledged(&inbound_id_from_update_id(5000)));
+    assert_eq!(io1.offsets.lock().unwrap().next_offset(), None);
 
     // 1. 同一实例内到达同 media_group_id 的迟到新分片 5003：立即确认并按 ADR 0013 §8.2 字面原文回复提示，零下载、不触发模型新轮次
     io1.push_updates(vec![private_album_photo_update(
@@ -5488,15 +5524,32 @@ async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redeli
         msgs_after_late[1].1, "该相册部分图片延迟到达，未并入上一轮",
         "迟到相册分片回复必须与 ADR 0013 §8.2 字面原文完全一致"
     );
-    io1.wait_offset(Some(5004)).await;
+    assert!(io1.is_acknowledged(&inbound_id_from_update_id(5003)));
     assert_eq!(
         io1.download_calls().len(),
-        2,
+        3,
         "迟到分片不得发起 download_file"
     );
 
+    // 确保首轮台账已更新为 DeliveredTurn 后停机第一实例，同时核对平台游标始终停在 None
+    for _ in 0..15 {
+        tokio::task::yield_now().await;
+    }
     let _ = gw_stop1.send(());
     bounded(gw_task1).await.unwrap().unwrap();
+    assert_eq!(
+        io1.offsets.lock().unwrap().next_offset(),
+        None,
+        "因 tg:5000 未确认，第一实例连续前缀游标始终保持为 None"
+    );
+    assert!(
+        io1.observed_offsets
+            .lock()
+            .unwrap()
+            .iter()
+            .all(Option::is_none),
+        "第一实例从未向 Telegram 发送越过 5002 的 offset，第二实例重收 5002 完全符合 Telegram getUpdates 游标规范"
+    );
 
     // 核对 tg:5002 为 Merged，而迟到分片 tg:5003 未写入台账
     {
@@ -5617,6 +5670,185 @@ async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redeli
     bounded(gw_task2).await.unwrap().unwrap();
     let final_io2_msgs = io2.sent_messages.lock().unwrap().clone();
     assert_eq!(final_io2_msgs.len(), 2);
+    harness.shutdown().await;
+}
+
+// 场景 21b（P2-1 回归）：同一私聊在 600ms 内交错收到 A1（组 A 图片）-> B1（组 B 合法 PNG，顶替闭合 A 并打开 B）
+// -> A2（组 A 迟到分片）-> B2（组 B 不受支持视频）：
+// 验证 A2 必须先提前闭合当前开放相册 B，使 B1 独立下载（次数为 1）并成功提交成轮，
+// 而 A2 与随后到达的 B2 各自收到迟到提示（B2 绝不并入 B 拒掉 B1）。
+#[tokio::test(start_paused = true)]
+async fn late_fragment_of_closed_album_closes_different_open_album_before_late_reply() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let png_a1 = b"\x89PNG\r\n\x1a\nINTERLEAVE_GROUP_A1".to_vec();
+    let png_b1 = b"\x89PNG\r\n\x1a\nINTERLEAVE_GROUP_B1".to_vec();
+    io.set_download_bytes("interleave_a1", png_a1.clone());
+    io.set_download_bytes("interleave_b1", png_b1.clone());
+    io.set_download_bytes(
+        "interleave_a2_never_dl",
+        b"\x89PNG\r\n\x1a\nNEVER_DL_A2".to_vec(),
+    );
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+    let _ = io.wait_poll_count(1).await;
+    let t0 = tokio::time::Instant::now();
+
+    // 1. t0 收到组 A 首张图片 A1（5101）：打开组 A（静默截止 t0 + 600ms）
+    io.push_updates(vec![private_album_photo_update(
+        5101,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "group-a",
+        &[("interleave_a1", Some(png_a1.len() as u64))],
+        Some("组A首图"),
+    )]);
+    let _ = io.wait_poll_count(2).await;
+    assert!(io.download_calls().is_empty());
+
+    // 2. t0 + 100ms 收到组 B 合法 PNG B1（5102）：顶替闭合组 A 并打开组 B（截止 t0 + 700ms），完成 A1 轮次使会话空闲
+    tokio::time::advance(Duration::from_millis(100)).await;
+    io.push_updates(vec![private_album_photo_update(
+        5102,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "group-b",
+        &[("interleave_b1", Some(png_b1.len() as u64))],
+        Some("组B合法单图"),
+    )]);
+    let _ = io.wait_download_count(1).await;
+    let (mut sock_a1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_a1).await;
+    write_sse_complete(&mut sock_a1, None, "组A首轮完成", None).await;
+    let msgs_after_a1 = io.wait_message_count(1).await;
+    assert_eq!(msgs_after_a1[0].1, "组A首轮完成");
+
+    // 确认在 A2 到达前（t0 + 199ms），组 B 仍处于开放收集态，B1 尚未发起下载
+    tokio::time::advance(Duration::from_millis(99)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        io.download_calls()
+            .iter()
+            .filter(|(_, file_id, _)| file_id == "interleave_b1")
+            .count(),
+        0,
+        "A2 到达前组 B 尚未满静默窗口，B1 不得提前下载"
+    );
+
+    // 3. 在 600ms 窗口内依次收到组 A 迟到分片 A2（5103）与组 B 不受支持视频 B2（5104）：
+    //    A2 到达瞬间（零额外等待）必须先触发组 B 提前闭合入队使 B1 独立下载 1 次并提交成轮，随后 A2 与 B2 各自命中近期已闭合集合回复迟到提示！
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let t_a2 = tokio::time::Instant::now();
+    assert!(
+        t_a2.duration_since(t0) < Duration::from_millis(600),
+        "A2 到达时刻仍在初始 600ms 窗口内"
+    );
+    io.push_updates(vec![private_album_photo_update(
+        5103,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "group-a",
+        &[("interleave_a2_never_dl", Some(20))],
+        Some("组A迟到分片"),
+    )]);
+
+    let all_dl = io.wait_download_count(2).await;
+    let b1_downloads: Vec<_> = all_dl
+        .iter()
+        .filter(|(_, file_id, _)| file_id == "interleave_b1")
+        .collect();
+    assert_eq!(b1_downloads.len(), 1, "B1 必须独立触发且仅触发 1 次下载");
+    assert_eq!(
+        b1_downloads[0].0.duration_since(t_a2),
+        Duration::ZERO,
+        "A2 到达时必须立即提前闭合开放相册 B，无需等待组 B 的 600ms 静默窗口"
+    );
+
+    tokio::time::advance(Duration::from_millis(100)).await;
+    assert!(
+        tokio::time::Instant::now().duration_since(t0) < Duration::from_millis(600),
+        "全部 4 条交错分片（A1、B1、A2、B2）均在 600ms 内依次到达"
+    );
+    io.push_updates(vec![private_album_unsupported_update(
+        5104,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "group-b",
+        "video",
+    )]);
+
+    let (mut sock_b1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req_b1: serde_json::Value =
+        serde_json::from_str(&read_http_request(&mut sock_b1).await).unwrap();
+    let b1_user = req_b1["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(
+        b1_user["content"][0]["image_url"]["url"],
+        format!("data:image/png;base64,{}", test_base64_encode(&png_b1)),
+        "B1 必须独立成轮提交给模型，不受随后迟到的视频分片 B2 污染"
+    );
+    write_sse_complete(&mut sock_b1, None, "组B独立成轮完成", None).await;
+
+    let all_msgs = io.wait_message_count(4).await;
+    io.wait_offset(Some(5105)).await;
+    let reply_texts: Vec<&str> = all_msgs.iter().map(|(_, text)| text.as_str()).collect();
+    assert!(
+        reply_texts.contains(&"组B独立成轮完成"),
+        "B1 必须成功完成模型轮次并发送最终回复：{reply_texts:?}"
+    );
+    assert_eq!(
+        reply_texts
+            .iter()
+            .filter(|&&t| t == "该相册部分图片延迟到达，未并入上一轮")
+            .count(),
+        2,
+        "A2 与迟到的 B2 必须各自收到 1 条迟到分片提示：{reply_texts:?}"
+    );
+    assert!(
+        !reply_texts.contains(&UNSUPPORTED_MEDIA_REPLY),
+        "B2 绝不得与 B1 合并触发整组不支持媒体拒绝：{reply_texts:?}"
+    );
+    assert_eq!(
+        io.download_calls()
+            .iter()
+            .filter(|(_, file_id, _)| file_id == "interleave_b1")
+            .count(),
+        1,
+        "B1 全程下载次数必须保持为 1"
+    );
+    assert_eq!(
+        io.download_calls()
+            .iter()
+            .filter(|(_, file_id, _)| file_id == "interleave_a2_never_dl")
+            .count(),
+        0,
+        "迟到分片 A2 不得发起下载"
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    let snap = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        snap.inbound_record(&inbound_id_from_update_id(5102)).await,
+        Some(InboundRecord::DeliveredTurn { .. })
+    ));
+    assert_eq!(
+        snap.inbound_record(&inbound_id_from_update_id(5103)).await,
+        None
+    );
+    assert_eq!(
+        snap.inbound_record(&inbound_id_from_update_id(5104)).await,
+        None
+    );
+
     harness.shutdown().await;
 }
 
@@ -6872,6 +7104,134 @@ async fn delivers_http_413_guidance_both_live_and_via_recovered_summary_notice()
 
     let _ = gw_stop2.send(());
     bounded(gw_task2).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 27b（P2-2 & P2-3 回归）：严格按后台固定前缀/后缀识别三类拒绝，并在截断前识别超长模型名：
+// 1. 纯文本消息收到远端 HTTP 404 正文含 "model HTTP 413 not found"：绝不误输出大小拒绝说明或 /new 引导；
+// 2. 纯文本模型命名为 local/HTTP 413（input = ["text"]）发图：零模型连接，仅输出不支持图片输入引导，绝不出现 HTTP 413 请求大小说明；
+// 3. 合法超长模型名（600 个 'a'，input = ["text"]）经真实网关准入路径发 PNG：零模型连接，IM 回复完整保留原因与引导且总字符数受控。
+#[tokio::test]
+async fn strictly_classifies_413_lookalikes_and_bounds_600_char_model_through_real_admission() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let png = b"\x89PNG\r\n\x1a\nSTRICT_REJECTION_PNG".to_vec();
+    io.set_download_bytes("strict_png", png.clone());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    // 1. 纯文本收到 HTTP 404 正文携带 "model HTTP 413 not found"
+    io.push_updates(vec![private_text_update(
+        3851,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "测试 HTTP 404 伪 413 正文",
+    )]);
+    let (mut sock_404, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_404).await;
+    let body_404 = r#"{"error":{"message":"model HTTP 413 not found","type":"not_found_error"}}"#;
+    let head_404 = format!(
+        "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body_404.len()
+    );
+    sock_404.write_all(head_404.as_bytes()).await.unwrap();
+    sock_404.write_all(body_404.as_bytes()).await.unwrap();
+    sock_404.flush().await.unwrap();
+
+    let msgs1 = io.wait_message_count(1).await;
+    io.wait_offset(Some(3852)).await;
+    let reply_404 = &msgs1[0].1;
+    assert!(
+        reply_404.contains("HTTP 404") && reply_404.contains("model HTTP 413 not found"),
+        "HTTP 404 失败回复应保留原始 404 诊断：{reply_404}"
+    );
+    assert!(
+        !reply_404.contains("目标服务拒绝了本次请求大小") && !reply_404.contains("/new"),
+        "HTTP 404 正文含 HTTP 413 字样绝不得误判为大小拒绝或输出 /new 引导：{reply_404}"
+    );
+
+    // 2. 发送 /new 重置会话绑定后，将模型切换为 local/HTTP 413（input = ["text"]）并发送 PNG
+    io.push_updates(vec![private_text_update(
+        3852,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "/new",
+    )]);
+    let _ = io.wait_message_count(2).await;
+    io.wait_offset(Some(3853)).await;
+
+    harness.set_agent_model_and_modalities("HTTP 413", &["text"]);
+    io.push_updates(vec![private_photo_update(
+        3853,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("strict_png", Some(png.len() as u64))],
+        Some("模型名含 HTTP 413 的纯文本模型发图"),
+    )]);
+    let msgs3 = io.wait_message_count(3).await;
+    io.wait_offset(Some(3854)).await;
+    let reply_named_413 = &msgs3[2].1;
+    assert!(
+        reply_named_413.contains("模型 local/HTTP 413 不支持图片输入")
+            && reply_named_413.contains("减少图片")
+            && reply_named_413.contains("/new")
+            && reply_named_413.contains("lattice session rewind"),
+        "名为 local/HTTP 413 的纯文本模型发图应输出不支持图片输入引导：{reply_named_413}"
+    );
+    assert!(
+        !reply_named_413.contains("目标服务拒绝了本次请求大小（HTTP 413）"),
+        "名为 local/HTTP 413 的纯文本模型发图绝不得混入请求大小拒绝说明：{reply_named_413}"
+    );
+
+    // 3. 发送 /new 重置会话绑定后，将模型切换为 600 个 'a' 的超长纯文本模型并发送 PNG
+    io.push_updates(vec![private_text_update(
+        3854,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "/new",
+    )]);
+    let _ = io.wait_message_count(4).await;
+    io.wait_offset(Some(3855)).await;
+
+    let long_model = "a".repeat(600);
+    harness.set_agent_model_and_modalities(&long_model, &["text"]);
+    io.push_updates(vec![private_photo_update(
+        3855,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("strict_png", Some(png.len() as u64))],
+        Some("600 字符长模型名真实准入路径测试"),
+    )]);
+    let msgs5 = io.wait_message_count(5).await;
+    io.wait_offset(Some(3856)).await;
+    let reply_long = &msgs5[4].1;
+    assert!(
+        reply_long.contains("不支持图片输入")
+            && reply_long.contains("减少图片")
+            && reply_long.contains("/new")
+            && reply_long.contains("lattice session rewind"),
+        "600 字符长模型名走真实准入路径时必须完整保留原因与全部操作引导：{reply_long}"
+    );
+    assert!(
+        reply_long.contains('…')
+            && reply_long.chars().count() <= crate::redact::MAX_DIAGNOSTIC_CHARS,
+        "超长模型名回复总长度必须受控在 MAX_DIAGNOSTIC_CHARS 以内且模型名带省略号，实际长度 {}：{reply_long}",
+        reply_long.chars().count()
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    // 验证步骤 2 与步骤 3 的两次图片提交均在真实后台准入预检阶段拦截，假模型零新增 HTTP 连接
+    let no_extra_conn = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(harness.listener.poll_accept(cx).is_pending())
+    })
+    .await;
+    assert!(
+        no_extra_conn,
+        "步骤 2 与步骤 3 的纯文本模型发图必须在准入阶段拦截，假模型保持零新连接"
+    );
+
     harness.shutdown().await;
 }
 

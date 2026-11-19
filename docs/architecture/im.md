@@ -158,7 +158,7 @@ sequenceDiagram
 关键分支处理：
 
 1. **相册收集、闭合判定与空轮询节流**：
-   - 授权私聊消息携带 `media_group_id` 时，先查台账（已落账的 `DeliveredTurn`、`Accepted`、`Registered` 或 `Merged` 立即静默确认跳过），再查当前对话内存中最近 `64` 个已闭合 `media_group_id` 集合（FIFO 淘汰）：若新 `update_id` 命中已闭合集合，说明分片延迟到达，不下载、不写台账，立即确认并回复 `该相册部分图片延迟到达，未并入上一轮`。
+   - 授权私聊消息携带 `media_group_id` 时，先查台账（已落账的 `DeliveredTurn`、`Accepted`、`Registered` 或 `Merged` 立即静默确认跳过，不扰动当前开放相册）；若当前对话存在另一个 `media_group_id` 的开放相册则先将其闭合入队，再查该对话内存中最近 `64` 个已闭合 `media_group_id` 集合（FIFO 淘汰）：若该新分片的 `media_group_id` 命中该对话的近期已闭合集合，说明分片延迟到达，不下载、不写台账，立即确认并回复 `该相册部分图片延迟到达，未并入上一轮`。
    - 其余分片加入 `(ChatKey, media_group_id)` 开放缓冲并全程持有 `InFlightGuard`，收集期间不调用 `acknowledge`（窗口内停机或崩溃后由 Telegram 完整重投整组相册）。满足以下任一条件时按数值 `update_id` 升序闭合相册、记入近期已闭合集合并排入单对话 FIFO 准入队列：
      - **静默窗口到期（`600ms`）**：每次收到同对话同 `media_group_id` 新分片将截止时刻重置为 `now + 600ms`，到期无新分片即闭合；
      - **同对话收到下一条非本相册事件**：同一 `ChatKey` 收到无 `media_group_id` 的消息/命令或另一个 `media_group_id` 的分片时，先闭合当前开放相册入队，再处理新事件（`stopped_message_generation` 不闭合开放相册）；
@@ -182,7 +182,7 @@ sequenceDiagram
 5. **草稿停止按钮**：收到私聊 `stopped_message_generation` 时立即确认更新且不闭合当前开放相册，在内存 `ActiveDrafts` 中按 `(ChatKey, draft_id)` 查找在途 `TurnId`；命中则调用 `Service::cancel(turn_id)` 并按 `/cancel` 同一文案回复，未命中（轮次已收尾或跨实例重挂）不发多余消息。
 6. **回复切分与发送错误处理**：
    - 最终回复取 `InProcessTurnOutcome.assistant_text`；若终态不是 `Completed`，在末尾附一行脱敏后的中文结局说明（正文与结局均为空时用简短兜底文本避免空消息）。总长度超过 4096 个 Unicode 字符时，优先按段落边界（保留 `\n\n`）、次按行边界（保留 `\n`）、最后按 4096 字符边界无损切分为多条消息按序发送（拼接严格还原原文），不切碎多字节字符。
-   - `sendMessage` 与 `getUpdates` 遇到 HTTP `429` 时完整遵守服务端 `retry_after`（本地指数退避上限仅约束无 `retry_after` 或 `5xx`/网络传输错误）并带停止监听退避重试（`getUpdates` 退避期间照常按截止时刻闭合到期相册）；遇到 HTTP `400` 或 `403` 视为平台拒收终态，记录告警日志、不再重试，并将关联首条台账标记为 `DeliveredTurn`。
+   - `sendMessage` 与 `getUpdates` 遇到 HTTP `429` 时完整遵守服务端 `retry_after`（本地指数退避上限仅约束无 `retry_after` 的限流及其他可重试错误）并在监听停止信号的前提下退避重试；`getUpdates` 遇到非限流错误时按指数退避重试（退避期间照常按截止时刻闭合到期相册）；仅 `sendMessage` 遇到 HTTP `400` 或 `403` 时视为平台拒收终态，记录告警日志、不再重试，并将关联首条台账标记为 `DeliveredTurn`（`sendMessage` 的其余非限流错误按指数退避重试）。
 7. **确认游标与优雅收尾**：
    - 写台账事件（文本消息、核验通过的单图/相册、`/new`）在台账落盘后确认；静态快筛或下载核验被拒的图片/相册在拒绝时一次性确认；其余事件收到即确认。确认调用始终发生在释放 `InFlightGuard` 之前，且单对话 worker 出队后再次复核平台确认状态与台账记录，杜绝拒绝或落账边界的重投竞态。`OffsetTracker` 仅弹出队首连续已确认前缀并将下一轮 offset 设为最后弹出 `update_id + 1`。
    - 收到外部 `stop` 或 `Service::stopping()` 通知时，广播内部停止信号中断所有长轮询、相册等待、下载重试与发送退避，等待轮询循环、`JoinSet` 中全部恢复/准入/草稿/台账写入子任务以及 `TelegramIo::drain` 中的在途阻塞解析任务完全退出后 `run` 才返回；即使 `run` 被宿主强制中止，生命周期守卫 `LedgerPublicationGuard` 也会在丢弃时同步封闭发布门闩，阻止阻塞线程池中滞留的旧台账写入覆盖新实例数据。若轮询或任一受监督子任务发生 panic，先广播停止并排空同代子任务，再向宿主重新抛出 panic 供组件层隔离。
@@ -209,12 +209,13 @@ stateDiagram-v2
 | 保证 | 适用范围 | 成立条件 | 依据或验证 |
 | --- | --- | --- | --- |
 | 配置改坏或组件崩溃不中断后台会话与已有可用网关 | 守护进程运行期全部重新挂载与组件异常 | `InvalidConfiguration` 且旧实例存活时保留旧实例继续运行；组件返回错误或 panic 时由监督任务捕获并转为 `Unmounted`（不泄露原始 panic 载荷），旧实例未退出前绝不并行启动新实例 | `local::components_tests`、`gateway_tests::gateway_panic_is_isolated_in_daemon_status_and_recovers_on_im_reload`、`gateway_tests::hosted_gateway_subtask_panic_never_leaks_payload_to_stderr` |
-| 平台重投不重复下载或重复提交轮次，旧 `/new` 重投不清掉后续新会话绑定 | Telegram 24 小时重投窗口（含 5 分钟裕量）内的全部文本、单图、相册与 `/new` | 相册在同一次台账原子替换中写入首条 `Registered` 与其余 `Merged`，先确认平台再释放 `InFlightGuard` 并在 worker 出队复核；窗口清理保留窗口内终态条目及关联在途轮次的全部 `Merged` 条目 | `ledger::tests`、`gateway_tests::deduplicates_inbound_id_preserves_single_session_and_handles_new_and_non_ledger_events`、`gateway_tests::replies_late_fragment_notice_for_new_update_id_and_silently_acks_redelivered_merged_id`、`gateway_tests::rejected_image_redelivery_race_never_redownloads_replies_twice_or_creates_turn` |
+| 同实例重投去重：不重复下载、不重复回复、不重复提交 | 同一网关实例运行期收到的全部入站更新（含图片拒绝与落账边界） | 同一实例内依靠 `in_flight_inbound`、先 `acknowledge` 后释放 `InFlightGuard`、`OffsetTracker` 与单对话 worker 出队复核，消除拒绝或落账边界的重投竞态 | `gateway_tests::deduplicates_inbound_id_preserves_single_session_and_handles_new_and_non_ledger_events`、`gateway_tests::rejected_image_redelivery_race_never_redownloads_replies_twice_or_creates_turn`、`gateway_tests::late_fragment_of_closed_album_closes_different_open_album_before_late_reply` |
+| 跨实例重投去重：已落账事件不重复提交轮次，旧 `/new` 重投不清掉后续新会话绑定 | 跨重启或重挂在 Telegram `24h + 5m` 重投窗口内的文本、核验通过的单图/相册与 `/new`（未落账的静态快筛/下载拒绝不写入台账，仅在平台 `offset` 越过该 `update_id` 后不再重投） | 依靠 `<state-root>/lattice/im/ledger` 持久台账去重：文本、核验通过的单图/相册（同一次原子落盘写入首条 `Registered` 与其余 `Merged`）及 `/new` 在原子落盘后才确认平台；窗口清理保留 `24h + 5m` 终态及关联在途轮次的 `Merged` | `ledger::tests`、`gateway_tests::deduplicates_inbound_id_preserves_single_session_and_handles_new_and_non_ledger_events`、`gateway_tests::replies_late_fragment_notice_for_new_update_id_and_silently_acks_redelivered_merged_id`、`gateway_tests::preserves_unclosed_album_offset_across_shutdown_and_recovers_registered_plus_merged_once` |
 | 受控媒体下载不越界、不留下空草稿会话且停机中断不丢更新 | 全部私聊图片与相册下载及核验路径 | 先静态快筛，再经固定公网地址客户端校验 `getFile` 相对路径并有界流式读取 `max_bytes + 1` 字节，魔数核验全部通过后才写台账并调用 `configure(New)`；收集窗口内或下载重试期间停机不调用 `acknowledge` | `media::tests`、`telegram_http::tests`、`gateway_tests::rejects_disguised_empty_oversized_and_invalid_path_images_without_ledger_or_draft_session_and_accepts_exact_max_bytes`、`gateway_tests::preserves_unclosed_album_offset_across_shutdown_and_recovers_registered_plus_merged_once` |
 | 崩溃或重挂后不丢失已接受轮次的最终回复（含 `HTTP 413` 等失败结局引导），也不阻塞新命令轮询 | 遗留 `Registered` 与 `Accepted` 条目及在途重新挂载 | 启动时同步建立同 chat 准入屏障后异步恢复并立即启动 `getUpdates`；重新挂载保持后台 `epoch` 不变，新实例从持久会话库读取终态与 `summary.notice` 补发回复 | `gateway_tests::recovers_all_ledger_phases_without_blocking_polling_and_orders_same_chat_after_registered`、`gateway_tests::reload_mid_turn_preserves_epoch_and_new_gateway_delivers_final_reply`、`gateway_tests::delivers_http_413_guidance_both_live_and_via_recovered_summary_notice` |
 | 机器人凭据与非法平台输入不出现在任何错误、日志、CLI 回显或用户回复中 | `im_auth`、`lattice-cli` 与 `lattice-im`（含 `getFile` 与 `/file/bot<token>/...` 下载路径） | CLI 先本地拒绝非法平台并拦截参数解析错误，终端秘密输入关闭回显；`ImToken` 无 `Debug`/`Display` 且释放清零，`reqwest::Error` 先 `without_url()` 再经无长度门槛的 `ImRedactor` 替换 | `im_auth::tests`、`commands::im::tests`、`redact::tests`、`telegram_http::tests`、`fast_im_cli` |
 | 流式草稿不含隐藏推理且同一 chat 每秒至多发送 1 条草稿 | 当前实例提交的在途轮次 | `InProcessTurn` 只提取纯文本语义段，`ChatDraftThrottleMap` 按 `ChatKey` 共享 1 秒节流与 25 秒保活并截取末尾 4096 字符 | `reply::tests`、`gateway_tests::full_turn_lifecycle_streams_clean_draft_and_stop_button_cancels_active_turn` |
-| 出站 HTTPS 请求不走代理、不跟随重定向且固定连接已校验公网地址 | `TelegramHttpClient` 全部 Bot API 与文件下载请求 | 运行期每次建连经 `net_guard` 校验 `https://api.telegram.org` 并 `resolve_to_addrs` 固定公网地址，仅注入后台启动期根证书 | `telegram_http.rs` 实现与 `telegram_http::tests` |
+| 出站 HTTPS 请求不走代理、不跟随重定向且固定连接已校验公网地址 | `TelegramHttpClient` 全部 Bot API 与文件下载请求 | 运行期在构建或重建 HTTP 客户端时经 `net_guard` 校验 `https://api.telegram.org` 并通过 `resolve_to_addrs` 固定公网地址，仅注入后台启动期根证书 | `telegram_http.rs` 实现与 `telegram_http::tests` |
 
 ## 范围之外
 

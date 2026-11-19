@@ -32,7 +32,7 @@
 
 ## 约束
 
-- 内部依赖仅限 `lattice-server`、`lattice-ipc`、`lattice-store` 与 `net-guard`；整个工作区中只有 `lattice-daemon` 允许依赖 `lattice-im`（含 `dev-dependencies`），由 `cargo xtask crate-boundary` 门禁强制检查。
+- 内部直接依赖（`dependencies` 与 `build-dependencies`）仅限 `lattice-server`、`lattice-ipc`、`lattice-store` 与 `net-guard`（`dev-dependencies` 允许按需用于跨前端测试）；整个工作区中只有 `lattice-daemon` 允许依赖 `lattice-im`（含 `dev-dependencies`），由 `cargo xtask crate-boundary` 门禁强制检查。
 - 构造阶段 `prepare_im_gateway` 只读检查本地配置文件与凭据，严禁在构造阶段启动异步任务、解析 DNS、调用 `net_guard::validate_base_url`、发起网络请求或读写正在被上一代实例使用的台账。
 - 本包唯一的 trait 是测试替身 `TelegramIo`；不引入时钟、存储或后台服务抽象 trait，集成测试直接连接真实进程内 `Service` 与临时状态根。
 - Telegram 将机器人凭据放在请求 URL 路径（含 `/bot<token>/getFile` 与 `/file/bot<token>/<file_path>`）中，所有 `reqwest::Error` 必须先调用 `without_url()`，再经 `ImRedactor` 替换全部非空已知凭据后才允许进入日志、诊断或用户回复；台账严禁保存凭据、消息正文、图片字节、说明文字、回复正文、轮询游标或草稿编号。

@@ -416,7 +416,9 @@ pub(crate) fn compose_final_reply(outcome: &InProcessTurnOutcome, redactor: &ImR
             }
         }
         PublicTurnOutcome::Cancelled => {
-            let detail = extract_outcome_detail(outcome, redactor);
+            let detail = extract_raw_outcome_detail(outcome)
+                .map(|raw| redactor.sanitize_single_line(raw))
+                .unwrap_or_default();
             let note = if detail.is_empty() {
                 "［本轮已取消］".to_owned()
             } else {
@@ -425,12 +427,15 @@ pub(crate) fn compose_final_reply(outcome: &InProcessTurnOutcome, redactor: &ImR
             append_outcome_note(body, &note)
         }
         PublicTurnOutcome::Failed => {
-            let detail = extract_outcome_detail(outcome, redactor);
-            let note = if detail.is_empty() {
+            let formatted = extract_raw_outcome_detail(outcome)
+                .map(|raw| {
+                    crate::command::format_backend_image_rejection(raw, redactor)
+                        .unwrap_or_else(|| redactor.sanitize_single_line(raw))
+                })
+                .unwrap_or_default();
+            let note = if formatted.is_empty() {
                 "［本轮执行失败］".to_owned()
             } else {
-                let formatted =
-                    crate::command::format_backend_image_rejection(&detail).unwrap_or(detail);
                 format!("［本轮执行失败：{formatted}］")
             };
             append_outcome_note(body, &note)
@@ -438,20 +443,24 @@ pub(crate) fn compose_final_reply(outcome: &InProcessTurnOutcome, redactor: &ImR
     }
 }
 
-fn extract_outcome_detail(outcome: &InProcessTurnOutcome, redactor: &ImRedactor) -> String {
-    if let Some(diag) = &outcome.diagnostic {
-        let cleaned = redactor.sanitize_single_line(&diag.message);
-        if !cleaned.is_empty() {
-            return cleaned;
-        }
+fn extract_raw_outcome_detail(outcome: &InProcessTurnOutcome) -> Option<&str> {
+    if let Some(diag) = &outcome.diagnostic
+        && diag
+            .message
+            .chars()
+            .any(|ch| !ch.is_control() && !ch.is_whitespace())
+    {
+        return Some(&diag.message);
     }
-    if let Some(notice) = &outcome.detail.summary.notice {
-        let cleaned = redactor.sanitize_single_line(&notice.text);
-        if !cleaned.is_empty() {
-            return cleaned;
-        }
+    if let Some(notice) = &outcome.detail.summary.notice
+        && notice
+            .text
+            .chars()
+            .any(|ch| !ch.is_control() && !ch.is_whitespace())
+    {
+        return Some(&notice.text);
     }
-    String::new()
+    None
 }
 
 fn append_outcome_note(body: &str, note: &str) -> String {
@@ -841,6 +850,39 @@ mod tests {
                 );
             }
         }
+
+        // 反例与超长模型名核验：HTTP 404 含 "model HTTP 413 not found" 绝不附加大小拒绝引导，600 字符长模型名在截断前识别
+        let not_found_413 = compose_final_reply(
+            &make_outcome(
+                PublicTurnOutcome::Failed,
+                "",
+                Some("HTTP 404 not_found_error: model HTTP 413 not found"),
+                None,
+            ),
+            &redactor,
+        );
+        assert_eq!(
+            not_found_413, "［本轮执行失败：HTTP 404 not_found_error: model HTTP 413 not found］",
+            "HTTP 404 正文含 HTTP 413 字样时不得误触发请求大小拒绝引导"
+        );
+        assert!(!not_found_413.contains("目标服务拒绝了本次请求大小"));
+        assert!(!not_found_413.contains("/new"));
+
+        let long_model_raw = format!(
+            "模型 local/{} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+            "a".repeat(600)
+        );
+        let long_model_reply = compose_final_reply(
+            &make_outcome(PublicTurnOutcome::Failed, "", None, Some(&long_model_raw)),
+            &redactor,
+        );
+        assert!(
+            long_model_reply.contains("不支持图片输入")
+                && long_model_reply.contains("减少图片")
+                && long_model_reply.contains("/new")
+                && long_model_reply.contains("lattice session rewind"),
+            "Failed 结局下超长模型名必须在截断前识别并保留完整引导：{long_model_reply}"
+        );
 
         // 普通 Failed、Cancelled 与 Completed 保持不变
         assert_eq!(

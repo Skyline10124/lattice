@@ -71,7 +71,7 @@ flowchart LR
 | 供应商可用性诊断文案 | `lattice-llm`（[`availability.rs`](../../crates/lattice-llm/src/availability.rs)） | 诊断文案由 `lattice-llm::Availability::diagnostic` 单一持有，后台在 [`local/presentation.rs`](../../crates/lattice-server/src/local/presentation.rs) 结合自身配置目录下的 `<config_dir>/providers.toml` 生成 `ProviderAuthStatus.diagnostic: Option<String>`（`Ready` 为 `None`）并随 `AuthStatus` 与 `AuthLoginResult::SignedIn` 经 IPC 下发；`lattice-ipc` 与前端不再重复维护诊断文案或本地拼接配置路径 |
 | 会话与对话领域值类型 | `lattice-session`、`lattice-conversation` | 持久格式、校验与存储事务归原 crate 持有；`lattice-ipc` 仅按线上消息所需显式选择性重导出领域只读值类型，再由 `lattice-local` 扁平重导出给前端，不重导出 `SessionStore` 或写入接口 |
 | 共用的 `--drain-timeout` 时长解析 | [`lattice-ipc`](../../crates/lattice-ipc/src/lib.rs)（私有模块 [`drain_timeout.rs`](../../crates/lattice-ipc/src/drain_timeout.rs)，经根模块显式导出） | `DrainTimeout` 与 `parse_drain_timeout` 只用于命令行参数解析，不实现 `serde`、不进入线上快照；`lattice-daemon` 直接使用 `lattice-ipc` 的导出，`lattice-local` 为 CLI 重导出所需条目 |
-| 前端与后台托管消费路径 | `lattice-tui`、`lattice-cli`、`lattice-im`、`lattice-daemon` | `lattice-tui` 只依赖 `lattice-local`；`lattice-cli` 只依赖 `lattice-local` 与 `lattice-tui`，不再依赖 `lattice-server`；`lattice-im` 只依赖 `lattice-server`、`lattice-ipc`、`lattice-store` 与 `net-guard`，且整个工作区中只有 `lattice-daemon` 允许依赖 `lattice-im`；后台守护进程由独立的 `lattice-daemon` 二进制承担 |
+| 前端与后台托管消费路径 | `lattice-tui`、`lattice-cli`、`lattice-im`、`lattice-daemon` | 内部直接依赖（`dependencies` 与 `build-dependencies`）受白名单约束（`dev-dependencies` 允许按需用于跨前端与后台测试）：`lattice-tui` 只依赖 `lattice-local`；`lattice-cli` 只依赖 `lattice-local` 与 `lattice-tui`；`lattice-im` 内部直接依赖仅限 `lattice-server`、`lattice-ipc`、`lattice-store` 与 `net-guard`，且整个工作区中只有 `lattice-daemon` 允许依赖 `lattice-im`（含 `dev-dependencies`）；后台守护进程由独立的 `lattice-daemon` 二进制承担 |
 
 ## 依赖边界门禁
 
