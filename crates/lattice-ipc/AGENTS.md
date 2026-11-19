@@ -6,7 +6,7 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 仅公开 `ipc` 子模块（`auth`、`drain_timeout`、`models`、`types` 为私有模块），在根模块显式重导出 IPC 协议类型、模型与凭据展示类型、`DrainTimeout`、`parse_drain_timeout`、`require_chatgpt`，以及线上消息引用的 `lattice-conversation` 与 `lattice-session` 只读领域值类型 |
+| `src/lib.rs` | 仅公开 `ipc` 子模块（`auth`、`drain_timeout`、`models`、`types` 为私有模块），在根模块显式重导出 IPC 协议类型、模型与凭据展示类型、`DrainTimeout`、`parse_drain_timeout`、`require_chatgpt`，以及线上消息引用的 `lattice-conversation` 与 `lattice-session` 只读领域值类型和单轮用户输入上限常量（`MAX_IMAGE_BYTES`、`MAX_USER_IMAGES_PER_TURN`、`MAX_USER_IMAGE_TOTAL_BYTES`、`MAX_USER_TEXT_BYTES`） |
 | `src/drain_timeout.rs` | `--drain-timeout` 时长值 `DrainTimeout` 与解析函数 `parse_drain_timeout`（支持 `ms`、`s`、`m` 与无单位秒；不实现 `serde`，不进入线上格式） |
 | `src/types.rs` | 分页常量（`WATCH_TURNS`、`HISTORY_TURNS`、`MAX_HISTORY_TURNS`）、`Request` / `Response`、会话配置与提交载荷（`UserInputPart`、`TurnRequest<I>`，图片为标准 base64）、`encoded_submit_len` 的输入 `PlannedTurnRequest`、视图更新、`DaemonStatus` / `ComponentStatus` / `ComponentState`、IM 凭据与挂载载荷（`ImMountResult`、`ImAuthSetReply`、`ImAuthRemoveReply`、`ImCredentialStatus`、`ImPlatformAuthStatus`、`ImAuthStatus`）、`LocalError` / `RequestConflict`（`ConflictReason`）与恢复/存储诊断、`TurnRef` / `TextSegment` 及 Unix 路径原始字节 serde |
 | `src/models.rs` | `ModelCandidateQuery` 请求类型，以及 `ModelCandidates`、`ModelCandidate`、`ModelPrice`、`ModelWarning`、`Availability`（含 `status_str`）、`ConfigurationRequirement`（含 `Display`）展示类型 |

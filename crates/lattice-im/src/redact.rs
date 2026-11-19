@@ -6,7 +6,7 @@
 use lattice_server::ImToken;
 
 /// 单条脱敏诊断的最大 Unicode 字符数。
-const MAX_DIAGNOSTIC_CHARS: usize = 512;
+pub(crate) const MAX_DIAGNOSTIC_CHARS: usize = 512;
 
 /// 持有当前 IM 实例已知平台凭据的脱敏器。
 #[derive(Clone)]
@@ -41,13 +41,13 @@ impl ImRedactor {
         output
     }
 
-    /// 替换全部已知凭据，将换行与控制字符折叠为单个空格，并按字符边界截断到上限以内。
-    pub(crate) fn sanitize_single_line(&self, input: &str) -> String {
-        let redacted = self.redact_str(input);
+    /// 替换全部已知凭据，并将换行、控制字符与连续空白折叠为单个空格（不做字符长度截断）。
+    pub(crate) fn redact_single_line_unbounded(&self, raw: &str) -> String {
+        let redacted = self.redact_str(raw);
         let mut normalized = String::with_capacity(redacted.len());
         let mut prev_space = false;
         for ch in redacted.chars() {
-            if ch.is_control() || ch == ' ' {
+            if ch.is_control() || ch.is_whitespace() {
                 if !prev_space && !normalized.is_empty() {
                     normalized.push(' ');
                     prev_space = true;
@@ -60,7 +60,13 @@ impl ImRedactor {
         if normalized.ends_with(' ') {
             normalized.pop();
         }
-        truncate_chars(&normalized, MAX_DIAGNOSTIC_CHARS)
+        normalized
+    }
+
+    /// 替换全部已知凭据，将换行、控制字符与空白折叠为单个空格，并按字符边界截断到上限以内。
+    pub(crate) fn sanitize_single_line(&self, input: &str) -> String {
+        let normalized = self.redact_single_line_unbounded(input);
+        truncate_diagnostic_chars(&normalized, MAX_DIAGNOSTIC_CHARS)
     }
 
     /// 对 `reqwest::Error` 先剥离携带 `/bot<token>/<method>` 的请求 URL，再执行凭据替换与单行截断。
@@ -78,12 +84,16 @@ impl std::fmt::Debug for ImRedactor {
     }
 }
 
-fn truncate_chars(text: &str, max_chars: usize) -> String {
+/// 按 Unicode 字符边界将文本截断到 `max_chars` 以内，超长时保留 `max_chars - 1` 个字符并附 `…`。
+pub(crate) fn truncate_diagnostic_chars(text: &str, max_chars: usize) -> String {
+    if max_chars == 0 {
+        return String::new();
+    }
     let total = text.chars().count();
     if total <= max_chars {
         return text.to_owned();
     }
-    let keep = max_chars.saturating_sub(1);
+    let keep = max_chars - 1;
     let mut out: String = text.chars().take(keep).collect();
     out.push('…');
     out
@@ -116,6 +126,18 @@ mod tests {
         let redactor = ImRedactor::new([secret]);
         let long_tail = "甲".repeat(600);
         let raw = format!("第一行\r\n\t携带 tg-secret-token-999\n{long_tail}");
+
+        let unbounded = redactor.redact_single_line_unbounded(&raw);
+        assert!(
+            !unbounded.contains('\n') && !unbounded.contains('\r') && !unbounded.contains('\t')
+        );
+        assert!(!unbounded.contains("tg-secret-token-999"));
+        assert!(unbounded.contains("[REDACTED]"));
+        assert!(
+            unbounded.chars().count() > MAX_DIAGNOSTIC_CHARS,
+            "无长度上限的单行脱敏不得截断末尾文本"
+        );
+        assert!(unbounded.ends_with(&long_tail));
 
         let cleaned = redactor.sanitize_single_line(&raw);
         assert!(!cleaned.contains('\n'), "单行诊断不得残留换行");

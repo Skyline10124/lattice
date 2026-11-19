@@ -6,9 +6,9 @@ status: active
 
 | 项 | 内容 |
 | --- | --- |
-| 目标 | 配置并启用内置 Telegram 私聊网关，管理平台凭据与热重载，验证流式草稿、停止按钮与内置斜杠命令 |
+| 目标 | 配置并启用内置 Telegram 私聊网关，管理平台凭据与热重载，验证文本、单图与多图相册输入、流式草稿、停止按钮与内置斜杠命令 |
 | 前提 | 本地后台 `lattice-daemon` 已运行，目标工作区内已准备好可用的 `agent` 与模型凭据；已从 `@BotFather` 取得机器人 Token 与本人 Telegram 数字 `user_id` |
-| 规则 | [IM 网关](../../../architecture/im.md)、[ADR 0011](../../../adr/0011-im-gateway-inside-backend.md)、[验证操作指南](../../validation-guide.md#判读结果) |
+| 规则 | [IM 网关](../../../architecture/im.md)、[ADR 0011](../../../adr/0011-im-gateway-inside-backend.md)、[ADR 0013](../../../adr/0013-user-image-input.md)、[验证操作指南](../../validation-guide.md#判读结果) |
 
 ## 命令
 
@@ -41,8 +41,9 @@ lattice im auth remove telegram
 
 在已加入 `allowed_senders` 的账号私聊窗口中依次发送：
 
-- `/help` 或 `/start`：查看内置命令列表；
+- `/help` 或 `/start`：查看内置命令列表与图文发送说明；
 - 任意纯文本问题：观察流式草稿更新、草稿下方的停止生成按钮与最终分段回复；
+- 单张合法图片（PNG、JPEG、WebP 或 GIF，可附说明文字）与一次勾选多张图片组成的相册：观察单图与多图相册各合并为一轮对话提交并返回回复；
 - `/status`、`/usage`：查看当前绑定会话的模型设置与累计 token/费用；
 - `/cancel`：取消当前正在执行的轮次；
 - `/new`：清除当前私聊绑定的会话，下一条普通消息开启新会话。
@@ -56,4 +57,4 @@ lattice im auth remove telegram
 | `im：已挂载；仍按上一份配置运行；<原因>`（`lattice im reload` 退出 `1`） | 新修改的配置文件或凭据文件不合规，后台保留修改前仍在运行的网关实例继续服务；按提示修复文件后保存或执行 `lattice im reload` |
 | `im：未挂载；<原因>`（`lattice im reload` 退出 `1`） | 缺少凭据、目录/文件权限过宽（须属于当前用户且无组/其他用户权限，后台不自动改权限）、工作区不存在或运行期遭遇不可恢复台账错误；按原因修复后执行 `lattice im reload` |
 | 删除 `~/.lattice/im` 后自动重载未触发 | 目录被删会使原 `inotify` 监视失效且后台不自动重建目录；执行一次 `lattice im reload` 即可重建 `0700` `~/.lattice/im` 并恢复自动监视 |
-| 私聊发送图片/文件收到 `只支持文本消息`，或群聊无响应 | 网关仅服务 `allowed_senders` 白名单内的私聊纯文本消息；非私聊或非白名单消息静默确认丢弃 |
+| 私聊发送合法 PNG/JPEG/WebP/GIF 单图或相册创建轮次，发送贴纸/视频/语音等不受支持媒体收到 `只支持文本和图片消息（PNG、JPEG、WebP、GIF）`，群聊或非白名单账号无响应 | 支持图片输入的模型收到白名单私聊内的合法单图或相册会下载核验并创建轮次；不受支持媒体收到 `只支持文本和图片消息（PNG、JPEG、WebP、GIF）`；非私聊或非白名单消息静默确认丢弃 |

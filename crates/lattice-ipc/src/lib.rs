@@ -19,8 +19,9 @@ pub use auth::{
 pub use drain_timeout::{DrainTimeout, parse_drain_timeout};
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
-    InvocationId, MessageRole, MessageSemantic, ModelAttemptKey, ModelId, ModelIdError, ModelRef,
-    ModelRefError, NativeMessage, ProviderId, ProviderIdError, ResultPayload, SessionId,
+    InvocationId, MAX_IMAGE_BYTES, MAX_USER_IMAGE_TOTAL_BYTES, MAX_USER_IMAGES_PER_TURN,
+    MAX_USER_TEXT_BYTES, MessageRole, MessageSemantic, ModelAttemptKey, ModelId, ModelIdError,
+    ModelRef, ModelRefError, NativeMessage, ProviderId, ProviderIdError, ResultPayload, SessionId,
     StepContent, StoredToolResult, SuccessContent, TokenSummary, ToolError, ToolResultOutcome,
     TurnId, UsageCompleteness,
 };

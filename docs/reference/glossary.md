@@ -166,6 +166,6 @@ _Avoid_: frozen configuration, current agent lookup, session config cache
 _Avoid_: 请求网关, 独立桥接进程, webhook 服务, 远程后台入口
 
 **台账**:
-英文名 Ledger。`lattice-im` 在 `<state-root>/lattice/im/ledger` 维护的私有状态文件，只保存外部对话与 `SessionId` 的当前绑定及重投窗口内入站事件的投递相位（`Registered`、`Accepted`、`Delivered`）；对话历史仍在会话树中，它也不保存消息正文或模型与工具调用记录。
+英文名 Ledger。`lattice-im` 在 `<state-root>/lattice/im/ledger` 维护的私有状态文件，只保存外部对话与 `SessionId` 的当前绑定及重投窗口内入站事件的相位（`Registered`、`Accepted`、`Merged`、`DeliveredTurn`、`DeliveredReset`）；对话历史与图片内容保存在会话库中，它不保存消息正文、图片字节或模型与工具调用记录。
 见[IM 网关](../architecture/im.md#状态)。
 _Avoid_: 会话树, invocation ledger, `invocations.git`, 消息历史库

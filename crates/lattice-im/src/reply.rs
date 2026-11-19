@@ -114,52 +114,65 @@ impl Drop for DraftLease {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum DeadlineBound {
+    #[default]
+    Ready,
+    Until(tokio::time::Instant),
+    Indefinite,
+}
+
 /// 按 `ChatKey` 共享的 1 秒草稿节流表：同一对话下新旧会话的轮次共同遵守每秒至多 1 条限制。
 #[derive(Default)]
 pub(crate) struct ChatDraftThrottleMap {
-    chats: StdMutex<BTreeMap<ChatKey, Arc<AsyncMutex<Option<tokio::time::Instant>>>>>,
+    chats: StdMutex<BTreeMap<ChatKey, Arc<AsyncMutex<DeadlineBound>>>>,
 }
 
 impl ChatDraftThrottleMap {
-    fn bucket(&self, chat: &ChatKey) -> Arc<AsyncMutex<Option<tokio::time::Instant>>> {
+    fn bucket(&self, chat: &ChatKey) -> Arc<AsyncMutex<DeadlineBound>> {
         let mut guard = self.chats.lock().expect("草稿节流表锁不应中毒");
         Arc::clone(
             guard
                 .entry(chat.clone())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(None))),
+                .or_insert_with(|| Arc::new(AsyncMutex::new(DeadlineBound::Ready))),
         )
     }
 
-    async fn earliest_allowed(&self, chat: &ChatKey) -> tokio::time::Instant {
+    async fn earliest_allowed(&self, chat: &ChatKey) -> Option<tokio::time::Instant> {
         let bucket = self.bucket(chat);
         let guard = bucket.lock().await;
         let now = tokio::time::Instant::now();
         match *guard {
-            Some(until) if until > now => until,
-            _ => now,
+            DeadlineBound::Ready => Some(now),
+            DeadlineBound::Until(until) if until > now => Some(until),
+            DeadlineBound::Until(_) => Some(now),
+            DeadlineBound::Indefinite => None,
         }
     }
 
-    async fn try_claim_now(&self, chat: &ChatKey) -> Result<(), tokio::time::Instant> {
+    async fn try_claim_now(&self, chat: &ChatKey) -> bool {
         let bucket = self.bucket(chat);
         let mut guard = bucket.lock().await;
         let now = tokio::time::Instant::now();
-        if let Some(until) = *guard
-            && until > now
-        {
-            return Err(until);
+        match *guard {
+            DeadlineBound::Indefinite => return false,
+            DeadlineBound::Until(until) if until > now => return false,
+            DeadlineBound::Ready | DeadlineBound::Until(_) => {}
         }
-        *guard = Some(now + DRAFT_THROTTLE_INTERVAL);
-        Ok(())
+        *guard = DeadlineBound::Until(now + DRAFT_THROTTLE_INTERVAL);
+        true
     }
 
-    async fn record_rate_limit(&self, chat: &ChatKey, retry_until: tokio::time::Instant) {
+    async fn record_rate_limit(&self, chat: &ChatKey, retry_until: Option<tokio::time::Instant>) {
         let bucket = self.bucket(chat);
         let mut guard = bucket.lock().await;
-        *guard = Some(match *guard {
-            Some(existing) if existing > retry_until => existing,
-            _ => retry_until,
-        });
+        *guard = match (*guard, retry_until) {
+            (DeadlineBound::Indefinite, _) | (_, None) => DeadlineBound::Indefinite,
+            (DeadlineBound::Until(existing), Some(until)) if existing > until => {
+                DeadlineBound::Until(existing)
+            }
+            (_, Some(until)) => DeadlineBound::Until(until),
+        };
     }
 }
 
@@ -171,6 +184,19 @@ pub(crate) async fn wait_stop_signal(stop: &mut watch::Receiver<bool>) {
         if stop.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// 等待指定退避时长或停机信号：等待期满返回 `true`；收到停机信号（或 `wait` 超出 `Instant` 表示范围后等待停机唤醒）返回 `false`。
+pub(crate) async fn sleep_or_stop(wait: Duration, stop: &mut watch::Receiver<bool>) -> bool {
+    let Some(deadline) = tokio::time::Instant::now().checked_add(wait) else {
+        wait_stop_signal(stop).await;
+        return false;
+    };
+    tokio::select! {
+        biased;
+        _ = wait_stop_signal(stop) => false,
+        _ = tokio::time::sleep_until(deadline) => true,
     }
 }
 
@@ -187,7 +213,7 @@ struct DraftPacer<'a> {
     dirty: bool,
     last_sent_at: Option<tokio::time::Instant>,
     consecutive_failures: u32,
-    backoff_until: Option<tokio::time::Instant>,
+    backoff: DeadlineBound,
 }
 
 impl<'a> DraftPacer<'a> {
@@ -200,7 +226,7 @@ impl<'a> DraftPacer<'a> {
             dirty: false,
             last_sent_at: None,
             consecutive_failures: 0,
-            backoff_until: None,
+            backoff: DeadlineBound::Ready,
         }
     }
 
@@ -216,10 +242,11 @@ impl<'a> DraftPacer<'a> {
 
     async fn next_deadline(&self) -> Option<tokio::time::Instant> {
         self.latest_text.as_ref()?;
-        let allowed_at = self.throttles.earliest_allowed(self.chat).await;
-        let floor = match self.backoff_until {
-            Some(until) => allowed_at.max(until),
-            None => allowed_at,
+        let allowed_at = self.throttles.earliest_allowed(self.chat).await?;
+        let floor = match self.backoff {
+            DeadlineBound::Ready => allowed_at,
+            DeadlineBound::Until(until) => allowed_at.max(until),
+            DeadlineBound::Indefinite => return None,
         };
         if self.dirty {
             Some(floor)
@@ -233,12 +260,14 @@ impl<'a> DraftPacer<'a> {
 
     async fn prepare_send(&mut self) -> Option<(String, tokio::time::Instant)> {
         let text = self.latest_text.as_deref()?;
-        if let Some(until) = self.backoff_until
-            && tokio::time::Instant::now() < until
-        {
+        match self.backoff {
+            DeadlineBound::Ready => {}
+            DeadlineBound::Until(until) if tokio::time::Instant::now() >= until => {}
+            DeadlineBound::Until(_) | DeadlineBound::Indefinite => return None,
+        }
+        if !self.throttles.try_claim_now(self.chat).await {
             return None;
         }
-        self.throttles.try_claim_now(self.chat).await.ok()?;
         let started_at = tokio::time::Instant::now();
         let preview = truncate_draft_tail(text);
         self.dirty = false;
@@ -254,7 +283,7 @@ impl<'a> DraftPacer<'a> {
             Ok(()) => {
                 self.last_sent_at = Some(started_at);
                 self.consecutive_failures = 0;
-                self.backoff_until = None;
+                self.backoff = DeadlineBound::Ready;
             }
             Err(err) => {
                 let completed_at = tokio::time::Instant::now();
@@ -275,17 +304,21 @@ impl<'a> DraftPacer<'a> {
                         ..
                     } => {
                         self.throttles
-                            .record_rate_limit(self.chat, completed_at + *ra)
+                            .record_rate_limit(self.chat, completed_at.checked_add(*ra))
                             .await;
                         (*ra).max(exp_backoff)
                     }
                     _ => exp_backoff,
                 };
-                self.backoff_until = Some(completed_at + wait);
+                self.backoff = match completed_at.checked_add(wait) {
+                    Some(until) => DeadlineBound::Until(until),
+                    None => DeadlineBound::Indefinite,
+                };
+                let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                 tracing::debug!(
                     chat = %self.chat,
                     draft_id = self.draft_id,
-                    wait_ms = wait.as_millis() as u64,
+                    wait_ms,
                     diagnostic = %err.diagnostic(),
                     "推送 Telegram 草稿失败，退避后等待后续刷新"
                 );
@@ -383,7 +416,9 @@ pub(crate) fn compose_final_reply(outcome: &InProcessTurnOutcome, redactor: &ImR
             }
         }
         PublicTurnOutcome::Cancelled => {
-            let detail = extract_outcome_detail(outcome, redactor);
+            let detail = extract_raw_outcome_detail(outcome)
+                .map(|raw| redactor.sanitize_single_line(raw))
+                .unwrap_or_default();
             let note = if detail.is_empty() {
                 "［本轮已取消］".to_owned()
             } else {
@@ -392,31 +427,40 @@ pub(crate) fn compose_final_reply(outcome: &InProcessTurnOutcome, redactor: &ImR
             append_outcome_note(body, &note)
         }
         PublicTurnOutcome::Failed => {
-            let detail = extract_outcome_detail(outcome, redactor);
-            let note = if detail.is_empty() {
+            let formatted = extract_raw_outcome_detail(outcome)
+                .map(|raw| {
+                    crate::command::format_backend_image_rejection(raw, redactor)
+                        .unwrap_or_else(|| redactor.sanitize_single_line(raw))
+                })
+                .unwrap_or_default();
+            let note = if formatted.is_empty() {
                 "［本轮执行失败］".to_owned()
             } else {
-                format!("［本轮执行失败：{detail}］")
+                format!("［本轮执行失败：{formatted}］")
             };
             append_outcome_note(body, &note)
         }
     }
 }
 
-fn extract_outcome_detail(outcome: &InProcessTurnOutcome, redactor: &ImRedactor) -> String {
-    if let Some(diag) = &outcome.diagnostic {
-        let cleaned = redactor.sanitize_single_line(&diag.message);
-        if !cleaned.is_empty() {
-            return cleaned;
-        }
+fn extract_raw_outcome_detail(outcome: &InProcessTurnOutcome) -> Option<&str> {
+    if let Some(diag) = &outcome.diagnostic
+        && diag
+            .message
+            .chars()
+            .any(|ch| !ch.is_control() && !ch.is_whitespace())
+    {
+        return Some(&diag.message);
     }
-    if let Some(notice) = &outcome.detail.summary.notice {
-        let cleaned = redactor.sanitize_single_line(&notice.text);
-        if !cleaned.is_empty() {
-            return cleaned;
-        }
+    if let Some(notice) = &outcome.detail.summary.notice
+        && notice
+            .text
+            .chars()
+            .any(|ch| !ch.is_control() && !ch.is_whitespace())
+    {
+        return Some(&notice.text);
     }
-    String::new()
+    None
 }
 
 fn append_outcome_note(body: &str, note: &str) -> String {
@@ -526,15 +570,15 @@ pub(crate) async fn send_text_reliably(
                     diagnostic,
                 }) => {
                     let wait = retry_after.unwrap_or(backoff);
+                    let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                     tracing::warn!(
                         chat = %chat,
-                        wait_ms = wait.as_millis() as u64,
+                        wait_ms,
                         diagnostic = %diagnostic,
                         "Telegram 发送消息触发限流，退避后重试"
                     );
-                    tokio::select! {
-                        _ = wait_stop_signal(&mut stop) => return Err(SendInterrupted),
-                        _ = tokio::time::sleep(wait) => {}
+                    if !sleep_or_stop(wait, &mut stop).await {
+                        return Err(SendInterrupted);
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_SEND_BACKOFF);
                 }
@@ -542,15 +586,15 @@ pub(crate) async fn send_text_reliably(
                     TelegramApiError::Retryable { diagnostic }
                     | TelegramApiError::UnauthorizedOrInvalid { diagnostic, .. },
                 ) => {
+                    let wait_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX);
                     tracing::warn!(
                         chat = %chat,
-                        wait_ms = backoff.as_millis() as u64,
+                        wait_ms,
                         diagnostic = %diagnostic,
                         "Telegram 发送消息失败，退避后重试"
                     );
-                    tokio::select! {
-                        _ = wait_stop_signal(&mut stop) => return Err(SendInterrupted),
-                        _ = tokio::time::sleep(backoff) => {}
+                    if !sleep_or_stop(backoff, &mut stop).await {
+                        return Err(SendInterrupted);
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_SEND_BACKOFF);
                 }
@@ -575,7 +619,7 @@ mod tests {
     use super::*;
     use crate::{
         identity::{new_session_id, new_turn_id},
-        telegram::TelegramUpdate,
+        telegram::TelegramPollBatch,
     };
 
     #[test]
@@ -700,6 +744,181 @@ mod tests {
     }
 
     #[test]
+    fn compose_final_reply_formats_image_and_size_rejections_from_live_diagnostic_and_recovered_notice()
+     {
+        let token = ImToken::parse("secret-tok-415").unwrap();
+        let redactor = ImRedactor::new([token]);
+        let empty_tok = TokenSummary {
+            known: Some(0),
+            complete: true,
+            overflowed: false,
+        };
+        let make_outcome =
+            |pub_outcome: PublicTurnOutcome,
+             assistant_text: &str,
+             diag_msg: Option<&str>,
+             notice_msg: Option<&str>| InProcessTurnOutcome {
+                detail: TurnDetail {
+                    turn_id: new_turn_id(),
+                    session_id: new_session_id(),
+                    user_node: NodeId(1),
+                    agent_name: AgentName::parse("test").unwrap(),
+                    accepted_at: Utc::now(),
+                    ended_at: Utc::now(),
+                    summary: TurnSummary {
+                        outcome: pub_outcome,
+                        notice: notice_msg.map(|text| Notice {
+                            level: NoticeLevel::Error,
+                            text: text.to_owned(),
+                        }),
+                        progress: StepProgress::Reserved,
+                    },
+                    usage: Box::new(UsageSummary {
+                        attempts: 0,
+                        partial_attempts: 0,
+                        kind: UsageCompleteness::Complete,
+                        input: empty_tok,
+                        cache_read: empty_tok,
+                        cache_write: empty_tok,
+                        output: empty_tok,
+                        reasoning: empty_tok,
+                        cost: CostSummary {
+                            known: None,
+                            unknown_attempts: 0,
+                            overflowed: false,
+                        },
+                    }),
+                    steps: Vec::new(),
+                },
+                assistant_text: assistant_text.to_owned(),
+                diagnostic: diag_msg.map(|msg| LocalError::new(LocalErrorKind::BadRequest, msg)),
+            };
+
+        let cases = [
+            (
+                "不支持图片输入",
+                "模型 local/m-secret-tok-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+                "不支持图片输入",
+            ),
+            (
+                "32 MiB 本地请求体预算",
+                "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话",
+                "本地请求体预算（32 MiB）",
+            ),
+            (
+                "远端 HTTP 413",
+                "HTTP 413 request_too_large: secret-tok-415 exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话",
+                "目标服务拒绝了本次请求大小（HTTP 413）",
+            ),
+        ];
+
+        for (label, raw_msg, expected_reason) in cases {
+            // 1. 实时路径：outcome.diagnostic 存在
+            let live = compose_final_reply(
+                &make_outcome(PublicTurnOutcome::Failed, "", Some(raw_msg), None),
+                &redactor,
+            );
+            // 2. 重挂/重启恢复路径：outcome.diagnostic == None，从持久 summary.notice.text 恢复
+            let recovered = compose_final_reply(
+                &make_outcome(PublicTurnOutcome::Failed, "", None, Some(raw_msg)),
+                &redactor,
+            );
+            assert_eq!(
+                live, recovered,
+                "{label} 在实时 diagnostic 与持久 summary.notice 恢复路径下的输出必须一致"
+            );
+            for rendered in [&live, &recovered] {
+                assert!(
+                    !rendered.contains("secret-tok-415"),
+                    "{label} 不得泄露机器人凭据：{rendered}"
+                );
+                assert!(
+                    rendered.starts_with("［本轮执行失败：") && rendered.ends_with('］'),
+                    "{label} 应保持失败结局说明格式：{rendered}"
+                );
+                assert!(
+                    rendered.contains(expected_reason)
+                        && rendered.contains("减少图片")
+                        && rendered.contains("/new")
+                        && rendered.contains("lattice session rewind"),
+                    "{label} 应包含脱敏中文原因与完整 IM 引导：{rendered}"
+                );
+                assert_eq!(
+                    rendered.matches("减少图片").count(),
+                    1,
+                    "{label} 不得重复拼接引导文案：{rendered}"
+                );
+            }
+        }
+
+        // 反例与超长模型名核验：HTTP 404 含 "model HTTP 413 not found" 绝不附加大小拒绝引导，600 字符长模型名在截断前识别
+        let not_found_413 = compose_final_reply(
+            &make_outcome(
+                PublicTurnOutcome::Failed,
+                "",
+                Some("HTTP 404 not_found_error: model HTTP 413 not found"),
+                None,
+            ),
+            &redactor,
+        );
+        assert_eq!(
+            not_found_413, "［本轮执行失败：HTTP 404 not_found_error: model HTTP 413 not found］",
+            "HTTP 404 正文含 HTTP 413 字样时不得误触发请求大小拒绝引导"
+        );
+        assert!(!not_found_413.contains("目标服务拒绝了本次请求大小"));
+        assert!(!not_found_413.contains("/new"));
+
+        let long_model_raw = format!(
+            "模型 local/{} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+            "a".repeat(600)
+        );
+        let long_model_reply = compose_final_reply(
+            &make_outcome(PublicTurnOutcome::Failed, "", None, Some(&long_model_raw)),
+            &redactor,
+        );
+        assert!(
+            long_model_reply.contains("不支持图片输入")
+                && long_model_reply.contains("减少图片")
+                && long_model_reply.contains("/new")
+                && long_model_reply.contains("lattice session rewind"),
+            "Failed 结局下超长模型名必须在截断前识别并保留完整引导：{long_model_reply}"
+        );
+
+        // 普通 Failed、Cancelled 与 Completed 保持不变
+        assert_eq!(
+            compose_final_reply(
+                &make_outcome(
+                    PublicTurnOutcome::Failed,
+                    "",
+                    None,
+                    Some("HTTP 502 Bad Gateway"),
+                ),
+                &redactor,
+            ),
+            "［本轮执行失败：HTTP 502 Bad Gateway］"
+        );
+        assert_eq!(
+            compose_final_reply(
+                &make_outcome(
+                    PublicTurnOutcome::Cancelled,
+                    "半截输出",
+                    None,
+                    Some("用户取消"),
+                ),
+                &redactor,
+            ),
+            "半截输出\n\n［本轮已取消：用户取消］"
+        );
+        assert_eq!(
+            compose_final_reply(
+                &make_outcome(PublicTurnOutcome::Completed, "正常回复", None, None),
+                &redactor,
+            ),
+            "正常回复"
+        );
+    }
+
+    #[test]
     fn active_drafts_allocates_positive_random_ids_across_instances() {
         let chat = ChatKey::from_platform_id("tg", "1001");
         let inst_a = Arc::new(ActiveDrafts::default());
@@ -737,11 +956,11 @@ mod tests {
         async fn get_updates(
             &self,
             _timeout_secs: u32,
-        ) -> Result<Vec<TelegramUpdate>, TelegramApiError> {
-            Ok(Vec::new())
+        ) -> Result<TelegramPollBatch, TelegramApiError> {
+            Ok(TelegramPollBatch::default())
         }
 
-        fn acknowledge(&self, _inbound_id: &crate::identity::InboundId) {}
+        fn acknowledge(&self, _inbound_ids: &[crate::identity::InboundId]) {}
 
         async fn send_message(&self, _chat: &ChatKey, text: &str) -> Result<(), TelegramApiError> {
             self.send_attempts
@@ -770,6 +989,18 @@ mod tests {
                 can_stop,
             ));
             Ok(())
+        }
+
+        async fn download_file(
+            &self,
+            _file_id: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>, crate::telegram::TelegramDownloadError> {
+            Err(crate::telegram::TelegramDownloadError::Api(
+                TelegramApiError::Retryable {
+                    diagnostic: "草稿节流单测替身未配置文件下载".into(),
+                },
+            ))
         }
     }
 
@@ -965,7 +1196,7 @@ mod tests {
             }));
             outcomes.push_back(Ok(()));
         }
-        let rejected = send_text_reliably(&io, &chat, "被拒消息", stop_rx)
+        let rejected = send_text_reliably(&io, &chat, "被拒消息", stop_rx.clone())
             .await
             .expect("不应被停止打断");
         assert_eq!(rejected, SendDisposition::PlatformRejected);
@@ -973,6 +1204,51 @@ mod tests {
             io.sent_messages.lock().unwrap().len(),
             1,
             "403 平台拒收后不得继续重试发送"
+        );
+
+        // 超大 retry_after（u64::MAX 秒，溢出 Instant 表示范围）：send_text_reliably 与 DraftPacer 均不 panic 且正常响应停机
+        let (overflow_stop_tx, overflow_stop_rx) = watch::channel(false);
+        {
+            let mut outcomes = io.send_outcomes.lock().unwrap();
+            outcomes.clear();
+            outcomes.push_back(Err(TelegramApiError::RateLimited {
+                retry_after: Some(Duration::from_secs(u64::MAX)),
+                diagnostic: "429 overflow".into(),
+            }));
+        }
+        let throttles = ChatDraftThrottleMap::default();
+        let mut pacer = DraftPacer::new(&chat, 7, &throttles);
+        pacer.record_snapshot("首段草稿".into());
+        let (_, started_at) = pacer.prepare_send().await.expect("首次草稿应允许准备发送");
+        pacer
+            .finish_send(
+                started_at,
+                Err(TelegramApiError::RateLimited {
+                    retry_after: Some(Duration::from_secs(u64::MAX)),
+                    diagnostic: "429 draft overflow".into(),
+                }),
+            )
+            .await;
+        pacer.record_snapshot("溢出退避后的草稿更新".into());
+        assert_eq!(
+            pacer.next_deadline().await,
+            None,
+            "草稿 retry_after 溢出 Instant 时应进入无限期退避，不得退化为立即重发"
+        );
+        assert!(pacer.prepare_send().await.is_none());
+
+        let send_task = tokio::spawn(async move {
+            send_text_reliably(&io, &chat, "等待停机", overflow_stop_rx).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !send_task.is_finished(),
+            "溢出 Instant 的 retry_after 在停机前应持续挂起等待停机信号"
+        );
+        overflow_stop_tx.send(true).unwrap();
+        assert_eq!(
+            send_task.await.expect("send_text_reliably 不得 panic"),
+            Err(SendInterrupted)
         );
     }
 }
