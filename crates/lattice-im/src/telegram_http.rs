@@ -17,7 +17,7 @@ use crate::{
     redact::ImRedactor,
     telegram::{
         ALLOWED_UPDATES, OffsetTracker, RawUpdateEnvelope, TelegramApiError, TelegramDownloadError,
-        TelegramIo, TelegramUpdate, chat_id_from_key,
+        TelegramIo, TelegramPollBatch, chat_id_from_key,
     },
 };
 
@@ -569,10 +569,7 @@ impl TelegramHttpClient {
 
 #[async_trait::async_trait]
 impl TelegramIo for TelegramHttpClient {
-    async fn get_updates(
-        &self,
-        timeout_secs: u32,
-    ) -> Result<Vec<TelegramUpdate>, TelegramApiError> {
+    async fn get_updates(&self, timeout_secs: u32) -> Result<TelegramPollBatch, TelegramApiError> {
         let offset = self
             .offsets
             .lock()
@@ -665,7 +662,7 @@ fn decode_and_filter_updates(
     payload_bytes: &[u8],
     offsets: &StdMutex<OffsetTracker>,
     redactor: &ImRedactor,
-) -> Result<Vec<TelegramUpdate>, TelegramApiError> {
+) -> Result<TelegramPollBatch, TelegramApiError> {
     let envelope: RawUpdateEnvelope =
         serde_json::from_slice(payload_bytes).map_err(|_| TelegramApiError::Retryable {
             diagnostic: "解析 Telegram getUpdates 响应 JSON 失败".into(),
@@ -681,14 +678,19 @@ fn decode_and_filter_updates(
         });
     }
 
+    let had_raw_updates = !envelope.result.is_empty();
     let mut tracker = offsets.lock().expect("Telegram offset 锁不应中毒");
     let mut seen_in_batch = std::collections::BTreeSet::new();
-    Ok(envelope
+    let updates = envelope
         .result
         .into_iter()
         .filter(|raw| seen_in_batch.insert(raw.update_id) && tracker.record_received(raw.update_id))
         .map(|u| u.into_domain())
-        .collect())
+        .collect();
+    Ok(TelegramPollBatch {
+        updates,
+        had_raw_updates,
+    })
 }
 
 #[cfg(test)]
@@ -843,6 +845,14 @@ mod tests {
         let redactor = ImRedactor::new([token]);
         let offsets = StdMutex::new(OffsetTracker::default());
 
+        // 真正空响应 {"ok":true,"result":[]}：updates 为空且 had_raw_updates 为 false
+        let empty_batch =
+            decode_and_filter_updates(br#"{"ok":true,"result":[]}"#, &offsets, &redactor).unwrap();
+        assert!(
+            empty_batch.updates.is_empty() && !empty_batch.had_raw_updates,
+            "真正空长轮询响应应返回 updates 为空且 had_raw_updates 为 false"
+        );
+
         let batch1 = r#"{
             "ok": true,
             "result": [
@@ -852,15 +862,31 @@ mod tests {
             ]
         }"#;
         let first = decode_and_filter_updates(batch1.as_bytes(), &offsets, &redactor).unwrap();
-        assert_eq!(first.len(), 3);
+        assert!(first.had_raw_updates);
+        assert_eq!(first.updates.len(), 3);
 
         // 模拟 50 仍在排队未确认，51（/help）与 52（/cancel）收到即确认：offset 仍为 None
         {
             let mut guard = offsets.lock().unwrap();
-            guard.ack_inbound(&first[1].inbound_id);
-            guard.ack_inbound(&first[2].inbound_id);
+            guard.ack_inbound(&first.updates[1].inbound_id);
+            guard.ack_inbound(&first.updates[2].inbound_id);
             assert_eq!(guard.next_offset(), None);
         }
+
+        // 原始 result 全部为已确认重投 [51, 52]：全部被 OffsetTracker 过滤后 updates 为空，但 had_raw_updates 仍为 true
+        let pure_acked_batch = r#"{
+            "ok": true,
+            "result": [
+                {"update_id": 51, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/help"}},
+                {"update_id": 52, "message": {"chat": {"id": 1, "type": "private"}, "from": {"id": 9}, "text": "/cancel"}}
+            ]
+        }"#;
+        let pure_acked =
+            decode_and_filter_updates(pure_acked_batch.as_bytes(), &offsets, &redactor).unwrap();
+        assert!(
+            pure_acked.updates.is_empty() && pure_acked.had_raw_updates,
+            "原始 result 全被 OffsetTracker 过滤时必须保留 had_raw_updates == true 以触发空轮询节流"
+        );
 
         // 下一轮 getUpdates 重投 [50, 51, 52] 并附带新到达的 53：已确认的 51、52 必须在返回前被过滤掉
         let batch2 = r#"{
@@ -873,7 +899,12 @@ mod tests {
             ]
         }"#;
         let second = decode_and_filter_updates(batch2.as_bytes(), &offsets, &redactor).unwrap();
-        let ids: Vec<String> = second.iter().map(|u| u.inbound_id.to_string()).collect();
+        assert!(second.had_raw_updates);
+        let ids: Vec<String> = second
+            .updates
+            .iter()
+            .map(|u| u.inbound_id.to_string())
+            .collect();
         assert_eq!(
             ids,
             vec!["tg:50".to_string(), "tg:53".to_string()],

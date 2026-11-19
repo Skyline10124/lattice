@@ -380,11 +380,17 @@ pub(crate) enum TelegramDownloadError {
     Api(TelegramApiError),
 }
 
+/// 单次 `getUpdates` 长轮询经平台连续前缀跟踪器过滤后的批次结果。
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct TelegramPollBatch {
+    pub(crate) updates: Vec<TelegramUpdate>,
+    pub(crate) had_raw_updates: bool,
+}
+
 /// `lattice-im` 中唯一的抽象接口：隔离 Telegram HTTPS 收发以便用真实 `Service` 做确定性集成测试。
 #[async_trait::async_trait]
 pub(crate) trait TelegramIo: Send + Sync {
-    async fn get_updates(&self, timeout_secs: u32)
-    -> Result<Vec<TelegramUpdate>, TelegramApiError>;
+    async fn get_updates(&self, timeout_secs: u32) -> Result<TelegramPollBatch, TelegramApiError>;
 
     /// 通知平台模块这批入站身份键已完成本地确认，推进平台内部连续前缀 `offset`。
     fn acknowledge(&self, inbound_ids: &[InboundId]);

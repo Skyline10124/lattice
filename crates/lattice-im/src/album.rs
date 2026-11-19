@@ -22,9 +22,6 @@ pub(crate) const ALBUM_QUIET_WINDOW: Duration = Duration::from_millis(600);
 /// Telegram 单相册协议上限：收满 10 条立即闭合（不在 8 张处截断，使 9～10 张整组被拒一次）。
 pub(crate) const ALBUM_MAX_ITEMS: usize = 10;
 
-/// 存在未确认开放相册，或未确认在途事件导致整批重投被过滤为零新更新时的空轮询节流上限。
-pub(crate) const ALBUM_IDLE_POLL_THROTTLE: Duration = Duration::from_millis(100);
-
 /// 每个对话内存中保留的近期已闭合 `media_group_id` 数量上限（FIFO 淘汰）。
 pub(crate) const RECENT_CLOSED_ALBUMS_PER_CHAT: usize = 64;
 

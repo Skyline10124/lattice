@@ -114,52 +114,65 @@ impl Drop for DraftLease {
     }
 }
 
+#[derive(Clone, Copy, Default)]
+enum DeadlineBound {
+    #[default]
+    Ready,
+    Until(tokio::time::Instant),
+    Indefinite,
+}
+
 /// 按 `ChatKey` 共享的 1 秒草稿节流表：同一对话下新旧会话的轮次共同遵守每秒至多 1 条限制。
 #[derive(Default)]
 pub(crate) struct ChatDraftThrottleMap {
-    chats: StdMutex<BTreeMap<ChatKey, Arc<AsyncMutex<Option<tokio::time::Instant>>>>>,
+    chats: StdMutex<BTreeMap<ChatKey, Arc<AsyncMutex<DeadlineBound>>>>,
 }
 
 impl ChatDraftThrottleMap {
-    fn bucket(&self, chat: &ChatKey) -> Arc<AsyncMutex<Option<tokio::time::Instant>>> {
+    fn bucket(&self, chat: &ChatKey) -> Arc<AsyncMutex<DeadlineBound>> {
         let mut guard = self.chats.lock().expect("草稿节流表锁不应中毒");
         Arc::clone(
             guard
                 .entry(chat.clone())
-                .or_insert_with(|| Arc::new(AsyncMutex::new(None))),
+                .or_insert_with(|| Arc::new(AsyncMutex::new(DeadlineBound::Ready))),
         )
     }
 
-    async fn earliest_allowed(&self, chat: &ChatKey) -> tokio::time::Instant {
+    async fn earliest_allowed(&self, chat: &ChatKey) -> Option<tokio::time::Instant> {
         let bucket = self.bucket(chat);
         let guard = bucket.lock().await;
         let now = tokio::time::Instant::now();
         match *guard {
-            Some(until) if until > now => until,
-            _ => now,
+            DeadlineBound::Ready => Some(now),
+            DeadlineBound::Until(until) if until > now => Some(until),
+            DeadlineBound::Until(_) => Some(now),
+            DeadlineBound::Indefinite => None,
         }
     }
 
-    async fn try_claim_now(&self, chat: &ChatKey) -> Result<(), tokio::time::Instant> {
+    async fn try_claim_now(&self, chat: &ChatKey) -> bool {
         let bucket = self.bucket(chat);
         let mut guard = bucket.lock().await;
         let now = tokio::time::Instant::now();
-        if let Some(until) = *guard
-            && until > now
-        {
-            return Err(until);
+        match *guard {
+            DeadlineBound::Indefinite => return false,
+            DeadlineBound::Until(until) if until > now => return false,
+            DeadlineBound::Ready | DeadlineBound::Until(_) => {}
         }
-        *guard = Some(now + DRAFT_THROTTLE_INTERVAL);
-        Ok(())
+        *guard = DeadlineBound::Until(now + DRAFT_THROTTLE_INTERVAL);
+        true
     }
 
-    async fn record_rate_limit(&self, chat: &ChatKey, retry_until: tokio::time::Instant) {
+    async fn record_rate_limit(&self, chat: &ChatKey, retry_until: Option<tokio::time::Instant>) {
         let bucket = self.bucket(chat);
         let mut guard = bucket.lock().await;
-        *guard = Some(match *guard {
-            Some(existing) if existing > retry_until => existing,
-            _ => retry_until,
-        });
+        *guard = match (*guard, retry_until) {
+            (DeadlineBound::Indefinite, _) | (_, None) => DeadlineBound::Indefinite,
+            (DeadlineBound::Until(existing), Some(until)) if existing > until => {
+                DeadlineBound::Until(existing)
+            }
+            (_, Some(until)) => DeadlineBound::Until(until),
+        };
     }
 }
 
@@ -171,6 +184,19 @@ pub(crate) async fn wait_stop_signal(stop: &mut watch::Receiver<bool>) {
         if stop.changed().await.is_err() {
             return;
         }
+    }
+}
+
+/// 等待指定退避时长或停机信号：等待期满返回 `true`；收到停机信号（或 `wait` 超出 `Instant` 表示范围后等待停机唤醒）返回 `false`。
+pub(crate) async fn sleep_or_stop(wait: Duration, stop: &mut watch::Receiver<bool>) -> bool {
+    let Some(deadline) = tokio::time::Instant::now().checked_add(wait) else {
+        wait_stop_signal(stop).await;
+        return false;
+    };
+    tokio::select! {
+        biased;
+        _ = wait_stop_signal(stop) => false,
+        _ = tokio::time::sleep_until(deadline) => true,
     }
 }
 
@@ -187,7 +213,7 @@ struct DraftPacer<'a> {
     dirty: bool,
     last_sent_at: Option<tokio::time::Instant>,
     consecutive_failures: u32,
-    backoff_until: Option<tokio::time::Instant>,
+    backoff: DeadlineBound,
 }
 
 impl<'a> DraftPacer<'a> {
@@ -200,7 +226,7 @@ impl<'a> DraftPacer<'a> {
             dirty: false,
             last_sent_at: None,
             consecutive_failures: 0,
-            backoff_until: None,
+            backoff: DeadlineBound::Ready,
         }
     }
 
@@ -216,10 +242,11 @@ impl<'a> DraftPacer<'a> {
 
     async fn next_deadline(&self) -> Option<tokio::time::Instant> {
         self.latest_text.as_ref()?;
-        let allowed_at = self.throttles.earliest_allowed(self.chat).await;
-        let floor = match self.backoff_until {
-            Some(until) => allowed_at.max(until),
-            None => allowed_at,
+        let allowed_at = self.throttles.earliest_allowed(self.chat).await?;
+        let floor = match self.backoff {
+            DeadlineBound::Ready => allowed_at,
+            DeadlineBound::Until(until) => allowed_at.max(until),
+            DeadlineBound::Indefinite => return None,
         };
         if self.dirty {
             Some(floor)
@@ -233,12 +260,14 @@ impl<'a> DraftPacer<'a> {
 
     async fn prepare_send(&mut self) -> Option<(String, tokio::time::Instant)> {
         let text = self.latest_text.as_deref()?;
-        if let Some(until) = self.backoff_until
-            && tokio::time::Instant::now() < until
-        {
+        match self.backoff {
+            DeadlineBound::Ready => {}
+            DeadlineBound::Until(until) if tokio::time::Instant::now() >= until => {}
+            DeadlineBound::Until(_) | DeadlineBound::Indefinite => return None,
+        }
+        if !self.throttles.try_claim_now(self.chat).await {
             return None;
         }
-        self.throttles.try_claim_now(self.chat).await.ok()?;
         let started_at = tokio::time::Instant::now();
         let preview = truncate_draft_tail(text);
         self.dirty = false;
@@ -254,7 +283,7 @@ impl<'a> DraftPacer<'a> {
             Ok(()) => {
                 self.last_sent_at = Some(started_at);
                 self.consecutive_failures = 0;
-                self.backoff_until = None;
+                self.backoff = DeadlineBound::Ready;
             }
             Err(err) => {
                 let completed_at = tokio::time::Instant::now();
@@ -275,17 +304,21 @@ impl<'a> DraftPacer<'a> {
                         ..
                     } => {
                         self.throttles
-                            .record_rate_limit(self.chat, completed_at + *ra)
+                            .record_rate_limit(self.chat, completed_at.checked_add(*ra))
                             .await;
                         (*ra).max(exp_backoff)
                     }
                     _ => exp_backoff,
                 };
-                self.backoff_until = Some(completed_at + wait);
+                self.backoff = match completed_at.checked_add(wait) {
+                    Some(until) => DeadlineBound::Until(until),
+                    None => DeadlineBound::Indefinite,
+                };
+                let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                 tracing::debug!(
                     chat = %self.chat,
                     draft_id = self.draft_id,
-                    wait_ms = wait.as_millis() as u64,
+                    wait_ms,
                     diagnostic = %err.diagnostic(),
                     "推送 Telegram 草稿失败，退避后等待后续刷新"
                 );
@@ -528,15 +561,15 @@ pub(crate) async fn send_text_reliably(
                     diagnostic,
                 }) => {
                     let wait = retry_after.unwrap_or(backoff);
+                    let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                     tracing::warn!(
                         chat = %chat,
-                        wait_ms = wait.as_millis() as u64,
+                        wait_ms,
                         diagnostic = %diagnostic,
                         "Telegram 发送消息触发限流，退避后重试"
                     );
-                    tokio::select! {
-                        _ = wait_stop_signal(&mut stop) => return Err(SendInterrupted),
-                        _ = tokio::time::sleep(wait) => {}
+                    if !sleep_or_stop(wait, &mut stop).await {
+                        return Err(SendInterrupted);
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_SEND_BACKOFF);
                 }
@@ -544,15 +577,15 @@ pub(crate) async fn send_text_reliably(
                     TelegramApiError::Retryable { diagnostic }
                     | TelegramApiError::UnauthorizedOrInvalid { diagnostic, .. },
                 ) => {
+                    let wait_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX);
                     tracing::warn!(
                         chat = %chat,
-                        wait_ms = backoff.as_millis() as u64,
+                        wait_ms,
                         diagnostic = %diagnostic,
                         "Telegram 发送消息失败，退避后重试"
                     );
-                    tokio::select! {
-                        _ = wait_stop_signal(&mut stop) => return Err(SendInterrupted),
-                        _ = tokio::time::sleep(backoff) => {}
+                    if !sleep_or_stop(backoff, &mut stop).await {
+                        return Err(SendInterrupted);
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_SEND_BACKOFF);
                 }
@@ -577,7 +610,7 @@ mod tests {
     use super::*;
     use crate::{
         identity::{new_session_id, new_turn_id},
-        telegram::TelegramUpdate,
+        telegram::TelegramPollBatch,
     };
 
     #[test]
@@ -881,8 +914,8 @@ mod tests {
         async fn get_updates(
             &self,
             _timeout_secs: u32,
-        ) -> Result<Vec<TelegramUpdate>, TelegramApiError> {
-            Ok(Vec::new())
+        ) -> Result<TelegramPollBatch, TelegramApiError> {
+            Ok(TelegramPollBatch::default())
         }
 
         fn acknowledge(&self, _inbound_ids: &[crate::identity::InboundId]) {}
@@ -1121,7 +1154,7 @@ mod tests {
             }));
             outcomes.push_back(Ok(()));
         }
-        let rejected = send_text_reliably(&io, &chat, "被拒消息", stop_rx)
+        let rejected = send_text_reliably(&io, &chat, "被拒消息", stop_rx.clone())
             .await
             .expect("不应被停止打断");
         assert_eq!(rejected, SendDisposition::PlatformRejected);
@@ -1129,6 +1162,51 @@ mod tests {
             io.sent_messages.lock().unwrap().len(),
             1,
             "403 平台拒收后不得继续重试发送"
+        );
+
+        // 超大 retry_after（u64::MAX 秒，溢出 Instant 表示范围）：send_text_reliably 与 DraftPacer 均不 panic 且正常响应停机
+        let (overflow_stop_tx, overflow_stop_rx) = watch::channel(false);
+        {
+            let mut outcomes = io.send_outcomes.lock().unwrap();
+            outcomes.clear();
+            outcomes.push_back(Err(TelegramApiError::RateLimited {
+                retry_after: Some(Duration::from_secs(u64::MAX)),
+                diagnostic: "429 overflow".into(),
+            }));
+        }
+        let throttles = ChatDraftThrottleMap::default();
+        let mut pacer = DraftPacer::new(&chat, 7, &throttles);
+        pacer.record_snapshot("首段草稿".into());
+        let (_, started_at) = pacer.prepare_send().await.expect("首次草稿应允许准备发送");
+        pacer
+            .finish_send(
+                started_at,
+                Err(TelegramApiError::RateLimited {
+                    retry_after: Some(Duration::from_secs(u64::MAX)),
+                    diagnostic: "429 draft overflow".into(),
+                }),
+            )
+            .await;
+        pacer.record_snapshot("溢出退避后的草稿更新".into());
+        assert_eq!(
+            pacer.next_deadline().await,
+            None,
+            "草稿 retry_after 溢出 Instant 时应进入无限期退避，不得退化为立即重发"
+        );
+        assert!(pacer.prepare_send().await.is_none());
+
+        let send_task = tokio::spawn(async move {
+            send_text_reliably(&io, &chat, "等待停机", overflow_stop_rx).await
+        });
+        tokio::task::yield_now().await;
+        assert!(
+            !send_task.is_finished(),
+            "溢出 Instant 的 retry_after 在停机前应持续挂起等待停机信号"
+        );
+        overflow_stop_tx.send(true).unwrap();
+        assert_eq!(
+            send_task.await.expect("send_text_reliably 不得 panic"),
+            Err(SendInterrupted)
         );
     }
 }

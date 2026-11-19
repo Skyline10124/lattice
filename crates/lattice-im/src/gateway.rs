@@ -25,10 +25,7 @@ use tokio::{
 };
 
 use crate::{
-    album::{
-        ALBUM_IDLE_POLL_THROTTLE, AlbumCollector, BufferedAlbumItem, ClosedAlbum,
-        LATE_ALBUM_FRAGMENT_REPLY,
-    },
+    album::{AlbumCollector, BufferedAlbumItem, ClosedAlbum, LATE_ALBUM_FRAGMENT_REPLY},
     command::{
         HELP_REPLY, ImCommand, ParsedInput, UNSUPPORTED_MEDIA_REPLY, cancel_turn_and_format,
         describe_local_error, execute_cancel_command, execute_status_command,
@@ -58,6 +55,8 @@ const INITIAL_POLL_BACKOFF: Duration = Duration::from_millis(200);
 const MAX_POLL_BACKOFF: Duration = Duration::from_secs(30);
 const INITIAL_RECOVERY_BACKOFF: Duration = Duration::from_millis(50);
 const MAX_RECOVERY_BACKOFF: Duration = Duration::from_secs(5);
+/// 存在未确认开放相册，或原始长轮询批次非空但全部更新被过滤为零新更新时的空轮询节流上限。
+const IDLE_POLL_THROTTLE: Duration = Duration::from_millis(100);
 
 /// IM 网关启动或不可恢复台账错误。
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -435,6 +434,27 @@ impl GatewayDebugProbe {
             .expect("对话准入队列锁不应中毒")
             .len()
     }
+
+    pub(crate) fn enqueue_media_for_test(
+        &self,
+        inbound_id: InboundId,
+        chat: ChatKey,
+        file_id: String,
+    ) -> bool {
+        let Some(rt) = self.runtime_weak.upgrade() else {
+            return false;
+        };
+        rt.enqueue_single_ledger_event(
+            inbound_id,
+            chat,
+            LedgerInboundAction::SubmitMedia(vec![IncomingMediaItem::image(
+                file_id,
+                Some(64),
+                None,
+            )]),
+        );
+        true
+    }
 }
 
 #[cfg(test)]
@@ -717,32 +737,34 @@ impl GatewayRuntime {
             }
             self.enqueue_closed_albums(collector.close_due(tokio::time::Instant::now()));
 
-            let poll_res = if let Some(deadline) = collector.next_deadline() {
-                tokio::select! {
-                    biased;
-                    _ = wait_stop_signal(&mut stop) => return,
-                    _ = tokio::time::sleep_until(deadline) => {
-                        self.enqueue_closed_albums(
-                            collector.close_due(tokio::time::Instant::now()),
-                        );
-                        continue;
+            let mut poll_fut = std::pin::pin!(self.io.get_updates(LONG_POLL_TIMEOUT_SECS));
+            let poll_res = loop {
+                if let Some(deadline) = collector.next_deadline() {
+                    tokio::select! {
+                        biased;
+                        _ = wait_stop_signal(&mut stop) => return,
+                        _ = tokio::time::sleep_until(deadline) => {
+                            self.enqueue_closed_albums(
+                                collector.close_due(tokio::time::Instant::now()),
+                            );
+                        }
+                        res = &mut poll_fut => break res,
                     }
-                    res = self.io.get_updates(LONG_POLL_TIMEOUT_SECS) => res,
-                }
-            } else {
-                tokio::select! {
-                    biased;
-                    _ = wait_stop_signal(&mut stop) => return,
-                    res = self.io.get_updates(LONG_POLL_TIMEOUT_SECS) => res,
+                } else {
+                    tokio::select! {
+                        biased;
+                        _ = wait_stop_signal(&mut stop) => return,
+                        res = &mut poll_fut => break res,
+                    }
                 }
             };
 
             match poll_res {
-                Ok(updates) => {
+                Ok(batch) => {
                     backoff = INITIAL_POLL_BACKOFF;
-                    let batch_had_updates = !updates.is_empty();
+                    let batch_had_updates = batch.had_raw_updates || !batch.updates.is_empty();
                     let mut saw_new_update = false;
-                    for update in updates {
+                    for update in batch.updates {
                         if self.is_stopping() {
                             return;
                         }
@@ -754,10 +776,10 @@ impl GatewayRuntime {
                     let next_deadline = collector.next_deadline();
                     if !saw_new_update && (batch_had_updates || next_deadline.is_some()) {
                         let throttle = match next_deadline {
-                            Some(deadline) => ALBUM_IDLE_POLL_THROTTLE.min(
+                            Some(deadline) => IDLE_POLL_THROTTLE.min(
                                 deadline.saturating_duration_since(tokio::time::Instant::now()),
                             ),
-                            None => ALBUM_IDLE_POLL_THROTTLE,
+                            None => IDLE_POLL_THROTTLE,
                         };
                         if !throttle.is_zero() {
                             tokio::select! {
@@ -773,8 +795,9 @@ impl GatewayRuntime {
                     diagnostic,
                 }) => {
                     let wait = retry_after.unwrap_or(backoff);
+                    let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                     tracing::warn!(
-                        wait_ms = wait.as_millis() as u64,
+                        wait_ms,
                         diagnostic = %diagnostic,
                         "Telegram getUpdates 触发限流，退避后重试"
                     );
@@ -787,8 +810,9 @@ impl GatewayRuntime {
                     backoff = backoff.saturating_mul(2).min(MAX_POLL_BACKOFF);
                 }
                 Err(err) => {
+                    let wait_ms = u64::try_from(backoff.as_millis()).unwrap_or(u64::MAX);
                     tracing::warn!(
-                        wait_ms = backoff.as_millis() as u64,
+                        wait_ms,
                         diagnostic = %err.diagnostic(),
                         "Telegram getUpdates 失败，退避后重试"
                     );
@@ -810,24 +834,32 @@ impl GatewayRuntime {
         collector: &mut AlbumCollector,
         stop: &mut watch::Receiver<bool>,
     ) -> bool {
-        let backoff_deadline = tokio::time::Instant::now() + wait;
+        let backoff_deadline = tokio::time::Instant::now().checked_add(wait);
         loop {
             if self.is_stopping() {
                 return false;
             }
-            self.enqueue_closed_albums(collector.close_due(tokio::time::Instant::now()));
             let now = tokio::time::Instant::now();
-            if now >= backoff_deadline {
+            self.enqueue_closed_albums(collector.close_due(now));
+            if backoff_deadline.is_some_and(|deadline| now >= deadline) {
                 return true;
             }
-            let next_wake = match collector.next_deadline() {
-                Some(album_deadline) if album_deadline < backoff_deadline => album_deadline,
-                _ => backoff_deadline,
+            let next_wake = match (collector.next_deadline(), backoff_deadline) {
+                (Some(album_deadline), Some(backoff_until)) => {
+                    Some(album_deadline.min(backoff_until))
+                }
+                (Some(album_deadline), None) => Some(album_deadline),
+                (None, Some(backoff_until)) => Some(backoff_until),
+                (None, None) => None,
+            };
+            let Some(wake_at) = next_wake else {
+                wait_stop_signal(stop).await;
+                return false;
             };
             tokio::select! {
                 biased;
                 _ = wait_stop_signal(stop) => return false,
-                _ = tokio::time::sleep_until(next_wake) => {}
+                _ = tokio::time::sleep_until(wake_at) => {}
             }
         }
     }

@@ -13,7 +13,7 @@ use tokio::sync::watch;
 
 use crate::{
     command::UNSUPPORTED_MEDIA_REPLY,
-    reply::wait_stop_signal,
+    reply::{sleep_or_stop, wait_stop_signal},
     telegram::{TelegramApiError, TelegramDownloadError, TelegramIo},
 };
 
@@ -215,16 +215,15 @@ async fn download_single_file_bounded(
                 }
                 retries_used += 1;
                 let wait = retry_after.unwrap_or(backoff);
+                let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                 tracing::warn!(
                     retry = retries_used,
-                    wait_ms = wait.as_millis() as u64,
+                    wait_ms,
                     diagnostic = %diagnostic,
                     "下载 Telegram 图片触发限流，退避后重试"
                 );
-                tokio::select! {
-                    biased;
-                    _ = wait_stop_signal(stop) => return SingleDownloadOutcome::Interrupted,
-                    _ = tokio::time::sleep(wait) => {}
+                if !sleep_or_stop(wait, stop).await {
+                    return SingleDownloadOutcome::Interrupted;
                 }
                 backoff = backoff.saturating_mul(2).min(MAX_DOWNLOAD_BACKOFF);
             }
@@ -241,16 +240,15 @@ async fn download_single_file_bounded(
                 }
                 retries_used += 1;
                 let wait = backoff;
+                let wait_ms = u64::try_from(wait.as_millis()).unwrap_or(u64::MAX);
                 tracing::warn!(
                     retry = retries_used,
-                    wait_ms = wait.as_millis() as u64,
+                    wait_ms,
                     diagnostic = %diagnostic,
                     "下载 Telegram 图片暂时失败，退避后重试"
                 );
-                tokio::select! {
-                    biased;
-                    _ = wait_stop_signal(stop) => return SingleDownloadOutcome::Interrupted,
-                    _ = tokio::time::sleep(wait) => {}
+                if !sleep_or_stop(wait, stop).await {
+                    return SingleDownloadOutcome::Interrupted;
                 }
                 backoff = backoff.saturating_mul(2).min(MAX_DOWNLOAD_BACKOFF);
             }
@@ -330,7 +328,7 @@ mod tests {
     use super::*;
     use crate::{
         identity::{ChatKey, InboundId},
-        telegram::TelegramUpdate,
+        telegram::TelegramPollBatch,
     };
 
     #[derive(Default)]
@@ -344,8 +342,8 @@ mod tests {
         async fn get_updates(
             &self,
             _timeout_secs: u32,
-        ) -> Result<Vec<TelegramUpdate>, TelegramApiError> {
-            Ok(Vec::new())
+        ) -> Result<TelegramPollBatch, TelegramApiError> {
+            Ok(TelegramPollBatch::default())
         }
 
         fn acknowledge(&self, _inbound_ids: &[InboundId]) {}
