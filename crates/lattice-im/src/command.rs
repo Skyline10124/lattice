@@ -10,8 +10,8 @@ use lattice_server::Service;
 
 use crate::{identity::SenderKey, redact::ImRedactor, usage};
 
-/// 非文本消息（如图片、贴纸、语音、文件，含带 `caption` 的媒体消息）的固定中文提示。
-pub(crate) const NON_TEXT_MESSAGE_REPLY: &str = "只支持文本消息";
+/// 不受支持的媒体或空消息（如贴纸、转码动图、视频、语音、音频、非图片文档等）的固定中文提示。
+pub(crate) const UNSUPPORTED_MEDIA_REPLY: &str = "只支持文本和图片消息（PNG、JPEG、WebP、GIF）";
 
 /// `/help` 与 `/start` 共用的固定六行中文命令说明。
 pub(crate) const HELP_REPLY: &str = "\
@@ -20,7 +20,7 @@ pub(crate) const HELP_REPLY: &str = "\
 /status — 查看当前绑定会话的状态与设置
 /usage — 查看当前绑定会话的用量与费用摘要
 /help — 显示本命令说明
-直接发送文字即向当前会话提交一轮对话。";
+直接发送文字或图片（可附说明文字）即向当前会话提交一轮对话。";
 
 /// IM 网关识别的内置斜杠命令。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

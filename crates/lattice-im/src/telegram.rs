@@ -53,9 +53,10 @@ fn update_id_from_inbound_id(inbound_id: &InboundId) -> Option<i64> {
         .ok()
 }
 
-/// 解析后的单条 Telegram 入站更新（原始整数标识已在平台模块边界全部转换为身份键）。
+/// 解析后的单条 Telegram 入站更新（原始整数标识已在平台模块边界转换为身份键，同时保留 `update_id` 供有序处理）。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TelegramUpdate {
+    pub(crate) update_id: i64,
     pub(crate) inbound_id: InboundId,
     pub(crate) payload: TelegramUpdatePayload,
 }
@@ -63,12 +64,13 @@ pub(crate) struct TelegramUpdate {
 /// 转换为平台无关身份键后的更新载荷。
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum TelegramUpdatePayload {
-    /// `message` 更新；仅提取 `message.text`（媒体消息附带的 `caption` 视为无文本）。
+    /// `message` 更新：识别纯文本、受支持图片（压缩照片或未压缩图片文档）与其他不支持媒体。
     Message {
         chat: ChatKey,
         is_private: bool,
         sender: Option<SenderKey>,
-        text: Option<String>,
+        media_group_id: Option<String>,
+        content: TelegramMessageContent,
     },
     /// 用户点击流式草稿上的停止按钮后到达的 `stopped_message_generation` 更新。
     StoppedMessageGeneration {
@@ -78,6 +80,21 @@ pub(crate) enum TelegramUpdatePayload {
     },
     /// 其他无需处理的更新变体（收到即确认，以免阻塞连续前缀）。
     Ignored,
+}
+
+/// 解析后的 Telegram `message` 正文分类。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TelegramMessageContent {
+    /// 纯文本消息。
+    Text(String),
+    /// 压缩图片（`photo` 最高分辨率项）或声明 MIME 属于四种受支持图片格式的未压缩 `document`。
+    Image {
+        file_id: String,
+        file_size: Option<u64>,
+        caption: Option<String>,
+    },
+    /// 贴纸、转码动图、视频、语音、音频、非图片文档或空消息等不受支持内容。
+    Unsupported,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,6 +122,32 @@ pub(crate) struct RawMessage {
     pub(crate) from: Option<RawUser>,
     #[serde(default)]
     pub(crate) text: Option<String>,
+    #[serde(default)]
+    pub(crate) photo: Option<Vec<RawPhotoSize>>,
+    #[serde(default)]
+    pub(crate) document: Option<RawDocument>,
+    #[serde(default)]
+    pub(crate) animation: Option<serde_json::Value>,
+    #[serde(default)]
+    pub(crate) caption: Option<String>,
+    #[serde(default)]
+    pub(crate) media_group_id: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawPhotoSize {
+    pub(crate) file_id: String,
+    #[serde(default)]
+    pub(crate) file_size: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawDocument {
+    pub(crate) file_id: String,
+    #[serde(default)]
+    pub(crate) file_size: Option<u64>,
+    #[serde(default)]
+    pub(crate) mime_type: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -128,16 +171,64 @@ pub(crate) struct RawStoppedMessageGeneration {
     pub(crate) draft_id: i64,
 }
 
+fn is_supported_document_image_mime(mime: &str) -> bool {
+    let normalized = mime
+        .split(';')
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "image/png" | "image/jpeg" | "image/webp" | "image/gif"
+    )
+}
+
 impl RawTelegramUpdate {
     /// 将 Telegram 原始更新结构转换为使用 `tg:` 身份键的网关更新。
     pub(crate) fn into_domain(self) -> TelegramUpdate {
-        let inbound_id = inbound_id_from_update_id(self.update_id);
+        let update_id = self.update_id;
+        let inbound_id = inbound_id_from_update_id(update_id);
         let payload = if let Some(msg) = self.message {
+            let chat = chat_key_from_id(msg.chat.id);
+            let is_private = msg.chat.kind == "private";
+            let sender = msg.from.map(|user| sender_key_from_id(user.id));
+            let media_group_id = msg.media_group_id;
+            let content = if let Some(photo) = msg.photo.and_then(|mut photos| photos.pop()) {
+                TelegramMessageContent::Image {
+                    file_id: photo.file_id,
+                    file_size: photo.file_size,
+                    caption: msg.caption,
+                }
+            } else if msg.animation.is_some() {
+                // Telegram 对服务端转码为 MP4 的动图会同时填充 animation 与 document，必须先于 document 拦截。
+                TelegramMessageContent::Unsupported
+            } else if let Some(doc) = msg.document {
+                if doc
+                    .mime_type
+                    .as_deref()
+                    .is_some_and(is_supported_document_image_mime)
+                {
+                    TelegramMessageContent::Image {
+                        file_id: doc.file_id,
+                        file_size: doc.file_size,
+                        caption: msg.caption,
+                    }
+                } else {
+                    TelegramMessageContent::Unsupported
+                }
+            } else if let Some(text) = msg.text {
+                TelegramMessageContent::Text(text)
+            } else {
+                TelegramMessageContent::Unsupported
+            };
+
             TelegramUpdatePayload::Message {
-                chat: chat_key_from_id(msg.chat.id),
-                is_private: msg.chat.kind == "private",
-                sender: msg.from.map(|user| sender_key_from_id(user.id)),
-                text: msg.text,
+                chat,
+                is_private,
+                sender,
+                media_group_id,
+                content,
             }
         } else if let Some(stopped) = self.stopped_message_generation {
             TelegramUpdatePayload::StoppedMessageGeneration {
@@ -150,6 +241,7 @@ impl RawTelegramUpdate {
         };
 
         TelegramUpdate {
+            update_id,
             inbound_id,
             payload,
         }
@@ -260,6 +352,17 @@ impl TelegramApiError {
     }
 }
 
+/// Telegram `getFile` 元数据查询与文件字节流下载的分类错误。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum TelegramDownloadError {
+    /// `getFile` 声明的 `file_size`、响应头 `Content-Length` 或实际响应字节流超过调用方上限。
+    TooLarge,
+    /// `getFile` 缺少 `file_path` 或返回了不合法的相对路径。
+    InvalidFilePath,
+    /// HTTP 非成功状态码、非成功响应包或传输层错误（已完成 URL 剥离与凭据脱敏）。
+    Api(TelegramApiError),
+}
+
 /// `lattice-im` 中唯一的抽象接口：隔离 Telegram HTTPS 收发以便用真实 `Service` 做确定性集成测试。
 #[async_trait::async_trait]
 pub(crate) trait TelegramIo: Send + Sync {
@@ -285,6 +388,13 @@ pub(crate) trait TelegramIo: Send + Sync {
         can_stop: bool,
     ) -> Result<(), TelegramApiError>;
 
+    /// 执行一次受控 `getFile + GET /file/...` 文件下载尝试（有界重试由上层 `media` 模块负责）。
+    async fn download_file(
+        &self,
+        file_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, TelegramDownloadError>;
+
     /// 等待本适配器派生的后台阻塞任务（如公网地址解析）全部退出。
     async fn drain(&self) {}
 }
@@ -294,7 +404,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn converts_raw_telegram_updates_to_prefixed_keys_and_ignores_caption() {
+    fn converts_text_photo_image_document_animation_and_unsupported_updates() {
         let json_text = r#"{
             "update_id": 501,
             "message": {
@@ -307,6 +417,7 @@ mod tests {
         }"#;
         let raw: RawTelegramUpdate = serde_json::from_str(json_text).expect("解析文本消息应成功");
         let parsed = raw.into_domain();
+        assert_eq!(parsed.update_id, 501);
         assert_eq!(parsed.inbound_id.to_string(), "tg:501");
         assert_eq!(
             parsed.payload,
@@ -314,34 +425,185 @@ mod tests {
                 chat: ChatKey::from_platform_id("tg", "42"),
                 is_private: true,
                 sender: Some(SenderKey::from_platform_id("tg", "42")),
-                text: Some("你好".into()),
+                media_group_id: None,
+                content: TelegramMessageContent::Text("你好".into()),
             }
         );
 
-        // 带 caption 的图片消息：没有 text 字段，必须解析为 text: None
-        let json_photo_caption = r#"{
+        // 压缩图片 photo 数组：取最后一项（最高分辨率），保留 caption 与 media_group_id
+        let json_photo = r#"{
             "update_id": 502,
             "message": {
                 "message_id": 11,
                 "from": {"id": 42, "is_bot": false, "first_name": "Alice"},
                 "chat": {"id": 42, "type": "private"},
                 "date": 1700000001,
-                "photo": [{"file_id": "abc", "file_unique_id": "u", "width": 10, "height": 10}],
+                "media_group_id": "album-77",
+                "photo": [
+                    {"file_id": "thumb", "file_unique_id": "u1", "width": 90, "height": 90, "file_size": 1200},
+                    {"file_id": "mid", "file_unique_id": "u2", "width": 320, "height": 320, "file_size": 8400},
+                    {"file_id": "hi_res", "file_unique_id": "u3", "width": 1280, "height": 960, "file_size": 95000}
+                ],
                 "caption": "这张图片带说明文字"
             }
         }"#;
         let raw_photo: RawTelegramUpdate =
-            serde_json::from_str(json_photo_caption).expect("解析带说明图片消息应成功");
-        match raw_photo.into_domain().payload {
-            TelegramUpdatePayload::Message { text, .. } => {
-                assert_eq!(text, None, "带 caption 的图片消息不得当作文本消息");
+            serde_json::from_str(json_photo).expect("解析带说明压缩图片消息应成功");
+        let parsed_photo = raw_photo.into_domain();
+        assert_eq!(parsed_photo.update_id, 502);
+        assert_eq!(
+            parsed_photo.payload,
+            TelegramUpdatePayload::Message {
+                chat: ChatKey::from_platform_id("tg", "42"),
+                is_private: true,
+                sender: Some(SenderKey::from_platform_id("tg", "42")),
+                media_group_id: Some("album-77".into()),
+                content: TelegramMessageContent::Image {
+                    file_id: "hi_res".into(),
+                    file_size: Some(95000),
+                    caption: Some("这张图片带说明文字".into()),
+                },
             }
-            other => panic!("应解析为 Message 变体，实际: {other:?}"),
+        );
+
+        // 未压缩图片 document：大小写、前后空白与分号参数规范化后识别四种受支持图片 MIME
+        for raw_mime in [
+            "image/png",
+            "IMAGE/JPEG",
+            "  Image/WebP ; charset=binary ",
+            "image/gif; name=\"demo.gif\"",
+        ] {
+            let doc_update: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+                "update_id": 503,
+                "message": {
+                    "message_id": 12,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "media_group_id": "doc-group",
+                    "document": {
+                        "file_id": "doc_img_1",
+                        "file_size": 4096,
+                        "mime_type": raw_mime
+                    },
+                    "caption": "/new"
+                }
+            }))
+            .expect("构造图片文档更新应成功");
+            assert_eq!(
+                doc_update.into_domain().payload,
+                TelegramUpdatePayload::Message {
+                    chat: ChatKey::from_platform_id("tg", "42"),
+                    is_private: true,
+                    sender: Some(SenderKey::from_platform_id("tg", "42")),
+                    media_group_id: Some("doc-group".into()),
+                    content: TelegramMessageContent::Image {
+                        file_id: "doc_img_1".into(),
+                        file_size: Some(4096),
+                        caption: Some("/new".into()),
+                    },
+                },
+                "文档 MIME {raw_mime:?} 规范化后应识别为受支持图片"
+            );
+        }
+
+        // 转码动图 animation（同时携带 document，即使 mime_type 为 image/gif 或 video/mp4）：必须先于 document 拦截为 Unsupported
+        for anim_doc_mime in ["video/mp4", "image/gif"] {
+            let anim_update: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+                "update_id": 504,
+                "message": {
+                    "message_id": 13,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "animation": {
+                        "file_id": "anim_1",
+                        "width": 320,
+                        "height": 240,
+                        "duration": 3
+                    },
+                    "document": {
+                        "file_id": "anim_1",
+                        "file_size": 20480,
+                        "mime_type": anim_doc_mime
+                    },
+                    "caption": "动图说明"
+                }
+            }))
+            .expect("构造动图更新应成功");
+            assert_eq!(
+                anim_update.into_domain().payload,
+                TelegramUpdatePayload::Message {
+                    chat: ChatKey::from_platform_id("tg", "42"),
+                    is_private: true,
+                    sender: Some(SenderKey::from_platform_id("tg", "42")),
+                    media_group_id: None,
+                    content: TelegramMessageContent::Unsupported,
+                },
+                "携带 animation 的消息必须先于 document 判定为 Unsupported（document MIME={anim_doc_mime}）"
+            );
+        }
+
+        // 非图片文档（PDF、SVG、缺省 MIME）、贴纸与空 photo 数组均归入 Unsupported
+        let unsupported_payloads = [
+            serde_json::json!({
+                "update_id": 505,
+                "message": {
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 42},
+                    "document": {"file_id": "pdf_1", "mime_type": "application/pdf"},
+                    "caption": "文档说明"
+                }
+            }),
+            serde_json::json!({
+                "update_id": 506,
+                "message": {
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 42},
+                    "document": {"file_id": "svg_1", "mime_type": "image/svg+xml"}
+                }
+            }),
+            serde_json::json!({
+                "update_id": 507,
+                "message": {
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 42},
+                    "document": {"file_id": "bin_1"}
+                }
+            }),
+            serde_json::json!({
+                "update_id": 508,
+                "message": {
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 42},
+                    "sticker": {"file_id": "stk_1", "width": 512, "height": 512}
+                }
+            }),
+            serde_json::json!({
+                "update_id": 509,
+                "message": {
+                    "chat": {"id": 42, "type": "private"},
+                    "from": {"id": 42},
+                    "photo": []
+                }
+            }),
+        ];
+        for sample in unsupported_payloads {
+            let raw_unsup: RawTelegramUpdate =
+                serde_json::from_value(sample.clone()).expect("构造不支持媒体更新应成功");
+            match raw_unsup.into_domain().payload {
+                TelegramUpdatePayload::Message { content, .. } => {
+                    assert_eq!(
+                        content,
+                        TelegramMessageContent::Unsupported,
+                        "样本 {sample} 必须归入 Unsupported"
+                    );
+                }
+                other => panic!("应解析为 Message 变体，实际: {other:?}"),
+            }
         }
 
         // 停止按钮事件
         let json_stop = r#"{
-            "update_id": 503,
+            "update_id": 510,
             "stopped_message_generation": {
                 "chat": {"id": 42, "type": "private"},
                 "draft_id": 9001
@@ -349,8 +611,10 @@ mod tests {
         }"#;
         let raw_stop: RawTelegramUpdate =
             serde_json::from_str(json_stop).expect("解析停止生成事件应成功");
+        let parsed_stop = raw_stop.into_domain();
+        assert_eq!(parsed_stop.update_id, 510);
         assert_eq!(
-            raw_stop.into_domain().payload,
+            parsed_stop.payload,
             TelegramUpdatePayload::StoppedMessageGeneration {
                 chat: ChatKey::from_platform_id("tg", "42"),
                 is_private: true,

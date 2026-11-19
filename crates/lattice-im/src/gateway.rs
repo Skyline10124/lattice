@@ -26,7 +26,7 @@ use tokio::{
 
 use crate::{
     command::{
-        HELP_REPLY, ImCommand, NON_TEXT_MESSAGE_REPLY, ParsedInput, cancel_turn_and_format,
+        HELP_REPLY, ImCommand, ParsedInput, UNSUPPORTED_MEDIA_REPLY, cancel_turn_and_format,
         describe_local_error, execute_cancel_command, execute_status_command,
         execute_usage_command, is_authorized_private_message, is_not_found_or_uninitialized,
         parse_text_input,
@@ -34,6 +34,7 @@ use crate::{
     config::TelegramGatewayConfig,
     identity::{ChatKey, InboundId, new_session_id, new_turn_id},
     ledger::{InboundRecord, Ledger, LedgerError, LedgerPublicationGuard, LedgerPublicationLatch},
+    media::{IncomingMediaItem, MediaBatchOutcome, prepare_media_turn},
     redact::ImRedactor,
     reply::{
         ActiveDrafts, ChatDraftThrottleMap, DraftLease, compose_final_reply, drive_turn_drafts,
@@ -41,7 +42,7 @@ use crate::{
     },
     telegram::{
         LONG_POLL_TIMEOUT_SECS, TELEGRAM_REDELIVERY_WINDOW, TelegramApiError, TelegramIo,
-        TelegramUpdate, TelegramUpdatePayload,
+        TelegramMessageContent, TelegramUpdate, TelegramUpdatePayload,
     },
     telegram_http::TelegramHttpClient,
 };
@@ -742,7 +743,8 @@ impl GatewayRuntime {
                 chat,
                 is_private,
                 sender,
-                text,
+                media_group_id: _,
+                content,
             } => {
                 if !is_authorized_private_message(
                     is_private,
@@ -758,81 +760,96 @@ impl GatewayRuntime {
                     return;
                 }
 
-                // 没有 text（含带 caption 的媒体消息）：不写台账、不建会话，立即确认后回复提示。
-                let Some(text) = text else {
-                    self.ack_update(&inbound_id);
-                    let rt = Arc::clone(self);
-                    self.spawn_tracked(async move {
-                        let _ = send_text_reliably(
-                            rt.io.as_ref(),
-                            &chat,
-                            NON_TEXT_MESSAGE_REPLY,
-                            rt.shutdown_rx.clone(),
-                        )
-                        .await;
-                    });
-                    return;
-                };
-
-                match parse_text_input(&text) {
-                    ParsedInput::Command(ImCommand::Help | ImCommand::Start) => {
+                match content {
+                    TelegramMessageContent::Unsupported => {
+                        // 不受支持的媒体或空消息：不写台账、不建会话，立即确认后回复提示。
                         self.ack_update(&inbound_id);
                         let rt = Arc::clone(self);
                         self.spawn_tracked(async move {
                             let _ = send_text_reliably(
                                 rt.io.as_ref(),
                                 &chat,
-                                HELP_REPLY,
+                                UNSUPPORTED_MEDIA_REPLY,
                                 rt.shutdown_rx.clone(),
                             )
                             .await;
                         });
                     }
-                    ParsedInput::Command(
-                        cmd @ (ImCommand::Cancel | ImCommand::Status | ImCommand::Usage),
-                    ) => {
-                        // 不写台账的查询与取消命令收到即确认，回复发出与否不影响 offset。
-                        self.ack_update(&inbound_id);
-                        let rt = Arc::clone(self);
-                        self.spawn_tracked(async move {
-                            let bound = rt.ledger.bound_session(&chat).await;
-                            let reply = match cmd {
-                                ImCommand::Cancel => {
-                                    execute_cancel_command(&rt.service, bound).await.to_owned()
-                                }
-                                ImCommand::Status => {
-                                    execute_status_command(&rt.service, bound, &rt.redactor).await
-                                }
-                                ImCommand::Usage => {
-                                    execute_usage_command(&rt.service, bound, &rt.redactor).await
-                                }
-                                _ => unreachable!("外层分支已限定命令种类"),
-                            };
-                            let _ = send_text_reliably(
-                                rt.io.as_ref(),
-                                &chat,
-                                &reply,
-                                rt.shutdown_rx.clone(),
+                    TelegramMessageContent::Image {
+                        file_id,
+                        file_size,
+                        caption,
+                    } => {
+                        let media_item = IncomingMediaItem::image(file_id, file_size, caption);
+                        self.enqueue_ledger_event(
+                            inbound_id,
+                            chat,
+                            LedgerInboundAction::SubmitMedia(vec![media_item]),
+                        )
+                        .await;
+                    }
+                    TelegramMessageContent::Text(text) => match parse_text_input(&text) {
+                        ParsedInput::Command(ImCommand::Help | ImCommand::Start) => {
+                            self.ack_update(&inbound_id);
+                            let rt = Arc::clone(self);
+                            self.spawn_tracked(async move {
+                                let _ = send_text_reliably(
+                                    rt.io.as_ref(),
+                                    &chat,
+                                    HELP_REPLY,
+                                    rt.shutdown_rx.clone(),
+                                )
+                                .await;
+                            });
+                        }
+                        ParsedInput::Command(
+                            cmd @ (ImCommand::Cancel | ImCommand::Status | ImCommand::Usage),
+                        ) => {
+                            // 不写台账的查询与取消命令收到即确认，回复发出与否不影响 offset。
+                            self.ack_update(&inbound_id);
+                            let rt = Arc::clone(self);
+                            self.spawn_tracked(async move {
+                                let bound = rt.ledger.bound_session(&chat).await;
+                                let reply = match cmd {
+                                    ImCommand::Cancel => {
+                                        execute_cancel_command(&rt.service, bound).await.to_owned()
+                                    }
+                                    ImCommand::Status => {
+                                        execute_status_command(&rt.service, bound, &rt.redactor)
+                                            .await
+                                    }
+                                    ImCommand::Usage => {
+                                        execute_usage_command(&rt.service, bound, &rt.redactor)
+                                            .await
+                                    }
+                                    _ => unreachable!("外层分支已限定命令种类"),
+                                };
+                                let _ = send_text_reliably(
+                                    rt.io.as_ref(),
+                                    &chat,
+                                    &reply,
+                                    rt.shutdown_rx.clone(),
+                                )
+                                .await;
+                            });
+                        }
+                        ParsedInput::Command(ImCommand::New) => {
+                            self.enqueue_ledger_event(
+                                inbound_id,
+                                chat,
+                                LedgerInboundAction::ResetBinding,
                             )
                             .await;
-                        });
-                    }
-                    ParsedInput::Command(ImCommand::New) => {
-                        self.enqueue_ledger_event(
-                            inbound_id,
-                            chat,
-                            LedgerInboundAction::ResetBinding,
-                        )
-                        .await;
-                    }
-                    ParsedInput::Message => {
-                        self.enqueue_ledger_event(
-                            inbound_id,
-                            chat,
-                            LedgerInboundAction::SubmitMessage(text),
-                        )
-                        .await;
-                    }
+                        }
+                        ParsedInput::Message => {
+                            self.enqueue_ledger_event(
+                                inbound_id,
+                                chat,
+                                LedgerInboundAction::SubmitMessage(text),
+                            )
+                            .await;
+                        }
+                    },
                 }
             }
         }
@@ -915,13 +932,49 @@ impl GatewayRuntime {
                         .await
                 }
                 LedgerInboundAction::SubmitMessage(text) => {
-                    self.handle_ordinary_message(
+                    self.handle_turn_parts(
                         &mut item.in_flight_guard,
                         item.inbound_id,
                         item.chat,
-                        text,
+                        vec![UserInputPart::Text { text }],
                     )
                     .await
+                }
+                LedgerInboundAction::SubmitMedia(media_items) => {
+                    match prepare_media_turn(
+                        self.io.as_ref(),
+                        &media_items,
+                        self.shutdown_rx.clone(),
+                    )
+                    .await
+                    {
+                        MediaBatchOutcome::Interrupted => false,
+                        MediaBatchOutcome::Rejected(reason) => {
+                            item.in_flight_guard.clear_now();
+                            self.ack_update(&item.inbound_id);
+                            let chat_for_reply = item.chat;
+                            let rt = Arc::clone(self);
+                            self.spawn_tracked(async move {
+                                let _ = send_text_reliably(
+                                    rt.io.as_ref(),
+                                    &chat_for_reply,
+                                    &reason,
+                                    rt.shutdown_rx.clone(),
+                                )
+                                .await;
+                            });
+                            !self.is_stopping()
+                        }
+                        MediaBatchOutcome::Ready(parts) => {
+                            self.handle_turn_parts(
+                                &mut item.in_flight_guard,
+                                item.inbound_id,
+                                item.chat,
+                                parts,
+                            )
+                            .await
+                        }
+                    }
                 }
             };
             if !keep_going {
@@ -981,12 +1034,12 @@ impl GatewayRuntime {
         true
     }
 
-    async fn handle_ordinary_message(
+    async fn handle_turn_parts(
         self: &Arc<Self>,
         in_flight_guard: &mut InFlightGuard,
         inbound_id: InboundId,
         chat: ChatKey,
-        text: String,
+        parts: Vec<UserInputPart>,
     ) -> bool {
         let existing_binding = self.ledger.bound_session(&chat).await;
         let is_new = existing_binding.is_none();
@@ -1033,20 +1086,21 @@ impl GatewayRuntime {
         in_flight_guard.clear_now();
         self.ack_update(&inbound_id);
 
+        let retry_parts = (!is_new).then(|| parts.clone());
         let mut submit_result = if is_new {
-            self.configure_new_and_submit(session_id, turn_id, &text)
+            self.configure_new_and_submit(session_id, turn_id, parts)
                 .await
         } else {
-            self.submit_only(session_id, turn_id, &text).await
+            self.submit_only(session_id, turn_id, parts).await
         };
 
-        // 绑定的草稿会话已被后台清理或会话库尚未初始化时，复用台账中已登记的同一个 SessionId 与 TurnId 重建并提交。
-        if !is_new
+        // 绑定的草稿会话已被后台清理或会话库尚未初始化时，复用台账中已登记的同一个 SessionId、TurnId 与 parts 重建并提交。
+        if let Some(parts_for_rebuild) = retry_parts
             && let Err(ref err) = submit_result
             && is_not_found_or_uninitialized(err)
         {
             submit_result = self
-                .configure_new_and_submit(session_id, turn_id, &text)
+                .configure_new_and_submit(session_id, turn_id, parts_for_rebuild)
                 .await;
         }
 
@@ -1106,7 +1160,7 @@ impl GatewayRuntime {
         &self,
         session_id: SessionId,
         turn_id: TurnId,
-        text: &str,
+        parts: Vec<UserInputPart>,
     ) -> Result<InProcessTurn, LocalError> {
         let configure_res = self
             .service
@@ -1123,23 +1177,21 @@ impl GatewayRuntime {
             Err(err) if err.conflict == Some(ConflictReason::SessionExists) => {}
             Err(err) => return Err(err),
         }
-        self.submit_only(session_id, turn_id, text).await
+        self.submit_only(session_id, turn_id, parts).await
     }
 
     async fn submit_only(
         &self,
         session_id: SessionId,
         turn_id: TurnId,
-        text: &str,
+        parts: Vec<UserInputPart>,
     ) -> Result<InProcessTurn, LocalError> {
         self.service
             .submit(TurnRequest {
                 turn_id,
                 session: session_id,
                 workspace: self.config.workspace.clone(),
-                parts: vec![UserInputPart::Text {
-                    text: text.to_owned(),
-                }],
+                parts,
                 expected_settings: None,
             })
             .await
@@ -1373,4 +1425,5 @@ impl GatewayRuntime {
 enum LedgerInboundAction {
     ResetBinding,
     SubmitMessage(String),
+    SubmitMedia(Vec<IncomingMediaItem>),
 }

@@ -16,8 +16,8 @@ use crate::{
     identity::{ChatKey, InboundId},
     redact::ImRedactor,
     telegram::{
-        ALLOWED_UPDATES, OffsetTracker, RawUpdateEnvelope, TelegramApiError, TelegramIo,
-        TelegramUpdate, chat_id_from_key,
+        ALLOWED_UPDATES, OffsetTracker, RawUpdateEnvelope, TelegramApiError, TelegramDownloadError,
+        TelegramIo, TelegramUpdate, chat_id_from_key,
     },
 };
 
@@ -188,11 +188,101 @@ struct SendMessageDraftRequest<'a> {
     can_stop: bool,
 }
 
+#[derive(Serialize)]
+struct GetFileRequest<'a> {
+    file_id: &'a str,
+}
+
 #[derive(Deserialize)]
 struct RawActionEnvelope {
     ok: bool,
     #[serde(default)]
     description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawGetFileEnvelope {
+    ok: bool,
+    #[serde(default)]
+    result: Option<RawTelegramFile>,
+    #[serde(default)]
+    error_code: Option<i64>,
+    #[serde(default)]
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RawTelegramFile {
+    #[serde(default)]
+    file_size: Option<u64>,
+    #[serde(default)]
+    file_path: Option<String>,
+}
+
+fn validate_file_path(file_path: &str) -> Result<Vec<&str>, TelegramDownloadError> {
+    if file_path.is_empty()
+        || file_path.starts_with('/')
+        || file_path
+            .chars()
+            .any(|ch| matches!(ch, '\\' | '?' | '#') || ch.is_control())
+    {
+        return Err(TelegramDownloadError::InvalidFilePath);
+    }
+    let mut segments = Vec::new();
+    for segment in file_path.split('/') {
+        if segment.is_empty() || segment == "." || segment == ".." {
+            return Err(TelegramDownloadError::InvalidFilePath);
+        }
+        segments.push(segment);
+    }
+    Ok(segments)
+}
+
+fn build_bot_method_url(
+    base_url: &str,
+    token: &str,
+    method: &str,
+) -> Result<reqwest::Url, TelegramDownloadError> {
+    let mut url = reqwest::Url::parse(base_url).map_err(|_| {
+        TelegramDownloadError::Api(TelegramApiError::Retryable {
+            diagnostic: "解析 Telegram API 基础地址失败".into(),
+        })
+    })?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|()| {
+            TelegramDownloadError::Api(TelegramApiError::Retryable {
+                diagnostic: "Telegram API 基础地址不支持路径分段".into(),
+            })
+        })?;
+        segments.push(&format!("bot{token}"));
+        segments.push(method);
+    }
+    Ok(url)
+}
+
+fn build_file_download_url(
+    base_url: &str,
+    token: &str,
+    path_segments: &[&str],
+) -> Result<reqwest::Url, TelegramDownloadError> {
+    let mut url = reqwest::Url::parse(base_url).map_err(|_| {
+        TelegramDownloadError::Api(TelegramApiError::Retryable {
+            diagnostic: "解析 Telegram API 基础地址失败".into(),
+        })
+    })?;
+    {
+        let mut segments = url.path_segments_mut().map_err(|()| {
+            TelegramDownloadError::Api(TelegramApiError::Retryable {
+                diagnostic: "Telegram API 基础地址不支持路径分段".into(),
+            })
+        })?;
+        segments.push("file");
+        segments.push(&format!("bot{token}"));
+        for seg in path_segments {
+            segments.push(seg);
+        }
+    }
+    Ok(url)
 }
 
 #[derive(Deserialize)]
@@ -336,6 +426,156 @@ impl TelegramHttpClient {
         }
         Ok(())
     }
+
+    async fn download_file_with_base(
+        &self,
+        client: &reqwest::Client,
+        base_url: &str,
+        file_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, TelegramDownloadError> {
+        let get_file_url = build_bot_method_url(base_url, self.token.as_str(), "getFile")?;
+        let meta_resp = match client
+            .post(get_file_url)
+            .timeout(ACTION_TIMEOUT)
+            .json(&GetFileRequest { file_id })
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Err(TelegramDownloadError::Api(
+                    self.handle_transport_error(err).await,
+                ));
+            }
+        };
+
+        let meta_status = meta_resp.status();
+        let meta_retry_after = meta_resp
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let meta_bytes = match read_bounded_bytes(meta_resp, MAX_ERROR_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return Err(TelegramDownloadError::Api(
+                    self.handle_transport_error(err).await,
+                ));
+            }
+        };
+
+        if !meta_status.is_success() {
+            return Err(TelegramDownloadError::Api(classify_http_failure(
+                meta_status.as_u16(),
+                meta_retry_after.as_deref(),
+                &meta_bytes,
+                &self.redactor,
+            )));
+        }
+
+        let envelope: RawGetFileEnvelope = serde_json::from_slice(&meta_bytes).map_err(|_| {
+            TelegramDownloadError::Api(TelegramApiError::Retryable {
+                diagnostic: "解析 Telegram getFile 响应 JSON 失败".into(),
+            })
+        })?;
+
+        if !envelope.ok {
+            if let Some(code) = envelope
+                .error_code
+                .and_then(|c| u16::try_from(c).ok())
+                .filter(|&c| c >= 400)
+            {
+                return Err(TelegramDownloadError::Api(classify_http_failure(
+                    code,
+                    meta_retry_after.as_deref(),
+                    &meta_bytes,
+                    &self.redactor,
+                )));
+            }
+            let desc = envelope
+                .description
+                .as_deref()
+                .map(|d| self.redactor.sanitize_single_line(d))
+                .filter(|d| !d.is_empty())
+                .unwrap_or_else(|| "ok=false".into());
+            return Err(TelegramDownloadError::Api(TelegramApiError::Retryable {
+                diagnostic: format!("Telegram getFile 返回非成功包：{desc}"),
+            }));
+        }
+
+        let Some(file_meta) = envelope.result else {
+            return Err(TelegramDownloadError::InvalidFilePath);
+        };
+        if file_meta
+            .file_size
+            .is_some_and(|size| size > max_bytes as u64)
+        {
+            return Err(TelegramDownloadError::TooLarge);
+        }
+        let Some(raw_file_path) = file_meta.file_path.as_deref() else {
+            return Err(TelegramDownloadError::InvalidFilePath);
+        };
+        let path_segments = validate_file_path(raw_file_path)?;
+
+        let download_url = build_file_download_url(base_url, self.token.as_str(), &path_segments)?;
+        let file_resp = match client
+            .get(download_url)
+            .timeout(ACTION_TIMEOUT)
+            .send()
+            .await
+        {
+            Ok(resp) => resp,
+            Err(err) => {
+                return Err(TelegramDownloadError::Api(
+                    self.handle_transport_error(err).await,
+                ));
+            }
+        };
+
+        let file_status = file_resp.status();
+        if !file_status.is_success() {
+            let retry_after = file_resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .map(str::to_owned);
+            let err_bytes = match read_bounded_bytes(file_resp, MAX_ERROR_BODY_BYTES).await {
+                Ok(bytes) => bytes,
+                Err(err) => {
+                    return Err(TelegramDownloadError::Api(
+                        self.handle_transport_error(err).await,
+                    ));
+                }
+            };
+            return Err(TelegramDownloadError::Api(classify_http_failure(
+                file_status.as_u16(),
+                retry_after.as_deref(),
+                &err_bytes,
+                &self.redactor,
+            )));
+        }
+
+        if file_resp
+            .content_length()
+            .is_some_and(|len| len > max_bytes as u64)
+        {
+            return Err(TelegramDownloadError::TooLarge);
+        }
+
+        let bytes = match read_bounded_bytes(file_resp, max_bytes.saturating_add(1)).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                return Err(TelegramDownloadError::Api(
+                    self.handle_transport_error(err).await,
+                ));
+            }
+        };
+        if bytes.len() > max_bytes {
+            return Err(TelegramDownloadError::TooLarge);
+        }
+        Ok(bytes)
+    }
 }
 
 #[async_trait::async_trait]
@@ -403,6 +643,19 @@ impl TelegramIo for TelegramHttpClient {
             can_stop,
         };
         self.post_unit_action("sendMessageDraft", &body).await
+    }
+
+    async fn download_file(
+        &self,
+        file_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, TelegramDownloadError> {
+        let client = self
+            .get_or_build_client()
+            .await
+            .map_err(TelegramDownloadError::Api)?;
+        self.download_file_with_base(&client, TELEGRAM_API_BASE_URL, file_id, max_bytes)
+            .await
     }
 
     async fn drain(&self) {
@@ -637,5 +890,364 @@ mod tests {
             vec!["tg:50".to_string(), "tg:53".to_string()],
             "前序更新挡住 offset 时，已确认的 /help 与 /cancel 重投不得再次进入网关分发"
         );
+    }
+
+    #[test]
+    fn validates_telegram_file_path_against_traversal_delimiters_and_control_chars() {
+        assert_eq!(
+            validate_file_path("file_0.jpg"),
+            Ok(vec!["file_0.jpg"]),
+            "单段合法相对路径应通过校验"
+        );
+        assert_eq!(
+            validate_file_path("photos/sub_dir/file_12.png"),
+            Ok(vec!["photos", "sub_dir", "file_12.png"]),
+            "多段合法相对路径应按斜杠分段通过校验"
+        );
+
+        let rejected = [
+            "",
+            "/",
+            "/photos/a.jpg",
+            "photos/a.jpg/",
+            "photos//a.jpg",
+            ".",
+            "..",
+            "photos/./a.jpg",
+            "photos/../bot123/getMe",
+            "../a.jpg",
+            "photos/..",
+            "photos\\a.jpg",
+            "photos/a.jpg?token=leak",
+            "photos/a.jpg#frag",
+            "photos/a\0.jpg",
+            "photos/a\n.jpg",
+            "photos/a\r.jpg",
+            "photos/a\t.jpg",
+            "photos/a\x7f.jpg",
+        ];
+        for bad in rejected {
+            assert_eq!(
+                validate_file_path(bad),
+                Err(TelegramDownloadError::InvalidFilePath),
+                "非法 file_path {bad:?} 必须被拒绝"
+            );
+        }
+    }
+
+    async fn read_raw_http_head_and_body(sock: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+        use tokio::io::AsyncReadExt;
+
+        let mut head = Vec::new();
+        while !head.ends_with(b"\r\n\r\n") {
+            head.push(sock.read_u8().await.expect("读取 HTTP 请求头应成功"));
+        }
+        let head_str = String::from_utf8(head).expect("HTTP 请求头应为 UTF-8");
+        let request_line = head_str.lines().next().unwrap_or("").to_owned();
+        let content_len: usize = head_str
+            .lines()
+            .find_map(|line| {
+                line.to_ascii_lowercase()
+                    .strip_prefix("content-length:")
+                    .and_then(|v| v.trim().parse().ok())
+            })
+            .unwrap_or(0);
+        let mut body = vec![0u8; content_len];
+        if content_len > 0 {
+            sock.read_exact(&mut body)
+                .await
+                .expect("读取 HTTP 请求体应成功");
+        }
+        (request_line, body)
+    }
+
+    #[tokio::test]
+    async fn download_file_enforces_size_bounds_aborts_oversized_stream_and_never_leaks_token() {
+        use std::sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        };
+        use tokio::{io::AsyncWriteExt, net::TcpListener};
+
+        const SECRET_TOKEN: &str = "777888:ULTRA_SECRET_DOWNLOAD_TOKEN";
+        let token = ImToken::parse(SECRET_TOKEN).unwrap();
+        let redactor = ImRedactor::new([token.clone()]);
+        let tg_client = TelegramHttpClient::new(token, Vec::new(), redactor);
+        let raw_http = reqwest::Client::builder()
+            .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .unwrap();
+
+        // 1. getFile 声明 file_size 超限时立即短路返回 TooLarge，绝不发起第二次 GET 连接
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let accepted = Arc::new(AtomicUsize::new(0));
+            let accepted_srv = Arc::clone(&accepted);
+            let srv = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                accepted_srv.fetch_add(1, Ordering::SeqCst);
+                let (req_line, req_body) = read_raw_http_head_and_body(&mut sock).await;
+                assert_eq!(
+                    req_line,
+                    format!("POST /bot{SECRET_TOKEN}/getFile HTTP/1.1")
+                );
+                let parsed: serde_json::Value = serde_json::from_slice(&req_body).unwrap();
+                assert_eq!(parsed["file_id"], "oversized_meta");
+                let json = r#"{"ok":true,"result":{"file_id":"oversized_meta","file_size":1025,"file_path":"photos/huge.png"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            });
+
+            let err = tg_client
+                .download_file_with_base(&raw_http, &base, "oversized_meta", 1024)
+                .await
+                .expect_err("声明 file_size 超限必须直接拒绝");
+            assert_eq!(err, TelegramDownloadError::TooLarge);
+            srv.await.unwrap();
+            assert_eq!(
+                accepted.load(Ordering::SeqCst),
+                1,
+                "getFile 声明超限时不得发起第二次 GET 请求"
+            );
+        }
+
+        // 2. getFile 返回非法 file_path 时立即返回 InvalidFilePath，不发起 GET
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let srv = tokio::spawn(async move {
+                let (mut sock, _) = listener.accept().await.unwrap();
+                let _ = read_raw_http_head_and_body(&mut sock).await;
+                let json = r#"{"ok":true,"result":{"file_id":"bad_path","file_path":"photos/../botleak"}}"#;
+                let resp = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+                sock.write_all(resp.as_bytes()).await.unwrap();
+            });
+
+            let err = tg_client
+                .download_file_with_base(&raw_http, &base, "bad_path", 1024)
+                .await
+                .expect_err("路径穿越 file_path 必须拒绝");
+            assert_eq!(err, TelegramDownloadError::InvalidFilePath);
+            srv.await.unwrap();
+        }
+
+        // 3. 恰好等于 max_bytes 的流式下载成功，且核验 GET /file/bot<token>/<file_path> 路径拼接
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let payload = vec![0x5Au8; 1024];
+            let payload_srv = payload.clone();
+            let srv = tokio::spawn(async move {
+                let (mut s1, _) = listener.accept().await.unwrap();
+                let _ = read_raw_http_head_and_body(&mut s1).await;
+                let json = r#"{"ok":true,"result":{"file_id":"exact_1k","file_size":1024,"file_path":"photos/sub/exact.png"}}"#;
+                let r1 = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+                s1.write_all(r1.as_bytes()).await.unwrap();
+                drop(s1);
+
+                let (mut s2, _) = listener.accept().await.unwrap();
+                let (req_line, _) = read_raw_http_head_and_body(&mut s2).await;
+                assert_eq!(
+                    req_line,
+                    format!("GET /file/bot{SECRET_TOKEN}/photos/sub/exact.png HTTP/1.1")
+                );
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload_srv.len()
+                );
+                s2.write_all(head.as_bytes()).await.unwrap();
+                s2.write_all(&payload_srv).await.unwrap();
+            });
+
+            let got = tg_client
+                .download_file_with_base(&raw_http, &base, "exact_1k", 1024)
+                .await
+                .expect("恰好等于上限的响应体应完整下载成功");
+            assert_eq!(got, payload);
+            srv.await.unwrap();
+        }
+
+        // 4. 无 Content-Length 的 chunked 响应流在读到 max_bytes + 1 字节时立即中断连接，不等待后续流结束
+        {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let (_hold_tx, hold_rx) = oneshot::channel::<()>();
+            let srv = tokio::spawn(async move {
+                let (mut s1, _) = listener.accept().await.unwrap();
+                let _ = read_raw_http_head_and_body(&mut s1).await;
+                let json = r#"{"ok":true,"result":{"file_id":"stream_overflow","file_path":"photos/stream.png"}}"#;
+                let r1 = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                    json.len()
+                );
+                s1.write_all(r1.as_bytes()).await.unwrap();
+                drop(s1);
+
+                let (mut s2, _) = listener.accept().await.unwrap();
+                let _ = read_raw_http_head_and_body(&mut s2).await;
+                s2.write_all(
+                    b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .await
+                .unwrap();
+                // 写出 513 字节分块（超过 max_bytes = 512 一字节），随后故意挂起不发送结束块
+                let over_chunk = vec![b'X'; 513];
+                s2.write_all(format!("{:X}\r\n", over_chunk.len()).as_bytes())
+                    .await
+                    .unwrap();
+                s2.write_all(&over_chunk).await.unwrap();
+                s2.write_all(b"\r\n").await.unwrap();
+                s2.flush().await.unwrap();
+                let _ = hold_rx.await;
+            });
+
+            let err = tokio::time::timeout(
+                Duration::from_secs(3),
+                tg_client.download_file_with_base(&raw_http, &base, "stream_overflow", 512),
+            )
+            .await
+            .expect("读取到 max_bytes + 1 后必须立即中断流返回，不得阻塞等待流结束")
+            .expect_err("超过上限 1 字节必须返回 TooLarge");
+            assert_eq!(err, TelegramDownloadError::TooLarge);
+            srv.abort();
+        }
+
+        // 5. 状态码分类（400/404/429/5xx，含 HTTP 200 ok=false 带 error_code）与传输异常零凭据泄露
+        for (mode, expected_check) in [
+            ("http_400", "rejected_400"),
+            ("ok_false_404", "unauth_404"),
+            ("file_429", "rate_429"),
+            ("file_503", "retryable"),
+        ] {
+            let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let srv = tokio::spawn(async move {
+                let (mut s1, _) = listener.accept().await.unwrap();
+                let _ = read_raw_http_head_and_body(&mut s1).await;
+                match mode {
+                    "http_400" => {
+                        let body = format!(
+                            r#"{{"ok":false,"error_code":400,"description":"Bad Request: invalid file_id {SECRET_TOKEN}"}}"#
+                        );
+                        let r = format!(
+                            "HTTP/1.1 400 Bad Request\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        s1.write_all(r.as_bytes()).await.unwrap();
+                    }
+                    "ok_false_404" => {
+                        let body = format!(
+                            r#"{{"ok":false,"error_code":404,"description":"Not Found {SECRET_TOKEN}"}}"#
+                        );
+                        let r = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                            body.len()
+                        );
+                        s1.write_all(r.as_bytes()).await.unwrap();
+                    }
+                    _ => {
+                        let json =
+                            r#"{"ok":true,"result":{"file_id":"f","file_path":"photos/a.png"}}"#;
+                        let r1 = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                            json.len()
+                        );
+                        s1.write_all(r1.as_bytes()).await.unwrap();
+                        drop(s1);
+
+                        let (mut s2, _) = listener.accept().await.unwrap();
+                        let _ = read_raw_http_head_and_body(&mut s2).await;
+                        if mode == "file_429" {
+                            let body = format!(
+                                r#"{{"ok":false,"error_code":429,"description":"Too Many Requests {SECRET_TOKEN}","parameters":{{"retry_after":9}}}}"#
+                            );
+                            let r2 = format!(
+                                "HTTP/1.1 429 Too Many Requests\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            s2.write_all(r2.as_bytes()).await.unwrap();
+                        } else {
+                            let body = format!("upstream broken {SECRET_TOKEN}");
+                            let r2 = format!(
+                                "HTTP/1.1 503 Service Unavailable\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                                body.len()
+                            );
+                            s2.write_all(r2.as_bytes()).await.unwrap();
+                        }
+                    }
+                }
+            });
+
+            let err = tg_client
+                .download_file_with_base(&raw_http, &base, "f", 1024)
+                .await
+                .expect_err("异常响应必须返回错误");
+            srv.await.unwrap();
+
+            let TelegramDownloadError::Api(api_err) = err else {
+                panic!("模式 {mode} 应返回 Api 错误，实际: {err:?}");
+            };
+            assert!(
+                !api_err.diagnostic().contains(SECRET_TOKEN),
+                "模式 {mode} 错误诊断绝不得泄露机器人凭据: {}",
+                api_err.diagnostic()
+            );
+            match expected_check {
+                "rejected_400" => assert!(matches!(
+                    api_err,
+                    TelegramApiError::Rejected { status: 400, .. }
+                )),
+                "unauth_404" => assert!(matches!(
+                    api_err,
+                    TelegramApiError::UnauthorizedOrInvalid { status: 404, .. }
+                )),
+                "rate_429" => assert!(matches!(
+                    api_err,
+                    TelegramApiError::RateLimited {
+                        retry_after: Some(d),
+                        ..
+                    } if d == Duration::from_secs(9)
+                )),
+                "retryable" => assert!(matches!(api_err, TelegramApiError::Retryable { .. })),
+                _ => unreachable!(),
+            }
+        }
+
+        // 6. 连接拒绝与流读取中途断开：传输层 reqwest::Error 经 without_url + ImRedactor 后绝不泄露凭据路径
+        {
+            let closed_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let closed_addr = closed_listener.local_addr().unwrap();
+            drop(closed_listener);
+            let closed_base = format!("http://{closed_addr}");
+
+            let err = tg_client
+                .download_file_with_base(&raw_http, &closed_base, "conn_refused", 1024)
+                .await
+                .expect_err("已关闭端口应返回传输层可重试错误");
+            match err {
+                TelegramDownloadError::Api(TelegramApiError::Retryable { diagnostic }) => {
+                    assert!(
+                        !diagnostic.contains(SECRET_TOKEN),
+                        "连接失败诊断不得泄露凭据: {diagnostic}"
+                    );
+                    assert!(
+                        !diagnostic.contains("/getFile"),
+                        "without_url 应剥离含凭据的请求路径: {diagnostic}"
+                    );
+                }
+                other => panic!("连接失败应归类为 Retryable，实际: {other:?}"),
+            }
+        }
     }
 }

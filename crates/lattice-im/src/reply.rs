@@ -771,6 +771,18 @@ mod tests {
             ));
             Ok(())
         }
+
+        async fn download_file(
+            &self,
+            _file_id: &str,
+            _max_bytes: usize,
+        ) -> Result<Vec<u8>, crate::telegram::TelegramDownloadError> {
+            Err(crate::telegram::TelegramDownloadError::Api(
+                TelegramApiError::Retryable {
+                    diagnostic: "草稿节流单测替身未配置文件下载".into(),
+                },
+            ))
+        }
     }
 
     #[tokio::test(start_paused = true)]

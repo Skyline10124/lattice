@@ -15,8 +15,9 @@ use std::{
 
 use chrono::Utc;
 use lattice_ipc::{
-    ConfigureRequest, ConfigureSession, LocalErrorKind, LocalUpdate, PublicTurnOutcome,
-    SubmissionResult, SubmissionUpdate, TurnRequest, UserInputPart,
+    ConfigureRequest, ConfigureSession, ConversationEntry, ImageRef, LocalErrorKind, LocalUpdate,
+    MAX_IMAGE_BYTES, MessageSemantic, Node, PublicTurnOutcome, SubmissionResult, SubmissionUpdate,
+    TurnRequest, UserInputPart,
 };
 use lattice_local::LocalClient;
 use lattice_server::{
@@ -32,13 +33,14 @@ use tokio::{
 
 use crate::{
     ImBuildOutcome,
-    command::{HELP_REPLY, NON_TEXT_MESSAGE_REPLY, cancel_turn_and_format},
+    command::{HELP_REPLY, UNSUPPORTED_MEDIA_REPLY, cancel_turn_and_format},
     identity::{ChatKey, InboundId, new_session_id, new_turn_id},
     ledger::{InboundRecord, Ledger},
     prepare_im_gateway,
     telegram::{
-        OffsetTracker, RawTelegramUpdate, TELEGRAM_REDELIVERY_WINDOW, TelegramApiError, TelegramIo,
-        TelegramUpdate, chat_key_from_id, inbound_id_from_update_id,
+        OffsetTracker, RawTelegramUpdate, TELEGRAM_REDELIVERY_WINDOW, TelegramApiError,
+        TelegramDownloadError, TelegramIo, TelegramUpdate, chat_key_from_id,
+        inbound_id_from_update_id,
     },
 };
 
@@ -52,8 +54,11 @@ async fn bounded<T>(future: impl std::future::Future<Output = T>) -> T {
         .expect("集成测试步骤应在 10 秒上限内完成")
 }
 
-/// 可编程的假 `TelegramIo`：记录每次 `getUpdates` 传入的 `offset`、全部草稿与全部消息，并支持注入发送阻塞或报错。
+/// 可编程的假 `TelegramIo`：记录每次 `getUpdates` 传入的 `offset`、全部草稿、全部消息与文件下载，并支持注入阻塞或报错。
 type MatchingSendGate = (String, oneshot::Sender<()>, oneshot::Receiver<()>);
+type RecordedDownloadCall = (tokio::time::Instant, String, usize);
+type ScriptedDownloadMap =
+    std::collections::BTreeMap<String, VecDeque<Result<Vec<u8>, TelegramDownloadError>>>;
 
 struct FakeTelegramIo {
     batches: StdMutex<VecDeque<Result<Vec<TelegramUpdate>, TelegramApiError>>>,
@@ -77,6 +82,11 @@ struct FakeTelegramIo {
     slow_draft_behavior: StdMutex<Option<(Duration, Result<(), TelegramApiError>)>>,
     draft_entered_count: std::sync::atomic::AtomicUsize,
     draft_entered_notify: Notify,
+    download_files: StdMutex<std::collections::BTreeMap<String, Vec<u8>>>,
+    download_overrides: StdMutex<ScriptedDownloadMap>,
+    download_calls: StdMutex<Vec<RecordedDownloadCall>>,
+    download_notify: Notify,
+    download_gate: StdMutex<Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>>,
 }
 
 impl Default for FakeTelegramIo {
@@ -103,6 +113,11 @@ impl Default for FakeTelegramIo {
             slow_draft_behavior: StdMutex::new(None),
             draft_entered_count: std::sync::atomic::AtomicUsize::new(0),
             draft_entered_notify: Notify::new(),
+            download_files: StdMutex::new(std::collections::BTreeMap::new()),
+            download_overrides: StdMutex::new(std::collections::BTreeMap::new()),
+            download_calls: StdMutex::new(Vec::new()),
+            download_notify: Notify::new(),
+            download_gate: StdMutex::new(None),
         }
     }
 }
@@ -263,6 +278,53 @@ impl FakeTelegramIo {
         })
         .await;
     }
+
+    fn set_download_bytes(&self, file_id: &str, bytes: Vec<u8>) {
+        self.download_files
+            .lock()
+            .unwrap()
+            .insert(file_id.to_owned(), bytes);
+    }
+
+    fn push_download_outcome(
+        &self,
+        file_id: &str,
+        outcome: Result<Vec<u8>, TelegramDownloadError>,
+    ) {
+        self.download_overrides
+            .lock()
+            .unwrap()
+            .entry(file_id.to_owned())
+            .or_default()
+            .push_back(outcome);
+    }
+
+    fn install_download_gate(&self) -> (oneshot::Receiver<()>, oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = oneshot::channel();
+        let (release_tx, release_rx) = oneshot::channel();
+        *self.download_gate.lock().unwrap() = Some((entered_tx, release_rx));
+        (entered_rx, release_tx)
+    }
+
+    fn download_calls(&self) -> Vec<RecordedDownloadCall> {
+        self.download_calls.lock().unwrap().clone()
+    }
+
+    async fn wait_download_count(&self, count: usize) -> Vec<RecordedDownloadCall> {
+        bounded(async {
+            loop {
+                let notified = self.download_notify.notified();
+                {
+                    let guard = self.download_calls.lock().unwrap();
+                    if guard.len() >= count {
+                        return guard.clone();
+                    }
+                }
+                notified.await;
+            }
+        })
+        .await
+    }
 }
 
 #[async_trait::async_trait]
@@ -375,6 +437,55 @@ impl TelegramIo for FakeTelegramIo {
             .push((chat.clone(), draft_id, text.to_owned(), can_stop));
         self.draft_notify.notify_waiters();
         Ok(())
+    }
+
+    async fn download_file(
+        &self,
+        file_id: &str,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, TelegramDownloadError> {
+        self.download_calls.lock().unwrap().push((
+            tokio::time::Instant::now(),
+            file_id.to_owned(),
+            max_bytes,
+        ));
+        self.download_notify.notify_waiters();
+
+        let maybe_gate = self.download_gate.lock().unwrap().take();
+        if let Some((entered_tx, release_rx)) = maybe_gate {
+            let _ = entered_tx.send(());
+            let _ = release_rx.await;
+        }
+
+        if let Some(scripted) = self
+            .download_overrides
+            .lock()
+            .unwrap()
+            .get_mut(file_id)
+            .and_then(VecDeque::pop_front)
+        {
+            return scripted.and_then(|bytes| {
+                if bytes.len() > max_bytes {
+                    Err(TelegramDownloadError::TooLarge)
+                } else {
+                    Ok(bytes)
+                }
+            });
+        }
+
+        let files = self.download_files.lock().unwrap();
+        let Some(bytes) = files.get(file_id) else {
+            return Err(TelegramDownloadError::Api(
+                TelegramApiError::UnauthorizedOrInvalid {
+                    status: 404,
+                    diagnostic: "假平台未配置该 file_id".into(),
+                },
+            ));
+        };
+        if bytes.len() > max_bytes {
+            return Err(TelegramDownloadError::TooLarge);
+        }
+        Ok(bytes.clone())
     }
 
     async fn drain(&self) {
@@ -768,7 +879,7 @@ async fn full_turn_lifecycle_streams_clean_draft_and_stop_button_cancels_active_
 // 场景 2、3、8 & 10：
 // - 重复 InboundId 不重复提交；同一 chat 连发两条只建一个会话；
 // - /new 清除绑定并落账，重投同一 /new 更新不会清掉之后才建立的新绑定；
-// - 无文本消息（含带 caption 的图片消息）、/help、/start（含参数）、未授权与群组消息不建会话不落账，
+// - 不受支持媒体（贴纸）、/help、/start（含参数）、未授权与群组消息不建会话不落账，
 //   且在 sendMessage 被阻塞尚未发出时 offset 照常立即推进。
 #[tokio::test]
 async fn deduplicates_inbound_id_preserves_single_session_and_handles_new_and_non_ledger_events() {
@@ -777,7 +888,7 @@ async fn deduplicates_inbound_id_preserves_single_session_and_handles_new_and_no
     let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
     let chat_key = chat_key_from_id(PRIVATE_CHAT_ID);
 
-    // 1. 验证未授权、群组消息、带 caption 图片消息、/help、/start payload 在回复阻塞时仍立即确认推进 offset
+    // 1. 验证未授权、群组消息、贴纸消息、/help、/start payload 在回复阻塞时仍立即确认推进 offset
     let unblock_send = io.install_send_gate();
     let group_update: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
         "update_id": 200,
@@ -790,14 +901,19 @@ async fn deduplicates_inbound_id_preserves_single_session_and_handles_new_and_no
     }))
     .unwrap();
     let stranger_update = private_text_update(201, PRIVATE_CHAT_ID, OTHER_UID, "陌生人消息");
-    let captioned_photo: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+    let sticker_update: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
         "update_id": 202,
         "message": {
             "message_id": 2,
             "from": {"id": ALLOWED_UID},
             "chat": {"id": PRIVATE_CHAT_ID, "type": "private"},
-            "photo": [{"file_id": "p1", "file_unique_id": "u1", "width": 100, "height": 100}],
-            "caption": "图片说明不是 text"
+            "sticker": {
+                "file_id": "stk1",
+                "file_unique_id": "u1",
+                "type": "regular",
+                "width": 512,
+                "height": 512
+            }
         }
     }))
     .unwrap();
@@ -808,7 +924,7 @@ async fn deduplicates_inbound_id_preserves_single_session_and_handles_new_and_no
     io.push_updates(vec![
         group_update.into_domain(),
         stranger_update,
-        captioned_photo.into_domain(),
+        sticker_update.into_domain(),
         help_update,
         start_update,
     ]);
@@ -820,7 +936,7 @@ async fn deduplicates_inbound_id_preserves_single_session_and_handles_new_and_no
 
     let initial_replies = io.wait_message_count(3).await;
     let reply_texts: Vec<&str> = initial_replies.iter().map(|(_, t)| t.as_str()).collect();
-    assert!(reply_texts.contains(&NON_TEXT_MESSAGE_REPLY));
+    assert!(reply_texts.contains(&UNSUPPORTED_MEDIA_REPLY));
     assert_eq!(
         reply_texts.iter().filter(|&&t| t == HELP_REPLY).count(),
         2,
@@ -3514,4 +3630,886 @@ async fn hosted_gateway_subtask_panic_never_leaks_payload_to_stderr() {
         stderr.contains("受托管组件执行期间发生 panic（已抑制原始载荷）"),
         "stderr 应记录脱敏后的组件 panic 位置告警：{stderr}"
     );
+}
+
+fn test_base64_encode(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = chunk[0];
+        let b1 = chunk.get(1).copied().unwrap_or(0);
+        let b2 = chunk.get(2).copied().unwrap_or(0);
+        let n = (u32::from(b0) << 16) | (u32::from(b1) << 8) | u32::from(b2);
+        out.push(TABLE[((n >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((n >> 12) & 0x3f) as usize] as char);
+        if chunk.len() > 1 {
+            out.push(TABLE[((n >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if chunk.len() > 2 {
+            out.push(TABLE[(n & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
+fn private_photo_update(
+    update_id: i64,
+    chat_id: i64,
+    sender_id: i64,
+    photos: &[(&str, Option<u64>)],
+    caption: Option<&str>,
+) -> TelegramUpdate {
+    let photo_arr: Vec<serde_json::Value> = photos
+        .iter()
+        .enumerate()
+        .map(|(idx, (file_id, file_size))| {
+            let mut obj = serde_json::json!({
+                "file_id": file_id,
+                "file_unique_id": format!("u_{update_id}_{idx}"),
+                "width": (idx + 1) * 100,
+                "height": (idx + 1) * 100,
+            });
+            if let Some(size) = file_size {
+                obj["file_size"] = serde_json::json!(size);
+            }
+            obj
+        })
+        .collect();
+    let mut msg = serde_json::json!({
+        "message_id": update_id,
+        "from": {"id": sender_id},
+        "chat": {"id": chat_id, "type": "private"},
+        "photo": photo_arr,
+    });
+    if let Some(cap) = caption {
+        msg["caption"] = serde_json::json!(cap);
+    }
+    let raw: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+        "update_id": update_id,
+        "message": msg,
+    }))
+    .expect("构造私聊压缩图片更新应成功");
+    raw.into_domain()
+}
+
+fn private_document_update(
+    update_id: i64,
+    chat_id: i64,
+    sender_id: i64,
+    file_id: &str,
+    file_size: Option<u64>,
+    mime_type: Option<&str>,
+    caption: Option<&str>,
+) -> TelegramUpdate {
+    let mut doc = serde_json::json!({
+        "file_id": file_id,
+        "file_unique_id": format!("doc_u_{update_id}"),
+    });
+    if let Some(size) = file_size {
+        doc["file_size"] = serde_json::json!(size);
+    }
+    if let Some(mime) = mime_type {
+        doc["mime_type"] = serde_json::json!(mime);
+    }
+    let mut msg = serde_json::json!({
+        "message_id": update_id,
+        "from": {"id": sender_id},
+        "chat": {"id": chat_id, "type": "private"},
+        "document": doc,
+    });
+    if let Some(cap) = caption {
+        msg["caption"] = serde_json::json!(cap);
+    }
+    let raw: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+        "update_id": update_id,
+        "message": msg,
+    }))
+    .expect("构造私聊文档更新应成功");
+    raw.into_domain()
+}
+
+fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|w| w == needle)
+}
+
+// 场景 13：授权私聊单张压缩 photo（无说明、带说明、说明为 /new 不触发会话重置）
+// 与未压缩 PNG/WebP/GIF document 端到端提交，核对假模型收到的图片字节、MIME、[Image] / [Image, Text] 顺序与会话库 BLOBS 持久化。
+#[tokio::test]
+async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_and_persisting_blobs()
+ {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let chat_key = chat_key_from_id(PRIVATE_CHAT_ID);
+
+    let jpeg_1 = b"\xff\xd8\xff\xe0\x00\x10JFIF_PHOTO_ROUND_1_PAYLOAD".to_vec();
+    let jpeg_2 = b"\xff\xd8\xff\xe0\x00\x10JFIF_PHOTO_ROUND_2_PAYLOAD".to_vec();
+    let jpeg_3 = b"\xff\xd8\xff\xe0\x00\x10JFIF_PHOTO_SLASH_NEW_PAYLOAD".to_vec();
+    let png_doc = b"\x89PNG\r\n\x1a\nUNCOMPRESSED_PNG_DOC_PAYLOAD".to_vec();
+    let webp_doc = b"RIFF\x24\x00\x00\x00WEBPUNCOMPRESSED_WEBP_PAYLOAD".to_vec();
+    let gif_doc = b"GIF89aUNCOMPRESSED_GIF_DOC_PAYLOAD".to_vec();
+
+    io.set_download_bytes("photo_hi_1", jpeg_1.clone());
+    io.set_download_bytes("photo_hi_2", jpeg_2.clone());
+    io.set_download_bytes("photo_hi_3", jpeg_3.clone());
+    io.set_download_bytes("doc_png_4", png_doc.clone());
+    io.set_download_bytes("doc_webp_5", webp_doc.clone());
+    io.set_download_bytes("doc_gif_6", gif_doc.clone());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    // 1. 纯图片 photo（多尺寸取最后一项最高分辨率，无 caption -> [Image]）
+    io.push_updates(vec![private_photo_update(
+        2101,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[
+            ("photo_thumb_unused", Some(32)),
+            ("photo_hi_1", Some(jpeg_1.len() as u64)),
+        ],
+        None,
+    )]);
+
+    let (mut s1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req1: serde_json::Value = serde_json::from_str(&read_http_request(&mut s1).await).unwrap();
+    let user_msg1 = req1["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(user_msg1["role"], "user");
+    assert_eq!(
+        user_msg1["content"],
+        serde_json::json!([{
+            "type": "image_url",
+            "image_url": {
+                "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_1))
+            }
+        }]),
+        "无 caption 的单张 photo 必须以单一 [Image] 内容块发往模型"
+    );
+    write_sse_complete(&mut s1, None, "第1轮纯图回复", None).await;
+    let msgs1 = io.wait_message_count(1).await;
+    assert_eq!(msgs1[0].1, "第1轮纯图回复");
+    assert_eq!(
+        io.download_calls()
+            .iter()
+            .map(|(_, id, max)| (id.as_str(), *max))
+            .collect::<Vec<_>>(),
+        vec![("photo_hi_1", MAX_IMAGE_BYTES)],
+        "必须只下载最高分辨率 photo_hi_1 且传入 MAX_IMAGE_BYTES"
+    );
+
+    // 2. 带说明文字的 photo -> 同一会话内按 [Image, Text] 顺序提交，且历史重放第 1 轮 BLOBS 图片
+    io.push_updates(vec![private_photo_update(
+        2102,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("photo_hi_2", Some(jpeg_2.len() as u64))],
+        Some("请核对这张截图"),
+    )]);
+
+    let (mut s2, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req2: serde_json::Value = serde_json::from_str(&read_http_request(&mut s2).await).unwrap();
+    let msgs_arr2 = req2["messages"].as_array().unwrap();
+    assert!(
+        msgs_arr2.iter().any(|m| {
+            m["content"].as_array().is_some_and(|arr| {
+                arr.iter().any(|part| {
+                    part["image_url"]["url"]
+                        == format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_1))
+                })
+            })
+        }),
+        "多轮会话第 2 轮请求必须从会话库 BLOBS 重放第 1 轮已持久化的图片"
+    );
+    let user_msg2 = msgs_arr2.last().unwrap();
+    assert_eq!(
+        user_msg2["content"],
+        serde_json::json!([
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_2))
+                }
+            },
+            {
+                "type": "text",
+                "text": "请核对这张截图"
+            }
+        ]),
+        "带说明文字的图片必须严格按 [Image, Text] 顺序发送"
+    );
+    write_sse_complete(&mut s2, None, "第2轮图文回复", None).await;
+    let msgs2 = io.wait_message_count(2).await;
+    assert_eq!(msgs2[1].1, "第2轮图文回复");
+
+    // 3. caption 为 "/new" 的图片消息：绝不触发 /new 会话重置，仍在原会话提交 [Image, Text("/new")]
+    io.push_updates(vec![private_photo_update(
+        2103,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("photo_hi_3", Some(jpeg_3.len() as u64))],
+        Some("/new"),
+    )]);
+
+    let (mut s3, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req3: serde_json::Value = serde_json::from_str(&read_http_request(&mut s3).await).unwrap();
+    let msgs_arr3 = req3["messages"].as_array().unwrap();
+    assert!(
+        msgs_arr3.iter().any(|m| m["content"] == "第2轮图文回复"),
+        "图片 caption 为 /new 时不得重置会话，仍须携带既有会话历史"
+    );
+    assert_eq!(
+        msgs_arr3.last().unwrap()["content"],
+        serde_json::json!([
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_3))
+                }
+            },
+            {
+                "type": "text",
+                "text": "/new"
+            }
+        ])
+    );
+    write_sse_complete(&mut s3, None, "第3轮斜杠说明回复", None).await;
+    let msgs3 = io.wait_message_count(3).await;
+    assert_eq!(msgs3[2].1, "第3轮斜杠说明回复");
+
+    // 4. 未压缩 PNG、WebP、GIF document 依次提交，核对各自魔数识别出的 MIME 与原始字节
+    for (idx, uid, fid, raw_mime, expected_mime, bytes, reply_label) in [
+        (
+            4usize,
+            2104i64,
+            "doc_png_4",
+            "  Image/PNG ; name=\"ui.png\" ",
+            "image/png",
+            &png_doc,
+            "第4轮PNG回复",
+        ),
+        (
+            5usize,
+            2105i64,
+            "doc_webp_5",
+            "image/webp",
+            "image/webp",
+            &webp_doc,
+            "第5轮WebP回复",
+        ),
+        (
+            6usize,
+            2106i64,
+            "doc_gif_6",
+            "IMAGE/GIF",
+            "image/gif",
+            &gif_doc,
+            "第6轮GIF回复",
+        ),
+    ] {
+        io.push_updates(vec![private_document_update(
+            uid,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            fid,
+            Some(bytes.len() as u64),
+            Some(raw_mime),
+            None,
+        )]);
+        let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
+        let req_json: serde_json::Value =
+            serde_json::from_str(&read_http_request(&mut sock).await).unwrap();
+        let last_user = req_json["messages"].as_array().unwrap().last().unwrap();
+        assert_eq!(
+            last_user["content"],
+            serde_json::json!([{
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:{expected_mime};base64,{}", test_base64_encode(bytes))
+                }
+            }]),
+            "未压缩文档 {fid} 应按魔数识别为 {expected_mime} 并编码完整字节"
+        );
+        write_sse_complete(&mut sock, None, reply_label, None).await;
+        let all_msgs = io.wait_message_count(idx).await;
+        assert_eq!(all_msgs[idx - 1].1, reply_label);
+    }
+
+    io.wait_offset(Some(2107)).await;
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    // 5. 核对台账唯一绑定 SessionId、会话历史节点 ImageRef 与 lattice.redb BLOBS 原始字节落盘
+    let ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    let bound_sid = ledger
+        .bound_session(&chat_key)
+        .await
+        .expect("6 轮图文消息应绑定同一个会话");
+
+    let client = LocalClient::new(harness.layout.clone());
+    let mut observed = client.observe(bound_sid);
+    let user_messages = bounded(async {
+        let mut msgs = Vec::new();
+        while msgs.len() < 6 {
+            match observed.next().await {
+                Some(LocalUpdate::Entry { entry }) => {
+                    if let ConversationEntry::UserMessage {
+                        content: Node::UserMessage { message, .. },
+                        ..
+                    } = *entry
+                    {
+                        msgs.push(message);
+                    }
+                }
+                Some(_) => {}
+                None => panic!("会话观察流在收齐 6 条用户消息前意外结束"),
+            }
+        }
+        msgs
+    })
+    .await;
+    drop(observed);
+    assert_eq!(
+        user_messages.len(),
+        6,
+        "同一会话内必须持久保留全部 6 条用户消息"
+    );
+    assert_eq!(
+        user_messages[0].parts[0].semantic,
+        MessageSemantic::Image {
+            image: ImageRef::from_bytes(&jpeg_1).unwrap(),
+        }
+    );
+    assert_eq!(user_messages[0].parts.len(), 1);
+    assert_eq!(user_messages[1].parts.len(), 2);
+    assert_eq!(
+        user_messages[1].parts[0].semantic,
+        MessageSemantic::Image {
+            image: ImageRef::from_bytes(&jpeg_2).unwrap(),
+        }
+    );
+    assert_eq!(
+        user_messages[1].parts[1].semantic,
+        MessageSemantic::Text {
+            text: "请核对这张截图".into(),
+        }
+    );
+    assert_eq!(
+        user_messages[2].parts[1].semantic,
+        MessageSemantic::Text {
+            text: "/new".into(),
+        }
+    );
+    assert_eq!(
+        user_messages[3].parts[0].semantic,
+        MessageSemantic::Image {
+            image: ImageRef::from_bytes(&png_doc).unwrap(),
+        }
+    );
+    assert_eq!(
+        user_messages[4].parts[0].semantic,
+        MessageSemantic::Image {
+            image: ImageRef::from_bytes(&webp_doc).unwrap(),
+        }
+    );
+    assert_eq!(
+        user_messages[5].parts[0].semantic,
+        MessageSemantic::Image {
+            image: ImageRef::from_bytes(&gif_doc).unwrap(),
+        }
+    );
+
+    let redb_bytes = std::fs::read(harness.layout.lattice_root().join("lattice.redb"))
+        .expect("会话库文件应已落盘");
+    for raw_blob in [&jpeg_1, &jpeg_2, &jpeg_3, &png_doc, &webp_doc, &gif_doc] {
+        let mut expected_record = vec![0u8, 0, 0, 10];
+        expected_record.extend_from_slice(raw_blob);
+        assert!(
+            contains_subslice(&redb_bytes, &expected_record),
+            "会话库 BLOBS 表必须持久化 4 字节版本头加原始图片字节"
+        );
+    }
+
+    harness.shutdown().await;
+}
+
+// 场景 14：未授权发送者或群组聊天发来图片消息时立即静默确认，零下载、零台账、零草稿会话。
+#[tokio::test]
+async fn ignores_unauthorized_or_group_image_messages_silently_with_zero_downloads() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    io.set_download_bytes("should_never_download", b"\x89PNG\r\n\x1a\nDATA".to_vec());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    let group_photo: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+        "update_id": 2201,
+        "message": {
+            "message_id": 1,
+            "from": {"id": ALLOWED_UID},
+            "chat": {"id": -100999, "type": "supergroup"},
+            "photo": [{"file_id": "should_never_download", "file_unique_id": "u1", "width": 100, "height": 100}]
+        }
+    }))
+    .unwrap();
+
+    io.push_updates(vec![
+        group_photo.into_domain(),
+        private_photo_update(
+            2202,
+            OTHER_UID,
+            OTHER_UID,
+            &[("should_never_download", Some(16))],
+            Some("陌生人私聊发图"),
+        ),
+        private_document_update(
+            2203,
+            OTHER_UID,
+            OTHER_UID,
+            "should_never_download",
+            Some(16),
+            Some("image/png"),
+            None,
+        ),
+        private_text_update(2204, PRIVATE_CHAT_ID, ALLOWED_UID, "/help"),
+    ]);
+
+    let replies = io.wait_message_count(1).await;
+    assert_eq!(replies[0].1, HELP_REPLY);
+    io.wait_offset(Some(2205)).await;
+    assert!(
+        io.download_calls().is_empty(),
+        "未授权或非私聊图片消息绝不能触发任何 download_file 调用"
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    let ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ledger.bound_session(&chat_key_from_id(OTHER_UID)).await,
+        None
+    );
+    assert!(
+        !harness.layout.lattice_root().join("lattice.redb").exists(),
+        "未授权图片与 /help 不得初始化或写入会话库"
+    );
+
+    harness.shutdown().await;
+}
+
+// 场景 15：伪装 image/png 的非图片字节、空文件、MAX_IMAGE_BYTES + 1 超限与非法 file_path 均不写台账、不建草稿会话、确认更新并回复清晰中文原因；
+// 恰好 MAX_IMAGE_BYTES 的合法图片正常通过并持久化。
+#[tokio::test]
+async fn rejects_disguised_empty_oversized_and_invalid_path_images_without_ledger_or_draft_session_and_accepts_exact_max_bytes()
+ {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let chat_key = chat_key_from_id(PRIVATE_CHAT_ID);
+
+    io.set_download_bytes("fake_png_pdf", b"%PDF-1.7 disguised as image/png".to_vec());
+    io.set_download_bytes("empty_body", Vec::new());
+    io.push_download_outcome("stream_over_max", Err(TelegramDownloadError::TooLarge));
+    io.push_download_outcome(
+        "invalid_rel_path",
+        Err(TelegramDownloadError::InvalidFilePath),
+    );
+
+    let mut exact_max_png = vec![0xABu8; MAX_IMAGE_BYTES];
+    exact_max_png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    io.set_download_bytes("exact_max_png", exact_max_png.clone());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    // 投递 6 条非法图片消息（覆盖静态快筛拦截与下载后魔数/空文件/超限/路径错误拦截）
+    io.push_updates(vec![
+        private_document_update(
+            2301,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "fake_png_pdf",
+            Some(31),
+            Some("image/png"),
+            Some("伪装成 PNG 的 PDF"),
+        ),
+        private_document_update(
+            2302,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "static_zero_size",
+            Some(0),
+            Some("image/png"),
+            None,
+        ),
+        private_document_update(
+            2303,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "empty_body",
+            None,
+            Some("image/png"),
+            None,
+        ),
+        private_document_update(
+            2304,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "static_over_max",
+            Some(MAX_IMAGE_BYTES as u64 + 1),
+            Some("image/png"),
+            None,
+        ),
+        private_photo_update(
+            2305,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            &[("stream_over_max", None)],
+            None,
+        ),
+        private_photo_update(
+            2306,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            &[("invalid_rel_path", None)],
+            None,
+        ),
+    ]);
+
+    let reject_msgs = io.wait_message_count(6).await;
+    io.wait_offset(Some(2307)).await;
+
+    assert!(
+        reject_msgs[0].1.contains("不支持的图片格式"),
+        "伪装魔数应返回清晰中文格式错误: {}",
+        reject_msgs[0].1
+    );
+    assert!(
+        reject_msgs[1].1.contains("0 字节") && reject_msgs[2].1.contains("0 字节"),
+        "静态与下载后空文件均应提示 0 字节: {:?}",
+        &reject_msgs[1..=2]
+    );
+    assert!(
+        reject_msgs[3].1.contains("3.75 MiB") && reject_msgs[4].1.contains("3.75 MiB"),
+        "静态与流式超单图上限均应提示 3.75 MiB: {:?}",
+        &reject_msgs[3..=4]
+    );
+    assert!(
+        reject_msgs[5].1.contains("文件路径无效"),
+        "非法 file_path 应提示路径无效: {}",
+        reject_msgs[5].1
+    );
+
+    // 静态快筛命中的 2302 与 2304 不得触发下载
+    let called_ids: Vec<String> = io
+        .download_calls()
+        .into_iter()
+        .map(|(_, id, _)| id)
+        .collect();
+    assert_eq!(
+        called_ids,
+        vec![
+            "fake_png_pdf".to_string(),
+            "empty_body".to_string(),
+            "stream_over_max".to_string(),
+            "invalid_rel_path".to_string(),
+        ],
+        "静态快筛拦截的空文件与超限文件绝不能发起 download_file"
+    );
+
+    // 验证全部 6 条拒绝消息均未写入台账、未绑定会话，且未调用 configure(New) 创建任何草稿会话
+    {
+        let ledger = Ledger::open_and_prune(
+            harness.layout.clone(),
+            Utc::now(),
+            TELEGRAM_REDELIVERY_WINDOW,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            ledger.bound_session(&chat_key).await,
+            None,
+            "图片核验拒绝时不得在台账中建立会话绑定"
+        );
+        for uid in 2301..=2306 {
+            assert_eq!(
+                ledger.inbound_record(&inbound_id_from_update_id(uid)).await,
+                None,
+                "被拒绝的图片更新 {uid} 不得写入台账"
+            );
+        }
+        assert!(
+            !harness.layout.lattice_root().join("lattice.redb").exists(),
+            "图片核验拒绝时绝不得调用 configure(New) 初始化会话库或遗留空草稿会话"
+        );
+    }
+
+    // 投递恰好 MAX_IMAGE_BYTES（3,932,160 B）的合法 PNG：必须通过并成功提交到假模型
+    io.push_updates(vec![private_document_update(
+        2307,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "exact_max_png",
+        Some(MAX_IMAGE_BYTES as u64),
+        Some("image/png"),
+        None,
+    )]);
+
+    let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req_body = read_http_request(&mut sock).await;
+    let req_val: serde_json::Value = serde_json::from_str(&req_body).unwrap();
+    let data_url =
+        req_val["messages"].as_array().unwrap().last().unwrap()["content"][0]["image_url"]["url"]
+            .as_str()
+            .expect("应包含 base64 图片 URL");
+    let b64_part = data_url
+        .strip_prefix("data:image/png;base64,")
+        .expect("应使用 image/png 前缀");
+    assert_eq!(
+        b64_part.len(),
+        5 * 1024 * 1024,
+        "恰好 3.75 MiB 原始 PNG 的 base64 长度必须精确等于 5 MiB（5,242,880 字符）"
+    );
+    write_sse_complete(&mut sock, None, "边界上限图片提交成功", None).await;
+
+    let final_msgs = io.wait_message_count(7).await;
+    assert_eq!(final_msgs[6].1, "边界上限图片提交成功");
+    io.wait_offset(Some(2308)).await;
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 16：下载重试矩阵与停机中断（start_paused = true）：
+// - 429（遵守 retry_after）与 5xx 重试后成功；
+// - 重试 3 次耗尽（共 4 次调用）后确认更新、不落账并回复下载失败；
+// - 400 与 404 只尝试 1 次不重试；
+// - 下载进行中或退避等待期间收到停机信号立即退出且不推进 offset。
+#[tokio::test(start_paused = true)]
+async fn retries_429_and_5xx_downloads_stops_on_400_404_exhaustion_and_interrupts_without_advancing_offset_on_shutdown()
+ {
+    let harness = ImTestHarness::start(&[ALLOWED_UID, OTHER_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let valid_png = b"\x89PNG\r\n\x1a\nRETRY_SUCCESS_PNG".to_vec();
+
+    // 1. retry_ok：第 1 次 429（retry_after = 45s）-> 第 2 次 502 -> 第 3 次成功返回图片字节
+    io.push_download_outcome(
+        "retry_ok",
+        Err(TelegramDownloadError::Api(TelegramApiError::RateLimited {
+            retry_after: Some(Duration::from_secs(45)),
+            diagnostic: "Telegram 返回 HTTP 429".into(),
+        })),
+    );
+    io.push_download_outcome(
+        "retry_ok",
+        Err(TelegramDownloadError::Api(TelegramApiError::Retryable {
+            diagnostic: "Telegram 返回 HTTP 502".into(),
+        })),
+    );
+    io.push_download_outcome("retry_ok", Ok(valid_png.clone()));
+
+    // 2. retry_exhaust：首次 + 3 次重试共 4 次全部返回 5xx 可重试失败
+    for _ in 0..5 {
+        io.push_download_outcome(
+            "retry_exhaust",
+            Err(TelegramDownloadError::Api(TelegramApiError::Retryable {
+                diagnostic: "Telegram 返回 HTTP 503".into(),
+            })),
+        );
+    }
+
+    // 3. err_400 与 err_404：不可重试错误，必须只尝试 1 次
+    io.push_download_outcome(
+        "err_400",
+        Err(TelegramDownloadError::Api(TelegramApiError::Rejected {
+            status: 400,
+            diagnostic: "Telegram 返回 HTTP 400：[REDACTED]".into(),
+        })),
+    );
+    io.push_download_outcome(
+        "err_404",
+        Err(TelegramDownloadError::Api(
+            TelegramApiError::UnauthorizedOrInvalid {
+                status: 404,
+                diagnostic: "Telegram 返回 HTTP 404：[REDACTED]".into(),
+            },
+        )),
+    );
+
+    let (gw_stop1, gw_task1) = harness.spawn_gateway(Arc::clone(&io));
+
+    // 子用例 A：验证 429 retry_after=45s 严格等待后再重试 5xx 并最终成功提交
+    io.push_updates(vec![private_photo_update(
+        2401,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("retry_ok", Some(valid_png.len() as u64))],
+        Some("限流与 5xx 重试后成功"),
+    )]);
+
+    let calls_1 = io.wait_download_count(1).await;
+    let t_attempt_1 = calls_1[0].0;
+
+    tokio::time::advance(Duration::from_secs(44)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        io.download_calls().len(),
+        1,
+        "429 retry_after=45s 未届满前不得发起第 2 次下载尝试"
+    );
+
+    // 补满 45s 触发第 2 次尝试（返回 502），再推进指数退避触发第 3 次成功尝试
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let calls_2 = io.wait_download_count(2).await;
+    assert_eq!(
+        calls_2[1].0.duration_since(t_attempt_1),
+        Duration::from_secs(45),
+        "第 2 次下载尝试必须精确遵守服务端 45 秒 retry_after"
+    );
+
+    tokio::time::advance(Duration::from_secs(1)).await;
+    let calls_3 = io.wait_download_count(3).await;
+    assert_eq!(calls_3.len(), 3);
+
+    let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock).await;
+    write_sse_complete(&mut sock, None, "重试下载后模型回复成功", None).await;
+    let msgs_a = io.wait_message_count(1).await;
+    assert_eq!(msgs_a[0].1, "重试下载后模型回复成功");
+    io.wait_offset(Some(2402)).await;
+
+    // 子用例 B：在另一私聊 OTHER_UID 上验证重试 3 次耗尽（总计 4 次尝试）以及 400 / 404 不重试
+    io.push_updates(vec![
+        private_photo_update(2402, OTHER_UID, OTHER_UID, &[("retry_exhaust", None)], None),
+        private_photo_update(2403, OTHER_UID, OTHER_UID, &[("err_400", None)], None),
+        private_photo_update(2404, OTHER_UID, OTHER_UID, &[("err_404", None)], None),
+    ]);
+
+    let _ = io.wait_download_count(4).await;
+    for step_secs in [1u64, 1, 2] {
+        tokio::time::advance(Duration::from_secs(step_secs)).await;
+        for _ in 0..10 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    let msgs_b = io.wait_message_count(4).await;
+    io.wait_offset(Some(2405)).await;
+    assert!(
+        msgs_b[1].1.contains("下载图片失败") && !msgs_b[1].1.contains("INTEGRATION_BOT_SECRET"),
+        "重试耗尽应回复脱敏中文失败说明: {}",
+        msgs_b[1].1
+    );
+    assert!(
+        msgs_b[2].1.contains("HTTP 400") && msgs_b[3].1.contains("HTTP 404"),
+        "400 与 404 应回复包含对应状态码的中文失败说明: {:?}",
+        &msgs_b[2..=3]
+    );
+
+    let all_calls = io.download_calls();
+    let count_for = |target: &str| all_calls.iter().filter(|(_, id, _)| id == target).count();
+    assert_eq!(
+        count_for("retry_exhaust"),
+        4,
+        "可重试错误必须执行首次尝试加 3 次重试（共 4 次）后停止"
+    );
+    assert_eq!(count_for("err_400"), 1, "HTTP 400 必须只尝试 1 次不重试");
+    assert_eq!(count_for("err_404"), 1, "HTTP 404 必须只尝试 1 次不重试");
+
+    // 子用例 C1：下载请求在途时收到停机信号 -> 立即退出且不确认更新、不推进 offset
+    let (dl_entered_rx, _dl_release_tx) = io.install_download_gate();
+    io.push_updates(vec![private_photo_update(
+        2405,
+        OTHER_UID,
+        OTHER_UID,
+        &[("in_flight_stop", None)],
+        None,
+    )]);
+    bounded(dl_entered_rx)
+        .await
+        .expect("应进入在途 download_file 闸门");
+    let _ = gw_stop1.send(());
+    bounded(gw_task1).await.unwrap().unwrap();
+    assert!(
+        !io.is_acknowledged(&inbound_id_from_update_id(2405)),
+        "下载在途被停机中断时绝不能确认该入站更新"
+    );
+    assert_eq!(
+        io.offsets.lock().unwrap().next_offset(),
+        Some(2405),
+        "下载在途停机中断后 offset 必须停留在 2405 而不越过未完成图片"
+    );
+
+    // 子用例 C2：429 长退避等待期间收到停机信号 -> 不等待退避届满立即退出且不推进 offset
+    let io2 = Arc::new(FakeTelegramIo::default());
+    io2.push_download_outcome(
+        "backoff_stop",
+        Err(TelegramDownloadError::Api(TelegramApiError::RateLimited {
+            retry_after: Some(Duration::from_secs(120)),
+            diagnostic: "Telegram 返回 HTTP 429".into(),
+        })),
+    );
+    let (gw_stop2, gw_task2) = harness.spawn_gateway(Arc::clone(&io2));
+    io2.push_updates(vec![private_photo_update(
+        2410,
+        OTHER_UID,
+        OTHER_UID,
+        &[("backoff_stop", None)],
+        None,
+    )]);
+    let _ = io2.wait_download_count(1).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    let stop_at = tokio::time::Instant::now();
+    let _ = gw_stop2.send(());
+    bounded(gw_task2).await.unwrap().unwrap();
+    assert!(
+        tokio::time::Instant::now().duration_since(stop_at) < Duration::from_secs(5),
+        "退避等待期间收到停机信号必须立即中断睡眠退出，不得等待 120s retry_after"
+    );
+    assert_eq!(io2.download_calls().len(), 1);
+    assert!(
+        !io2.is_acknowledged(&inbound_id_from_update_id(2410)),
+        "退避等待期间停机中断绝不能确认该入站更新"
+    );
+    assert_eq!(io2.offsets.lock().unwrap().next_offset(), None);
+
+    // 核对 OTHER_UID 上的失败与中断更新均未污染台账
+    let ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ledger.bound_session(&chat_key_from_id(OTHER_UID)).await,
+        None,
+        "全部下载失败或中断的对话不得在台账中留下会话绑定"
+    );
+    for uid in [2402, 2403, 2404, 2405, 2410] {
+        assert_eq!(
+            ledger.inbound_record(&inbound_id_from_update_id(uid)).await,
+            None,
+            "下载失败或中断的更新 {uid} 不得写入台账"
+        );
+    }
+
+    harness.shutdown().await;
 }
