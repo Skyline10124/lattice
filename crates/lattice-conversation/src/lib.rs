@@ -46,7 +46,8 @@ pub use effort::{Effort, ParseEffortError};
 pub use history::ConversationItem;
 pub use identity::{IdParseError, InvocationId, SessionId, TurnId};
 pub use image::{
-    ImageBytesError, ImageMediaType, ImagePlacementError, ImageRef, validate_image_placement,
+    ImageBytesError, ImageMediaType, ImagePlacementError, ImageRef, ImageRefHasher,
+    validate_image_placement,
 };
 pub use input_modality::InputModality;
 pub use limits::{
