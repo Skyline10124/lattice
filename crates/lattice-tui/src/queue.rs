@@ -4,7 +4,7 @@
 //! 本客户端的待发送内容。编辑器持有目标，草稿和排队不能同时编辑。
 
 use crate::blocks::{BlockId, BlockList};
-use crate::comment::{Anchor, Comment, Location, Message};
+use crate::comment::{Anchor, Comment, Location};
 use crate::input::{InputBuffer, KeyAction};
 use std::collections::VecDeque;
 
@@ -20,29 +20,58 @@ pub(crate) enum QueuedSettings {
     },
 }
 
-/// 仅由输入文字和已验证锚点的草稿组成，不从历史消息恢复可编辑草稿。
+/// 由输入缓冲和已验证锚点的草稿组成，不从历史消息恢复可编辑草稿。
 #[derive(Clone)]
 pub(crate) struct Outgoing {
-    pub(crate) message: Message,
+    pub(crate) input: InputBuffer,
+    pub(crate) comments: Vec<Comment>,
     pub(crate) expected_settings: lattice_local::SettingsVersion,
-}
-impl std::ops::Deref for Outgoing {
-    type Target = Message;
-    fn deref(&self) -> &Message {
-        &self.message
-    }
 }
 
 pub(crate) struct QueuedMessage {
     pub(crate) id: BlockId,
-    message: Message,
+    pub(crate) input: InputBuffer,
+    pub(crate) comments: Vec<Comment>,
     settings: QueuedSettings,
 }
-impl std::ops::Deref for QueuedMessage {
-    type Target = Message;
-    fn deref(&self) -> &Message {
-        &self.message
+
+impl QueuedMessage {
+    fn is_empty(&self) -> bool {
+        is_blank_parts(&self.input, &self.comments)
     }
+}
+
+fn is_blank_parts(input: &InputBuffer, comments: &[Comment]) -> bool {
+    input.is_blank() && comments.is_empty()
+}
+
+fn step_present(
+    comment: &Comment,
+    steps: &std::collections::BTreeSet<lattice_local::StepKey>,
+) -> bool {
+    let fragment = &comment.location.fragment;
+    steps.contains(&lattice_local::StepKey {
+        turn_id: fragment.turn,
+        ordinal: fragment.step,
+    })
+}
+
+fn retain_comments(
+    comments: &[Comment],
+    steps: Option<&std::collections::BTreeSet<lattice_local::StepKey>>,
+) -> Vec<Comment> {
+    comments
+        .iter()
+        .filter(|comment| steps.is_none_or(|steps| step_present(comment, steps)))
+        .cloned()
+        .collect()
+}
+
+fn normalized_input(mut input: InputBuffer) -> InputBuffer {
+    if input.is_blank() {
+        input.clear();
+    }
+    input
 }
 
 pub(crate) struct Draft {
@@ -92,6 +121,33 @@ impl Queue {
         self.editor.is_some()
     }
 
+    pub(crate) fn send_candidate(
+        &self,
+        steps: Option<&std::collections::BTreeSet<lattice_local::StepKey>>,
+    ) -> Option<Outgoing> {
+        if self.paused || self.is_editing() || self.awaiting.is_some() {
+            return None;
+        }
+        if !matches!(self.messages.front()?.settings, QueuedSettings::Snapshot(_)) {
+            return None;
+        }
+        for message in &self.messages {
+            let comments = retain_comments(&message.comments, steps);
+            if is_blank_parts(&message.input, &comments) {
+                continue;
+            }
+            let QueuedSettings::Snapshot(expected_settings) = message.settings else {
+                return None;
+            };
+            return Some(Outgoing {
+                input: message.input.clone(),
+                comments,
+                expected_settings,
+            });
+        }
+        None
+    }
+
     pub(crate) fn start_send(&mut self, turn: lattice_local::TurnId) -> Option<Outgoing> {
         if self.paused || self.is_editing() || self.awaiting.is_some() {
             return None;
@@ -101,7 +157,8 @@ impl Queue {
         };
         let message = self.messages.pop_front()?;
         let payload = Outgoing {
-            message: message.message.clone(),
+            input: message.input.clone(),
+            comments: message.comments.clone(),
             expected_settings,
         };
         self.awaiting = Some((turn, message));
@@ -189,12 +246,18 @@ impl Queue {
         } else {
             return false;
         };
-        let text = match &target {
-            EditTarget::Queued { message, .. } => &message.text,
-            EditTarget::NewComment(draft) | EditTarget::SavedComment(draft) => &draft.comment.text,
+        let input = match &target {
+            EditTarget::Queued { message, .. } => {
+                let mut input = message.input.clone();
+                input.move_to_end();
+                input
+            }
+            EditTarget::NewComment(draft) | EditTarget::SavedComment(draft) => {
+                let mut input = InputBuffer::new();
+                input.set_text(&draft.comment.text);
+                input
+            }
         };
-        let mut input = InputBuffer::new();
-        input.set_text(text);
         self.editor = Some(Editor { target, input });
         true
     }
@@ -241,10 +304,7 @@ impl Queue {
                 position,
             } => {
                 if save {
-                    message.message.text = input.text();
-                    if message.text.trim().is_empty() {
-                        message.message.text.clear();
-                    }
+                    message.input = normalized_input(input);
                 }
                 if !message.is_empty() {
                     self.messages
@@ -272,6 +332,10 @@ impl Queue {
             }
         }
     }
+    pub(crate) fn queued_editor_mut(&mut self) -> Option<&mut InputBuffer> {
+        let editor = self.editor.as_mut()?;
+        matches!(editor.target, EditTarget::Queued { .. }).then_some(&mut editor.input)
+    }
     pub(crate) fn edit(&mut self, action: &KeyAction, width: u16) {
         if let Some(editor) = &mut self.editor {
             editor.input.edit(action, width);
@@ -294,35 +358,49 @@ impl Queue {
             .saturating_add(usize::from(self.awaiting.is_some()))
             >= LIMIT
     }
-    fn drain_message(&mut self, text: String) -> Message {
-        self.drafts.sort_by_key(|d| d.comment.n);
-        Message {
-            text: if text.trim().is_empty() {
-                String::new()
-            } else {
-                text
-            },
-            comments: self.drafts.drain(..).map(|d| d.comment).collect(),
-        }
+    pub(crate) fn draft_comments(&self) -> Vec<Comment> {
+        self.draft_comments_in(None)
+    }
+    pub(crate) fn draft_comments_in(
+        &self,
+        steps: Option<&std::collections::BTreeSet<lattice_local::StepKey>>,
+    ) -> Vec<Comment> {
+        let mut comments: Vec<Comment> = self
+            .drafts
+            .iter()
+            .map(|d| &d.comment)
+            .filter(|comment| steps.is_none_or(|steps| step_present(comment, steps)))
+            .cloned()
+            .collect();
+        comments.sort_by_key(|c| c.n);
+        comments
     }
     pub(crate) fn take_message(
         &mut self,
-        text: String,
+        input: InputBuffer,
         expected_settings: lattice_local::SettingsVersion,
     ) -> Outgoing {
+        self.drafts.sort_by_key(|d| d.comment.n);
         Outgoing {
-            message: self.drain_message(text),
+            input: normalized_input(input),
+            comments: self.drafts.drain(..).map(|d| d.comment).collect(),
             expected_settings,
         }
     }
-    pub(crate) fn enqueue(&mut self, id: BlockId, text: String, settings: QueuedSettings) -> bool {
-        if self.is_full() || (text.trim().is_empty() && self.drafts.is_empty()) {
+    pub(crate) fn enqueue(
+        &mut self,
+        id: BlockId,
+        input: InputBuffer,
+        settings: QueuedSettings,
+    ) -> bool {
+        if self.is_full() || (input.is_blank() && self.drafts.is_empty()) {
             return false;
         }
-        let message = self.drain_message(text);
+        self.drafts.sort_by_key(|d| d.comment.n);
         self.messages.push_back(QueuedMessage {
             id,
-            message,
+            input: normalized_input(input),
+            comments: self.drafts.drain(..).map(|d| d.comment).collect(),
             settings,
         });
         true
@@ -369,13 +447,13 @@ impl Queue {
         }
         resolved
     }
-    pub(crate) fn restore(&mut self, message: Outgoing, blocks: &mut BlockList) -> String {
+    pub(crate) fn restore(&mut self, message: Outgoing, blocks: &mut BlockList) -> InputBuffer {
         self.drafts
-            .extend(message.message.comments.into_iter().map(|comment| Draft {
+            .extend(message.comments.into_iter().map(|comment| Draft {
                 id: blocks.allocate_id(),
                 comment,
             }));
-        message.message.text
+        message.input
     }
     pub(crate) fn retain_steps(
         &mut self,
@@ -383,11 +461,7 @@ impl Queue {
     ) -> Vec<usize> {
         let mut dropped = Vec::new();
         let mut keep = |comment: &Comment| {
-            let fragment = &comment.location.fragment;
-            let present = steps.contains(&lattice_local::StepKey {
-                turn_id: fragment.turn,
-                ordinal: fragment.step,
-            });
+            let present = step_present(comment, steps);
             if !present {
                 dropped.push(comment.n);
             }
@@ -395,7 +469,7 @@ impl Queue {
         };
         self.drafts.retain(|d| keep(&d.comment));
         for message in &mut self.messages {
-            message.message.comments.retain(&mut keep);
+            message.comments.retain(&mut keep);
         }
         let edited_position = self
             .editor
@@ -417,7 +491,7 @@ impl Queue {
                     !keep(&draft.comment)
                 }
                 EditTarget::Queued { message, position } => {
-                    message.message.comments.retain(&mut keep);
+                    message.comments.retain(&mut keep);
                     if let Some(retained_before) = edited_position {
                         *position = retained_before;
                     }
@@ -436,6 +510,9 @@ impl Queue {
     }
     pub(crate) fn drain(&mut self) -> impl Iterator<Item = String> + '_ {
         self.finish_edit(false);
-        self.messages.drain(..).map(|m| m.message.text)
+        self.messages
+            .drain(..)
+            .map(|m| m.input.text())
+            .filter(|text| !text.trim().is_empty())
     }
 }

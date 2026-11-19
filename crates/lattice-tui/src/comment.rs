@@ -80,23 +80,34 @@ pub(crate) struct Message {
     pub(crate) comments: Vec<Comment>,
 }
 
-impl Message {
-    pub(crate) fn is_empty(&self) -> bool {
-        self.text.trim().is_empty() && self.comments.is_empty()
-    }
-    pub(crate) fn encode(&self) -> String {
-        let mut parts: Vec<_> = self.comments.iter().map(|comment| {
+pub(crate) fn encode_comments(comments: &[Comment]) -> String {
+    comments
+        .iter()
+        .map(|comment| {
             let Fragment { turn, step, part } = comment.location.fragment;
             let range = &comment.location.range;
             format!(
                 "<lattice-comment n=\"{}\" turn=\"{turn}\" step=\"{step}\" part=\"{part}\" range=\"{}..{}\">\n<quote>\n{}\n</quote>\n{}\n</lattice-comment>",
-                comment.n, range.start, range.end, escape(&comment.quote), escape(&comment.text)
+                comment.n,
+                range.start,
+                range.end,
+                escape(&comment.quote),
+                escape(&comment.text)
             )
-        }).collect();
-        if !self.text.trim().is_empty() {
-            parts.push(self.text.clone());
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
+impl Message {
+    pub(crate) fn encode(&self) -> String {
+        let prefix = encode_comments(&self.comments);
+        match (prefix.is_empty(), self.text.trim().is_empty()) {
+            (true, true) => String::new(),
+            (false, true) => prefix,
+            (true, false) => self.text.clone(),
+            (false, false) => format!("{prefix}\n\n{}", self.text),
         }
-        parts.join("\n\n")
     }
 
     /// 任一开头元素损坏时，调用方显示整条原文。

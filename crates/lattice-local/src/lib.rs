@@ -6,6 +6,7 @@
 mod client;
 mod display;
 mod endpoint;
+mod image_file;
 mod logging;
 mod login;
 mod operation;
@@ -17,12 +18,13 @@ pub use client::LocalWatch;
 pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
+pub use image_file::{image_bytes_ref, image_file_ref, probe_image_file, read_verified_image};
 pub use lattice_conversation::{
-    BoundToolCall, CostEstimate, CostSummary, Effort, ImageBytesError, ImageMediaType, ImageRef,
-    InputModality, InvocationId, MAX_IMAGE_BYTES, MessageRole, MessageSemantic, ModelAttemptKey,
-    ModelId, ModelIdError, ModelRef, ModelRefError, NativeMessage, ProviderId, ProviderIdError,
+    BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
+    InvocationId, MAX_IMAGE_BYTES, MessageRole, MessageSemantic, ModelAttemptKey, ModelId,
+    ModelIdError, ModelRef, ModelRefError, NativeMessage, ProviderId, ProviderIdError,
     ResultPayload, SessionId, StepContent, StoredToolResult, SuccessContent, TokenSummary,
-    TokenUsage, ToolError, ToolResultOutcome, TurnId, UsageCompleteness, UserInputError,
+    TokenUsage, ToolError, ToolResultOutcome, TurnId, UsageCompleteness,
 };
 pub use lattice_ipc::{
     Acceptance, AgentName, AgentNameError, AttemptProgress, AuthCatalogOutcome, AuthLoginOutcome,
@@ -42,7 +44,7 @@ pub use lattice_ipc::{
     TurnSummary, TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary,
     UserInputPart, ViewUpdate, WATCH_TURNS, parse_drain_timeout,
 };
-pub use lattice_store::{StateLayout, xdg_state_root};
+pub use lattice_store::{PrivateDirectory, StateLayout, xdg_state_root};
 pub use logging::init_logging;
 pub use login::{AuthLoginEvent, LocalAuthLogin, SensitiveLoginUrl};
 pub use operation::{ConfigureOutcome, DetachReport, LocalTurn, STREAM_IDLE_TIMEOUT_SECS};

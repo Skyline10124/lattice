@@ -71,8 +71,14 @@ fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
     h.app.apply_action(KeyAction::Submit);
     h.app.focus = Focus::Dock;
     h.app.input.set_text(" \n\t");
-    let wire = h.app.apply_action(KeyAction::Submit).unwrap();
-    let message = crate::comment::Message::parse(&wire).unwrap();
+    let req = h.app.apply_action(KeyAction::Submit).unwrap();
+    assert_eq!(req.session, sid());
+    assert_eq!(req.workspace, h.options.project_root);
+    assert_eq!(req.expected_settings, Some(settings_version(0x11)));
+    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+        panic!("提交请求应只含一段文本");
+    };
+    let message = crate::comment::Message::parse(wire).unwrap();
     assert_eq!(message.comments[0].location.fragment.part, 1);
     assert_eq!(message.comments[0].location.fragment.step, 0);
     assert_eq!(message.comments[0].quote, "comment target");
@@ -171,8 +177,14 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         save_comment(app, "rejected note");
         app.focus = Focus::Dock;
         app.input.set_text("body");
-        let wire = app.apply_action(KeyAction::Submit).unwrap();
-        assert_eq!(crate::comment::Message::parse(&wire).unwrap().text, "body");
+        let req = app.apply_action(KeyAction::Submit).unwrap();
+        assert_eq!(req.session, sid());
+        assert_eq!(req.workspace, h.options.project_root);
+        assert_eq!(req.expected_settings, Some(settings_version(0x11)));
+        let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+            panic!("提交请求应只含一段文本");
+        };
+        assert_eq!(crate::comment::Message::parse(wire).unwrap().text, "body");
         assert_eq!(app.history.prev(), Some("body"));
         let id = app.own_turn.unwrap();
         reject(app, id, how);
@@ -231,10 +243,16 @@ fn comment_queue_only_edit_rejection_and_delete() {
         assert_eq!(app.queue.messages().count(), 1);
         app.apply_submission(receipt(running, accepted(running)));
         finish(app, running, "running prompt");
-        let wire = app.auto_submit().unwrap();
+        let req = app.auto_submit().unwrap();
+        assert_eq!(req.session, sid());
+        assert_eq!(req.workspace, h.options.project_root);
+        assert_eq!(req.expected_settings, Some(settings_version(0x11)));
+        let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+            panic!("自动发送请求应只含一段文本");
+        };
         assert!(!transcript(app).contains("排队 · #1"));
         assert_eq!(transcript(app).matches("queued note").count(), 1);
-        assert_eq!(crate::comment::Message::parse(&wire).unwrap().text, "");
+        assert_eq!(crate::comment::Message::parse(wire).unwrap().text, "");
         assert_eq!(app.history.prev(), Some("running prompt"));
         let id = app.own_turn.unwrap();
         reject(app, id, how);
@@ -283,8 +301,14 @@ fn comment_reload_attaches_or_falls_back() {
     let mut source = comment_app();
     save_comment(&mut source.app, "reload note");
     source.app.focus = Focus::Dock;
-    let wire = source.app.submit().unwrap();
-    let original = crate::comment::Message::parse(&wire).unwrap();
+    let req = source.app.submit().unwrap();
+    assert_eq!(req.session, sid());
+    assert_eq!(req.workspace, source.options.project_root);
+    assert_eq!(req.expected_settings, Some(settings_version(0x11)));
+    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+        panic!("提交请求应只含一段文本");
+    };
+    let original = crate::comment::Message::parse(wire).unwrap();
     let target = original.comments[0].location.fragment.turn;
     for mismatch in 0..4 {
         let mut message = original.clone();
@@ -312,8 +336,14 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
     let mut source = comment_app();
     save_comment(&mut source.app, "inline note");
     source.app.focus = Focus::Dock;
-    let wire = source.app.submit().unwrap();
-    let target = crate::comment::Message::parse(&wire).unwrap().comments[0]
+    let req = source.app.submit().unwrap();
+    assert_eq!(req.session, sid());
+    assert_eq!(req.workspace, source.options.project_root);
+    assert_eq!(req.expected_settings, Some(settings_version(0x11)));
+    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+        panic!("提交请求应只含一段文本");
+    };
+    let target = crate::comment::Message::parse(wire).unwrap().comments[0]
         .location
         .fragment
         .turn;
@@ -331,7 +361,7 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
                 .text("comment target\n\nlater paragraph")
                 .finished()
                 .entry(),
-            user(7, last, 4, &wire),
+            user(7, last, 4, wire),
             step(8, last, 0).text("answer-4").finished().entry(),
         ],
     );
@@ -409,7 +439,7 @@ fn comment_missing_step_discards_drafts_and_comment_only_queue_but_keeps_text() 
     assert_eq!(
         app.queue
             .messages()
-            .map(|m| m.text.as_str())
+            .map(|m| m.input.text())
             .collect::<Vec<_>>(),
         ["kept text"]
     );
@@ -448,7 +478,7 @@ fn comment_rewind_during_queue_edit_preserves_remaining_order() {
     assert_eq!(
         app.queue
             .messages()
-            .map(|m| m.text.as_str())
+            .map(|m| m.input.text())
             .collect::<Vec<_>>(),
         ["middle", "last"]
     );
@@ -509,7 +539,11 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
     let mut source = comment_app();
     save_comment(&mut source.app, "history note");
     source.app.focus = Focus::Dock;
-    let mut message = crate::comment::Message::parse(&source.app.submit().unwrap()).unwrap();
+    let source_req = source.app.submit().unwrap();
+    let [UserInputPart::Text { text: source_wire }] = &source_req.parts[..] else {
+        panic!("提交请求应只含一段文本");
+    };
+    let mut message = crate::comment::Message::parse(source_wire).unwrap();
     let target = message.comments[0].location.fragment.turn;
     message.comments[0].n = 7;
     let mut h = Harness::new(false);
@@ -530,7 +564,14 @@ fn comment_numbering_combines_history_queue_and_drafts_and_does_not_resume_with_
     save_comment(app, "draft nine");
     save_comment(app, "draft ten");
     app.focus = Focus::Dock;
-    let outgoing = crate::comment::Message::parse(&app.submit().unwrap()).unwrap();
+    let out_req = app.submit().unwrap();
+    assert_eq!(out_req.session, sid());
+    assert_eq!(out_req.workspace, h.options.project_root);
+    assert_eq!(out_req.expected_settings, Some(settings_version(0x11)));
+    let [UserInputPart::Text { text: out_wire }] = &out_req.parts[..] else {
+        panic!("提交请求应只含一段文本");
+    };
+    let outgoing = crate::comment::Message::parse(out_wire).unwrap();
     assert_eq!(
         outgoing.comments.iter().map(|c| c.n).collect::<Vec<_>>(),
         [9, 10]
@@ -570,7 +611,7 @@ fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
             assert_eq!(app.cancel_requested, Some(CancelTarget::Own));
         }
         app.input.set_text(" \n ");
-        assert_eq!(app.apply_action(KeyAction::Submit), None);
+        assert!(app.apply_action(KeyAction::Submit).is_none());
         assert_eq!(app.input.text(), " \n ");
         app.input.set_text("/help");
         app.apply_action(KeyAction::Submit);
@@ -579,7 +620,7 @@ fn running_enter_queues_verbatim_without_history_and_preserves_full_input() {
         app.apply_action(KeyAction::Clear);
         for n in 0..5 {
             app.input.set_text(&format!("  queued {n}\n**plain**  "));
-            assert_eq!(app.apply_action(KeyAction::Submit), None);
+            assert!(app.apply_action(KeyAction::Submit).is_none());
             assert!(
                 app.input.is_empty(),
                 "running Enter must clear enqueued input"
@@ -663,7 +704,16 @@ fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
     for how in 0..4 {
         let mut h = queued_app();
         let app = &mut h.app;
-        assert_eq!(app.auto_submit(), Some(" q0\nraw ".into()));
+        let req = app.auto_submit().expect("完成后应自动发送队首");
+        assert!(
+            req.parts
+                == [UserInputPart::Text {
+                    text: " q0\nraw ".into()
+                }]
+        );
+        assert_eq!(req.session, sid());
+        assert_eq!(req.workspace, h.options.project_root);
+        assert_eq!(req.expected_settings, Some(settings_version(0x01)));
         let id = app.own_turn.unwrap();
         assert!(app.queue.is_full(), "awaiting automatic prompt owns a slot");
         app.input.set_text("user is typing");
@@ -674,7 +724,7 @@ fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
         assert_eq!(
             app.queue
                 .messages()
-                .map(|m| m.text.as_str())
+                .map(|m| m.input.text())
                 .collect::<Vec<_>>(),
             [
                 " q0\nraw ",
@@ -686,7 +736,7 @@ fn automatic_rejections_restore_exact_front_and_do_not_touch_input() {
         );
         assert!(app.queue.is_full());
         assert_eq!(transcript(app).matches("暂停").count(), 5);
-        assert_eq!(app.auto_submit(), None);
+        assert!(app.auto_submit().is_none());
         assert_eq!(app.phase, TurnPhase::Idle);
     }
 }
@@ -721,7 +771,7 @@ fn accepting_and_unknown_receipts_release_capacity_without_requeue() {
             assert!(app.input.is_empty(), "接受后这一轮在运行，Enter 入队");
             assert!(app.queue.is_full());
             assert_eq!(
-                app.queue.messages().last().unwrap().text,
+                app.queue.messages().last().unwrap().input.text(),
                 "new queued input"
             );
         } else {
@@ -771,11 +821,11 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
         }
         assert!(app.queue.is_paused(), "cause {cause}");
         assert_eq!(transcript(app).matches("暂停").count(), 4);
-        assert_eq!(app.auto_submit(), None);
+        assert!(app.auto_submit().is_none());
         // 观察中断后重新观察得到成功结局也不能自行恢复。
         if cause >= 2 {
             finish(app, id, " q0\nraw ");
-            assert_eq!(app.auto_submit(), None);
+            assert!(app.auto_submit().is_none());
         }
         // 失败结局与观察中断是 Error 与 Warn，暂驻 Dock；取消结局是 Info，直接进对话记录。
         assert_eq!(app.dock.message_id().is_some(), cause != 1, "cause {cause}");
@@ -783,26 +833,40 @@ fn queue_pauses_on_failure_cancel_and_disconnect_and_resumes_after_failed_manual
             release_dock(app);
         }
         app.input.set_text("manual while paused");
-        assert_eq!(
-            app.apply_action(KeyAction::Submit),
-            Some("manual while paused".into())
+        let manual_req = app
+            .apply_action(KeyAction::Submit)
+            .expect("暂停时非空输入应直接提交");
+        assert!(
+            manual_req.parts
+                == [UserInputPart::Text {
+                    text: "manual while paused".into()
+                }]
         );
+        assert_eq!(manual_req.session, sid());
+        assert_eq!(manual_req.workspace, h.options.project_root);
+        assert_eq!(manual_req.expected_settings, Some(settings_version(0x11)));
         assert!(app.queue.is_paused());
         let manual = app.own_turn.unwrap();
         app.apply_submission(receipt(manual, accepted(manual)));
         stop(app, manual, "manual while paused", "failed");
         assert!(app.input.is_empty());
-        assert_eq!(
-            app.apply_action(KeyAction::Submit),
-            None,
+        assert!(
+            app.apply_action(KeyAction::Submit).is_none(),
             "失败结局暂驻 Dock 时输入区不可达"
         );
         release_dock(app);
-        assert_eq!(
-            app.apply_action(KeyAction::Submit),
-            Some(" q1\nraw ".into()),
-            "Failed 后空输入 Enter 立即发送"
+        let resumed_req = app
+            .apply_action(KeyAction::Submit)
+            .expect("失败后空输入按回车应立即发送队首");
+        assert!(
+            resumed_req.parts
+                == [UserInputPart::Text {
+                    text: " q1\nraw ".into()
+                }]
         );
+        assert_eq!(resumed_req.session, sid());
+        assert_eq!(resumed_req.workspace, h.options.project_root);
+        assert_eq!(resumed_req.expected_settings, Some(settings_version(0x01)));
         assert!(!app.queue.is_paused());
     }
 }
@@ -819,25 +883,42 @@ fn completion_waits_for_editor_then_sends_one_on_save_or_discard() {
         app.apply_action(KeyAction::Submit);
         app.apply_action(KeyAction::Insert('!'));
         finish(app, first, " q0\nraw ");
-        assert_eq!(app.auto_submit(), None);
-        assert_eq!(
-            app.apply_action(if save {
+        assert!(app.auto_submit().is_none());
+        let edited_req = app
+            .apply_action(if save {
                 KeyAction::Submit
             } else {
                 KeyAction::Clear
-            }),
-            Some(" q1\nraw ".into())
+            })
+            .expect("退出排队编辑后应发送队首");
+        assert!(
+            edited_req.parts
+                == [UserInputPart::Text {
+                    text: " q1\nraw ".into()
+                }]
         );
+        assert_eq!(edited_req.session, sid());
+        assert_eq!(edited_req.workspace, h.options.project_root);
+        assert_eq!(edited_req.expected_settings, Some(settings_version(0x01)));
         assert_eq!(
-            app.queue.messages().last().unwrap().text,
+            app.queue.messages().last().unwrap().input.text(),
             if save { " q4\nraw !" } else { " q4\nraw " }
         );
-        assert_eq!(app.auto_submit(), None);
+        assert!(app.auto_submit().is_none());
         let id = app.own_turn.unwrap();
         app.apply_submission(receipt(id, accepted(id)));
         finish(app, id, " q1\nraw ");
-        assert_eq!(app.auto_submit(), Some(" q2\nraw ".into()));
-        assert_eq!(app.auto_submit(), None);
+        let next_req = app.auto_submit().expect("下一轮完成后应继续发送队首");
+        assert!(
+            next_req.parts
+                == [UserInputPart::Text {
+                    text: " q2\nraw ".into()
+                }]
+        );
+        assert_eq!(next_req.session, sid());
+        assert_eq!(next_req.workspace, h.options.project_root);
+        assert_eq!(next_req.expected_settings, Some(settings_version(0x01)));
+        assert!(app.auto_submit().is_none());
     }
 }
 
@@ -1300,7 +1381,12 @@ impl Harness {
         )
     }
     fn with_context(options: TuiOptions, ctx: SessionContext, root: tempfile::TempDir) -> Self {
-        let app = App::new(ctx, false, &options.session_dir);
+        let app = App::new(
+            ctx,
+            false,
+            &options.session_dir,
+            options.project_root.clone(),
+        );
         let (keys, events) = unbounded();
         let (observer, frames) = watch::channel(frame(&app));
         Self {
@@ -2851,4 +2937,1086 @@ async fn startup_configure_and_open_modes_enforce_configure_and_busy_before_watc
         "Busy 错误应说明会话正在执行一轮、稍后再试：{}",
         busy_local.message
     );
+}
+
+#[tokio::test]
+async fn idle_submit_preflight_failure_preserves_input_draft_and_never_sends() {
+    let closed = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let line = format!("{}\n", "x".repeat(79));
+    let body = format!("{}tail", line.repeat(26_213));
+    assert!(body.len() <= 2_097_152, "输入文字本身不能超过单轮文本上限");
+    let body_for_driver = body.clone();
+    let driver = async move {
+        view_tx.push([
+            head_reply(head(2, Some(closed), false)),
+            entry_reply(user(1, closed, 1, "original prompt")),
+            entry_reply(step(2, closed, 0).text("comment target").finished().entry()),
+        ]);
+        let initial = remote
+            .wait(|f| f.phase == TurnPhase::Idle && f.text.contains("comment target"))
+            .await;
+        let total = initial.text.lines().count();
+        let target_row = initial
+            .text
+            .lines()
+            .position(|l| l.contains("comment target"))
+            .expect("对话记录中应包含评论目标行");
+        for _ in 0..(total - target_row) {
+            remote.press(KeyCode::Up, KeyModifiers::NONE);
+        }
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("草稿评论".into())))
+            .unwrap();
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote
+            .wait(|f| f.text.contains("草稿 · #1") && f.panel.contains("1 条评论待发送"))
+            .await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(body_for_driver.clone())))
+            .unwrap();
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "预检未通过应在底部区域暂驻错误状态：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("2,097,152")
+                && shown.dock.contains("输入已保留")
+                && !shown.dock.contains("被拒绝"),
+            "错误文案应说明原因与输入保留且不写被拒绝：{}",
+            shown.dock
+        );
+        assert_eq!(shown.input, body_for_driver, "输入区文字应保持原样");
+        assert!(
+            shown.text.contains("草稿 · #1") && shown.text.contains("草稿评论"),
+            "评论草稿应留在原位：{}",
+            shown.text
+        );
+        assert_eq!(
+            shown.text.matches("── USER ").count(),
+            1,
+            "对话记录中不应出现新的用户消息块"
+        );
+        assert_eq!(shown.phase, TurnPhase::Idle);
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert!(exit.turn.is_none());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "预检失败时假后台不应收到提交请求"
+    );
+    assert_eq!(h.app.input.text(), body, "输入区文字应保持原样");
+    assert_eq!(h.app.queue.draft_count(), 1, "评论草稿应保持原样");
+    assert!(
+        compose_parts(&h.app.input, &h.app.queue.draft_comments())
+            .iter()
+            .map(|part| match part {
+                UserInputPart::Text { text } => text.len(),
+                UserInputPart::Image { .. } => 0,
+            })
+            .sum::<usize>()
+            > 2_097_152,
+        "输入文字加评论草稿编码后应超过上限"
+    );
+    assert_eq!(h.app.history.prev(), None, "输入历史不应新增记录");
+    assert!(
+        !h.app.blocks.iter().any(|b| matches!(
+            b,
+            Block::UserTurn { node: None, .. } | Block::CommentedUser(_) | Block::RejectedUser(_)
+        )),
+        "不应登记新的用户提交块"
+    );
+    assert!(
+        h.app
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Status(s) if s.level == NoticeLevel::Error)),
+        "应记录错误等级的状态消息"
+    );
+}
+
+#[tokio::test]
+async fn running_enqueue_preflight_failure_preserves_input_draft_and_skips_queue() {
+    let closed = numbered_turn(1);
+    let running = numbered_turn(2);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let line = format!("{}\n", "x".repeat(79));
+    let body = format!("{}tail", line.repeat(26_213));
+    assert!(body.len() <= 2_097_152, "输入文字本身不能超过单轮文本上限");
+    let body_for_driver = body.clone();
+    let driver = async move {
+        view_tx.push([
+            head_reply(head(4, Some(running), true)),
+            entry_reply(user(1, closed, 1, "original prompt")),
+            entry_reply(step(2, closed, 0).text("comment target").finished().entry()),
+            entry_reply(user(3, running, 2, "running prompt")),
+            entry_reply(step(4, running, 0).text("streaming reply").sent().entry()),
+        ]);
+        let initial = remote
+            .wait(|f| f.phase == TurnPhase::Streaming && f.text.contains("streaming reply"))
+            .await;
+        let total = initial.text.lines().count();
+        let target_row = initial
+            .text
+            .lines()
+            .position(|l| l.contains("comment target"))
+            .expect("对话记录中应包含评论目标行");
+        for _ in 0..(total - target_row) {
+            remote.press(KeyCode::Up, KeyModifiers::NONE);
+        }
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("草稿评论".into())))
+            .unwrap();
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote.press(KeyCode::Esc, KeyModifiers::NONE);
+        remote
+            .wait(|f| {
+                f.text.contains("草稿 · #1")
+                    && f.panel.contains("Enter 排队")
+                    && f.panel.contains("1 条评论待发送")
+            })
+            .await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(body_for_driver.clone())))
+            .unwrap();
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "入队预检未通过应在底部区域暂驻错误状态：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("2,097,152")
+                && shown.dock.contains("输入已保留")
+                && !shown.dock.contains("被拒绝"),
+            "错误文案应说明原因与输入保留且不写被拒绝：{}",
+            shown.dock
+        );
+        assert!(
+            !shown.text.contains("排队"),
+            "预检未通过时队列不应新增消息：{}",
+            shown.text
+        );
+        assert_eq!(shown.input, body_for_driver, "输入区文字应保持原样");
+        assert!(
+            shown.text.contains("草稿 · #1") && shown.text.contains("草稿评论"),
+            "评论草稿应保持原样：{}",
+            shown.text
+        );
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "入队预检失败时假后台不应收到提交请求"
+    );
+    assert_eq!(h.app.history.prev(), None, "输入历史应为空");
+    assert_eq!(h.app.input.text(), body, "输入区文字应保持原样");
+    assert_eq!(h.app.queue.draft_count(), 1, "评论草稿应保持原样");
+    assert!(
+        compose_parts(&h.app.input, &h.app.queue.draft_comments())
+            .iter()
+            .map(|part| match part {
+                UserInputPart::Text { text } => text.len(),
+                UserInputPart::Image { .. } => 0,
+            })
+            .sum::<usize>()
+            > 2_097_152,
+        "输入文字加评论草稿编码后应超过上限"
+    );
+    assert!(
+        h.app
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::Status(s) if s.level == NoticeLevel::Error)),
+        "应记录错误等级的状态消息"
+    );
+}
+
+#[tokio::test]
+async fn paste_interleaved_text_and_image_submits_exact_parts_in_order() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let png_bytes = b"\x89PNG\r\n\x1a\ninterleaved-payload".to_vec();
+    let image_path = h.options.project_root.join("shot.png");
+    std::fs::write(&image_path, &png_bytes).expect("写入测试图片文件");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+
+    let driver = async {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("前缀文字".into())))
+            .expect("发送前段文字粘贴事件");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str.clone())))
+            .expect("发送图片路径粘贴事件");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("后缀文字".into())))
+            .expect("发送后段文字粘贴事件");
+
+        remote
+            .wait(|f| f.panel.contains("前缀文字[IMAGE 1 · png · 27 B]后缀文字"))
+            .await;
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let submitted_frame = remote
+            .wait(|f| {
+                f.text
+                    .contains("前缀文字 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}27\u{00a0}B] 后缀文字")
+            })
+            .await;
+        assert_eq!(submitted_frame.phase, TurnPhase::Streaming);
+
+        peer.wait(|s| count(s, "submit") == 1).await;
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+
+    let seen = peer.seen.borrow().clone();
+    let submit_val = &requests(&seen, "submit")
+        .next()
+        .expect("假后台应收到一次提交")["request"];
+    let decoded: TurnRequest =
+        serde_json::from_value(submit_val.clone()).expect("反序列化提交请求");
+    assert_eq!(decoded.parts.len(), 3, "提交片段应保持三段交错顺序");
+    assert!(
+        matches!(&decoded.parts[0], UserInputPart::Text { text } if text == "前缀文字"),
+        "首段应为前缀文字"
+    );
+    assert!(
+        matches!(&decoded.parts[1], UserInputPart::Image { image } if *image == png_bytes),
+        "中段应为与原文件完全一致的图片字节"
+    );
+    assert!(
+        matches!(&decoded.parts[2], UserInputPart::Text { text } if text == "后缀文字"),
+        "末段应为后缀文字"
+    );
+    assert_eq!(
+        h.app.history.prev(),
+        Some("前缀文字后缀文字"),
+        "输入历史只记录文字部分"
+    );
+}
+
+#[tokio::test]
+async fn modified_image_file_after_paste_blocks_submit_and_preserves_input() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let image_path = h.options.project_root.join("mutated.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nversion-1").expect("写入初始 PNG");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+    let image_path_for_driver = image_path.clone();
+
+    let driver = async move {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("请看图".into())))
+            .expect("粘贴文字");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str)))
+            .expect("粘贴图片路径");
+        remote
+            .wait(|f| f.panel.contains("请看图[IMAGE 1 · png · 17 B]"))
+            .await;
+
+        // 改写为相同字节长度、相同 PNG 魔数但内容不同的图片。
+        std::fs::write(&image_path_for_driver, b"\x89PNG\r\n\x1a\nversion-2")
+            .expect("改写同长度同魔数的不同 PNG 内容");
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "图片内容改变时应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("在预检后已改变") && shown.dock.contains("输入已保留"),
+            "错误文案应指出图片在预检后已改变且输入已保留：{}",
+            shown.dock
+        );
+
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote
+            .wait(|f| f.dock.is_empty() && f.panel.contains("请看图[IMAGE 1 · png · 17 B]"))
+            .await;
+
+        remote.keys.close_channel();
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "图片被改写时不应发出提交请求"
+    );
+    assert_eq!(h.app.input.text(), "请看图", "输入区文字应保持原样");
+    assert_eq!(h.app.input.image_count(), 1, "输入区图片原子应保持原样");
+}
+
+#[tokio::test]
+async fn deleted_image_file_after_paste_blocks_submit_and_preserves_input() {
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let image_path = h.options.project_root.join("deleted.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\npayload").expect("写入初始 PNG");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+    let image_path_for_driver = image_path.clone();
+
+    let driver = async move {
+        view_tx.push([head_reply(head(0, None, false))]);
+        remote.wait(|f| f.phase == TurnPhase::Idle).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("截图说明".into())))
+            .expect("粘贴文字");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str)))
+            .expect("粘贴图片路径");
+        remote
+            .wait(|f| f.panel.contains("截图说明[IMAGE 1 · png · 15 B]"))
+            .await;
+
+        std::fs::remove_file(&image_path_for_driver).expect("删除粘贴后的图片文件");
+
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "图片被删除时应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        let (_, after_prefix) = shown
+            .dock
+            .split_once("无法读取第 1 张图片：")
+            .unwrap_or_else(|| panic!("错误应包含读取失败前缀：{}", shown.dock));
+        let (reason, _) = after_prefix
+            .split_once("；输入已保留")
+            .unwrap_or_else(|| panic!("错误应说明输入已保留：{}", shown.dock));
+        assert!(!reason.trim().is_empty(), "错误应保留具体读取失败原因");
+
+        remote.press(KeyCode::Char(' '), KeyModifiers::NONE);
+        remote
+            .wait(|f| f.dock.is_empty() && f.panel.contains("截图说明[IMAGE 1 · png · 15 B]"))
+            .await;
+
+        remote.keys.close_channel();
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "图片删除后不应发出提交请求"
+    );
+    assert_eq!(h.app.input.text(), "截图说明", "输入区文字应保持原样");
+    assert_eq!(h.app.input.image_count(), 1, "输入区图片原子应保持原样");
+}
+
+#[tokio::test]
+async fn queued_image_deleted_before_auto_send_returns_to_front_pauses_and_errors() {
+    let running = numbered_turn(1);
+    let views = Views::default();
+    let view_tx = views.clone();
+    let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
+        "watch" => views.subscribe(),
+        "submit" => Reply::Now(accepted_reply(r)),
+        _ => Reply::Never,
+    });
+    let mut h = Harness::new(false);
+    let remote = h.remote.clone();
+    let image_path = h.options.project_root.join("queued_shot.png");
+    std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nqueued").expect("写入排队测试图片");
+    let path_str = image_path.to_str().expect("路径应为有效 UTF-8").to_owned();
+    let image_path_for_driver = image_path.clone();
+
+    let driver = async move {
+        view_tx.push([
+            head_reply(head(2, Some(running), true)),
+            entry_reply(user(1, running, 1, "running prompt")),
+            entry_reply(step(2, running, 0).sent().entry()),
+        ]);
+        remote.wait(|f| f.phase == TurnPhase::Streaming).await;
+
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste("排队说明".into())))
+            .expect("粘贴排队文字");
+        remote
+            .keys
+            .unbounded_send(Ok(Event::Paste(path_str)))
+            .expect("粘贴排队图片路径");
+        remote.press(KeyCode::Enter, KeyModifiers::NONE);
+        remote
+            .wait(|f| {
+                f.text.contains("排队")
+                    && f.text.contains(
+                        "排队说明 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}14\u{00a0}B]",
+                    )
+            })
+            .await;
+
+        std::fs::remove_file(&image_path_for_driver).expect("在当前轮完成前删除排队图片文件");
+
+        view_tx.push([
+            head_reply(head(2, Some(running), false)),
+            entry_reply(step(2, running, 0).text("done").finished().entry()),
+        ]);
+
+        let shown = remote.wait(|f| !f.dock.is_empty()).await;
+        assert!(
+            shown.panel.contains("── ERROR ─"),
+            "自动发送读取图片失败应在 Dock 暂驻错误：{}",
+            shown.panel
+        );
+        assert!(
+            shown.dock.contains("无法读取第 1 张图片：") && shown.dock.contains("已放回队首并暂停"),
+            "错误应说明读取失败原因且已放回队首并暂停：{}",
+            shown.dock
+        );
+        assert!(
+            shown.text.contains("暂停")
+                && shown.text.contains(
+                    "排队说明 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}14\u{00a0}B]"
+                ),
+            "含图排队消息应回到队首并显示暂停状态：{}",
+            shown.text
+        );
+
+        remote.ctrl('c');
+        remote.ctrl('c');
+    };
+    let ((), exit) = bounded(LOOP_LIMIT, async {
+        tokio::join!(driver, h.run(&peer.client))
+    })
+    .await;
+    assert!(exit.result.is_ok());
+    assert_eq!(
+        count(&peer.seen.borrow(), "submit"),
+        0,
+        "队首图片读取失败时不应发出提交请求"
+    );
+    assert!(h.app.queue.is_paused(), "自动发送失败后队列应保持暂停");
+    assert_eq!(
+        h.app.history.prev(),
+        Some("排队说明"),
+        "退出转存排队历史时只写入文字部分"
+    );
+}
+
+#[test]
+fn image_submission_rejection_restores_when_empty_and_distinguishes_pure_image_vs_text_draft() {
+    // 1. 手动提交含图消息被拒且输入区为空：完整图文按原顺序放回输入区。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("restore.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nrestore!").expect("写入图片");
+        let app = &mut h.app;
+        app.apply_action(KeyAction::Paste("前文".into()));
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        app.apply_action(KeyAction::Paste("后文".into()));
+        app.submit().expect("空闲手动提交含图消息应返回请求");
+        let id = app.own_turn.expect("应记录本客户端提交身份");
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        reject(app, id, how);
+        assert_eq!(app.input.image_count(), 1, "输入区为空时图片原子应完整放回");
+        assert_eq!(app.input.text(), "前文后文", "输入区为空时文字应放回");
+        assert_eq!(
+            crate::view::input_visual(&app.input, 200).0,
+            vec!["前文[IMAGE 1 · png · 16 B]后文".to_owned()],
+            "放回后的图文应保持原有交错顺序"
+        );
+        assert_eq!(app.phase, TurnPhase::Idle);
+    }
+
+    // 2. 输入区已有新草稿时，纯图片消息被拒：新草稿不动，提示写明图片未放回且不含 Ctrl+↑，历史为空。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("pure.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\npure-img").expect("写入纯图片");
+        let app = &mut h.app;
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        app.submit().expect("空闲手动提交纯图片应返回请求");
+        let id = app.own_turn.expect("应记录本客户端提交身份");
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        app.input.set_text("用户新草稿");
+        reject(app, id, how);
+        assert_eq!(
+            app.input.text(),
+            "用户新草稿",
+            "输入区已有新草稿时不得覆盖新草稿"
+        );
+        assert_eq!(app.input.image_count(), 0, "纯图片不应覆盖新草稿");
+        let status_msg = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .next_back()
+            .expect("应生成拒绝或未接受状态消息");
+        assert!(
+            status_msg.contains("图片未放回")
+                && !status_msg.contains("Ctrl+↑")
+                && !status_msg.contains("输入已保留"),
+            "纯图片被拒且有新草稿时不应提示 Ctrl+↑ 或输入已保留：{status_msg}"
+        );
+        assert_eq!(app.history.prev(), None, "纯图片消息不应写入输入历史");
+    }
+
+    // 3. 输入区已有新草稿时，图文混排消息被拒：新草稿不动，提示含 Ctrl+↑，输入历史只含文字。
+    for (how, late) in (0..4)
+        .map(|how| (how, false))
+        .chain([(0, true), (1, true), (3, true)])
+    {
+        let mut h = Harness::new(true);
+        let img_path = h.options.project_root.join("mixed.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nmixed-img").expect("写入图文混排图片");
+        let app = &mut h.app;
+        app.apply_action(KeyAction::Paste("图文里的文字".into()));
+        app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+        app.submit().expect("空闲手动提交图文混排消息应返回请求");
+        let id = app.own_turn.expect("应记录本客户端提交身份");
+        if late {
+            app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        }
+        app.input.set_text("另一份新草稿");
+        reject(app, id, how);
+        assert_eq!(app.input.text(), "另一份新草稿", "新草稿应保持原样");
+        assert_eq!(app.input.image_count(), 0, "原图片不应混入新草稿");
+        let status_msg = app
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Status(s) => Some(s.text.as_str()),
+                _ => None,
+            })
+            .next_back()
+            .expect("应生成拒绝或未接受状态消息");
+        assert!(
+            status_msg.contains("Ctrl+↑") && !status_msg.contains("输入已保留"),
+            "图文消息被拒且有新草稿时应提示按 Ctrl+↑ 从历史找回文字：{status_msg}"
+        );
+        assert_eq!(
+            app.history.prev(),
+            Some("图文里的文字"),
+            "输入历史应只包含图文消息中的文字部分"
+        );
+    }
+
+    // 4. 自动发送遇 Unknown 释放名额后迟到确定拒绝：纯图片提示图片未放回，含文字提示 Ctrl+↑，只带评论两者都不提示。
+    enum AutoLateKind {
+        PureImage,
+        TextAndImage,
+        CommentOnly,
+    }
+    for kind in [
+        AutoLateKind::PureImage,
+        AutoLateKind::TextAndImage,
+        AutoLateKind::CommentOnly,
+    ] {
+        let mut h = comment_app();
+        let img_path = h.options.project_root.join("auto_late.png");
+        std::fs::write(&img_path, b"\x89PNG\r\n\x1a\nauto").expect("写入自动发送图片");
+        let app = &mut h.app;
+        app.focus = Focus::Dock;
+        app.input.set_text("先跑一轮");
+        app.submit().expect("提交第一轮");
+        let first = app.own_turn.expect("第一轮身份");
+        app.apply_submission(receipt(first, accepted(first)));
+        match kind {
+            AutoLateKind::PureImage => {
+                app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+            }
+            AutoLateKind::TextAndImage => {
+                app.apply_action(KeyAction::Paste("排队里的文字".into()));
+                app.apply_action(KeyAction::Paste(img_path.to_str().unwrap().to_owned()));
+            }
+            AutoLateKind::CommentOnly => {
+                save_comment(app, "排队里的评论");
+                app.focus = Focus::Dock;
+            }
+        }
+        assert!(app.submit().is_none(), "运行中按回车应入队");
+        finish(app, first, "先跑一轮");
+        app.auto_submit().expect("完成后应自动发送队首");
+        let auto_id = app.own_turn.expect("自动发送身份");
+        app.apply_submission(receipt(auto_id, SubmissionResult::Unknown { error: None }));
+        app.apply_submission(receipt(
+            auto_id,
+            SubmissionResult::Rejected {
+                error: local_error(LocalErrorKind::BadRequest, "迟到拒绝"),
+            },
+        ));
+        let err = app.dock.message().expect("迟到拒绝应暂驻错误");
+        match kind {
+            AutoLateKind::TextAndImage => {
+                assert!(
+                    err.text.contains("Ctrl+↑"),
+                    "含文字的自动发送迟到拒绝应提示 Ctrl+↑：{}",
+                    err.text
+                );
+                assert_eq!(app.history.prev(), Some("排队里的文字"));
+            }
+            AutoLateKind::PureImage => {
+                assert!(
+                    err.text.contains("图片未放回") && !err.text.contains("Ctrl+↑"),
+                    "纯图片的自动发送迟到拒绝应说明图片未放回且不提 Ctrl+↑：{}",
+                    err.text
+                );
+                assert_eq!(app.history.prev(), Some("先跑一轮"));
+            }
+            AutoLateKind::CommentOnly => {
+                assert!(
+                    err.text.contains("迟到拒绝")
+                        && !err.text.contains("图片未放回")
+                        && !err.text.contains("Ctrl+↑"),
+                    "只带评论的自动发送迟到拒绝不应提示图片未放回或 Ctrl+↑：{}",
+                    err.text
+                );
+                assert_eq!(app.history.prev(), Some("先跑一轮"));
+            }
+        }
+    }
+}
+
+#[test]
+fn initial_replay_manual_submit_preflight_failure_preserves_comment_draft_until_step_arrives() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let target = app
+        .head
+        .as_ref()
+        .expect("初始会话头")
+        .turn_id
+        .expect("被评论轮次");
+    save_comment(app, "重连前草稿");
+    app.focus = Focus::Dock;
+    assert_eq!(app.queue.draft_count(), 1, "保存后应有 1 条评论草稿");
+
+    // 重连后开始初始回放：用户消息已回放，被评论的 Step 尚未回放。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(2, Some(target), false)));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
+    assert!(app.initial, "末尾 Step 尚未到达时仍处于初始回放期间");
+    assert!(app.present_steps().is_empty(), "此时对话记录中尚无 Step");
+
+    let oversized = "x".repeat(2_097_153);
+    app.input.set_text(&oversized);
+    assert!(app.submit().is_none(), "超过 2 MiB 的消息预检应拒绝提交");
+
+    let err = app.dock.message().expect("预检失败应在 Dock 暂驻错误");
+    assert_eq!(err.level, NoticeLevel::Error);
+    assert!(
+        err.text.contains("2,097,152") && err.text.contains("输入已保留"),
+        "错误文案应说明单轮文本超限且输入已保留：{}",
+        err.text
+    );
+    assert_eq!(app.input.text(), oversized, "预检失败后输入区文字应保留");
+    assert_eq!(
+        app.queue.draft_count(),
+        1,
+        "预检失败时不得提前丢弃锚点暂未回放的评论草稿"
+    );
+    assert!(
+        !app.blocks
+            .iter()
+            .any(|b| matches!(b, Block::Status(s) if s.level == NoticeLevel::Warn)),
+        "预检失败时不应产生丢弃评论的警告"
+    );
+
+    // 随后被评论的 Step 到达，初始回放结束，草稿仍保留并重新挂回锚点。
+    app.apply_view(entry_update(
+        step(2, target, 0).text("comment target").finished().entry(),
+    ));
+    assert!(!app.initial, "末尾 Step 到达后初始回放应结束");
+    assert_eq!(app.queue.draft_count(), 1, "Step 到达后评论草稿仍应为 1 条");
+    assert_eq!(
+        app.queue
+            .drafts()
+            .next()
+            .expect("保留的草稿")
+            .comment()
+            .text,
+        "重连前草稿"
+    );
+    assert!(
+        transcript(app).contains("草稿 · #1"),
+        "草稿卡片应重新显示在锚点下方"
+    );
+}
+
+#[test]
+fn initial_replay_configure_bound_comment_only_queue_sends_after_step_arrives() {
+    use lattice_local::ModelCandidates;
+
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.term_width = 100;
+    app.term_height = 40;
+    let target = numbered_turn(1);
+    let failed_step = || {
+        step(2, target, 0)
+            .text("comment target")
+            .stopped("failed")
+            .entry()
+    };
+
+    // 1. 会话空闲，队列未暂停，最近一轮以失败结束（不满足上一轮完成后自动发出的条件）。
+    open_view(
+        app,
+        head(2, Some(target), false),
+        vec![user(1, target, 1, "original prompt"), failed_step()],
+    );
+    assert_eq!(app.phase, TurnPhase::Idle, "初始会话应处于空闲状态");
+    assert!(!app.queue.is_paused(), "初始回放的失败轮次不应暂停队列");
+
+    // 2. configure 在途时提交一条只带评论的消息，绑定在途代次进入队列。
+    save_comment(app, "等待锚点回放的评论");
+    app.focus = Focus::Dock;
+    app.apply_builtin("/model");
+    let query = app.model_query.take().expect("打开模型面板应发起候选查询");
+    app.apply_models(
+        query,
+        Ok(ModelCandidates {
+            models: vec![model_candidate("p", "chosen", &[])],
+            warnings: vec![],
+        }),
+    );
+    assert!(
+        app.apply_action(KeyAction::Submit).is_none(),
+        "选定模型只发出设置修改请求，不提交对话"
+    );
+    let pending = app
+        .configure_request
+        .take()
+        .expect("选定模型应登记待发出的 configure 请求");
+    assert!(
+        app.apply_action(KeyAction::Submit).is_none(),
+        "configure 在途时提交纯评论应进入队列"
+    );
+    assert_eq!(app.queue.messages().count(), 1, "纯评论消息应已进入队列");
+
+    // 3. 开始初始回放：用户消息已回放，评论所指的 Step 尚未回放。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(2, Some(target), false)));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
+    assert!(app.initial, "末尾 Step 尚未到达时仍处于初始回放期间");
+    assert!(app.present_steps().is_empty(), "此时评论锚点 Step 尚未回放");
+
+    // 4. configure 成功回复到达后，auto_submit() 返回 None，消息仍在队列中。
+    let mut configured = head(2, Some(target), false);
+    configured.provider = Some(ProviderId::parse("p").expect("解析测试供应商标识"));
+    configured.model = Some(ModelId::parse("chosen").expect("解析测试模型标识"));
+    configured.settings_version = settings_version(0x22);
+    app.apply_configure(
+        pending.generation,
+        Ok(ConfigureReply {
+            head: configured,
+            adjustment: None,
+        }),
+    );
+    assert!(
+        app.auto_submit().is_none(),
+        "锚点 Step 尚未回放时不应发出纯评论消息"
+    );
+    assert_eq!(
+        app.queue.messages().count(),
+        1,
+        "未发出的纯评论消息应继续留在队列中"
+    );
+
+    // 5. 该 Step 到达后，auto_submit() 返回含该评论的请求。
+    app.apply_view(entry_update(failed_step()));
+    assert!(!app.initial, "末尾 Step 到达后初始回放应结束");
+    let req = app
+        .auto_submit()
+        .expect("锚点 Step 回放后应自动发出绑定 configure 的纯评论消息");
+    assert_eq!(
+        req.expected_settings,
+        Some(settings_version(0x22)),
+        "自动发出的请求应携带绑定的 configure 新版本"
+    );
+    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+        panic!("纯评论提交请求应只包含一段文本");
+    };
+    let parsed = crate::comment::Message::parse(wire).expect("提交文本应可解析为评论消息");
+    assert_eq!(parsed.comments.len(), 1, "提交请求应携带 1 条评论");
+    assert_eq!(parsed.comments[0].text, "等待锚点回放的评论");
+    assert_eq!(parsed.comments[0].quote, "comment target");
+    assert!(parsed.text.is_empty(), "纯评论消息不应包含额外正文");
+    assert_eq!(app.queue.messages().count(), 0, "发出后队列应为空");
+}
+
+#[test]
+fn initial_replay_queue_head_preflight_failure_preserves_messages_and_comments_and_pauses() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let target = app
+        .head
+        .as_ref()
+        .expect("初始会话头")
+        .turn_id
+        .expect("被评论轮次");
+    app.input.set_text("running");
+    app.submit().expect("发起运行中轮次");
+    let running = app.own_turn.expect("运行中轮次身份");
+
+    save_comment(app, "队首评论");
+    app.focus = Focus::Dock;
+    app.input.set_text("队首初稿");
+    assert!(app.submit().is_none(), "运行中提交应进入队列");
+
+    save_comment(app, "次条评论");
+    app.focus = Focus::Dock;
+    assert!(app.submit().is_none(), "纯评论消息在运行中同样进入队列");
+    assert_eq!(
+        app.queue.messages().count(),
+        2,
+        "队列中应有两条带评论的消息"
+    );
+
+    app.apply_submission(receipt(running, accepted(running)));
+    stop(app, running, "running", "failed");
+    release_dock(app);
+    assert!(app.queue.is_paused(), "上一轮失败结束后队列应暂停");
+
+    // 原地把队首正文改成超过 2 MiB，保存编辑后触发重连初始回放。
+    let oversized = "x".repeat(2_097_153);
+    let first_id = app.queue.messages().next().expect("队首消息").id;
+    assert!(app.queue.start_edit(first_id), "应能进入队首原地编辑");
+    app.queue
+        .queued_editor_mut()
+        .expect("队首编辑器")
+        .set_text(&oversized);
+    app.queue.finish_edit(true);
+
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(running), false)));
+    app.apply_view(entry_update(user(1, target, 1, "original prompt")));
+    assert!(app.initial, "仅回放首条用户消息时仍处于初始回放期间");
+    assert!(app.present_steps().is_empty(), "被评论的 Step 尚未回放");
+    assert_eq!(app.phase, TurnPhase::Idle);
+
+    // 空输入按回车恢复并尝试发出队首：副本预检失败，不应清理评论也不应取出消息。
+    assert!(app.submit().is_none(), "队首预检失败不应返回提交请求");
+    let err = app.dock.message().expect("队首预检失败应在 Dock 暂驻错误");
+    assert_eq!(err.level, NoticeLevel::Error);
+    assert!(
+        err.text.contains("2,097,152") && err.text.contains("已放回队首并暂停"),
+        "错误文案应说明原因并提示已放回队首并暂停：{}",
+        err.text
+    );
+    assert!(app.queue.is_paused(), "队首预检失败后队列应暂停");
+
+    let queued: Vec<_> = app.queue.messages().collect();
+    assert_eq!(queued.len(), 2, "两条排队消息都应保留在队列中");
+    assert_eq!(queued[0].input.text(), oversized, "队首超限正文应保留");
+    assert_eq!(queued[0].comments.len(), 1, "队首评论不应在预检失败时丢失");
+    assert_eq!(queued[0].comments[0].text, "队首评论");
+    assert!(queued[1].input.is_blank(), "次条仍为纯评论排队消息");
+    assert_eq!(queued[1].comments.len(), 1, "次条评论不应在预检失败时丢失");
+    assert_eq!(queued[1].comments[0].text, "次条评论");
+
+    // 随后其余条目回放完毕，两条排队消息及其评论依旧完整保留。
+    app.apply_view(entry_update(
+        step(2, target, 0).text("comment target").finished().entry(),
+    ));
+    app.apply_view(entry_update(user(3, running, 2, "running")));
+    app.apply_view(entry_update(
+        step(4, running, 0)
+            .text("live body")
+            .stopped("failed")
+            .entry(),
+    ));
+    assert!(!app.initial, "全部初始条目到达后回放应结束");
+    let after: Vec<_> = app.queue.messages().collect();
+    assert_eq!(after.len(), 2, "回放完成后两条排队消息仍应都在");
+    assert_eq!(after[0].comments.len(), 1);
+    assert_eq!(after[1].comments.len(), 1);
+}
+
+#[test]
+fn apply_clipboard_stages_image_in_private_tmp_submits_bytes_and_removes_dir_on_drop() {
+    let mut h = Harness::new(false);
+    let png = b"\x89PNG\r\n\x1a\nclipboard-png".to_vec();
+    h.app
+        .apply_clipboard(Ok(crate::clipboard::Content::Image(png.clone())));
+
+    let parts = h.app.input.parts();
+    let [
+        UserInputPart::Image {
+            image:
+                PendingImage {
+                    source: ImageSource::Temp(temp_path),
+                    ..
+                },
+        },
+    ] = &parts[..]
+    else {
+        panic!("输入区应含 1 个 Temp 图片原子");
+    };
+    let staging_dir = temp_path
+        .parent()
+        .expect("暂存图片文件应有父目录")
+        .to_path_buf();
+    assert_eq!(
+        staging_dir.parent(),
+        Some(Path::new("/tmp")),
+        "暂存目录应位于 /tmp 下"
+    );
+    let dir_name = staging_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .expect("暂存目录名应为 UTF-8");
+    assert!(
+        dir_name.starts_with("lattice-tui-"),
+        "暂存目录名应以 lattice-tui- 开头：{dir_name}"
+    );
+    assert!(staging_dir.exists(), "丢弃 App 前暂存目录应存在");
+
+    let req = h
+        .app
+        .apply_action(KeyAction::Submit)
+        .expect("按 Enter 应返回提交请求");
+    assert!(
+        req.parts == [UserInputPart::Image { image: png }],
+        "提交请求应携带剪贴板图片的原始字节"
+    );
+
+    drop(h);
+    assert!(!staging_dir.exists(), "丢弃 App 后暂存目录应被删除");
+}
+
+#[test]
+fn apply_clipboard_invalid_image_pushes_error_and_no_session_pushes_warn() {
+    let mut h = Harness::new(false);
+    let app = &mut h.app;
+    app.input.set_text("原有草稿");
+    let before = app.input.clone();
+
+    app.apply_clipboard(Ok(crate::clipboard::Content::Image(
+        b"not an image".to_vec(),
+    )));
+    let err = app
+        .dock
+        .message()
+        .expect("剪贴板返回非图片字节时应在 Dock 暂驻错误");
+    assert_eq!(err.level, NoticeLevel::Error, "非图片字节应推 Error");
+    assert!(
+        err.text.contains("无法粘贴图片："),
+        "错误文案应说明无法粘贴图片：{}",
+        err.text
+    );
+    assert!(app.input == before, "推 Error 后输入区应保持不变");
+
+    release_dock(app);
+    app.apply_clipboard(Err(crate::clipboard::ClipboardError::NoSession));
+    let warn = app
+        .dock
+        .message()
+        .expect("未检测到图形会话时应在 Dock 暂驻警告");
+    assert_eq!(warn.level, NoticeLevel::Warn, "无图形会话应推 Warn");
+    assert_eq!(
+        warn.text,
+        "未检测到图形会话（WAYLAND_DISPLAY 或 DISPLAY），无法读取剪贴板；可直接粘贴本地图片路径"
+    );
+    assert!(app.input == before, "推 Warn 后输入区应保持不变");
 }

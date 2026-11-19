@@ -6,6 +6,7 @@
 //! 不调度请求、订阅或退出交接。
 
 use crate::app::Status;
+use crate::clipboard::{Backend, ClipboardError};
 use lattice_local::{
     CancelStatus, ConnectionStatus, DetachReport, LocalError, ModelAttemptKey, Notice, NoticeLevel,
     PublicTurnOutcome, SubmissionResult, TurnId, TurnSummary,
@@ -99,6 +100,8 @@ pub(crate) enum KeptInput {
     Restored,
     /// 没有放回：输入区已有用户的草稿，或结果未知的自动发送不再放回队首；原输入在输入历史中。
     History,
+    /// 没有放回且没有文字历史：纯图片消息未覆盖新草稿，或结果未知的自动发送已释放名额；图片未放回。
+    Discarded,
     /// 没有可归还的输入：这次提交已经有过确定结果，或不是本客户端在等结果的提交。
     Nothing,
 }
@@ -107,6 +110,7 @@ fn history_hint(kept: KeptInput) -> &'static str {
     match kept {
         KeptInput::Restored | KeptInput::Nothing => "",
         KeptInput::History => "；原输入未放回，可按 Ctrl+↑ 从输入历史找回",
+        KeptInput::Discarded => "；图片未放回",
     }
 }
 
@@ -116,9 +120,59 @@ pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
     let notice = not_accepted_notice(turn_id);
     let kept = match kept {
         KeptInput::Restored => "，输入已保留",
-        KeptInput::History | KeptInput::Nothing => history_hint(kept),
+        KeptInput::History | KeptInput::Discarded | KeptInput::Nothing => history_hint(kept),
     };
     status(NoticeLevel::Error, format!("{notice}{kept}"))
+}
+
+/// 粘贴本机图片文件失败，不插入任何内容。
+pub(crate) fn paste_image_failed_status(error: &LocalError) -> Status {
+    status(
+        NoticeLevel::Error,
+        format!("无法粘贴图片：{}", error.message),
+    )
+}
+
+pub(crate) fn clipboard_failed_status(error: &ClipboardError) -> Status {
+    match error {
+        ClipboardError::NoSession => status(
+            NoticeLevel::Warn,
+            "未检测到图形会话（WAYLAND_DISPLAY 或 DISPLAY），无法读取剪贴板；可直接粘贴本地图片路径"
+                .into(),
+        ),
+        ClipboardError::Missing(Backend::Wayland) => status(
+            NoticeLevel::Warn,
+            "未找到 wl-paste，请安装 wl-clipboard，或直接粘贴本地图片路径".into(),
+        ),
+        ClipboardError::Missing(Backend::X11) => status(
+            NoticeLevel::Warn,
+            "未找到 xclip，请安装 xclip，或直接粘贴本地图片路径".into(),
+        ),
+        ClipboardError::TooLarge => status(
+            NoticeLevel::Error,
+            "剪贴板内容超过 3,932,160 字节（3.75 MiB），未插入".into(),
+        ),
+        ClipboardError::Failed(detail) => {
+            status(NoticeLevel::Warn, format!("无法读取剪贴板：{detail}"))
+        }
+    }
+}
+
+pub(crate) fn clipboard_stage_failed_status(error: &anyhow::Error) -> Status {
+    status(NoticeLevel::Error, format!("无法暂存剪贴板图片：{error}"))
+}
+
+/// 提交、入队或发出队首前本地预检未通过，请求尚未发出。
+pub(crate) fn preflight_failed_status(error: &LocalError, from_queue: bool) -> Status {
+    let kept = if from_queue {
+        "已放回队首并暂停"
+    } else {
+        "输入已保留"
+    };
+    status(
+        NoticeLevel::Error,
+        format!("无法提交：{}；{kept}", error.message),
+    )
 }
 
 pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError, kept: KeptInput) -> Status {

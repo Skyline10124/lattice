@@ -11,7 +11,8 @@
 | `src/session.rs` | 启动时经 `configure` 创建新会话或更新既有会话设置、按 `current_dir()` 原始字节核对只读打开会话的项目绑定并将对话条目按节点与调用身份转换为 `Block` |
 | `src/connection.rs` | 将回执、`configure` 回复、会话头、连接与查询异常、重试提示、Turn 结局及 `DetachReport` 转换为定级状态消息与退出文案 |
 | `src/blocks.rs` | 扁平显示 `Block` 列表与按 `NodeId`、`InvocationId` 原位更新 |
-| `src/input.rs` | 输入区缓冲、按键处理、粘贴及 `<session_dir>/repl_history.txt` 纯文本历史读写 |
+| `src/input.rs` | 输入区缓冲、图片原子与路径粘贴识别、按键处理及 `<session_dir>/repl_history.txt` 纯文本历史读写 |
+| `src/clipboard.rs` | `Ctrl+V` 经 `wl-paste` 或 `xclip` 有界读取剪贴板，以及剪贴板图片在 `/tmp` 下本进程私有目录的暂存 |
 | `src/comment.rs` | 助手正文块级锚定、`<lattice-comment>` 消息编解码与草稿管理 |
 | `src/queue.rs` | 运行中排队消息缓冲、入队设置版本记录、原地编辑、暂停与自动发出控制 |
 | `src/markdown.rs`、`src/wrapping.rs` | GFM 正文、代码块高亮、diff、表格解析及按显示宽度的统一折行 |
@@ -32,7 +33,7 @@
 ## 约束
 
 - `Cargo.toml` 的内部直接依赖只允许 `lattice-local`，普通依赖闭包中禁止出现 `lattice-server`、`lattice-llm`、`lattice-profile`、`lattice-agent`、`lattice-im`，由 `cargo xtask crate-boundary` 强制检查。
-- 启动时新会话经 `configure(New)` 创建草稿会话，既有会话带 `--agent` 时经 `configure(Existing)` 更新设置，只读打开既有会话时按 `current_dir()` 的 Unix 原始字节与 `session.project_path` 比较（不在前端做 `canonicalize`），进入事件循环即开始 `watch`；提交携带当前或入队时的 `expected_settings`（排队绑定规则见[排队](../../docs/architecture/tui/interaction.md#排队)），被配置拒绝或 `SettingsChanged` 冲突拒绝时展示说明并保留输入，见[启动、提交与运行](../../docs/architecture/tui/README.md#启动提交与运行)。
+- 启动时新会话经 `configure(New)` 创建草稿会话，既有会话带 `--agent` 时经 `configure(Existing)` 更新设置，只读打开既有会话时按 `current_dir()` 的 Unix 原始字节与 `session.project_path` 比较（不在前端做 `canonicalize`），进入事件循环即开始 `watch`；提交、入队与发出队首前经 `check_turn_plan` 做本地预检（未通过时显示错误并保留输入与评论草稿，或将队首放回并暂停），提交携带当前或入队时的 `expected_settings`（排队绑定规则见[排队](../../docs/architecture/tui/interaction.md#排队)），被配置拒绝或 `SettingsChanged` 冲突拒绝时展示说明并保留输入，见[启动、提交与运行](../../docs/architecture/tui/README.md#启动提交与运行)。
 - `/model` 与 `/effort` 候选项取自后台模型候选查询，选定后异步发出 `configure(Existing)`，statusline 与 `/effort` 面板直接读取会话头，见[选择面板](../../docs/architecture/tui/dock.md#选择面板)。
 - `connection.rs` 集中生成状态消息文案并决定等级，Dock 只按等级决定暂驻或常驻，组件间状态与句柄交接见[状态消息与等级](../../docs/architecture/tui/README.md#状态消息与等级)与[组件接线](../../docs/architecture/tui/README.md#组件接线)。
 - raw 模式下直接从终端输入事件捕获 `Ctrl+C`，经当前 `LocalTurn` 按 `TurnId` 发出取消意图，退出交接、视图推送替换、向上翻页与断连恢复显示按[连接、结局与重载](../../docs/architecture/tui/README.md#连接结局与重载)与[取消、退出与恢复提示](../../docs/architecture/tui/README.md#取消退出与恢复提示)执行。

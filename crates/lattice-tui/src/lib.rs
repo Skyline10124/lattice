@@ -5,6 +5,7 @@
 
 mod app;
 mod blocks;
+mod clipboard;
 mod comment;
 mod connection;
 mod input;

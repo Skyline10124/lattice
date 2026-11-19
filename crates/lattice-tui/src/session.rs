@@ -344,45 +344,82 @@ fn append_messages(
     }
 }
 
+pub(crate) enum UserPartRef<'a> {
+    Text(&'a str),
+    Image(&'a lattice_local::ImageRef),
+}
+
+/// 按片段顺序拼接用户消息的文字与 `[IMAGE n · <ext> · <size>]` 标记：
+/// 标记内部使用不换行空格 `U+00A0` 防止折行拆开；标记与无可断开空白交界的相邻片段之间补单个普通空格，
+/// 首尾或已有可断开空白处不额外补空格。
+pub(crate) fn format_user_parts<'a>(parts: impl IntoIterator<Item = UserPartRef<'a>>) -> String {
+    let mut out = String::new();
+    let mut prev_was_image = false;
+    let mut image_ordinal: usize = 0;
+
+    for part in parts {
+        match part {
+            UserPartRef::Text(text) => {
+                if !text.is_empty() {
+                    if prev_was_image
+                        && !text
+                            .chars()
+                            .next()
+                            .is_some_and(crate::wrapping::breakable_space)
+                    {
+                        out.push(' ');
+                    }
+                    out.push_str(text);
+                    prev_was_image = false;
+                }
+            }
+            UserPartRef::Image(image) => {
+                image_ordinal = image_ordinal.saturating_add(1);
+                let ordinal = std::num::NonZeroUsize::new(image_ordinal)
+                    .expect("图片序号从 1 开始递增，必定非零");
+                if !out.is_empty()
+                    && !out
+                        .chars()
+                        .next_back()
+                        .is_some_and(crate::wrapping::breakable_space)
+                {
+                    out.push(' ');
+                }
+                let marker =
+                    lattice_local::format_image_marker(ordinal, image).replace(' ', "\u{00a0}");
+                out.push_str(&marker);
+                prev_was_image = true;
+            }
+        }
+    }
+
+    out
+}
+
 fn append_user_message(
     blocks: &mut BlockList,
     message: lattice_local::NativeMessage<lattice_local::BoundToolCall>,
 ) {
-    let mut out = String::new();
-    let mut has_content = false;
-    let mut prev_was_image = false;
-    let mut image_ordinal: usize = 0;
-
-    for part in message.parts {
-        match part.semantic {
-            MessageSemantic::Text { text } => {
-                has_content = true;
-                if !text.is_empty() {
-                    if prev_was_image && !text.chars().next().is_some_and(char::is_whitespace) {
-                        out.push(' ');
-                    }
-                    out.push_str(&text);
-                    prev_was_image = false;
-                }
-            }
-            MessageSemantic::Image { image } => {
-                has_content = true;
-                image_ordinal = image_ordinal.saturating_add(1);
-                let ordinal = std::num::NonZeroUsize::new(image_ordinal)
-                    .expect("图片序号从 1 开始递增，必定非零");
-                if !out.is_empty() && !out.chars().next_back().is_some_and(char::is_whitespace) {
-                    out.push(' ');
-                }
-                out.push_str(&lattice_local::format_image_marker(ordinal, &image));
-                prev_was_image = true;
-            }
-            MessageSemantic::ToolCall { .. } | MessageSemantic::Reasoning { .. } => {}
-        }
+    let has_content = message.parts.iter().any(|part| {
+        matches!(
+            part.semantic,
+            MessageSemantic::Text { .. } | MessageSemantic::Image { .. }
+        )
+    });
+    if !has_content {
+        return;
     }
-
-    if has_content {
-        blocks.push(user_block(out));
-    }
+    let out = format_user_parts(
+        message
+            .parts
+            .iter()
+            .filter_map(|part| match &part.semantic {
+                MessageSemantic::Text { text } => Some(UserPartRef::Text(text)),
+                MessageSemantic::Image { image } => Some(UserPartRef::Image(image)),
+                MessageSemantic::ToolCall { .. } | MessageSemantic::Reasoning { .. } => None,
+            }),
+    );
+    blocks.push(user_block(out));
 }
 
 /// 隐藏 reasoning 不应在生成中的文字由回复取代时引入原来没有的换行。
@@ -484,7 +521,10 @@ mod tests {
         );
         assert_eq!(
             blocks[1],
-            Block::User("请看报错截图 [IMAGE 1 · png · 2 KiB] 定位原因".to_owned()),
+            Block::User(
+                "请看报错截图 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}2\u{00a0}KiB] 定位原因"
+                    .to_owned()
+            ),
             "图文交错消息应按顺序拼入单个 USER 块并在无空白交界处补单个空格"
         );
 
@@ -502,8 +542,30 @@ mod tests {
         assert_eq!(ws_blocks.len(), 2);
         assert_eq!(
             ws_blocks[1],
-            Block::User("第一行\n[IMAGE 1 · jpg · 1023 B]\n第二行".to_owned()),
+            Block::User(
+                "第一行\n[IMAGE\u{00a0}1\u{00a0}·\u{00a0}jpg\u{00a0}·\u{00a0}1023\u{00a0}B]\n第二行"
+                    .to_owned()
+            ),
             "相邻文本在交界处已有空白时不应重复插入空格"
+        );
+
+        let with_nbsp = user_entry_from_parts(
+            5,
+            3,
+            3,
+            json!([
+                text_part_json("前文\u{00a0}"),
+                image_part_json('8', "png", 1024)
+            ]),
+        );
+        let nbsp_blocks = entry_blocks(&with_nbsp, true, None);
+        assert_eq!(
+            nbsp_blocks[1],
+            Block::User(
+                "前文\u{00a0} [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}1\u{00a0}KiB]"
+                    .to_owned()
+            ),
+            "前文以不换行空格结尾时应在标记前补一个普通空格"
         );
     }
 
@@ -515,7 +577,9 @@ mod tests {
         assert_eq!(single_blocks.len(), 2);
         assert_eq!(
             single_blocks[1],
-            Block::User("[IMAGE 1 · webp · 2 KiB]".to_owned()),
+            Block::User(
+                "[IMAGE\u{00a0}1\u{00a0}·\u{00a0}webp\u{00a0}·\u{00a0}2\u{00a0}KiB]".to_owned()
+            ),
             "单张纯图片消息开头与结尾不应有多余空格"
         );
 
@@ -532,7 +596,10 @@ mod tests {
         assert_eq!(two_blocks.len(), 2);
         assert_eq!(
             two_blocks[1],
-            Block::User("[IMAGE 1 · png · 1 KiB] [IMAGE 2 · jpg · 3.8 MiB]".to_owned()),
+            Block::User(
+                "[IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}1\u{00a0}KiB] [IMAGE\u{00a0}2\u{00a0}·\u{00a0}jpg\u{00a0}·\u{00a0}3.8\u{00a0}MiB]"
+                    .to_owned()
+            ),
             "连续图片标记之间应以单个空格分隔"
         );
     }
@@ -562,12 +629,18 @@ mod tests {
         let second_blocks = entry_blocks(&second, true, None);
         assert_eq!(
             first_blocks[1],
-            Block::User("[IMAGE 1 · png · 1 KiB] [IMAGE 2 · gif · 512 B]".to_owned()),
+            Block::User(
+                "[IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}1\u{00a0}KiB] [IMAGE\u{00a0}2\u{00a0}·\u{00a0}gif\u{00a0}·\u{00a0}512\u{00a0}B]"
+                    .to_owned()
+            ),
             "第一条消息的图片序号应为 1 和 2"
         );
         assert_eq!(
             second_blocks[1],
-            Block::User("再来一张 [IMAGE 1 · jpg · 4 KiB]".to_owned()),
+            Block::User(
+                "再来一张 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}jpg\u{00a0}·\u{00a0}4\u{00a0}KiB]"
+                    .to_owned()
+            ),
             "第二条消息的图片序号应重新从 1 开始计数"
         );
     }

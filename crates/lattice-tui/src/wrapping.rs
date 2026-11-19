@@ -87,8 +87,13 @@ fn push(line: &mut Line<'static>, glyph: &StyledGrapheme<'_>) {
     }
 }
 
+/// 可作为折行断点的空白字符；不换行空格 `U+00A0` 与两侧字符保持粘连，不算可断开空白。
+pub(crate) fn breakable_space(ch: char) -> bool {
+    ch.is_whitespace() && ch != '\u{00a0}'
+}
+
 fn whitespace(glyph: &StyledGrapheme<'_>) -> bool {
-    glyph.symbol.chars().all(char::is_whitespace)
+    glyph.symbol.chars().all(breakable_space)
 }
 
 fn wrap_line(source: &[StyledGrapheme<'_>], width: usize, lines: &mut Vec<Line<'static>>) {

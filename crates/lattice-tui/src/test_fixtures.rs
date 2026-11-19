@@ -59,6 +59,7 @@ pub(super) fn test_app(_existing: bool) -> App {
         },
         false,
         Path::new("/nonexistent-tui-test-history"),
+        std::path::PathBuf::from("/nonexistent-tui-test-workspace"),
     )
 }
 
