@@ -369,8 +369,8 @@ pub(crate) trait TelegramIo: Send + Sync {
     async fn get_updates(&self, timeout_secs: u32)
     -> Result<Vec<TelegramUpdate>, TelegramApiError>;
 
-    /// 通知平台模块该入站身份键已完成本地确认，推进平台内部连续前缀 `offset`。
-    fn acknowledge(&self, inbound_id: &InboundId);
+    /// 通知平台模块这批入站身份键已完成本地确认，推进平台内部连续前缀 `offset`。
+    fn acknowledge(&self, inbound_ids: &[InboundId]);
 
     /// 查询该入站身份键在本实例中是否已完成本地确认，供分发前兜底过滤重投。
     fn is_acknowledged(&self, inbound_id: &InboundId) -> bool {

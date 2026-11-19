@@ -6,6 +6,7 @@
 //! 根模块仅公开宿主组装所需的只读构造入口 [`prepare_im_gateway`]、构造判定 [`ImBuildOutcome`]、
 //! 待运行网关实例 [`PreparedImGateway`] 与台账启动错误 [`ImGatewayError`]。
 
+mod album;
 mod command;
 mod config;
 mod gateway;

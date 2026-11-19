@@ -602,11 +602,11 @@ impl TelegramIo for TelegramHttpClient {
         decode_and_filter_updates(&payload_bytes, &self.offsets, &self.redactor)
     }
 
-    fn acknowledge(&self, inbound_id: &InboundId) {
-        self.offsets
-            .lock()
-            .expect("Telegram offset 锁不应中毒")
-            .ack_inbound(inbound_id);
+    fn acknowledge(&self, inbound_ids: &[InboundId]) {
+        let mut tracker = self.offsets.lock().expect("Telegram offset 锁不应中毒");
+        for inbound_id in inbound_ids {
+            tracker.ack_inbound(inbound_id);
+        }
     }
 
     fn is_acknowledged(&self, inbound_id: &InboundId) -> bool {

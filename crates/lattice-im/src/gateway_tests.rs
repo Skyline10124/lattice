@@ -33,6 +33,7 @@ use tokio::{
 
 use crate::{
     ImBuildOutcome,
+    album::LATE_ALBUM_FRAGMENT_REPLY,
     command::{HELP_REPLY, UNSUPPORTED_MEDIA_REPLY, cancel_turn_and_format},
     identity::{ChatKey, InboundId, new_session_id, new_turn_id},
     ledger::{InboundRecord, Ledger},
@@ -369,8 +370,13 @@ impl TelegramIo for FakeTelegramIo {
         }
     }
 
-    fn acknowledge(&self, inbound_id: &InboundId) {
-        self.offsets.lock().unwrap().ack_inbound(inbound_id);
+    fn acknowledge(&self, inbound_ids: &[InboundId]) {
+        {
+            let mut tracker = self.offsets.lock().unwrap();
+            for inbound_id in inbound_ids {
+                tracker.ack_inbound(inbound_id);
+            }
+        }
         self.offset_notify.notify_waiters();
     }
 
@@ -4510,6 +4516,1077 @@ async fn retries_429_and_5xx_downloads_stops_on_400_404_exhaustion_and_interrupt
             "下载失败或中断的更新 {uid} 不得写入台账"
         );
     }
+
+    harness.shutdown().await;
+}
+
+fn private_album_photo_update(
+    update_id: i64,
+    chat_id: i64,
+    sender_id: i64,
+    media_group_id: &str,
+    photos: &[(&str, Option<u64>)],
+    caption: Option<&str>,
+) -> TelegramUpdate {
+    let photo_arr: Vec<serde_json::Value> = photos
+        .iter()
+        .enumerate()
+        .map(|(idx, (file_id, file_size))| {
+            let mut obj = serde_json::json!({
+                "file_id": file_id,
+                "file_unique_id": format!("u_alb_{update_id}_{idx}"),
+                "width": (idx + 1) * 100,
+                "height": (idx + 1) * 100,
+            });
+            if let Some(size) = file_size {
+                obj["file_size"] = serde_json::json!(size);
+            }
+            obj
+        })
+        .collect();
+    let mut msg = serde_json::json!({
+        "message_id": update_id,
+        "from": {"id": sender_id},
+        "chat": {"id": chat_id, "type": "private"},
+        "media_group_id": media_group_id,
+        "photo": photo_arr,
+    });
+    if let Some(cap) = caption {
+        msg["caption"] = serde_json::json!(cap);
+    }
+    let raw: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+        "update_id": update_id,
+        "message": msg,
+    }))
+    .expect("构造私聊相册图片更新应成功");
+    raw.into_domain()
+}
+
+fn private_album_unsupported_update(
+    update_id: i64,
+    chat_id: i64,
+    sender_id: i64,
+    media_group_id: &str,
+    kind_field: &str,
+) -> TelegramUpdate {
+    let mut msg = serde_json::json!({
+        "message_id": update_id,
+        "from": {"id": sender_id},
+        "chat": {"id": chat_id, "type": "private"},
+        "media_group_id": media_group_id,
+    });
+    msg[kind_field] = serde_json::json!({
+        "file_id": format!("unsup_{kind_field}_{update_id}"),
+        "width": 320,
+        "height": 240,
+    });
+    let raw: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+        "update_id": update_id,
+        "message": msg,
+    }))
+    .expect("构造相册混入不支持媒体更新应成功");
+    raw.into_domain()
+}
+
+// 场景 17（相册测试 1）：两批乱序到达（100 后 99，均带不同说明文字与图片）在 600ms 静默到期合并为一轮提交，
+// 假模型收到 [Image(99), Image(100), Text("cap99\ncap100")]；
+// 结合 arm_replace_gate_for_test 验证台账落盘前 99 与 100 均未确认，落盘后一次性推进 offset 到 101 且磁盘写入 tg:99 -> Registered、tg:100 -> Merged。
+#[tokio::test(start_paused = true)]
+async fn merges_out_of_order_album_batches_after_600ms_and_acks_atomically_after_ledger_replace() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+
+    let png_99 = b"\x89PNG\r\n\x1a\nALBUM_IMAGE_99_BYTES".to_vec();
+    let jpeg_100 = b"\xff\xd8\xff\xe0\x00\x10ALBUM_IMAGE_100_BYTES".to_vec();
+    io.set_download_bytes("img_99", png_99.clone());
+    io.set_download_bytes("img_100", jpeg_100.clone());
+
+    let (reg_entered_rx, reg_release_tx, reg_finished_rx) =
+        crate::ledger::arm_replace_gate_for_test(harness.layout.lattice_root().to_path_buf());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+    let _ = io.wait_poll_count(1).await;
+
+    // 第 1 批先到达 update_id = 100
+    io.push_updates(vec![private_album_photo_update(
+        100,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "album-out-of-order",
+        &[("img_100", Some(jpeg_100.len() as u64))],
+        Some("cap100"),
+    )]);
+    let _ = io.wait_poll_count(2).await;
+
+    // 间隔 200ms 后第 2 批到达数值更小的 update_id = 99（重置 600ms 静默截止）
+    tokio::time::advance(Duration::from_millis(200)).await;
+    io.push_updates(vec![private_album_photo_update(
+        99,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "album-out-of-order",
+        &[("img_99", Some(png_99.len() as u64))],
+        Some("cap99"),
+    )]);
+    let _ = io.wait_poll_count(3).await;
+
+    // 第 2 批到达后 599ms 仍未满 600ms 静默窗口，不得提前下载或确认
+    tokio::time::advance(Duration::from_millis(599)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        io.download_calls().is_empty(),
+        "静默窗口满 600ms 前不得提前闭合相册发起下载"
+    );
+    assert!(!io.is_acknowledged(&inbound_id_from_update_id(99)));
+    assert!(!io.is_acknowledged(&inbound_id_from_update_id(100)));
+
+    // 补满第 600ms：触发唤醒闭合、按数值升序下载 [img_99, img_100]，并停在 register_turn 落盘替换前闸门
+    tokio::time::advance(Duration::from_millis(1)).await;
+    bounded(reg_entered_rx)
+        .await
+        .expect("相册闭合完成下载核验后应进入 register_turn 台账落盘闸门");
+
+    let dl_ids: Vec<String> = io
+        .download_calls()
+        .into_iter()
+        .map(|(_, id, _)| id)
+        .collect();
+    assert_eq!(
+        dl_ids,
+        vec!["img_99".to_string(), "img_100".to_string()],
+        "乱序到达的相册分片必须按数值 update_id 升序依次下载"
+    );
+
+    // 验证台账原子替换落盘前：99 与 100 均未确认，offset 仍为 None
+    assert!(
+        !io.is_acknowledged(&inbound_id_from_update_id(99))
+            && !io.is_acknowledged(&inbound_id_from_update_id(100)),
+        "台账原子落盘完成前绝不能确认任何相册分片"
+    );
+    assert_eq!(io.offsets.lock().unwrap().next_offset(), None);
+
+    // 紧接着武装下一次台账写入闸门（拦截 mark_accepted），以便直接检查 register_turn 落盘后的磁盘状态
+    let (acc_entered_rx, acc_release_tx, _) =
+        crate::ledger::arm_replace_gate_for_test(harness.layout.lattice_root().to_path_buf());
+    reg_release_tx.send(()).unwrap();
+    bounded(reg_finished_rx)
+        .await
+        .expect("register_turn 原子替换应完成");
+    bounded(acc_entered_rx)
+        .await
+        .expect("submit 接受后应停在 mark_accepted 替换前闸门");
+
+    // 此时 register_turn 已落盘：99 与 100 已一次性确认，连续前缀 offset 推进到 101，且磁盘保存 Registered + Merged
+    assert!(io.is_acknowledged(&inbound_id_from_update_id(99)));
+    assert!(io.is_acknowledged(&inbound_id_from_update_id(100)));
+    assert_eq!(io.offsets.lock().unwrap().next_offset(), Some(101));
+    io.wait_offset(Some(101)).await;
+
+    {
+        let on_disk = Ledger::open_and_prune(
+            harness.layout.clone(),
+            Utc::now(),
+            TELEGRAM_REDELIVERY_WINDOW,
+        )
+        .await
+        .unwrap();
+        let rec_99 = on_disk
+            .inbound_record(&inbound_id_from_update_id(99))
+            .await
+            .expect("磁盘台账必须包含首条 tg:99");
+        let rec_100 = on_disk
+            .inbound_record(&inbound_id_from_update_id(100))
+            .await
+            .expect("磁盘台账必须包含并入分片 tg:100");
+        match (rec_99, rec_100) {
+            (
+                InboundRecord::Registered {
+                    chat: c1,
+                    session: s1,
+                    turn: t1,
+                },
+                InboundRecord::Merged {
+                    chat: c2,
+                    session: s2,
+                    turn: t2,
+                    ..
+                },
+            ) => {
+                assert_eq!(c1, chat_key_from_id(PRIVATE_CHAT_ID));
+                assert_eq!(c1, c2);
+                assert_eq!(s1, s2, "Registered 与 Merged 必须关联同一个 SessionId");
+                assert_eq!(t1, t2, "Registered 与 Merged 必须关联同一个 TurnId");
+            }
+            other => panic!("register_turn 落盘后应为 (Registered, Merged)，实际: {other:?}"),
+        }
+    }
+
+    acc_release_tx.send(()).unwrap();
+
+    // 核对假模型收到的单轮消息严格为 [Image(99), Image(100), Text("cap99\ncap100")]
+    let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req_json: serde_json::Value =
+        serde_json::from_str(&read_http_request(&mut sock).await).unwrap();
+    let last_user = req_json["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(
+        last_user["content"],
+        serde_json::json!([
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/png;base64,{}", test_base64_encode(&png_99))
+                }
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_100))
+                }
+            },
+            {
+                "type": "text",
+                "text": "cap99\ncap100"
+            }
+        ]),
+        "相册闭合后必须按数值 update_id 升序发送全部图片与换行拼接的说明文字"
+    );
+    write_sse_complete(&mut sock, None, "乱序相册合并回复", None).await;
+
+    let replies = io.wait_message_count(1).await;
+    assert_eq!(replies[0].1, "乱序相册合并回复");
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    let final_ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        final_ledger
+            .inbound_record(&inbound_id_from_update_id(99))
+            .await,
+        Some(InboundRecord::DeliveredTurn { .. })
+    ));
+    assert!(matches!(
+        final_ledger
+            .inbound_record(&inbound_id_from_update_id(100))
+            .await,
+        Some(InboundRecord::Merged { .. })
+    ));
+
+    harness.shutdown().await;
+}
+
+// 场景 18（相册测试 2）：重投已缓冲分片不重置 600ms 截止，过滤后零新更新的空轮询按 100ms 节流（核对 poll_timestamps 间隔），
+// 且轮询错误退避（如 429 retry_after）期间到期的开放相册照常按时闭合。
+#[tokio::test(start_paused = true)]
+async fn redelivered_buffered_fragment_never_resets_deadline_and_throttles_idle_polls_at_100ms() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let png = b"\x89PNG\r\n\x1a\nTHROTTLE_ALBUM_PNG".to_vec();
+    io.set_download_bytes("f_throttle", png.clone());
+    io.set_download_bytes("f_backoff_wake", png);
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+    let _ = io.wait_poll_count(1).await;
+    let t0 = io.poll_timestamps.lock().unwrap()[0];
+
+    // t0 收到首个相册分片 3101（截止时刻设为 t0 + 600ms）；有新更新不节流，立即进入第 2 次轮询
+    let frag_3101 = private_album_photo_update(
+        3101,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "g-throttle",
+        &[("f_throttle", Some(26))],
+        Some("节流验证"),
+    );
+    io.push_updates(vec![frag_3101.clone()]);
+    let _ = io.wait_poll_count(2).await;
+    assert_eq!(
+        io.poll_timestamps.lock().unwrap()[1].duration_since(t0),
+        Duration::ZERO,
+        "包含新分片的轮询批次不得触发 100ms 节流"
+    );
+
+    // t0 + 250ms 平台重投未确认的已缓冲分片 3101：过滤后无新更新，必须按 100ms 节流且不重置截止时刻
+    tokio::time::advance(Duration::from_millis(250)).await;
+    io.push_updates(vec![frag_3101.clone()]);
+    for _ in 0..15 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        io.poll_timestamps.lock().unwrap().len(),
+        2,
+        "过滤后零新更新时不得无等待紧循环发起下一轮 getUpdates"
+    );
+
+    tokio::time::advance(Duration::from_millis(99)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        io.poll_timestamps.lock().unwrap().len(),
+        2,
+        "100ms 节流未届满（99ms）前不得提前发起第 3 次轮询"
+    );
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let _ = io.wait_poll_count(3).await;
+    assert_eq!(
+        io.poll_timestamps.lock().unwrap()[2].duration_since(t0),
+        Duration::from_millis(350),
+        "第 3 次轮询时间戳必须精确落在重投响应后 100ms（t0 + 350ms）"
+    );
+
+    // t0 + 350ms 返回空更新列表：同样触发 100ms 节流，第 4 次轮询落在 t0 + 450ms
+    io.push_updates(Vec::new());
+    for _ in 0..15 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(99)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(io.poll_timestamps.lock().unwrap().len(), 3);
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let _ = io.wait_poll_count(4).await;
+    {
+        let timestamps = io.poll_timestamps.lock().unwrap();
+        assert_eq!(
+            timestamps[3].duration_since(timestamps[2]),
+            Duration::from_millis(100),
+            "开放相册期间空批次轮询间隔必须精确为 100ms"
+        );
+    }
+
+    // t0 + 540ms（距原定 t0 + 600ms 仅剩 60ms）再次重投 3101：节流收敛为 min(100ms, 60ms) = 60ms，
+    // 且相册在原定 t0 + 600ms 准时闭合（证明两次重投均未重置 600ms 窗口）！
+    tokio::time::advance(Duration::from_millis(90)).await;
+    io.push_updates(vec![frag_3101]);
+    for _ in 0..15 {
+        tokio::task::yield_now().await;
+    }
+    tokio::time::advance(Duration::from_millis(59)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        io.download_calls().is_empty(),
+        "t0 + 599ms 尚未到达原定 600ms 截止"
+    );
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let dl_calls = io.wait_download_count(1).await;
+    assert_eq!(
+        dl_calls[0].0.duration_since(t0),
+        Duration::from_millis(600),
+        "重投已缓冲分片不得推迟原定 t0 + 600ms 相册闭合时刻"
+    );
+
+    let (mut sock1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock1).await;
+    write_sse_complete(&mut sock1, None, "节流相册回复", None).await;
+    let msgs1 = io.wait_message_count(1).await;
+    assert_eq!(msgs1[0].1, "节流相册回复");
+    io.wait_offset(Some(3102)).await;
+
+    // 附加核对：存在开放相册时下一轮 getUpdates 返回 429 retry_after=30s，600ms 到期照常唤醒闭合相册，且总退避仍守满 30s
+    let poll_idx_before_err = io.poll_timestamps.lock().unwrap().len();
+    let t_err_start = tokio::time::Instant::now();
+    io.push_updates(vec![private_album_photo_update(
+        3102,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "g-backoff-wake",
+        &[("f_backoff_wake", Some(26))],
+        None,
+    )]);
+    io.push_poll_error(TelegramApiError::RateLimited {
+        retry_after: Some(Duration::from_secs(30)),
+        diagnostic: "Telegram 返回 HTTP 429".into(),
+    });
+    let _ = io.wait_poll_count(poll_idx_before_err + 1).await;
+    for _ in 0..15 {
+        tokio::task::yield_now().await;
+    }
+
+    tokio::time::advance(Duration::from_millis(600)).await;
+    let dl_calls_2 = io.wait_download_count(2).await;
+    assert_eq!(
+        dl_calls_2[1].0.duration_since(t_err_start),
+        Duration::from_millis(600),
+        "getUpdates 处于 429 退避期间也必须在 600ms 到期时准时闭合开放相册"
+    );
+    let (mut sock2, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock2).await;
+    write_sse_complete(&mut sock2, None, "退避期间闭合回复", None).await;
+    let msgs2 = io.wait_message_count(2).await;
+    assert_eq!(msgs2[1].1, "退避期间闭合回复");
+    assert_eq!(
+        io.poll_timestamps.lock().unwrap().len(),
+        poll_idx_before_err + 1,
+        "30s retry_after 未满前不得提前发起下一轮 getUpdates"
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 19（相册测试 3）：提前闭合保序：
+// - 开放相册后紧跟同对话普通文本或 /new 立即提前闭合相册，且单对话 FIFO 先提交相册再执行后续文本或 /new；
+// - 跨对话开放相册互不干扰；
+// - stopped_message_generation 不提前闭合开放相册。
+#[tokio::test(start_paused = true)]
+async fn early_closes_album_preserving_fifo_before_text_or_new_isolates_chats_and_ignores_stop_draft()
+ {
+    let harness = ImTestHarness::start(&[ALLOWED_UID, OTHER_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    let chat_a = chat_key_from_id(PRIVATE_CHAT_ID);
+
+    let img_a1 = b"\x89PNG\r\n\x1a\nEARLY_CLOSE_A1".to_vec();
+    let img_a2 = b"\x89PNG\r\n\x1a\nEARLY_CLOSE_A2".to_vec();
+    let img_b1 = b"\x89PNG\r\n\x1a\nOTHER_CHAT_B1".to_vec();
+    io.set_download_bytes("a_img1", img_a1.clone());
+    io.set_download_bytes("a_img2", img_a2.clone());
+    io.set_download_bytes("b_img1", img_b1);
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+    let _ = io.wait_poll_count(1).await;
+    let t0 = tokio::time::Instant::now();
+
+    // 1. chat_a 与 chat_b 各自打开一个相册，随后 chat_a 收到 stopped_message_generation：两者均不得提前闭合
+    io.push_updates(vec![
+        private_album_photo_update(
+            3201,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "ga-1",
+            &[("a_img1", Some(img_a1.len() as u64))],
+            Some("相册A1说明"),
+        ),
+        private_album_photo_update(
+            3202,
+            OTHER_UID,
+            OTHER_UID,
+            "gb-1",
+            &[("b_img1", Some(21))],
+            Some("跨对话B1说明"),
+        ),
+        stop_draft_update(3203, PRIVATE_CHAT_ID, 98765),
+    ]);
+    let _ = io.wait_poll_count(2).await;
+
+    tokio::time::advance(Duration::from_millis(100)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        io.download_calls().is_empty(),
+        "stopped_message_generation 绝不能提前闭合当前开放相册"
+    );
+
+    // 2. 在 t0 + 100ms（未满 600ms）向 chat_a 发送普通文本消息 3204：
+    //    必须立即闭合 ga-1 并按 FIFO 先提交 ga-1 创建会话，紧随其后的 3204 在 ga-1 执行期间撞上同一会话 Busy；
+    //    同时 chat_b 的 gb-1 仍保持开放不受影响！
+    io.push_updates(vec![private_text_update(
+        3204,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "紧随相册的同对话文本",
+    )]);
+
+    let dl_a1 = io.wait_download_count(1).await;
+    assert_eq!(dl_a1[0].1, "a_img1");
+    assert_eq!(
+        dl_a1[0].0.duration_since(t0),
+        Duration::from_millis(100),
+        "同对话普通文本到达时必须立即提前闭合开放相册，不等待 600ms"
+    );
+
+    let (mut sock_a1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req_a1: serde_json::Value =
+        serde_json::from_str(&read_http_request(&mut sock_a1).await).unwrap();
+    let user_a1 = req_a1["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(
+        user_a1["content"][0]["image_url"]["url"],
+        format!("data:image/png;base64,{}", test_base64_encode(&img_a1)),
+        "FIFO 队首必须先提交刚闭合的相册 ga-1，而非后续文本消息"
+    );
+
+    // ga-1 尚未结束时，排在其后的文本 3204 复用同一会话提交并收到 Busy
+    let mid_msgs = io.wait_message_count(1).await;
+    assert_eq!(mid_msgs[0].0, chat_a);
+    assert_eq!(mid_msgs[0].1, "正在忙，可发 /cancel");
+    assert_eq!(
+        io.download_calls().len(),
+        1,
+        "chat_a 提前闭合不得干扰跨对话 chat_b 的开放相册 gb-1"
+    );
+
+    write_sse_complete(&mut sock_a1, None, "相册A1完成回复", None).await;
+    let msgs_after_a1 = io.wait_message_count(2).await;
+    assert_eq!(msgs_after_a1[1].1, "相册A1完成回复");
+
+    // 推进剩余 500ms 至 t0 + 600ms：chat_b 的 gb-1 按自身静默窗口到期闭合提交
+    tokio::time::advance(Duration::from_millis(500)).await;
+    let dl_b1 = io.wait_download_count(2).await;
+    assert_eq!(dl_b1[1].1, "b_img1");
+    let (mut sock_b1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_b1).await;
+    write_sse_complete(&mut sock_b1, None, "跨对话相册B1回复", None).await;
+    let msgs_after_b1 = io.wait_message_count(3).await;
+    assert_eq!(msgs_after_b1[2].1, "跨对话相册B1回复");
+
+    let sid_before_new = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap()
+    .bound_session(&chat_a)
+    .await
+    .expect("chat_a 应持有 ga-1 创建的会话绑定");
+
+    // 3. 开放相册 ga-2 后同批紧跟 /new：必须先将 ga-2 提交到原绑定会话 sid_before_new，再执行 /new 清空绑定！
+    io.push_updates(vec![
+        private_album_photo_update(
+            3210,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "ga-2",
+            &[("a_img2", Some(img_a2.len() as u64))],
+            Some("重置前相册A2"),
+        ),
+        private_text_update(3211, PRIVATE_CHAT_ID, ALLOWED_UID, "/new"),
+    ]);
+
+    let (mut sock_a2, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req_a2: serde_json::Value =
+        serde_json::from_str(&read_http_request(&mut sock_a2).await).unwrap();
+    let msgs_arr_a2 = req_a2["messages"].as_array().unwrap();
+    assert!(
+        msgs_arr_a2.iter().any(|m| m["content"] == "相册A1完成回复"),
+        "紧跟 /new 前闭合的相册 ga-2 必须仍在旧会话 sid_before_new 中提交并携带旧历史"
+    );
+    write_sse_complete(&mut sock_a2, None, "相册A2完成回复", None).await;
+
+    let final_msgs = io.wait_message_count(5).await;
+    let tail_texts: Vec<&str> = final_msgs[3..].iter().map(|(_, t)| t.as_str()).collect();
+    assert!(tail_texts.contains(&"已清除当前会话绑定，下一条消息将新建会话"));
+    assert!(tail_texts.contains(&"相册A2完成回复"));
+    io.wait_offset(Some(3212)).await;
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    let final_ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        final_ledger.bound_session(&chat_a).await,
+        None,
+        "相册 ga-2 准入后排在后面的 /new 必须已清除 chat_a 的会话绑定"
+    );
+    match final_ledger
+        .inbound_record(&inbound_id_from_update_id(3210))
+        .await
+    {
+        Some(InboundRecord::DeliveredTurn { session, .. }) => {
+            assert_eq!(session, sid_before_new);
+        }
+        other => panic!("3210 应记录在原会话上并完成投递，实际: {other:?}"),
+    }
+
+    harness.shutdown().await;
+}
+
+// 场景 20（相册测试 4）：整组拒绝：
+// - 9 张相册（静默到期闭合）与 10 张相册（第 10 张立即闭合）均按超过 8 张整组拒绝、零下载、只回 1 条提示；
+// - 混有视频/贴纸的相册整组拒绝 1 次、零下载、回复 UNSUPPORTED_MEDIA_REPLY。
+#[tokio::test(start_paused = true)]
+async fn rejects_9_and_10_image_albums_and_mixed_unsupported_albums_once_with_zero_downloads() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io = Arc::new(FakeTelegramIo::default());
+    io.set_download_bytes("never_dl", b"\x89PNG\r\n\x1a\nNEVER".to_vec());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+    let _ = io.wait_poll_count(1).await;
+
+    // 1. 9 张相册：不在第 8 张截断，等待 600ms 静默到期后整组拒绝 1 次
+    let nine_updates: Vec<_> = (0..9)
+        .map(|i| {
+            private_album_photo_update(
+                3301 + i,
+                PRIVATE_CHAT_ID,
+                ALLOWED_UID,
+                "album-nine",
+                &[("never_dl", Some(64))],
+                None,
+            )
+        })
+        .collect();
+    io.push_updates(nine_updates);
+    let _ = io.wait_poll_count(2).await;
+
+    tokio::time::advance(Duration::from_millis(599)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        io.sent_messages.lock().unwrap().is_empty(),
+        "9 张相册在 599ms 时仍处于收集中，不得在第 8 张处提前截断"
+    );
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let msgs_after_nine = io.wait_message_count(1).await;
+    assert_eq!(msgs_after_nine.len(), 1, "9 张超限相册必须只回复 1 条提示");
+    assert!(
+        msgs_after_nine[0].1.contains("最多支持 8 张") && msgs_after_nine[0].1.contains("9 张"),
+        "9 张超限提示应说明上限与当前张数: {}",
+        msgs_after_nine[0].1
+    );
+    io.wait_offset(Some(3310)).await;
+
+    // 2. 10 张相册：收满第 10 张立即闭合（无需等待 600ms），整组拒绝 1 次
+    let t_before_ten = tokio::time::Instant::now();
+    let ten_updates: Vec<_> = (0..10)
+        .map(|i| {
+            private_album_photo_update(
+                3311 + i,
+                PRIVATE_CHAT_ID,
+                ALLOWED_UID,
+                "album-ten",
+                &[("never_dl", Some(64))],
+                None,
+            )
+        })
+        .collect();
+    io.push_updates(ten_updates);
+    let msgs_after_ten = io.wait_message_count(2).await;
+    assert_eq!(
+        tokio::time::Instant::now().duration_since(t_before_ten),
+        Duration::ZERO,
+        "10 张相册必须在收到第 10 张时立即闭合拒绝，无需等待 600ms"
+    );
+    assert!(
+        msgs_after_ten[1].1.contains("最多支持 8 张") && msgs_after_ten[1].1.contains("10 张"),
+        "10 张超限提示应说明上限与当前张数: {}",
+        msgs_after_ten[1].1
+    );
+    io.wait_offset(Some(3321)).await;
+
+    // 3. 混有图片 + 视频 + 贴纸的相册：收集期内不逐条报错，600ms 闭合后整组拒绝 1 次并回复 UNSUPPORTED_MEDIA_REPLY
+    io.push_updates(vec![
+        private_album_photo_update(
+            3331,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-mixed",
+            &[("never_dl", Some(64))],
+            Some("混排说明"),
+        ),
+        private_album_unsupported_update(
+            3332,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-mixed",
+            "video",
+        ),
+        private_album_unsupported_update(
+            3333,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-mixed",
+            "sticker",
+        ),
+    ]);
+    let poll_target = io.observed_offsets.lock().unwrap().len() + 1;
+    let _ = io.wait_poll_count(poll_target).await;
+    tokio::time::advance(Duration::from_millis(599)).await;
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        io.sent_messages.lock().unwrap().len(),
+        2,
+        "携带 media_group_id 的不支持媒体分片在相册闭合前不得单独回复提示"
+    );
+
+    tokio::time::advance(Duration::from_millis(1)).await;
+    let msgs_after_mixed = io.wait_message_count(3).await;
+    assert_eq!(msgs_after_mixed.len(), 3);
+    assert_eq!(msgs_after_mixed[2].1, UNSUPPORTED_MEDIA_REPLY);
+    io.wait_offset(Some(3334)).await;
+
+    assert!(
+        io.download_calls().is_empty(),
+        "9 张、10 张超限与混入视频/贴纸的相册均须在静态快筛拦截，零文件下载"
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    let ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        ledger
+            .bound_session(&chat_key_from_id(PRIVATE_CHAT_ID))
+            .await,
+        None,
+        "整组拒绝的相册不得写入台账或创建草稿会话"
+    );
+    for uid in (3301..=3309).chain(3311..=3320).chain(3331..=3333) {
+        assert_eq!(
+            ledger.inbound_record(&inbound_id_from_update_id(uid)).await,
+            None
+        );
+    }
+    assert!(!harness.layout.lattice_root().join("lattice.redb").exists());
+
+    harness.shutdown().await;
+}
+
+// 场景 21（相册测试 5）：迟到尾图 vs Merged 重投：
+// - 相册闭合落账后，同 media_group_id 的新 update_id 回复 LATE_ALBUM_FRAGMENT_REPLY，不下载、不落账、不开启新轮次；
+// - 重投已落账的 Merged update_id（即使同 media_group_id 也在近期已闭合集合中）静默确认、零回复、不开启新轮次。
+#[tokio::test(start_paused = true)]
+async fn replies_late_fragment_notice_for_new_update_id_and_silently_acks_redelivered_merged_id() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    let io1 = Arc::new(FakeTelegramIo::default());
+    let png_1 = b"\x89PNG\r\n\x1a\nLATE_TEST_1".to_vec();
+    let png_2 = b"\x89PNG\r\n\x1a\nLATE_TEST_2".to_vec();
+    io1.set_download_bytes("late_f1", png_1);
+    io1.set_download_bytes("late_f2", png_2);
+    io1.set_download_bytes("late_tail_f3", b"\x89PNG\r\n\x1a\nNEVER_DL_LATE".to_vec());
+
+    let (gw_stop1, gw_task1) = harness.spawn_gateway(Arc::clone(&io1));
+    let _ = io1.wait_poll_count(1).await;
+
+    io1.push_updates(vec![
+        private_album_photo_update(
+            3401,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-late-check",
+            &[("late_f1", Some(19))],
+            Some("正常到达"),
+        ),
+        private_album_photo_update(
+            3402,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-late-check",
+            &[("late_f2", Some(19))],
+            None,
+        ),
+    ]);
+    let _ = io1.wait_poll_count(2).await;
+    tokio::time::advance(Duration::from_millis(600)).await;
+
+    let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock).await;
+    write_sse_complete(&mut sock, None, "首轮正常相册回复", None).await;
+    let msgs1 = io1.wait_message_count(1).await;
+    assert_eq!(msgs1[0].1, "首轮正常相册回复");
+    io1.wait_offset(Some(3403)).await;
+    assert_eq!(io1.download_calls().len(), 2);
+
+    // 1. 同一实例内到达同 media_group_id 的迟到新分片 3403：立即确认并回复迟到提示，零下载、不触发模型新轮次
+    io1.push_updates(vec![private_album_photo_update(
+        3403,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "album-late-check",
+        &[("late_tail_f3", Some(21))],
+        Some("迟到的第3张"),
+    )]);
+    let msgs_after_late = io1.wait_message_count(2).await;
+    assert_eq!(msgs_after_late[1].1, LATE_ALBUM_FRAGMENT_REPLY);
+    io1.wait_offset(Some(3404)).await;
+    assert_eq!(
+        io1.download_calls().len(),
+        2,
+        "迟到分片不得发起 download_file"
+    );
+
+    let _ = gw_stop1.send(());
+    bounded(gw_task1).await.unwrap().unwrap();
+
+    // 核对 3402 为 Merged，而迟到分片 3403 未写入台账
+    {
+        let snap = Ledger::open_and_prune(
+            harness.layout.clone(),
+            Utc::now(),
+            TELEGRAM_REDELIVERY_WINDOW,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            snap.inbound_record(&inbound_id_from_update_id(3402)).await,
+            Some(InboundRecord::Merged { .. })
+        ));
+        assert_eq!(
+            snap.inbound_record(&inbound_id_from_update_id(3403)).await,
+            None,
+            "迟到分片不得写入台账"
+        );
+    }
+
+    // 2. 启动新实例（全新 OffsetTracker）：重投已落账的 [3401 (DeliveredTurn), 3402 (Merged)] -> 静默确认推进 offset 至 3403，零回复、零下载
+    let io2 = Arc::new(FakeTelegramIo::default());
+    io2.set_download_bytes("reopen_f", b"\x89PNG\r\n\x1a\nREOPEN".to_vec());
+    let (gw_stop2, gw_task2) = harness.spawn_gateway(Arc::clone(&io2));
+    let _ = io2.wait_poll_count(1).await;
+
+    io2.push_updates(vec![
+        private_album_photo_update(
+            3401,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-late-check",
+            &[("reopen_f", Some(14))],
+            None,
+        ),
+        private_album_photo_update(
+            3402,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "album-late-check",
+            &[("reopen_f", Some(14))],
+            None,
+        ),
+    ]);
+    io2.wait_offset(Some(3403)).await;
+    for _ in 0..15 {
+        tokio::task::yield_now().await;
+    }
+    assert!(
+        io2.sent_messages.lock().unwrap().is_empty(),
+        "重投已落账的 DeliveredTurn 与 Merged 分片必须静默确认，严禁发送迟到提示或开启新轮次"
+    );
+    assert!(io2.download_calls().is_empty());
+
+    let _ = gw_stop2.send(());
+    bounded(gw_task2).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 22（相册测试 6）：停机与恢复：
+// - 600ms 窗口内停机不确认未闭合分片、不推进 offset，新实例启动后接收完整重投并成功合并提交一次；
+// - 已原子登记 Registered + Merged 后重挂恢复，仅首条 Registered 驱动恢复一次并发送一条最终回复（同时吸收平台重投）。
+#[tokio::test(start_paused = true)]
+async fn preserves_unclosed_album_offset_across_shutdown_and_recovers_registered_plus_merged_once()
+{
+    let harness = ImTestHarness::start(&[ALLOWED_UID, OTHER_UID]).await;
+
+    // 第一部分：600ms 收集窗口内停机 -> 零确认、零下载、零落账 -> 新实例接收重投后完整提交一次
+    let img_1 = b"\x89PNG\r\n\x1a\nSTOP_WINDOW_IMG_1".to_vec();
+    let img_2 = b"\x89PNG\r\n\x1a\nSTOP_WINDOW_IMG_2".to_vec();
+
+    let io1 = Arc::new(FakeTelegramIo::default());
+    io1.set_download_bytes("sw_1", img_1.clone());
+    io1.set_download_bytes("sw_2", img_2.clone());
+    let (gw_stop1, gw_task1) = harness.spawn_gateway(Arc::clone(&io1));
+    let _ = io1.wait_poll_count(1).await;
+
+    let batch_stop = vec![
+        private_album_photo_update(
+            3501,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "g-stop-window",
+            &[("sw_1", Some(img_1.len() as u64))],
+            Some("窗口内首图"),
+        ),
+        private_album_photo_update(
+            3502,
+            PRIVATE_CHAT_ID,
+            ALLOWED_UID,
+            "g-stop-window",
+            &[("sw_2", Some(img_2.len() as u64))],
+            Some("窗口内次图"),
+        ),
+    ];
+    io1.push_updates(batch_stop.clone());
+    let _ = io1.wait_poll_count(2).await;
+
+    // 仅推进 300ms（仍在 600ms 静默窗口内）即触发停机
+    tokio::time::advance(Duration::from_millis(300)).await;
+    let _ = gw_stop1.send(());
+    bounded(gw_task1).await.unwrap().unwrap();
+
+    assert!(!io1.is_acknowledged(&inbound_id_from_update_id(3501)));
+    assert!(!io1.is_acknowledged(&inbound_id_from_update_id(3502)));
+    assert_eq!(
+        io1.offsets.lock().unwrap().next_offset(),
+        None,
+        "600ms 窗口内停机绝不能确认未闭合分片或推进 offset"
+    );
+    assert!(io1.download_calls().is_empty());
+
+    // 新实例启动并收到 Telegram 完整重投 [3501, 3502] -> 600ms 后合并提交一次
+    let io2 = Arc::new(FakeTelegramIo::default());
+    io2.set_download_bytes("sw_1", img_1.clone());
+    io2.set_download_bytes("sw_2", img_2.clone());
+    let (gw_stop2, gw_task2) = harness.spawn_gateway(Arc::clone(&io2));
+    let _ = io2.wait_poll_count(1).await;
+    io2.push_updates(batch_stop);
+    let _ = io2.wait_poll_count(2).await;
+    tokio::time::advance(Duration::from_millis(600)).await;
+
+    let (mut sock_sw, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req_sw: serde_json::Value =
+        serde_json::from_str(&read_http_request(&mut sock_sw).await).unwrap();
+    let content_sw = req_sw["messages"].as_array().unwrap().last().unwrap()["content"]
+        .as_array()
+        .unwrap();
+    assert_eq!(content_sw.len(), 3);
+    assert_eq!(content_sw[2]["text"], "窗口内首图\n窗口内次图");
+    write_sse_complete(&mut sock_sw, None, "停机重投相册回复", None).await;
+
+    let msgs_sw = io2.wait_message_count(1).await;
+    assert_eq!(msgs_sw[0].1, "停机重投相册回复");
+    io2.wait_offset(Some(3503)).await;
+    let _ = gw_stop2.send(());
+    bounded(gw_task2).await.unwrap().unwrap();
+
+    // 第二部分：在 OTHER_UID 上真实执行相册 register_turn (3510 -> Registered, 3511 -> Merged) + submit，
+    // 在 mark_accepted 落盘前强拆旧网关实例，使磁盘保留 Registered + Merged 且后台轮次仍在途运行；
+    // 新实例启动恢复并同时接收 [3510, 3511] 重投 -> 仅恢复一次、发送一条最终回复！
+    let rec_img_1 = b"\x89PNG\r\n\x1a\nRECOVER_ALBUM_1".to_vec();
+    let rec_img_2 = b"\x89PNG\r\n\x1a\nRECOVER_ALBUM_2".to_vec();
+    let io3 = Arc::new(FakeTelegramIo::default());
+    io3.set_download_bytes("rec_1", rec_img_1.clone());
+    io3.set_download_bytes("rec_2", rec_img_2.clone());
+    let (_gw_stop3, gw_task3) = harness.spawn_gateway(Arc::clone(&io3));
+    let _ = io3.wait_poll_count(1).await;
+
+    let rec_batch = vec![
+        private_album_photo_update(
+            3510,
+            OTHER_UID,
+            OTHER_UID,
+            "g-recover-group",
+            &[("rec_1", Some(rec_img_1.len() as u64))],
+            Some("恢复首图"),
+        ),
+        private_album_photo_update(
+            3511,
+            OTHER_UID,
+            OTHER_UID,
+            "g-recover-group",
+            &[("rec_2", Some(rec_img_2.len() as u64))],
+            Some("恢复次图"),
+        ),
+    ];
+    io3.push_updates(rec_batch.clone());
+    let _ = io3.wait_poll_count(2).await;
+
+    // 放过第一次台账写入（register_turn），在第二次台账写入（mark_accepted）前暂停并强拆旧实例
+    let (reg3_entered, reg3_release, reg3_finished) =
+        crate::ledger::arm_replace_gate_for_test(harness.layout.lattice_root().to_path_buf());
+    tokio::time::advance(Duration::from_millis(600)).await;
+    bounded(reg3_entered).await.unwrap();
+    let (acc3_entered, acc3_release, acc3_finished) =
+        crate::ledger::arm_replace_gate_for_test(harness.layout.lattice_root().to_path_buf());
+    reg3_release.send(()).unwrap();
+    bounded(reg3_finished).await.unwrap();
+    bounded(acc3_entered).await.unwrap();
+
+    // 此时后台已接受该相册轮次并向假模型发起请求（保持流式连接打开），而磁盘台账仍停在 Registered + Merged
+    let (mut sock_rec, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock_rec).await;
+
+    gw_task3.abort();
+    let _ = bounded(gw_task3).await;
+    acc3_release.send(()).unwrap();
+    bounded(acc3_finished).await.unwrap();
+
+    {
+        let disk_before_recover = Ledger::open_and_prune(
+            harness.layout.clone(),
+            Utc::now(),
+            TELEGRAM_REDELIVERY_WINDOW,
+        )
+        .await
+        .unwrap();
+        assert!(matches!(
+            disk_before_recover
+                .inbound_record(&inbound_id_from_update_id(3510))
+                .await,
+            Some(InboundRecord::Registered { .. })
+        ));
+        assert!(matches!(
+            disk_before_recover
+                .inbound_record(&inbound_id_from_update_id(3511))
+                .await,
+            Some(InboundRecord::Merged { .. })
+        ));
+    }
+
+    // 启动新实例 io4：启动恢复仅针对首条 3510（忽略 Merged 3511），同时重投 [3510, 3511] 也被台账静默确认
+    let io4 = Arc::new(FakeTelegramIo::default());
+    let (gw_stop4, gw_task4) = harness.spawn_gateway(Arc::clone(&io4));
+    let _ = io4.wait_poll_count(1).await;
+    io4.push_updates(rec_batch);
+    io4.wait_offset(Some(3512)).await;
+
+    write_sse_complete(&mut sock_rec, None, "相册唯一恢复最终回复", None).await;
+    let recovered_msgs = io4.wait_message_count(1).await;
+    for _ in 0..20 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        recovered_msgs.len(),
+        1,
+        "Registered + Merged 恢复与重投只能发送唯一 1 条最终回复"
+    );
+    assert_eq!(recovered_msgs[0].0, chat_key_from_id(OTHER_UID));
+    assert_eq!(recovered_msgs[0].1, "相册唯一恢复最终回复");
+    assert!(
+        io4.download_calls().is_empty(),
+        "恢复已提交的相册轮次不得重新下载任何图片"
+    );
+
+    let _ = gw_stop4.send(());
+    bounded(gw_task4).await.unwrap().unwrap();
+
+    let final_snap = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        final_snap
+            .inbound_record(&inbound_id_from_update_id(3510))
+            .await,
+        Some(InboundRecord::DeliveredTurn { .. })
+    ));
+    assert!(matches!(
+        final_snap
+            .inbound_record(&inbound_id_from_update_id(3511))
+            .await,
+        Some(InboundRecord::Merged { .. })
+    ));
 
     harness.shutdown().await;
 }

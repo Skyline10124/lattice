@@ -35,7 +35,6 @@ pub(crate) struct IncomingImageItem {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum IncomingMediaKind {
     Image(IncomingImageItem),
-    #[cfg_attr(not(test), allow(dead_code))]
     Unsupported,
 }
 
@@ -56,7 +55,6 @@ impl IncomingMediaItem {
         }
     }
 
-    #[cfg(test)]
     pub(crate) fn unsupported() -> Self {
         Self {
             kind: IncomingMediaKind::Unsupported,
@@ -360,7 +358,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn acknowledge(&self, _inbound_id: &InboundId) {}
+        fn acknowledge(&self, _inbound_ids: &[InboundId]) {}
 
         async fn send_message(&self, _chat: &ChatKey, _text: &str) -> Result<(), TelegramApiError> {
             Ok(())

@@ -25,6 +25,10 @@ use tokio::{
 };
 
 use crate::{
+    album::{
+        ALBUM_IDLE_POLL_THROTTLE, AlbumCollector, BufferedAlbumItem, ClosedAlbum,
+        LATE_ALBUM_FRAGMENT_REPLY,
+    },
     command::{
         HELP_REPLY, ImCommand, ParsedInput, UNSUPPORTED_MEDIA_REPLY, cancel_turn_and_format,
         describe_local_error, execute_cancel_command, execute_status_command,
@@ -345,12 +349,27 @@ impl Drop for AbortTaskOnDrop {
 
 /// 在途去重集合的 RAII 守卫：仅持有去重集合引用（不反向持有 `GatewayRuntime`，杜绝引用成环），
 /// 无论正常落账、停机取消、未轮询即丢弃还是异常展开，释放时均自动移除去重标记。
-struct InFlightGuard {
+pub(crate) struct InFlightGuard {
     in_flight_inbound: Arc<StdMutex<BTreeSet<InboundId>>>,
     inbound_id: Option<InboundId>,
 }
 
 impl InFlightGuard {
+    #[cfg(test)]
+    pub(crate) fn new_for_test(
+        in_flight_inbound: Arc<StdMutex<BTreeSet<InboundId>>>,
+        inbound_id: InboundId,
+    ) -> Self {
+        in_flight_inbound
+            .lock()
+            .expect("在途去重集合锁不应中毒")
+            .insert(inbound_id.clone());
+        Self {
+            in_flight_inbound,
+            inbound_id: Some(inbound_id),
+        }
+    }
+
     fn clear_now(&mut self) {
         if let Some(id) = self.inbound_id.take() {
             self.in_flight_inbound
@@ -432,10 +451,34 @@ fn take_chat_worker_panic_for_test(inbound_id: &InboundId) -> bool {
 }
 
 struct QueuedChatAdmission {
-    inbound_id: InboundId,
+    primary_inbound_id: InboundId,
+    merged_inbound_ids: Vec<InboundId>,
     chat: ChatKey,
     action: LedgerInboundAction,
-    in_flight_guard: InFlightGuard,
+    in_flight_guards: Vec<InFlightGuard>,
+}
+
+impl QueuedChatAdmission {
+    fn clear_all(&mut self) {
+        clear_all_guards(&mut self.in_flight_guards);
+    }
+
+    fn all_inbound_ids(&self) -> Vec<InboundId> {
+        collect_inbound_ids(&self.primary_inbound_id, &self.merged_inbound_ids)
+    }
+}
+
+fn clear_all_guards(guards: &mut [InFlightGuard]) {
+    for guard in guards {
+        guard.clear_now();
+    }
+}
+
+fn collect_inbound_ids(primary: &InboundId, merged: &[InboundId]) -> Vec<InboundId> {
+    let mut ids = Vec::with_capacity(1 + merged.len());
+    ids.push(primary.clone());
+    ids.extend_from_slice(merged);
+    ids
 }
 
 struct ChatQueueEntry {
@@ -627,8 +670,14 @@ impl GatewayRuntime {
             .send(Box::pin(lattice_server::scoped_component_future(fut)));
     }
 
-    fn ack_update(&self, inbound_id: &InboundId) {
-        self.io.acknowledge(inbound_id);
+    fn ack_update(&self, id: &InboundId) {
+        self.io.acknowledge(std::slice::from_ref(id));
+    }
+
+    fn ack_updates(&self, ids: &[InboundId]) {
+        if !ids.is_empty() {
+            self.io.acknowledge(ids);
+        }
     }
 
     fn is_in_flight(&self, inbound_id: &InboundId) -> bool {
@@ -653,24 +702,58 @@ impl GatewayRuntime {
     async fn poll_updates_loop(self: &Arc<Self>) {
         let mut backoff = INITIAL_POLL_BACKOFF;
         let mut stop = self.shutdown_rx.clone();
+        let mut collector = AlbumCollector::default();
 
         loop {
             if self.is_stopping() {
                 return;
             }
-            let poll_res = tokio::select! {
-                _ = wait_stop_signal(&mut stop) => return,
-                res = self.io.get_updates(LONG_POLL_TIMEOUT_SECS) => res,
+            self.enqueue_closed_albums(collector.close_due(tokio::time::Instant::now()));
+
+            let poll_res = if let Some(deadline) = collector.next_deadline() {
+                tokio::select! {
+                    biased;
+                    _ = wait_stop_signal(&mut stop) => return,
+                    _ = tokio::time::sleep_until(deadline) => {
+                        self.enqueue_closed_albums(
+                            collector.close_due(tokio::time::Instant::now()),
+                        );
+                        continue;
+                    }
+                    res = self.io.get_updates(LONG_POLL_TIMEOUT_SECS) => res,
+                }
+            } else {
+                tokio::select! {
+                    biased;
+                    _ = wait_stop_signal(&mut stop) => return,
+                    res = self.io.get_updates(LONG_POLL_TIMEOUT_SECS) => res,
+                }
             };
 
             match poll_res {
                 Ok(updates) => {
                     backoff = INITIAL_POLL_BACKOFF;
+                    let mut saw_new_update = false;
                     for update in updates {
                         if self.is_stopping() {
                             return;
                         }
-                        self.dispatch_update(update).await;
+                        if self.dispatch_update(update, &mut collector).await {
+                            saw_new_update = true;
+                        }
+                    }
+                    self.enqueue_closed_albums(collector.close_due(tokio::time::Instant::now()));
+                    if !saw_new_update && let Some(deadline) = collector.next_deadline() {
+                        let remaining =
+                            deadline.saturating_duration_since(tokio::time::Instant::now());
+                        let throttle = ALBUM_IDLE_POLL_THROTTLE.min(remaining);
+                        if !throttle.is_zero() {
+                            tokio::select! {
+                                biased;
+                                _ = wait_stop_signal(&mut stop) => return,
+                                _ = tokio::time::sleep(throttle) => {}
+                            }
+                        }
                     }
                 }
                 Err(TelegramApiError::RateLimited {
@@ -683,9 +766,11 @@ impl GatewayRuntime {
                         diagnostic = %diagnostic,
                         "Telegram getUpdates 触发限流，退避后重试"
                     );
-                    tokio::select! {
-                        _ = wait_stop_signal(&mut stop) => return,
-                        _ = tokio::time::sleep(wait) => {}
+                    if !self
+                        .sleep_poll_backoff_closing_albums(wait, &mut collector, &mut stop)
+                        .await
+                    {
+                        return;
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_POLL_BACKOFF);
                 }
@@ -695,9 +780,11 @@ impl GatewayRuntime {
                         diagnostic = %err.diagnostic(),
                         "Telegram getUpdates 失败，退避后重试"
                     );
-                    tokio::select! {
-                        _ = wait_stop_signal(&mut stop) => return,
-                        _ = tokio::time::sleep(backoff) => {}
+                    if !self
+                        .sleep_poll_backoff_closing_albums(backoff, &mut collector, &mut stop)
+                        .await
+                    {
+                        return;
                     }
                     backoff = backoff.saturating_mul(2).min(MAX_POLL_BACKOFF);
                 }
@@ -705,27 +792,58 @@ impl GatewayRuntime {
         }
     }
 
-    async fn dispatch_update(self: &Arc<Self>, update: TelegramUpdate) {
+    async fn sleep_poll_backoff_closing_albums(
+        self: &Arc<Self>,
+        wait: Duration,
+        collector: &mut AlbumCollector,
+        stop: &mut watch::Receiver<bool>,
+    ) -> bool {
+        let backoff_deadline = tokio::time::Instant::now() + wait;
+        loop {
+            if self.is_stopping() {
+                return false;
+            }
+            self.enqueue_closed_albums(collector.close_due(tokio::time::Instant::now()));
+            let now = tokio::time::Instant::now();
+            if now >= backoff_deadline {
+                return true;
+            }
+            let next_wake = match collector.next_deadline() {
+                Some(album_deadline) if album_deadline < backoff_deadline => album_deadline,
+                _ => backoff_deadline,
+            };
+            tokio::select! {
+                biased;
+                _ = wait_stop_signal(stop) => return false,
+                _ = tokio::time::sleep_until(next_wake) => {}
+            }
+        }
+    }
+
+    async fn dispatch_update(
+        self: &Arc<Self>,
+        update: TelegramUpdate,
+        collector: &mut AlbumCollector,
+    ) -> bool {
+        let update_id = update.update_id;
         let inbound_id = update.inbound_id;
-        if self.io.is_acknowledged(&inbound_id) {
-            return;
+        if self.io.is_acknowledged(&inbound_id) || self.is_in_flight(&inbound_id) {
+            return false;
         }
 
         match update.payload {
             TelegramUpdatePayload::Ignored => {
                 self.ack_update(&inbound_id);
+                true
             }
             TelegramUpdatePayload::StoppedMessageGeneration {
                 chat,
                 is_private,
                 draft_id,
             } => {
-                // 停止事件不写台账，收到即确认。
+                // 停止事件不写台账、不闭合开放相册，收到即确认。
                 self.ack_update(&inbound_id);
-                if !is_private {
-                    return;
-                }
-                if let Some(turn_id) = self.active_drafts.lookup(&chat, draft_id) {
+                if is_private && let Some(turn_id) = self.active_drafts.lookup(&chat, draft_id) {
                     let rt = Arc::clone(self);
                     self.spawn_tracked(async move {
                         let reply = cancel_turn_and_format(&rt.service, turn_id).await;
@@ -738,12 +856,13 @@ impl GatewayRuntime {
                         .await;
                     });
                 }
+                true
             }
             TelegramUpdatePayload::Message {
                 chat,
                 is_private,
                 sender,
-                media_group_id: _,
+                media_group_id,
                 content,
             } => {
                 if !is_authorized_private_message(
@@ -757,136 +876,225 @@ impl GatewayRuntime {
                         "忽略未授权或非私聊入站消息并立即确认"
                     );
                     self.ack_update(&inbound_id);
-                    return;
+                    return true;
                 }
 
-                match content {
-                    TelegramMessageContent::Unsupported => {
-                        // 不受支持的媒体或空消息：不写台账、不建会话，立即确认后回复提示。
-                        self.ack_update(&inbound_id);
-                        let rt = Arc::clone(self);
-                        self.spawn_tracked(async move {
-                            let _ = send_text_reliably(
-                                rt.io.as_ref(),
-                                &chat,
-                                UNSUPPORTED_MEDIA_REPLY,
-                                rt.shutdown_rx.clone(),
-                            )
-                            .await;
-                        });
-                    }
-                    TelegramMessageContent::Image {
-                        file_id,
-                        file_size,
-                        caption,
-                    } => {
-                        let media_item = IncomingMediaItem::image(file_id, file_size, caption);
-                        self.enqueue_ledger_event(
-                            inbound_id,
+                match (media_group_id, content) {
+                    (
+                        Some(group_id),
+                        content @ (TelegramMessageContent::Image { .. }
+                        | TelegramMessageContent::Unsupported),
+                    ) => {
+                        if self.ledger.inbound_record(&inbound_id).await.is_some() {
+                            self.ack_update(&inbound_id);
+                            return true;
+                        }
+                        if collector.is_recently_closed(&chat, &group_id) {
+                            self.ack_update(&inbound_id);
+                            let rt = Arc::clone(self);
+                            self.spawn_tracked(async move {
+                                let _ = send_text_reliably(
+                                    rt.io.as_ref(),
+                                    &chat,
+                                    LATE_ALBUM_FRAGMENT_REPLY,
+                                    rt.shutdown_rx.clone(),
+                                )
+                                .await;
+                            });
+                            return true;
+                        }
+                        let Some(in_flight_guard) = self.try_acquire_in_flight(inbound_id.clone())
+                        else {
+                            return false;
+                        };
+                        let media_item = match content {
+                            TelegramMessageContent::Image {
+                                file_id,
+                                file_size,
+                                caption,
+                            } => IncomingMediaItem::image(file_id, file_size, caption),
+                            TelegramMessageContent::Unsupported => IncomingMediaItem::unsupported(),
+                            TelegramMessageContent::Text(_) => {
+                                unreachable!("外层模式已限定为图片或不受支持媒体")
+                            }
+                        };
+                        let (displaced, closed_now) = collector.push_fragment(
                             chat,
-                            LedgerInboundAction::SubmitMedia(vec![media_item]),
-                        )
-                        .await;
+                            group_id,
+                            BufferedAlbumItem {
+                                update_id,
+                                inbound_id,
+                                kind: media_item.kind,
+                                in_flight_guard,
+                            },
+                            tokio::time::Instant::now(),
+                        );
+                        if let Some(closed) = displaced {
+                            self.enqueue_closed_album(closed);
+                        }
+                        if let Some(closed) = closed_now {
+                            self.enqueue_closed_album(closed);
+                        }
+                        true
                     }
-                    TelegramMessageContent::Text(text) => match parse_text_input(&text) {
-                        ParsedInput::Command(ImCommand::Help | ImCommand::Start) => {
+                    (_, content) => {
+                        if self.ledger.inbound_record(&inbound_id).await.is_some() {
                             self.ack_update(&inbound_id);
-                            let rt = Arc::clone(self);
-                            self.spawn_tracked(async move {
-                                let _ = send_text_reliably(
-                                    rt.io.as_ref(),
-                                    &chat,
-                                    HELP_REPLY,
-                                    rt.shutdown_rx.clone(),
-                                )
-                                .await;
-                            });
+                            return true;
                         }
-                        ParsedInput::Command(
-                            cmd @ (ImCommand::Cancel | ImCommand::Status | ImCommand::Usage),
-                        ) => {
-                            // 不写台账的查询与取消命令收到即确认，回复发出与否不影响 offset。
-                            self.ack_update(&inbound_id);
-                            let rt = Arc::clone(self);
-                            self.spawn_tracked(async move {
-                                let bound = rt.ledger.bound_session(&chat).await;
-                                let reply = match cmd {
-                                    ImCommand::Cancel => {
-                                        execute_cancel_command(&rt.service, bound).await.to_owned()
-                                    }
-                                    ImCommand::Status => {
-                                        execute_status_command(&rt.service, bound, &rt.redactor)
-                                            .await
-                                    }
-                                    ImCommand::Usage => {
-                                        execute_usage_command(&rt.service, bound, &rt.redactor)
-                                            .await
-                                    }
-                                    _ => unreachable!("外层分支已限定命令种类"),
-                                };
-                                let _ = send_text_reliably(
-                                    rt.io.as_ref(),
-                                    &chat,
-                                    &reply,
-                                    rt.shutdown_rx.clone(),
-                                )
-                                .await;
-                            });
+                        if let Some(closed) = collector.close_for_chat(&chat) {
+                            self.enqueue_closed_album(closed);
                         }
-                        ParsedInput::Command(ImCommand::New) => {
-                            self.enqueue_ledger_event(
-                                inbound_id,
-                                chat,
-                                LedgerInboundAction::ResetBinding,
-                            )
-                            .await;
+                        match content {
+                            TelegramMessageContent::Unsupported => {
+                                // 不受支持的独立媒体或空消息：不写台账、不建会话，立即确认后回复提示。
+                                self.ack_update(&inbound_id);
+                                let rt = Arc::clone(self);
+                                self.spawn_tracked(async move {
+                                    let _ = send_text_reliably(
+                                        rt.io.as_ref(),
+                                        &chat,
+                                        UNSUPPORTED_MEDIA_REPLY,
+                                        rt.shutdown_rx.clone(),
+                                    )
+                                    .await;
+                                });
+                            }
+                            TelegramMessageContent::Image {
+                                file_id,
+                                file_size,
+                                caption,
+                            } => {
+                                let media_item =
+                                    IncomingMediaItem::image(file_id, file_size, caption);
+                                self.enqueue_single_ledger_event(
+                                    inbound_id,
+                                    chat,
+                                    LedgerInboundAction::SubmitMedia(vec![media_item]),
+                                );
+                            }
+                            TelegramMessageContent::Text(text) => match parse_text_input(&text) {
+                                ParsedInput::Command(ImCommand::Help | ImCommand::Start) => {
+                                    self.ack_update(&inbound_id);
+                                    let rt = Arc::clone(self);
+                                    self.spawn_tracked(async move {
+                                        let _ = send_text_reliably(
+                                            rt.io.as_ref(),
+                                            &chat,
+                                            HELP_REPLY,
+                                            rt.shutdown_rx.clone(),
+                                        )
+                                        .await;
+                                    });
+                                }
+                                ParsedInput::Command(
+                                    cmd
+                                    @ (ImCommand::Cancel | ImCommand::Status | ImCommand::Usage),
+                                ) => {
+                                    // 不写台账的查询与取消命令收到即确认，回复发出与否不影响 offset。
+                                    self.ack_update(&inbound_id);
+                                    let rt = Arc::clone(self);
+                                    self.spawn_tracked(async move {
+                                        let bound = rt.ledger.bound_session(&chat).await;
+                                        let reply = match cmd {
+                                            ImCommand::Cancel => {
+                                                execute_cancel_command(&rt.service, bound)
+                                                    .await
+                                                    .to_owned()
+                                            }
+                                            ImCommand::Status => {
+                                                execute_status_command(
+                                                    &rt.service,
+                                                    bound,
+                                                    &rt.redactor,
+                                                )
+                                                .await
+                                            }
+                                            ImCommand::Usage => {
+                                                execute_usage_command(
+                                                    &rt.service,
+                                                    bound,
+                                                    &rt.redactor,
+                                                )
+                                                .await
+                                            }
+                                            _ => unreachable!("外层分支已限定命令种类"),
+                                        };
+                                        let _ = send_text_reliably(
+                                            rt.io.as_ref(),
+                                            &chat,
+                                            &reply,
+                                            rt.shutdown_rx.clone(),
+                                        )
+                                        .await;
+                                    });
+                                }
+                                ParsedInput::Command(ImCommand::New) => {
+                                    self.enqueue_single_ledger_event(
+                                        inbound_id,
+                                        chat,
+                                        LedgerInboundAction::ResetBinding,
+                                    );
+                                }
+                                ParsedInput::Message => {
+                                    self.enqueue_single_ledger_event(
+                                        inbound_id,
+                                        chat,
+                                        LedgerInboundAction::SubmitMessage(text),
+                                    );
+                                }
+                            },
                         }
-                        ParsedInput::Message => {
-                            self.enqueue_ledger_event(
-                                inbound_id,
-                                chat,
-                                LedgerInboundAction::SubmitMessage(text),
-                            )
-                            .await;
-                        }
-                    },
+                        true
+                    }
                 }
             }
         }
     }
 
-    async fn enqueue_ledger_event(
+    fn enqueue_admission(self: &Arc<Self>, item: QueuedChatAdmission) {
+        // 在分发点同步排入单对话 FIFO 队列并在派生任务前构造 ChatWorkerGuard，
+        // 确保即使工作任务在首次 poll 前被取消丢弃，队列与在途去重标记也会立即释放且不泄漏实例引用。
+        let worker_chat = item.chat.clone();
+        if let Some(worker_guard) = self.chat_queues.enqueue(item) {
+            let rt = Arc::clone(self);
+            self.spawn_tracked(async move {
+                rt.run_chat_worker(worker_chat, worker_guard).await;
+            });
+        }
+    }
+
+    fn enqueue_single_ledger_event(
         self: &Arc<Self>,
         inbound_id: InboundId,
         chat: ChatKey,
         action: LedgerInboundAction,
     ) {
-        // 正在排队等待同一 chat 前序准入结果的相同 InboundId 直接跳过，不推进 offset 也不重复入队。
-        if self.is_in_flight(&inbound_id) {
-            return;
-        }
-        // 已落入台账的重复重投事件仅确认平台，绝不再次执行。
-        if self.ledger.inbound_record(&inbound_id).await.is_some() {
-            self.ack_update(&inbound_id);
-            return;
-        }
         let Some(in_flight_guard) = self.try_acquire_in_flight(inbound_id.clone()) else {
             return;
         };
-
-        // 在分发点同步排入单对话 FIFO 队列并在派生任务前构造 ChatWorkerGuard，
-        // 确保即使工作任务在首次 poll 前被取消丢弃，队列与在途去重标记也会立即释放且不泄漏实例引用。
-        let worker_chat = chat.clone();
-        if let Some(worker_guard) = self.chat_queues.enqueue(QueuedChatAdmission {
-            inbound_id,
+        self.enqueue_admission(QueuedChatAdmission {
+            primary_inbound_id: inbound_id,
+            merged_inbound_ids: Vec::new(),
             chat,
             action,
-            in_flight_guard,
-        }) {
-            let rt = Arc::clone(self);
-            self.spawn_tracked(async move {
-                rt.run_chat_worker(worker_chat, worker_guard).await;
-            });
+            in_flight_guards: vec![in_flight_guard],
+        });
+    }
+
+    fn enqueue_closed_album(self: &Arc<Self>, closed: ClosedAlbum) {
+        self.enqueue_admission(QueuedChatAdmission {
+            primary_inbound_id: closed.primary_inbound_id,
+            merged_inbound_ids: closed.merged_inbound_ids,
+            chat: closed.chat,
+            action: LedgerInboundAction::SubmitMedia(closed.media_items),
+            in_flight_guards: closed.in_flight_guards,
+        });
+    }
+
+    fn enqueue_closed_albums(self: &Arc<Self>, closed_albums: Vec<ClosedAlbum>) {
+        for closed in closed_albums {
+            self.enqueue_closed_album(closed);
         }
     }
 
@@ -915,43 +1123,55 @@ impl GatewayRuntime {
             };
 
             #[cfg(test)]
-            if take_chat_worker_panic_for_test(&item.inbound_id) {
+            if take_chat_worker_panic_for_test(&item.primary_inbound_id) {
                 panic!("注入单对话准入子任务 panic 以验证守卫释放与宿主传播");
             }
 
             // 出队后再核验一次台账幂等。
-            if self.ledger.inbound_record(&item.inbound_id).await.is_some() {
-                item.in_flight_guard.clear_now();
-                self.ack_update(&item.inbound_id);
+            if self
+                .ledger
+                .inbound_record(&item.primary_inbound_id)
+                .await
+                .is_some()
+            {
+                let all_ids = item.all_inbound_ids();
+                item.clear_all();
+                self.ack_updates(&all_ids);
                 continue;
             }
 
             let keep_going = match item.action {
                 LedgerInboundAction::ResetBinding => {
-                    self.handle_reset_command(&mut item.in_flight_guard, item.inbound_id, item.chat)
-                        .await
+                    self.handle_reset_command(
+                        &mut item.in_flight_guards,
+                        item.primary_inbound_id,
+                        item.chat,
+                    )
+                    .await
                 }
                 LedgerInboundAction::SubmitMessage(text) => {
                     self.handle_turn_parts(
-                        &mut item.in_flight_guard,
-                        item.inbound_id,
+                        &mut item.in_flight_guards,
+                        item.primary_inbound_id,
+                        item.merged_inbound_ids,
                         item.chat,
                         vec![UserInputPart::Text { text }],
                     )
                     .await
                 }
-                LedgerInboundAction::SubmitMedia(media_items) => {
+                LedgerInboundAction::SubmitMedia(ref media_items) => {
                     match prepare_media_turn(
                         self.io.as_ref(),
-                        &media_items,
+                        media_items,
                         self.shutdown_rx.clone(),
                     )
                     .await
                     {
                         MediaBatchOutcome::Interrupted => false,
                         MediaBatchOutcome::Rejected(reason) => {
-                            item.in_flight_guard.clear_now();
-                            self.ack_update(&item.inbound_id);
+                            let all_ids = item.all_inbound_ids();
+                            item.clear_all();
+                            self.ack_updates(&all_ids);
                             let chat_for_reply = item.chat;
                             let rt = Arc::clone(self);
                             self.spawn_tracked(async move {
@@ -967,8 +1187,9 @@ impl GatewayRuntime {
                         }
                         MediaBatchOutcome::Ready(parts) => {
                             self.handle_turn_parts(
-                                &mut item.in_flight_guard,
-                                item.inbound_id,
+                                &mut item.in_flight_guards,
+                                item.primary_inbound_id,
+                                item.merged_inbound_ids,
                                 item.chat,
                                 parts,
                             )
@@ -985,7 +1206,7 @@ impl GatewayRuntime {
 
     async fn handle_reset_command(
         self: &Arc<Self>,
-        in_flight_guard: &mut InFlightGuard,
+        in_flight_guards: &mut [InFlightGuard],
         inbound_id: InboundId,
         chat: ChatKey,
     ) -> bool {
@@ -1017,7 +1238,7 @@ impl GatewayRuntime {
                 }
             }
         }
-        in_flight_guard.clear_now();
+        clear_all_guards(in_flight_guards);
         self.ack_update(&inbound_id);
 
         // 台账重置已完成，确认提示异步投递，不阻塞同 chat 后续消息准入。
@@ -1036,8 +1257,9 @@ impl GatewayRuntime {
 
     async fn handle_turn_parts(
         self: &Arc<Self>,
-        in_flight_guard: &mut InFlightGuard,
-        inbound_id: InboundId,
+        in_flight_guards: &mut [InFlightGuard],
+        primary_inbound_id: InboundId,
+        merged_inbound_ids: Vec<InboundId>,
         chat: ChatKey,
         parts: Vec<UserInputPart>,
     ) -> bool {
@@ -1055,8 +1277,8 @@ impl GatewayRuntime {
             match self
                 .ledger
                 .register_turn(
-                    inbound_id.clone(),
-                    Vec::new(),
+                    primary_inbound_id.clone(),
+                    merged_inbound_ids.clone(),
                     chat.clone(),
                     session_id,
                     turn_id,
@@ -1082,9 +1304,10 @@ impl GatewayRuntime {
                 }
             }
         }
-        // 台账持久化成功后立即释放内存去重标记并确认平台。
-        in_flight_guard.clear_now();
-        self.ack_update(&inbound_id);
+        // 台账原子落盘成功后清除整组内存去重标记，并一次性批量确认首条与并入分片。
+        let all_ids = collect_inbound_ids(&primary_inbound_id, &merged_inbound_ids);
+        clear_all_guards(in_flight_guards);
+        self.ack_updates(&all_ids);
 
         let retry_parts = (!is_new).then(|| parts.clone());
         let mut submit_result = if is_new {
@@ -1106,9 +1329,9 @@ impl GatewayRuntime {
 
         match submit_result {
             Ok(turn_handle) => {
-                if let Err(err) = self.ledger.mark_accepted(&inbound_id).await {
+                if let Err(err) = self.ledger.mark_accepted(&primary_inbound_id).await {
                     tracing::error!(
-                        inbound_id = %inbound_id,
+                        inbound_id = %primary_inbound_id,
                         error = %err,
                         "推进台账 Accepted 失败，保留原相位"
                     );
@@ -1117,8 +1340,13 @@ impl GatewayRuntime {
                 // 得出准入结果后立即在受跟踪任务中异步观察与投递，放行单对话队列处理后续消息。
                 let rt = Arc::clone(self);
                 self.spawn_tracked(async move {
-                    rt.observe_live_turn_and_deliver(inbound_id, chat, turn_handle, draft_lease)
-                        .await;
+                    rt.observe_live_turn_and_deliver(
+                        primary_inbound_id,
+                        chat,
+                        turn_handle,
+                        draft_lease,
+                    )
+                    .await;
                 });
             }
             Err(err) if err.kind == LocalErrorKind::Stopping || err.recovery.is_some() => {
@@ -1126,7 +1354,7 @@ impl GatewayRuntime {
                 let mut no_startup_guard = None;
                 self.resolve_registered_until_settled(
                     &mut no_startup_guard,
-                    inbound_id,
+                    primary_inbound_id,
                     chat,
                     session_id,
                     turn_id,
@@ -1134,18 +1362,20 @@ impl GatewayRuntime {
                 .await;
             }
             Err(err) => {
-                // 明确拒绝：立即放行单对话队列，在后台任务中回复拒绝原因并将台账记为 Delivered。
+                // 明确拒绝：立即放行单对话队列，在后台任务中回复拒绝原因并将首条台账记为 Delivered。
                 let reply = describe_local_error(&err, &self.redactor);
                 let rt = Arc::clone(self);
                 self.spawn_tracked(async move {
                     if send_text_reliably(rt.io.as_ref(), &chat, &reply, rt.shutdown_rx.clone())
                         .await
                         .is_ok()
-                        && let Err(ledger_err) =
-                            rt.ledger.mark_delivered(&inbound_id, Utc::now()).await
+                        && let Err(ledger_err) = rt
+                            .ledger
+                            .mark_delivered(&primary_inbound_id, Utc::now())
+                            .await
                     {
                         tracing::error!(
-                            inbound_id = %inbound_id,
+                            inbound_id = %primary_inbound_id,
                             error = %ledger_err,
                             "拒绝回复发出后更新台账 Delivered 失败"
                         );

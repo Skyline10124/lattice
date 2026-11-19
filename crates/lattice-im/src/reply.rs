@@ -741,7 +741,7 @@ mod tests {
             Ok(Vec::new())
         }
 
-        fn acknowledge(&self, _inbound_id: &crate::identity::InboundId) {}
+        fn acknowledge(&self, _inbound_ids: &[crate::identity::InboundId]) {}
 
         async fn send_message(&self, _chat: &ChatKey, text: &str) -> Result<(), TelegramApiError> {
             self.send_attempts
