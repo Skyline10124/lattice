@@ -1002,10 +1002,12 @@ async fn rebuilds_cleaned_draft_session_with_same_id_and_serves_status_usage_and
         ledger
             .register_turn(
                 dummy_inbound.clone(),
+                Vec::new(),
                 chat_key.clone(),
                 preset_session_id,
                 dummy_turn,
                 true,
+                Utc::now(),
             )
             .await
             .unwrap();
@@ -1258,20 +1260,24 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
         ledger
             .register_turn(
                 id_c_missing.clone(),
+                Vec::new(),
                 chat_c.clone(),
                 session_c,
                 turn_c_missing,
                 true,
+                Utc::now(),
             )
             .await
             .unwrap();
         ledger
             .register_turn(
                 id_c_inflight.clone(),
+                Vec::new(),
                 chat_c.clone(),
                 session_c,
                 turn_c_inflight,
                 false,
+                Utc::now(),
             )
             .await
             .unwrap();
@@ -1279,20 +1285,24 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
         ledger
             .register_turn(
                 id_reg_accepted.clone(),
+                Vec::new(),
                 chat_b.clone(),
                 session_a,
                 turn_reg_accepted,
                 false,
+                Utc::now(),
             )
             .await
             .unwrap();
         ledger
             .register_turn(
                 id_accepted_done.clone(),
+                Vec::new(),
                 chat_b.clone(),
                 session_b,
                 turn_accepted,
                 true,
+                Utc::now(),
             )
             .await
             .unwrap();
@@ -1301,10 +1311,12 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
         ledger
             .register_turn(
                 id_accepted_hanging.clone(),
+                Vec::new(),
                 chat_a.clone(),
                 session_a,
                 turn_hanging,
                 true,
+                Utc::now(),
             )
             .await
             .unwrap();
@@ -1483,7 +1495,15 @@ async fn preserves_registered_phase_and_reports_unknown_cancel_when_store_unavai
             .await
             .unwrap();
         ledger
-            .register_turn(reg_id.clone(), chat_key, sid, tid, true)
+            .register_turn(
+                reg_id.clone(),
+                Vec::new(),
+                chat_key,
+                sid,
+                tid,
+                true,
+                Utc::now(),
+            )
             .await
             .unwrap();
     }
@@ -1768,10 +1788,12 @@ async fn recovers_live_confirmation_unknown_without_duplicate_turn_and_stops_cle
         ledger
             .register_turn(
                 seed_id.clone(),
+                Vec::new(),
                 chat_key.clone(),
                 preset_sid,
                 new_turn_id(),
                 true,
+                Utc::now(),
             )
             .await
             .unwrap();

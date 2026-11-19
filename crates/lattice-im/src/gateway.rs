@@ -227,6 +227,7 @@ impl PreparedImGateway {
                             .await;
                     }));
                 }
+                InboundRecord::Merged { .. } => {}
                 InboundRecord::DeliveredTurn { .. } | InboundRecord::DeliveredReset { .. } => {}
             }
         }
@@ -1002,10 +1003,12 @@ impl GatewayRuntime {
                 .ledger
                 .register_turn(
                     inbound_id.clone(),
+                    Vec::new(),
                     chat.clone(),
                     session_id,
                     turn_id,
                     is_new,
+                    Utc::now(),
                 )
                 .await
             {
