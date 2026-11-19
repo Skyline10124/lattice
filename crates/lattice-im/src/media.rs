@@ -31,34 +31,24 @@ pub(crate) struct IncomingImageItem {
     pub(crate) caption: Option<String>,
 }
 
-/// 单条入站媒体分类：受支持候选图片，或相册中混入的不受支持媒体。
+/// 单条图片或已闭合相册中的一项入站媒体元素：受支持候选图片，或相册中混入的不受支持媒体。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum IncomingMediaKind {
+pub(crate) enum IncomingMediaItem {
     Image(IncomingImageItem),
     Unsupported,
 }
 
-/// 单条图片或已闭合相册中的一项入站媒体元素。
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct IncomingMediaItem {
-    pub(crate) kind: IncomingMediaKind,
-}
-
 impl IncomingMediaItem {
     pub(crate) fn image(file_id: String, file_size: Option<u64>, caption: Option<String>) -> Self {
-        Self {
-            kind: IncomingMediaKind::Image(IncomingImageItem {
-                file_id,
-                file_size,
-                caption,
-            }),
-        }
+        Self::Image(IncomingImageItem {
+            file_id,
+            file_size,
+            caption,
+        })
     }
 
     pub(crate) fn unsupported() -> Self {
-        Self {
-            kind: IncomingMediaKind::Unsupported,
-        }
+        Self::Unsupported
     }
 }
 
@@ -95,9 +85,9 @@ struct PreflightedBatch<'a> {
 fn preflight_media_batch(items: &[IncomingMediaItem]) -> Result<PreflightedBatch<'_>, String> {
     let mut images = Vec::with_capacity(items.len());
     for item in items {
-        match &item.kind {
-            IncomingMediaKind::Image(img) => images.push(img),
-            IncomingMediaKind::Unsupported => return Err(UNSUPPORTED_MEDIA_REPLY.to_owned()),
+        match item {
+            IncomingMediaItem::Image(img) => images.push(img),
+            IncomingMediaItem::Unsupported => return Err(UNSUPPORTED_MEDIA_REPLY.to_owned()),
         }
     }
 

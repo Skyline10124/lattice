@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use crate::{
     gateway::InFlightGuard,
     identity::{ChatKey, InboundId},
-    media::{IncomingMediaItem, IncomingMediaKind},
+    media::IncomingMediaItem,
 };
 
 /// 相册收集静默窗口：每收到同对话同 `media_group_id` 的新分片即重置为 `now + 600ms`。
@@ -22,7 +22,7 @@ pub(crate) const ALBUM_QUIET_WINDOW: Duration = Duration::from_millis(600);
 /// Telegram 单相册协议上限：收满 10 条立即闭合（不在 8 张处截断，使 9～10 张整组被拒一次）。
 pub(crate) const ALBUM_MAX_ITEMS: usize = 10;
 
-/// 存在未确认开放相册且整批轮询过滤后无新更新时的空轮询节流上限。
+/// 存在未确认开放相册，或未确认在途事件导致整批重投被过滤为零新更新时的空轮询节流上限。
 pub(crate) const ALBUM_IDLE_POLL_THROTTLE: Duration = Duration::from_millis(100);
 
 /// 每个对话内存中保留的近期已闭合 `media_group_id` 数量上限（FIFO 淘汰）。
@@ -35,7 +35,7 @@ pub(crate) const LATE_ALBUM_FRAGMENT_REPLY: &str = "该相册部分图片延迟�
 pub(crate) struct BufferedAlbumItem {
     pub(crate) update_id: i64,
     pub(crate) inbound_id: InboundId,
-    pub(crate) kind: IncomingMediaKind,
+    pub(crate) item: IncomingMediaItem,
     pub(crate) in_flight_guard: InFlightGuard,
 }
 
@@ -88,12 +88,12 @@ impl AlbumCollector {
         let mut media_items = Vec::with_capacity(total);
         let mut in_flight_guards = Vec::with_capacity(total);
 
-        media_items.push(IncomingMediaItem { kind: first.kind });
+        media_items.push(first.item);
         in_flight_guards.push(first.in_flight_guard);
 
         for rest in iter {
             merged_inbound_ids.push(rest.inbound_id);
-            media_items.push(IncomingMediaItem { kind: rest.kind });
+            media_items.push(rest.item);
             in_flight_guards.push(rest.in_flight_guard);
         }
 
@@ -214,7 +214,7 @@ mod tests {
         BufferedAlbumItem {
             update_id,
             inbound_id,
-            kind: item.kind,
+            item,
             in_flight_guard: guard,
         }
     }

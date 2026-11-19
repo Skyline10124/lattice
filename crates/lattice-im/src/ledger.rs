@@ -566,11 +566,11 @@ pub(crate) fn arm_transient_write_error_for_test(
     hit_rx
 }
 
-/// 并发安全的单实例台账句柄：写入经异步互斥锁串行化，仅在磁盘原子替换成功后提交至内存快照短锁，读操作不跨越 `.await` 或磁盘 I/O。
+/// 并发安全的单实例台账句柄：写入经异步互斥锁串行化，仅在磁盘原子替换成功后向内存快照短锁换入新 `Arc<LedgerData>`，读操作仅在短锁内克隆引用计数且不跨越 `.await` 或磁盘 I/O。
 #[derive(Clone)]
 pub(crate) struct Ledger {
     write_lock: Arc<Mutex<()>>,
-    snapshot: Arc<std::sync::Mutex<LedgerData>>,
+    snapshot: Arc<std::sync::Mutex<Arc<LedgerData>>>,
     meta: Arc<LedgerMeta>,
 }
 
@@ -657,7 +657,7 @@ impl Ledger {
 
         Ok(Self {
             write_lock: Arc::new(Mutex::new(())),
-            snapshot: Arc::new(std::sync::Mutex::new(data)),
+            snapshot: Arc::new(std::sync::Mutex::new(Arc::new(data))),
             meta: Arc::new(LedgerMeta {
                 layout,
                 redelivery_window,
@@ -667,23 +667,28 @@ impl Ledger {
         })
     }
 
+    fn current_snapshot(&self) -> Arc<LedgerData> {
+        let guard = self.snapshot.lock().expect("台账内存快照锁不应中毒");
+        Arc::clone(&guard)
+    }
+
     /// 查询指定对话当前绑定的会话身份。
     pub(crate) async fn bound_session(&self, chat: &ChatKey) -> Option<SessionId> {
-        let guard = self.snapshot.lock().expect("台账内存快照锁不应中毒");
-        guard.bindings.get(chat).copied()
+        let snapshot = self.current_snapshot();
+        snapshot.bindings.get(chat).copied()
     }
 
     /// 查询指定入站事件在台账中的现有相位记录。
     pub(crate) async fn inbound_record(&self, id: &InboundId) -> Option<InboundRecord> {
-        let guard = self.snapshot.lock().expect("台账内存快照锁不应中毒");
-        guard.inbound.get(id).cloned()
+        let snapshot = self.current_snapshot();
+        snapshot.inbound.get(id).cloned()
     }
 
     /// 返回当前遗留的全部 `Registered` 与 `Accepted` 条目快照（按 `InboundId` 升序）。
     pub(crate) async fn pending_records(&self) -> Vec<(InboundId, InboundRecord)> {
-        let guard = self.snapshot.lock().expect("台账内存快照锁不应中毒");
+        let snapshot = self.current_snapshot();
         let mut out = Vec::new();
-        for (id, record) in &guard.inbound {
+        for (id, record) in &snapshot.inbound {
             match record {
                 InboundRecord::Registered { .. } | InboundRecord::Accepted { .. } => {
                     out.push((id.clone(), record.clone()));
@@ -718,6 +723,14 @@ impl Ledger {
                 }
             }
             drop(seen);
+
+            if data.inbound.contains_key(&primary)
+                || merged.iter().any(|id| data.inbound.contains_key(id))
+            {
+                return Err(LedgerError::Corrupt(
+                    "整组登记包含台账中已存在的入站事件标识",
+                ));
+            }
 
             if bind_session {
                 data.bindings.insert(chat.clone(), session);
@@ -850,10 +863,12 @@ impl Ledger {
         let max_bytes = self.meta.max_bytes;
         let latch = self.meta.latch.clone();
         let snapshot = Arc::clone(&self.snapshot);
-        let mut candidate = snapshot.lock().expect("台账内存快照锁不应中毒").clone();
+        let base_snapshot = self.current_snapshot();
         tokio::task::spawn_blocking(move || {
             let _write_guard = write_guard;
             lattice_server::with_component_panic_scope(|| {
+                let mut candidate = (*base_snapshot).clone();
+                drop(base_snapshot);
                 apply(&mut candidate)?;
                 let bytes = match serialize_checked_ledger_data(&candidate, max_bytes) {
                     Ok(bytes) => bytes,
@@ -897,7 +912,12 @@ impl Ledger {
                 }
                 let im_dir = open_im_state_dir(&layout)?;
                 replace_ledger_guarded(&im_dir, &bytes, &latch)?;
-                *snapshot.lock().expect("台账内存快照锁不应中毒") = candidate;
+                let next_snapshot = Arc::new(candidate);
+                let prev_snapshot = {
+                    let mut guard = snapshot.lock().expect("台账内存快照锁不应中毒");
+                    std::mem::replace(&mut *guard, next_snapshot)
+                };
+                drop(prev_snapshot);
                 Ok::<(), LedgerError>(())
             })
         })
@@ -1476,6 +1496,153 @@ mod tests {
             }),
             "mark_delivered 幂等返回后应保持原 Merged 记录不变"
         );
+    }
+
+    #[tokio::test]
+    async fn register_turn_rejects_overwriting_existing_inbound_entries_preserving_snapshot_and_disk()
+     {
+        let dir = tempfile::tempdir().expect("创建临时状态根应成功");
+        let layout = StateLayout::in_state_root(dir.path());
+        let base_time = Utc.with_ymd_and_hms(2026, 11, 14, 15, 30, 0).unwrap();
+
+        let ledger = Ledger::open_and_prune(layout.clone(), base_time, TELEGRAM_REDELIVERY_WINDOW)
+            .await
+            .expect("初始化空台账应成功");
+
+        let chat_orig = ChatKey::from_platform_id("tg", "2101");
+        let chat_other = ChatKey::from_platform_id("tg", "2102");
+        let sid_orig = new_session_id();
+        let sid_intruder = new_session_id();
+
+        let id_reg = InboundId::from_platform_id("tg", "r-1");
+        let id_merged = InboundId::from_platform_id("tg", "r-2");
+        let id_acc = InboundId::from_platform_id("tg", "r-3");
+        let id_del = InboundId::from_platform_id("tg", "r-4");
+
+        let t_reg = new_turn_id();
+        let t_acc = new_turn_id();
+        let t_del = new_turn_id();
+
+        // 构造覆盖 Registered、Merged、Accepted、DeliveredTurn 四种已存在条目
+        ledger
+            .register_turn(
+                id_reg.clone(),
+                vec![id_merged.clone()],
+                chat_orig.clone(),
+                sid_orig,
+                t_reg,
+                true,
+                base_time,
+            )
+            .await
+            .unwrap();
+        ledger
+            .register_turn(
+                id_acc.clone(),
+                Vec::new(),
+                chat_orig.clone(),
+                sid_orig,
+                t_acc,
+                false,
+                base_time,
+            )
+            .await
+            .unwrap();
+        ledger.mark_accepted(&id_acc).await.unwrap();
+        ledger
+            .register_turn(
+                id_del.clone(),
+                Vec::new(),
+                chat_orig.clone(),
+                sid_orig,
+                t_del,
+                false,
+                base_time,
+            )
+            .await
+            .unwrap();
+        ledger.mark_delivered(&id_del, base_time).await.unwrap();
+
+        let ledger_path = layout.lattice_root().join("im/ledger");
+        let disk_before = std::fs::read(&ledger_path).expect("读取初始台账字节应成功");
+
+        for (phase_label, existing_id) in [
+            ("Registered", &id_reg),
+            ("Accepted", &id_acc),
+            ("Merged", &id_merged),
+            ("DeliveredTurn", &id_del),
+        ] {
+            let expected_record = ledger
+                .inbound_record(existing_id)
+                .await
+                .expect("既有条目应存在");
+            let fresh_companion =
+                InboundId::from_platform_id("tg", &format!("fresh-{phase_label}"));
+
+            // (a) 既有 ID 作为 primary 传入 register_turn（同时尝试篡改已有绑定或绑定新对话）
+            let err_as_primary = ledger
+                .register_turn(
+                    existing_id.clone(),
+                    vec![fresh_companion.clone()],
+                    chat_orig.clone(),
+                    sid_intruder,
+                    new_turn_id(),
+                    true,
+                    base_time + chrono::Duration::minutes(5),
+                )
+                .await
+                .expect_err("已存在入站条目作为 primary 时必须拒绝覆盖");
+            assert_eq!(
+                err_as_primary,
+                LedgerError::Corrupt("整组登记包含台账中已存在的入站事件标识"),
+                "{phase_label} 作为 primary 冲突时错误信息必须匹配"
+            );
+
+            // (b) 既有 ID 混入 merged 传入 register_turn
+            let err_in_merged = ledger
+                .register_turn(
+                    fresh_companion.clone(),
+                    vec![existing_id.clone()],
+                    chat_other.clone(),
+                    sid_intruder,
+                    new_turn_id(),
+                    true,
+                    base_time + chrono::Duration::minutes(5),
+                )
+                .await
+                .expect_err("已存在入站条目出现在 merged 中时必须拒绝覆盖");
+            assert_eq!(
+                err_in_merged,
+                LedgerError::Corrupt("整组登记包含台账中已存在的入站事件标识"),
+                "{phase_label} 出现在 merged 冲突时错误信息必须匹配"
+            );
+
+            assert_eq!(
+                ledger.bound_session(&chat_orig).await,
+                Some(sid_orig),
+                "{phase_label} 拒绝覆盖后原有会话绑定必须保持不变"
+            );
+            assert_eq!(
+                ledger.bound_session(&chat_other).await,
+                None,
+                "{phase_label} 拒绝覆盖后不得写入新对话绑定"
+            );
+            assert_eq!(
+                ledger.inbound_record(existing_id).await,
+                Some(expected_record),
+                "{phase_label} 拒绝覆盖后原有入站记录必须保持原样"
+            );
+            assert_eq!(
+                ledger.inbound_record(&fresh_companion).await,
+                None,
+                "{phase_label} 拒绝覆盖后同批新 ID 不得残留于内存中"
+            );
+            assert_eq!(
+                std::fs::read(&ledger_path).unwrap(),
+                disk_before,
+                "{phase_label} 拒绝覆盖后磁盘台账文件必须保持原样"
+            );
+        }
     }
 
     #[tokio::test]

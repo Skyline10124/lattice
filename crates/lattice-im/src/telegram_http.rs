@@ -359,6 +359,30 @@ async fn read_bounded_bytes(
 }
 
 impl TelegramHttpClient {
+    async fn classify_error_response(&self, response: reqwest::Response) -> TelegramApiError {
+        let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        // 读取有界错误正文仅作为补充诊断：若正文读取中途断开，仍触发连接池重建与脱敏，
+        // 并以空字节保留已收到的 HTTP 状态码与 Retry-After 头，绝不将 400/404 退化为可重试错误或丢弃 429 退避时长。
+        let err_bytes = match read_bounded_bytes(response, MAX_ERROR_BODY_BYTES).await {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                let _ = self.handle_transport_error(err).await;
+                Vec::new()
+            }
+        };
+        classify_http_failure(
+            status.as_u16(),
+            retry_after.as_deref(),
+            &err_bytes,
+            &self.redactor,
+        )
+    }
+
     async fn post_and_read_success_bytes<B: Serialize + Sync>(
         &self,
         method: &str,
@@ -377,23 +401,8 @@ impl TelegramHttpClient {
             Err(err) => return Err(self.handle_transport_error(err).await),
         };
 
-        let status = response.status();
-        if !status.is_success() {
-            let retry_header = response
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            let err_bytes = match read_bounded_bytes(response, MAX_ERROR_BODY_BYTES).await {
-                Ok(b) => b,
-                Err(err) => return Err(self.handle_transport_error(err).await),
-            };
-            return Err(classify_http_failure(
-                status.as_u16(),
-                retry_header.as_deref(),
-                &err_bytes,
-                &self.redactor,
-            ));
+        if !response.status().is_success() {
+            return Err(self.classify_error_response(response).await);
         }
 
         match response.bytes().await {
@@ -451,6 +460,12 @@ impl TelegramHttpClient {
         };
 
         let meta_status = meta_resp.status();
+        if !meta_status.is_success() {
+            return Err(TelegramDownloadError::Api(
+                self.classify_error_response(meta_resp).await,
+            ));
+        }
+
         let meta_retry_after = meta_resp
             .headers()
             .get(reqwest::header::RETRY_AFTER)
@@ -464,15 +479,6 @@ impl TelegramHttpClient {
                 ));
             }
         };
-
-        if !meta_status.is_success() {
-            return Err(TelegramDownloadError::Api(classify_http_failure(
-                meta_status.as_u16(),
-                meta_retry_after.as_deref(),
-                &meta_bytes,
-                &self.redactor,
-            )));
-        }
 
         let envelope: RawGetFileEnvelope = serde_json::from_slice(&meta_bytes).map_err(|_| {
             TelegramDownloadError::Api(TelegramApiError::Retryable {
@@ -533,27 +539,10 @@ impl TelegramHttpClient {
             }
         };
 
-        let file_status = file_resp.status();
-        if !file_status.is_success() {
-            let retry_after = file_resp
-                .headers()
-                .get(reqwest::header::RETRY_AFTER)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned);
-            let err_bytes = match read_bounded_bytes(file_resp, MAX_ERROR_BODY_BYTES).await {
-                Ok(bytes) => bytes,
-                Err(err) => {
-                    return Err(TelegramDownloadError::Api(
-                        self.handle_transport_error(err).await,
-                    ));
-                }
-            };
-            return Err(TelegramDownloadError::Api(classify_http_failure(
-                file_status.as_u16(),
-                retry_after.as_deref(),
-                &err_bytes,
-                &self.redactor,
-            )));
+        if !file_resp.status().is_success() {
+            return Err(TelegramDownloadError::Api(
+                self.classify_error_response(file_resp).await,
+            ));
         }
 
         if file_resp
@@ -963,10 +952,7 @@ mod tests {
 
     #[tokio::test]
     async fn download_file_enforces_size_bounds_aborts_oversized_stream_and_never_leaks_token() {
-        use std::sync::{
-            Arc,
-            atomic::{AtomicUsize, Ordering},
-        };
+        use std::sync::Arc;
         use tokio::{io::AsyncWriteExt, net::TcpListener};
 
         const SECRET_TOKEN: &str = "777888:ULTRA_SECRET_DOWNLOAD_TOKEN";
@@ -979,28 +965,38 @@ mod tests {
             .build()
             .unwrap();
 
-        // 1. getFile 声明 file_size 超限时立即短路返回 TooLarge，绝不发起第二次 GET 连接
+        // 1. getFile 声明 file_size 超限时立即短路返回 TooLarge，服务端持续监听直至客户端返回后确认零 GET 请求
         {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
-            let accepted = Arc::new(AtomicUsize::new(0));
-            let accepted_srv = Arc::clone(&accepted);
+            let recorded_requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+            let recorded_srv = Arc::clone(&recorded_requests);
+            let (stop_srv_tx, mut stop_srv_rx) = oneshot::channel::<()>();
             let srv = tokio::spawn(async move {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                accepted_srv.fetch_add(1, Ordering::SeqCst);
-                let (req_line, req_body) = read_raw_http_head_and_body(&mut sock).await;
-                assert_eq!(
-                    req_line,
-                    format!("POST /bot{SECRET_TOKEN}/getFile HTTP/1.1")
-                );
-                let parsed: serde_json::Value = serde_json::from_slice(&req_body).unwrap();
-                assert_eq!(parsed["file_id"], "oversized_meta");
-                let json = r#"{"ok":true,"result":{"file_id":"oversized_meta","file_size":1025,"file_path":"photos/huge.png"}}"#;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
-                    json.len()
-                );
-                sock.write_all(resp.as_bytes()).await.unwrap();
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_srv_rx => break,
+                        accepted = listener.accept() => {
+                            let (mut sock, _) = accepted.unwrap();
+                            let (req_line, req_body) = read_raw_http_head_and_body(&mut sock).await;
+                            recorded_srv.lock().unwrap().push(req_line.clone());
+                            if req_line.starts_with("POST ") {
+                                let parsed: serde_json::Value = serde_json::from_slice(&req_body).unwrap();
+                                assert_eq!(parsed["file_id"], "oversized_meta");
+                                let json = r#"{"ok":true,"result":{"file_id":"oversized_meta","file_size":1025,"file_path":"photos/huge.png"}}"#;
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                                    json.len()
+                                );
+                                sock.write_all(resp.as_bytes()).await.unwrap();
+                            } else {
+                                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
             });
 
             let err = tg_client
@@ -1008,27 +1004,46 @@ mod tests {
                 .await
                 .expect_err("声明 file_size 超限必须直接拒绝");
             assert_eq!(err, TelegramDownloadError::TooLarge);
+            let _ = stop_srv_tx.send(());
             srv.await.unwrap();
+            let requests = recorded_requests.lock().unwrap().clone();
             assert_eq!(
-                accepted.load(Ordering::SeqCst),
-                1,
-                "getFile 声明超限时不得发起第二次 GET 请求"
+                requests,
+                vec![format!("POST /bot{SECRET_TOKEN}/getFile HTTP/1.1")],
+                "getFile 声明超限时客户端绝不得发起任何 GET 请求"
             );
         }
 
-        // 2. getFile 返回非法 file_path 时立即返回 InvalidFilePath，不发起 GET
+        // 2. getFile 返回非法 file_path 时立即返回 InvalidFilePath，服务端持续监听直至客户端返回后确认零 GET 请求
         {
             let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
             let base = format!("http://{}", listener.local_addr().unwrap());
+            let recorded_requests = Arc::new(StdMutex::new(Vec::<String>::new()));
+            let recorded_srv = Arc::clone(&recorded_requests);
+            let (stop_srv_tx, mut stop_srv_rx) = oneshot::channel::<()>();
             let srv = tokio::spawn(async move {
-                let (mut sock, _) = listener.accept().await.unwrap();
-                let _ = read_raw_http_head_and_body(&mut sock).await;
-                let json = r#"{"ok":true,"result":{"file_id":"bad_path","file_path":"photos/../botleak"}}"#;
-                let resp = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
-                    json.len()
-                );
-                sock.write_all(resp.as_bytes()).await.unwrap();
+                loop {
+                    tokio::select! {
+                        _ = &mut stop_srv_rx => break,
+                        accepted = listener.accept() => {
+                            let (mut sock, _) = accepted.unwrap();
+                            let (req_line, _) = read_raw_http_head_and_body(&mut sock).await;
+                            recorded_srv.lock().unwrap().push(req_line.clone());
+                            if req_line.starts_with("POST ") {
+                                let json = r#"{"ok":true,"result":{"file_id":"bad_path","file_path":"photos/../botleak"}}"#;
+                                let resp = format!(
+                                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                                    json.len()
+                                );
+                                sock.write_all(resp.as_bytes()).await.unwrap();
+                            } else {
+                                sock.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                                    .await
+                                    .unwrap();
+                            }
+                        }
+                    }
+                }
             });
 
             let err = tg_client
@@ -1036,7 +1051,14 @@ mod tests {
                 .await
                 .expect_err("路径穿越 file_path 必须拒绝");
             assert_eq!(err, TelegramDownloadError::InvalidFilePath);
+            let _ = stop_srv_tx.send(());
             srv.await.unwrap();
+            let requests = recorded_requests.lock().unwrap().clone();
+            assert_eq!(
+                requests,
+                vec![format!("POST /bot{SECRET_TOKEN}/getFile HTTP/1.1")],
+                "getFile 返回非法 file_path 时客户端绝不得发起任何 GET 请求"
+            );
         }
 
         // 3. 恰好等于 max_bytes 的流式下载成功，且核验 GET /file/bot<token>/<file_path> 路径拼接
@@ -1247,6 +1269,129 @@ mod tests {
                     );
                 }
                 other => panic!("连接失败应归类为 Retryable，实际: {other:?}"),
+            }
+        }
+
+        // 7. 非 2xx 错误响应正文读取中途断开（声明 Content-Length 大于实际发送字节并关闭连接）：
+        //    必须保留已收到的 404 非重试状态码与 429 的 Retry-After: 17，绝不退化为传输层可重试错误
+        for stage in ["get_file", "file_get"] {
+            // 7a. 404 截断正文 -> 仍为 UnauthorizedOrInvalid { status: 404, .. }
+            {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base = format!("http://{}", listener.local_addr().unwrap());
+                let srv = tokio::spawn(async move {
+                    let (mut s1, _) = listener.accept().await.unwrap();
+                    let _ = read_raw_http_head_and_body(&mut s1).await;
+                    if stage == "get_file" {
+                        let partial =
+                            format!(r#"{{"ok":false,"description":"trunc {SECRET_TOKEN}"#);
+                        let resp = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{partial}",
+                            partial.len() + 200
+                        );
+                        s1.write_all(resp.as_bytes()).await.unwrap();
+                    } else {
+                        let json =
+                            r#"{"ok":true,"result":{"file_id":"f","file_path":"photos/a.png"}}"#;
+                        let r1 = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                            json.len()
+                        );
+                        s1.write_all(r1.as_bytes()).await.unwrap();
+                        drop(s1);
+
+                        let (mut s2, _) = listener.accept().await.unwrap();
+                        let _ = read_raw_http_head_and_body(&mut s2).await;
+                        let partial =
+                            format!(r#"{{"ok":false,"description":"trunc {SECRET_TOKEN}"#);
+                        let r2 = format!(
+                            "HTTP/1.1 404 Not Found\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{partial}",
+                            partial.len() + 200
+                        );
+                        s2.write_all(r2.as_bytes()).await.unwrap();
+                    }
+                });
+
+                let err = tg_client
+                    .download_file_with_base(&raw_http, &base, "trunc_404", 1024)
+                    .await
+                    .expect_err("404 截断响应必须返回错误");
+                srv.await.unwrap();
+                match err {
+                    TelegramDownloadError::Api(TelegramApiError::UnauthorizedOrInvalid {
+                        status: 404,
+                        diagnostic,
+                    }) => {
+                        assert!(
+                            !diagnostic.contains(SECRET_TOKEN),
+                            "阶段 {stage} 404 截断响应诊断不得泄露凭据: {diagnostic}"
+                        );
+                    }
+                    other => panic!(
+                        "阶段 {stage} 404 错误正文截断不得退化为 Retryable，应保持 UnauthorizedOrInvalid(404)，实际: {other:?}"
+                    ),
+                }
+            }
+
+            // 7b. 429 带 Retry-After: 17 且截断正文 -> 仍为 RateLimited { retry_after: Some(17s), .. }
+            {
+                let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+                let base = format!("http://{}", listener.local_addr().unwrap());
+                let srv = tokio::spawn(async move {
+                    let (mut s1, _) = listener.accept().await.unwrap();
+                    let _ = read_raw_http_head_and_body(&mut s1).await;
+                    if stage == "get_file" {
+                        let partial = format!(r#"{{"ok":false,"description":"rate {SECRET_TOKEN}"#);
+                        let resp = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{partial}",
+                            partial.len() + 200
+                        );
+                        s1.write_all(resp.as_bytes()).await.unwrap();
+                    } else {
+                        let json =
+                            r#"{"ok":true,"result":{"file_id":"f","file_path":"photos/a.png"}}"#;
+                        let r1 = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{json}",
+                            json.len()
+                        );
+                        s1.write_all(r1.as_bytes()).await.unwrap();
+                        drop(s1);
+
+                        let (mut s2, _) = listener.accept().await.unwrap();
+                        let _ = read_raw_http_head_and_body(&mut s2).await;
+                        let partial = format!(r#"{{"ok":false,"description":"rate {SECRET_TOKEN}"#);
+                        let r2 = format!(
+                            "HTTP/1.1 429 Too Many Requests\r\nRetry-After: 17\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{partial}",
+                            partial.len() + 200
+                        );
+                        s2.write_all(r2.as_bytes()).await.unwrap();
+                    }
+                });
+
+                let err = tg_client
+                    .download_file_with_base(&raw_http, &base, "trunc_429", 1024)
+                    .await
+                    .expect_err("429 截断响应必须返回错误");
+                srv.await.unwrap();
+                match err {
+                    TelegramDownloadError::Api(TelegramApiError::RateLimited {
+                        retry_after: Some(wait),
+                        diagnostic,
+                    }) => {
+                        assert_eq!(
+                            wait,
+                            Duration::from_secs(17),
+                            "阶段 {stage} 429 正文截断时必须保留 Retry-After: 17 秒"
+                        );
+                        assert!(
+                            !diagnostic.contains(SECRET_TOKEN),
+                            "阶段 {stage} 429 截断响应诊断不得泄露凭据: {diagnostic}"
+                        );
+                    }
+                    other => {
+                        panic!("阶段 {stage} 429 错误正文截断不得丢弃 Retry-After，实际: {other:?}")
+                    }
+                }
             }
         }
     }

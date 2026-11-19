@@ -421,6 +421,13 @@ impl GatewayDebugProbe {
             .len()
     }
 
+    pub(crate) fn contains_in_flight(&self, id: &InboundId) -> bool {
+        self.in_flight_inbound
+            .lock()
+            .expect("在途去重集合锁不应中毒")
+            .contains(id)
+    }
+
     pub(crate) fn chat_queue_entry_count(&self) -> usize {
         self.chat_queues
             .entries
@@ -733,6 +740,7 @@ impl GatewayRuntime {
             match poll_res {
                 Ok(updates) => {
                     backoff = INITIAL_POLL_BACKOFF;
+                    let batch_had_updates = !updates.is_empty();
                     let mut saw_new_update = false;
                     for update in updates {
                         if self.is_stopping() {
@@ -743,10 +751,14 @@ impl GatewayRuntime {
                         }
                     }
                     self.enqueue_closed_albums(collector.close_due(tokio::time::Instant::now()));
-                    if !saw_new_update && let Some(deadline) = collector.next_deadline() {
-                        let remaining =
-                            deadline.saturating_duration_since(tokio::time::Instant::now());
-                        let throttle = ALBUM_IDLE_POLL_THROTTLE.min(remaining);
+                    let next_deadline = collector.next_deadline();
+                    if !saw_new_update && (batch_had_updates || next_deadline.is_some()) {
+                        let throttle = match next_deadline {
+                            Some(deadline) => ALBUM_IDLE_POLL_THROTTLE.min(
+                                deadline.saturating_duration_since(tokio::time::Instant::now()),
+                            ),
+                            None => ALBUM_IDLE_POLL_THROTTLE,
+                        };
                         if !throttle.is_zero() {
                             tokio::select! {
                                 biased;
@@ -827,7 +839,7 @@ impl GatewayRuntime {
     ) -> bool {
         let update_id = update.update_id;
         let inbound_id = update.inbound_id;
-        if self.io.is_acknowledged(&inbound_id) || self.is_in_flight(&inbound_id) {
+        if self.is_in_flight(&inbound_id) || self.io.is_acknowledged(&inbound_id) {
             return false;
         }
 
@@ -924,7 +936,7 @@ impl GatewayRuntime {
                             BufferedAlbumItem {
                                 update_id,
                                 inbound_id,
-                                kind: media_item.kind,
+                                item: media_item,
                                 in_flight_guard,
                             },
                             tokio::time::Instant::now(),
@@ -1127,16 +1139,17 @@ impl GatewayRuntime {
                 panic!("注入单对话准入子任务 panic 以验证守卫释放与宿主传播");
             }
 
-            // 出队后再核验一次台账幂等。
-            if self
-                .ledger
-                .inbound_record(&item.primary_inbound_id)
-                .await
-                .is_some()
+            // 出队后再核验一次平台确认状态与台账幂等，防止重投事件重复下载或重复回复。
+            if self.io.is_acknowledged(&item.primary_inbound_id)
+                || self
+                    .ledger
+                    .inbound_record(&item.primary_inbound_id)
+                    .await
+                    .is_some()
             {
                 let all_ids = item.all_inbound_ids();
-                item.clear_all();
                 self.ack_updates(&all_ids);
+                item.clear_all();
                 continue;
             }
 
@@ -1170,8 +1183,8 @@ impl GatewayRuntime {
                         MediaBatchOutcome::Interrupted => false,
                         MediaBatchOutcome::Rejected(reason) => {
                             let all_ids = item.all_inbound_ids();
-                            item.clear_all();
                             self.ack_updates(&all_ids);
+                            item.clear_all();
                             let chat_for_reply = item.chat;
                             let rt = Arc::clone(self);
                             self.spawn_tracked(async move {
@@ -1238,8 +1251,8 @@ impl GatewayRuntime {
                 }
             }
         }
-        clear_all_guards(in_flight_guards);
         self.ack_update(&inbound_id);
+        clear_all_guards(in_flight_guards);
 
         // 台账重置已完成，确认提示异步投递，不阻塞同 chat 后续消息准入。
         let rt = Arc::clone(self);
@@ -1304,10 +1317,10 @@ impl GatewayRuntime {
                 }
             }
         }
-        // 台账原子落盘成功后清除整组内存去重标记，并一次性批量确认首条与并入分片。
+        // 台账原子落盘成功后先一次性批量确认首条与并入分片，再清除整组内存去重标记。
         let all_ids = collect_inbound_ids(&primary_inbound_id, &merged_inbound_ids);
-        clear_all_guards(in_flight_guards);
         self.ack_updates(&all_ids);
+        clear_all_guards(in_flight_guards);
 
         let retry_parts = (!is_new).then(|| parts.clone());
         let mut submit_result = if is_new {

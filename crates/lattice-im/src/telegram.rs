@@ -127,7 +127,7 @@ pub(crate) struct RawMessage {
     #[serde(default)]
     pub(crate) document: Option<RawDocument>,
     #[serde(default)]
-    pub(crate) animation: Option<serde_json::Value>,
+    pub(crate) animation: Option<RawAnimation>,
     #[serde(default)]
     pub(crate) caption: Option<String>,
     #[serde(default)]
@@ -146,6 +146,12 @@ pub(crate) struct RawDocument {
     pub(crate) file_id: String,
     #[serde(default)]
     pub(crate) file_size: Option<u64>,
+    #[serde(default)]
+    pub(crate) mime_type: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct RawAnimation {
     #[serde(default)]
     pub(crate) mime_type: Option<String>,
 }
@@ -171,17 +177,23 @@ pub(crate) struct RawStoppedMessageGeneration {
     pub(crate) draft_id: i64,
 }
 
-fn is_supported_document_image_mime(mime: &str) -> bool {
-    let normalized = mime
-        .split(';')
+fn normalize_mime_essence(mime: &str) -> String {
+    mime.split(';')
         .next()
         .unwrap_or("")
         .trim()
-        .to_ascii_lowercase();
+        .to_ascii_lowercase()
+}
+
+fn is_supported_document_image_mime(mime: &str) -> bool {
     matches!(
-        normalized.as_str(),
+        normalize_mime_essence(mime).as_str(),
         "image/png" | "image/jpeg" | "image/webp" | "image/gif"
     )
+}
+
+fn is_gif_mime(mime: &str) -> bool {
+    normalize_mime_essence(mime) == "image/gif"
 }
 
 impl RawTelegramUpdate {
@@ -200,8 +212,13 @@ impl RawTelegramUpdate {
                     file_size: photo.file_size,
                     caption: msg.caption,
                 }
-            } else if msg.animation.is_some() {
-                // Telegram 对服务端转码为 MP4 的动图会同时填充 animation 与 document，必须先于 document 拦截。
+            } else if msg
+                .animation
+                .as_ref()
+                .is_some_and(|anim| !anim.mime_type.as_deref().is_some_and(is_gif_mime))
+            {
+                // Telegram 对服务端转码为 MP4 的动图会同时填充 animation 与 document，必须先于 document 拦截；
+                // 若未压缩 GIF 的 animation.mime_type 归一化后为 image/gif，则放行至后续 document 分支并经魔数核验。
                 TelegramMessageContent::Unsupported
             } else if let Some(doc) = msg.document {
                 if doc
@@ -506,20 +523,28 @@ mod tests {
             );
         }
 
-        // 转码动图 animation（同时携带 document，即使 mime_type 为 image/gif 或 video/mp4）：必须先于 document 拦截为 Unsupported
-        for anim_doc_mime in ["video/mp4", "image/gif"] {
+        // 转码动图 animation（video/mp4 或无 mime_type）+ document（即使声明 image/gif）：必须先于 document 拦截为 Unsupported
+        for (anim_mime, anim_doc_mime) in [
+            (Some("video/mp4"), "video/mp4"),
+            (Some("video/mp4"), "image/gif"),
+            (None, "image/gif"),
+        ] {
+            let mut anim_obj = serde_json::json!({
+                "file_id": "anim_1",
+                "width": 320,
+                "height": 240,
+                "duration": 3
+            });
+            if let Some(m) = anim_mime {
+                anim_obj["mime_type"] = serde_json::json!(m);
+            }
             let anim_update: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
                 "update_id": 504,
                 "message": {
                     "message_id": 13,
                     "from": {"id": 42},
                     "chat": {"id": 42, "type": "private"},
-                    "animation": {
-                        "file_id": "anim_1",
-                        "width": 320,
-                        "height": 240,
-                        "duration": 3
-                    },
+                    "animation": anim_obj,
                     "document": {
                         "file_id": "anim_1",
                         "file_size": 20480,
@@ -528,7 +553,7 @@ mod tests {
                     "caption": "动图说明"
                 }
             }))
-            .expect("构造动图更新应成功");
+            .expect("构造转码动图更新应成功");
             assert_eq!(
                 anim_update.into_domain().payload,
                 TelegramUpdatePayload::Message {
@@ -538,7 +563,48 @@ mod tests {
                     media_group_id: None,
                     content: TelegramMessageContent::Unsupported,
                 },
-                "携带 animation 的消息必须先于 document 判定为 Unsupported（document MIME={anim_doc_mime}）"
+                "非 image/gif 的 animation（{anim_mime:?}）必须先于 document（{anim_doc_mime}）拦截为 Unsupported"
+            );
+        }
+
+        // 未压缩 GIF（animation 归一化 MIME 为 image/gif + document 声明 image/gif）：放行识别为 Image 并保留元数据
+        for anim_gif_mime in ["image/gif", "  IMAGE/GIF; charset=binary "] {
+            let gif_anim_update: RawTelegramUpdate = serde_json::from_value(serde_json::json!({
+                "update_id": 504,
+                "message": {
+                    "message_id": 14,
+                    "from": {"id": 42},
+                    "chat": {"id": 42, "type": "private"},
+                    "animation": {
+                        "file_id": "raw_gif_1",
+                        "width": 320,
+                        "height": 240,
+                        "duration": 2,
+                        "mime_type": anim_gif_mime
+                    },
+                    "document": {
+                        "file_id": "raw_gif_1",
+                        "file_size": 20480,
+                        "mime_type": "image/gif"
+                    },
+                    "caption": "未压缩动图说明"
+                }
+            }))
+            .expect("构造未压缩 GIF 动图更新应成功");
+            assert_eq!(
+                gif_anim_update.into_domain().payload,
+                TelegramUpdatePayload::Message {
+                    chat: ChatKey::from_platform_id("tg", "42"),
+                    is_private: true,
+                    sender: Some(SenderKey::from_platform_id("tg", "42")),
+                    media_group_id: None,
+                    content: TelegramMessageContent::Image {
+                        file_id: "raw_gif_1".into(),
+                        file_size: Some(20480),
+                        caption: Some("未压缩动图说明".into()),
+                    },
+                },
+                "animation({anim_gif_mime:?}) + document(image/gif) 应识别为受支持图片"
             );
         }
 
