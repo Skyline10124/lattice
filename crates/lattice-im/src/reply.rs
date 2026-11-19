@@ -396,7 +396,9 @@ pub(crate) fn compose_final_reply(outcome: &InProcessTurnOutcome, redactor: &ImR
             let note = if detail.is_empty() {
                 "［本轮执行失败］".to_owned()
             } else {
-                format!("［本轮执行失败：{detail}］")
+                let formatted =
+                    crate::command::format_backend_image_rejection(&detail).unwrap_or(detail);
+                format!("［本轮执行失败：{formatted}］")
             };
             append_outcome_note(body, &note)
         }
@@ -697,6 +699,148 @@ mod tests {
             "拼接分片必须与组装后的回复完全一致"
         );
         assert_eq!(chunks[1], "［本轮执行失败：连接中断 [REDACTED]］");
+    }
+
+    #[test]
+    fn compose_final_reply_formats_image_and_size_rejections_from_live_diagnostic_and_recovered_notice()
+     {
+        let token = ImToken::parse("secret-tok-415").unwrap();
+        let redactor = ImRedactor::new([token]);
+        let empty_tok = TokenSummary {
+            known: Some(0),
+            complete: true,
+            overflowed: false,
+        };
+        let make_outcome =
+            |pub_outcome: PublicTurnOutcome,
+             assistant_text: &str,
+             diag_msg: Option<&str>,
+             notice_msg: Option<&str>| InProcessTurnOutcome {
+                detail: TurnDetail {
+                    turn_id: new_turn_id(),
+                    session_id: new_session_id(),
+                    user_node: NodeId(1),
+                    agent_name: AgentName::parse("test").unwrap(),
+                    accepted_at: Utc::now(),
+                    ended_at: Utc::now(),
+                    summary: TurnSummary {
+                        outcome: pub_outcome,
+                        notice: notice_msg.map(|text| Notice {
+                            level: NoticeLevel::Error,
+                            text: text.to_owned(),
+                        }),
+                        progress: StepProgress::Reserved,
+                    },
+                    usage: Box::new(UsageSummary {
+                        attempts: 0,
+                        partial_attempts: 0,
+                        kind: UsageCompleteness::Complete,
+                        input: empty_tok,
+                        cache_read: empty_tok,
+                        cache_write: empty_tok,
+                        output: empty_tok,
+                        reasoning: empty_tok,
+                        cost: CostSummary {
+                            known: None,
+                            unknown_attempts: 0,
+                            overflowed: false,
+                        },
+                    }),
+                    steps: Vec::new(),
+                },
+                assistant_text: assistant_text.to_owned(),
+                diagnostic: diag_msg.map(|msg| LocalError::new(LocalErrorKind::BadRequest, msg)),
+            };
+
+        let cases = [
+            (
+                "不支持图片输入",
+                "模型 local/m-secret-tok-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+                "不支持图片输入",
+            ),
+            (
+                "32 MiB 本地请求体预算",
+                "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话",
+                "本地请求体预算（32 MiB）",
+            ),
+            (
+                "远端 HTTP 413",
+                "HTTP 413 request_too_large: secret-tok-415 exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话",
+                "目标服务拒绝了本次请求大小（HTTP 413）",
+            ),
+        ];
+
+        for (label, raw_msg, expected_reason) in cases {
+            // 1. 实时路径：outcome.diagnostic 存在
+            let live = compose_final_reply(
+                &make_outcome(PublicTurnOutcome::Failed, "", Some(raw_msg), None),
+                &redactor,
+            );
+            // 2. 重挂/重启恢复路径：outcome.diagnostic == None，从持久 summary.notice.text 恢复
+            let recovered = compose_final_reply(
+                &make_outcome(PublicTurnOutcome::Failed, "", None, Some(raw_msg)),
+                &redactor,
+            );
+            assert_eq!(
+                live, recovered,
+                "{label} 在实时 diagnostic 与持久 summary.notice 恢复路径下的输出必须一致"
+            );
+            for rendered in [&live, &recovered] {
+                assert!(
+                    !rendered.contains("secret-tok-415"),
+                    "{label} 不得泄露机器人凭据：{rendered}"
+                );
+                assert!(
+                    rendered.starts_with("［本轮执行失败：") && rendered.ends_with('］'),
+                    "{label} 应保持失败结局说明格式：{rendered}"
+                );
+                assert!(
+                    rendered.contains(expected_reason)
+                        && rendered.contains("减少图片")
+                        && rendered.contains("/new")
+                        && rendered.contains("lattice session rewind"),
+                    "{label} 应包含脱敏中文原因与完整 IM 引导：{rendered}"
+                );
+                assert_eq!(
+                    rendered.matches("减少图片").count(),
+                    1,
+                    "{label} 不得重复拼接引导文案：{rendered}"
+                );
+            }
+        }
+
+        // 普通 Failed、Cancelled 与 Completed 保持不变
+        assert_eq!(
+            compose_final_reply(
+                &make_outcome(
+                    PublicTurnOutcome::Failed,
+                    "",
+                    None,
+                    Some("HTTP 502 Bad Gateway"),
+                ),
+                &redactor,
+            ),
+            "［本轮执行失败：HTTP 502 Bad Gateway］"
+        );
+        assert_eq!(
+            compose_final_reply(
+                &make_outcome(
+                    PublicTurnOutcome::Cancelled,
+                    "半截输出",
+                    None,
+                    Some("用户取消"),
+                ),
+                &redactor,
+            ),
+            "半截输出\n\n［本轮已取消：用户取消］"
+        );
+        assert_eq!(
+            compose_final_reply(
+                &make_outcome(PublicTurnOutcome::Completed, "正常回复", None, None),
+                &redactor,
+            ),
+            "正常回复"
+        );
     }
 
     #[test]

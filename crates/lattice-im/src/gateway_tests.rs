@@ -785,6 +785,25 @@ impl ImTestHarness {
         assert_eq!(exit.drain, DrainOutcome::Completed);
         drop(exit.instance);
     }
+
+    fn set_model_input_modalities(&self, modalities: &[&str]) {
+        let endpoint = format!("http://{}/v1", self.listener.local_addr().unwrap());
+        let mods = modalities
+            .iter()
+            .map(|m| format!("{m:?}"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let cfg_priv = PrivateDirectory::open_or_create(&self.config_dir).unwrap();
+        cfg_priv
+            .replace(
+                OsStr::new("providers.toml"),
+                format!(
+                    "[providers.local]\nprotocol='chat-completions'\nbase_url='{endpoint}'\nauth='none'\n\n[providers.local.models.\"local-test\"]\ninput = [{mods}]\n"
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+    }
 }
 
 // 场景 1 & 11：普通消息完整闭环（configure(New) -> submit -> Accepted -> 不含隐藏推理的流式草稿 -> 最终回复 -> Delivered）
@@ -5984,5 +6003,583 @@ async fn throttles_idle_polls_at_100ms_during_single_image_429_backoff_and_wakes
     );
     assert_eq!(io.download_calls().len(), 1);
 
+    harness.shutdown().await;
+}
+
+/// 分块排空假 provider 收到的 HTTP 请求头与正文并返回 `Content-Length`，避免在大预算测试中额外分配整包字符串副本。
+async fn drain_http_request_len(socket: &mut tokio::net::TcpStream) -> usize {
+    let mut headers = Vec::new();
+    while !headers.ends_with(b"\r\n\r\n") {
+        headers.push(socket.read_u8().await.expect("读取 HTTP 请求头应成功"));
+    }
+    let header_str = String::from_utf8(headers).expect("HTTP 头应为 UTF-8");
+    let content_len: usize = header_str
+        .lines()
+        .find_map(|line| {
+            line.to_ascii_lowercase()
+                .strip_prefix("content-length:")
+                .map(|v| v.trim().parse().expect("解析 Content-Length 应成功"))
+        })
+        .unwrap_or(0);
+    let mut remaining = content_len;
+    let mut buf = vec![0_u8; 64 * 1024];
+    while remaining > 0 {
+        let to_read = remaining.min(buf.len());
+        socket
+            .read_exact(&mut buf[..to_read])
+            .await
+            .expect("排空 HTTP 请求体字节应成功");
+        remaining -= to_read;
+    }
+    content_len
+}
+
+/// 向假 provider 连接写入 `HTTP/1.1 413 Payload Too Large` JSON 错误响应。
+async fn write_http_413_error(socket: &mut tokio::net::TcpStream, body_json: &str) {
+    let header = format!(
+        "HTTP/1.1 413 Payload Too Large\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body_json.len()
+    );
+    socket.write_all(header.as_bytes()).await.unwrap();
+    socket.write_all(body_json.as_bytes()).await.unwrap();
+    socket.flush().await.unwrap();
+}
+
+// 场景 25：目标模型不支持图片输入（input = ["text"]）：
+// 私聊发送合法图片时在准入预检阶段被拒绝，假模型零 HTTP 连接，IM 回复含脱敏中文原因与减少图片、/new、lattice session rewind 引导，
+// 台账推进为 DeliveredTurn，且确认 offset 正常推进。
+#[tokio::test]
+async fn rejects_image_for_text_only_model_with_im_guidance_and_marks_delivered_turn() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    harness.set_model_input_modalities(&["text"]);
+
+    let io = Arc::new(FakeTelegramIo::default());
+    let png = b"\x89PNG\r\n\x1a\nTEXT_ONLY_MODEL_CHECK".to_vec();
+    io.set_download_bytes("text_only_f1", png.clone());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    io.push_updates(vec![private_photo_update(
+        3601,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("text_only_f1", Some(png.len() as u64))],
+        Some("请帮我分析这张图"),
+    )]);
+
+    let msgs = io.wait_message_count(1).await;
+    io.wait_offset(Some(3602)).await;
+
+    let reply = &msgs[0].1;
+    assert!(
+        reply.contains("local/local-test") && reply.contains("不支持图片输入"),
+        "拒绝回复应包含脱敏中文原因与模型名：{reply}"
+    );
+    assert!(
+        reply.contains("减少图片")
+            && reply.contains("/new")
+            && reply.contains("lattice session rewind"),
+        "拒绝回复必须同时引导减少图片、发送 /new 与执行 lattice session rewind：{reply}"
+    );
+    assert!(
+        !reply.contains("INTEGRATION_BOT_SECRET"),
+        "拒绝回复严禁泄露机器人凭据：{reply}"
+    );
+    assert_eq!(
+        reply.matches("减少图片").count(),
+        1,
+        "拒绝回复不得重复拼接冗余引导：{reply}"
+    );
+
+    // 等待异步拒绝回复任务将首条台账标记为 DeliveredTurn
+    bounded(async {
+        loop {
+            let snap = Ledger::open_and_prune(
+                harness.layout.clone(),
+                Utc::now(),
+                TELEGRAM_REDELIVERY_WINDOW,
+            )
+            .await
+            .unwrap();
+            if matches!(
+                snap.inbound_record(&inbound_id_from_update_id(3601)).await,
+                Some(InboundRecord::DeliveredTurn { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    // 网关与所有子任务已收尾，确认假模型监听器从未收到任何 TCP 连接
+    let listener_pending = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(harness.listener.poll_accept(cx).is_pending())
+    })
+    .await;
+    assert!(
+        listener_pending,
+        "纯文本模型准入预检拒绝图片时，假模型必须保持零 HTTP 连接"
+    );
+
+    harness.shutdown().await;
+}
+
+// 场景 26：累计历史超过 32 MiB 本地请求体预算：
+// 前 3 轮每轮提交 2 张 3.6 MiB 合法 PNG（每轮约 9.6 MiB base64，3 轮累计约 28.8 MiB 均成功），
+// 第 4 轮再发 1 张 3.6 MiB PNG 使累计超过 32 MiB 触发准入预检拒绝：第 4 轮假模型零新连接，
+// IM 回复含 32 MiB / 本地请求体预算原因及减少图片、/new、lattice session rewind 引导，台账记为 DeliveredTurn。
+#[tokio::test(start_paused = true)]
+async fn rejects_fourth_round_exceeding_32mib_local_request_budget_with_im_guidance() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    harness.set_model_input_modalities(&["text", "image"]);
+
+    let io = Arc::new(FakeTelegramIo::default());
+    // 3_774_873 字节（3.60 MiB <= 3.75 MiB），单张 base64 恰好 5_033_164 字节（4.80 MiB）
+    let mut big_png = vec![0u8; 3_774_873];
+    big_png[..8].copy_from_slice(b"\x89PNG\r\n\x1a\n");
+    io.set_download_bytes("budget_big_png", big_png.clone());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+    let _ = io.wait_poll_count(1).await;
+
+    for round in 1..=3_i64 {
+        let base_uid = 3700 + round * 10;
+        let group_id = format!("budget-album-{round}");
+        io.push_updates(vec![
+            private_album_photo_update(
+                base_uid + 1,
+                PRIVATE_CHAT_ID,
+                ALLOWED_UID,
+                &group_id,
+                &[("budget_big_png", Some(big_png.len() as u64))],
+                Some(&format!("第{round}轮大图组")),
+            ),
+            private_album_photo_update(
+                base_uid + 2,
+                PRIVATE_CHAT_ID,
+                ALLOWED_UID,
+                &group_id,
+                &[("budget_big_png", Some(big_png.len() as u64))],
+                None,
+            ),
+        ]);
+        let _ = io.wait_poll_count((round as usize) + 1).await;
+        tokio::time::advance(Duration::from_millis(600)).await;
+
+        let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
+        let req_len = drain_http_request_len(&mut sock).await;
+        assert!(
+            req_len > (round as usize) * 10_000_000 && req_len <= 32 * 1024 * 1024,
+            "第 {round} 轮请求体长度应随历史图片递增且在 32 MiB 预算内，实际: {req_len}"
+        );
+        write_sse_complete(&mut sock, None, &format!("第{round}轮完成"), None).await;
+
+        let msgs = io.wait_message_count(round as usize).await;
+        assert_eq!(msgs[(round as usize) - 1].1, format!("第{round}轮完成"));
+        io.wait_offset(Some(base_uid + 3)).await;
+    }
+
+    // 第 4 轮发送 1 张单图（累计 7 张约 33.6 MiB base64 > 32 MiB），在后台准入预检阶段被拒绝
+    io.push_updates(vec![private_photo_update(
+        3741,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("budget_big_png", Some(big_png.len() as u64))],
+        Some("第4轮越过本地请求体预算"),
+    )]);
+
+    let all_msgs = io.wait_message_count(4).await;
+    io.wait_offset(Some(3742)).await;
+
+    let fourth_reply = &all_msgs[3].1;
+    assert!(
+        fourth_reply.contains("本地请求体预算") && fourth_reply.contains("32 MiB"),
+        "第 4 轮回复应包含 32 MiB 本地请求体预算原因：{fourth_reply}"
+    );
+    assert!(
+        fourth_reply.contains("减少图片")
+            && fourth_reply.contains("/new")
+            && fourth_reply.contains("lattice session rewind"),
+        "第 4 轮回复必须包含减少图片、/new 与 lattice session rewind 引导：{fourth_reply}"
+    );
+    assert!(!fourth_reply.contains("INTEGRATION_BOT_SECRET"));
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
+
+    // 验证第 4 轮未向假模型发起任何新 HTTP 连接
+    let no_fourth_conn = std::future::poll_fn(|cx| {
+        std::task::Poll::Ready(harness.listener.poll_accept(cx).is_pending())
+    })
+    .await;
+    assert!(
+        no_fourth_conn,
+        "第 4 轮触发 32 MiB 本地预算预检拒绝时，假模型必须零新连接"
+    );
+
+    let ledger = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        ledger
+            .inbound_record(&inbound_id_from_update_id(3741))
+            .await,
+        Some(InboundRecord::DeliveredTurn { .. })
+    ));
+
+    harness.shutdown().await;
+}
+
+// 场景 27：远端返回 HTTP 413（覆盖实时投递与停机重启后从持久 summary.notice 恢复补发两条路径）：
+// - 实时路径：假模型返回 HTTP/1.1 413 Payload Too Large，IM 回复含 HTTP 413、脱敏原因及减少图片、/new、lattice session rewind，台账落为 DeliveredTurn；
+// - 恢复路径：第 2 轮图片在发送最终回复前被停机中断（台账停在 Accepted），核实持久库中 outcome.diagnostic == None 且 summary.notice 含 HTTP 413，
+//   重启新网关实例后补发的最终回复同样包含完整 HTTP 413 原因与 IM 引导，并将台账推进为 DeliveredTurn。
+#[tokio::test]
+async fn delivers_http_413_guidance_both_live_and_via_recovered_summary_notice() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    harness.set_model_input_modalities(&["text", "image"]);
+
+    let png_1 = b"\x89PNG\r\n\x1a\nHTTP_413_LIVE_ROUND".to_vec();
+    let png_2 = b"\x89PNG\r\n\x1a\nHTTP_413_RECOVER_ROUND".to_vec();
+
+    let io1 = Arc::new(FakeTelegramIo::default());
+    io1.set_download_bytes("f413_live", png_1.clone());
+    io1.set_download_bytes("f413_recover", png_2.clone());
+
+    let (gw_stop1, gw_task1) = harness.spawn_gateway(Arc::clone(&io1));
+
+    // 1. 实时路径：第 1 轮假模型返回 HTTP 413 JSON 错误体
+    io1.push_updates(vec![private_photo_update(
+        3801,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("f413_live", Some(png_1.len() as u64))],
+        Some("实时 413 测试"),
+    )]);
+
+    let (mut sock1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock1).await;
+    write_http_413_error(
+        &mut sock1,
+        r#"{"error":{"message":"Request payload size exceeds upstream 8 MiB limit","type":"request_too_large"}}"#,
+    )
+    .await;
+
+    let live_msgs = io1.wait_message_count(1).await;
+    io1.wait_offset(Some(3802)).await;
+
+    let live_reply = &live_msgs[0].1;
+    assert!(
+        live_reply.contains("［本轮执行失败：")
+            && live_reply.contains("HTTP 413")
+            && live_reply.contains("Request payload size exceeds upstream 8 MiB limit")
+            && live_reply.contains("目标服务拒绝了本次请求大小"),
+        "实时 413 回复应包含脱敏远端摘要与中文原因：{live_reply}"
+    );
+    assert!(
+        live_reply.contains("减少图片")
+            && live_reply.contains("/new")
+            && live_reply.contains("lattice session rewind"),
+        "实时 413 回复必须包含减少图片、/new 与 lattice session rewind：{live_reply}"
+    );
+    assert!(!live_reply.contains("INTEGRATION_BOT_SECRET"));
+
+    bounded(async {
+        loop {
+            let snap = Ledger::open_and_prune(
+                harness.layout.clone(),
+                Utc::now(),
+                TELEGRAM_REDELIVERY_WINDOW,
+            )
+            .await
+            .unwrap();
+            if matches!(
+                snap.inbound_record(&inbound_id_from_update_id(3801)).await,
+                Some(InboundRecord::DeliveredTurn { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    // 2. 恢复路径：拦截第 2 轮最终回复发送，在后台轮次已以 HTTP 413 失败落盘但 IM 尚未发出回复时停机
+    let _hold_round2_send = io1.install_send_gate();
+    io1.push_updates(vec![private_photo_update(
+        3802,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        &[("f413_recover", Some(png_2.len() as u64))],
+        Some("重启恢复 413 测试"),
+    )]);
+
+    let (mut sock2, _) = bounded(harness.listener.accept()).await.unwrap();
+    let _ = read_http_request(&mut sock2).await;
+    write_http_413_error(
+        &mut sock2,
+        r#"{"error":{"message":"Second turn payload exceeds gateway cap","type":"request_too_large"}}"#,
+    )
+    .await;
+
+    // 第 1 轮已进入过 1 次 send_message，等待第 2 轮进入 send_message 闸门后立即停机旧网关实例
+    io1.wait_send_entered(2).await;
+    io1.wait_offset(Some(3803)).await;
+    let _ = gw_stop1.send(());
+    bounded(gw_task1).await.unwrap().unwrap();
+    assert_eq!(
+        io1.sent_messages.lock().unwrap().len(),
+        1,
+        "停机中断前第 2 轮回复尚未发出"
+    );
+
+    // 核实持久状态：台账停在 Accepted，且后台 observe 读出的 outcome.diagnostic 为 None、summary.notice 含 HTTP 413
+    let (session_id, round2_turn_id) = {
+        let snap = Ledger::open_and_prune(
+            harness.layout.clone(),
+            Utc::now(),
+            TELEGRAM_REDELIVERY_WINDOW,
+        )
+        .await
+        .unwrap();
+        match snap.inbound_record(&inbound_id_from_update_id(3802)).await {
+            Some(InboundRecord::Accepted { session, turn, .. }) => (session, turn),
+            other => panic!("停机中断发送后 3802 应保留在 Accepted 相位，实际: {other:?}"),
+        }
+    };
+    {
+        let mut observed = harness
+            .service
+            .observe(session_id, round2_turn_id)
+            .await
+            .expect("观察已落盘的失败轮次应成功");
+        let raw_outcome = bounded(observed.outcome()).await.unwrap();
+        assert_eq!(
+            raw_outcome.diagnostic, None,
+            "恢复路径必须依赖持久 summary.notice 而非内存 diagnostic"
+        );
+        let persisted_notice = raw_outcome
+            .detail
+            .summary
+            .notice
+            .as_ref()
+            .expect("持久轮次摘要必须记录 HTTP 413 notice");
+        assert!(persisted_notice.text.contains("HTTP 413"));
+    }
+
+    // 启动新网关实例 io2，自动从持久库恢复 Accepted 条目并补发最终回复
+    let io2 = Arc::new(FakeTelegramIo::default());
+    let (gw_stop2, gw_task2) = harness.spawn_gateway(Arc::clone(&io2));
+
+    let recovered_msgs = io2.wait_message_count(1).await;
+    let recovered_reply = &recovered_msgs[0].1;
+    assert!(
+        recovered_reply.contains("［本轮执行失败：")
+            && recovered_reply.contains("HTTP 413")
+            && recovered_reply.contains("Second turn payload exceeds gateway cap")
+            && recovered_reply.contains("目标服务拒绝了本次请求大小"),
+        "恢复补发的 413 回复应包含持久 summary.notice 中的原因：{recovered_reply}"
+    );
+    assert!(
+        recovered_reply.contains("减少图片")
+            && recovered_reply.contains("/new")
+            && recovered_reply.contains("lattice session rewind"),
+        "恢复补发的 413 回复必须包含减少图片、/new 与 lattice session rewind：{recovered_reply}"
+    );
+    assert!(!recovered_reply.contains("INTEGRATION_BOT_SECRET"));
+
+    bounded(async {
+        loop {
+            let snap = Ledger::open_and_prune(
+                harness.layout.clone(),
+                Utc::now(),
+                TELEGRAM_REDELIVERY_WINDOW,
+            )
+            .await
+            .unwrap();
+            if matches!(
+                snap.inbound_record(&inbound_id_from_update_id(3802)).await,
+                Some(InboundRecord::DeliveredTurn { .. })
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+
+    let _ = gw_stop2.send(());
+    bounded(gw_task2).await.unwrap().unwrap();
+    harness.shutdown().await;
+}
+
+// 场景 28：跨前端 BLOBS 回放测试（本地客户端 LocalClient 在 IM 含图会话上续发纯文本消息）：
+// 先通过 IM 私聊提交图片完成首轮并落盘，再由连接同一后台的真实 LocalClient 向同一绑定 SessionId 提交纯文本续发，
+// 验证假模型收到的第 2 轮 HTTP 请求体精确重放了 IM 持久化在 BLOBS 中的原始图片（base64 data URL 逐字节一致），且 LocalClient 收到完整模型回复。
+#[tokio::test]
+async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
+    let harness = ImTestHarness::start(&[ALLOWED_UID]).await;
+    harness.set_model_input_modalities(&["text", "image"]);
+
+    let io = Arc::new(FakeTelegramIo::default());
+    let chat_key = chat_key_from_id(PRIVATE_CHAT_ID);
+    let im_png = b"\x89PNG\r\n\x1a\nCROSS_FRONTEND_BLOBS_REPLAY_IMAGE_PAYLOAD".to_vec();
+    let expected_data_url = format!("data:image/png;base64,{}", test_base64_encode(&im_png));
+    io.set_download_bytes("cross_frontend_png", im_png.clone());
+
+    let (gw_stop, gw_task) = harness.spawn_gateway(Arc::clone(&io));
+
+    // 1. 先经 IM 网关向私聊发送含图消息完成第 1 轮并落盘至会话库 BLOBS
+    io.push_updates(vec![private_document_update(
+        3901,
+        PRIVATE_CHAT_ID,
+        ALLOWED_UID,
+        "cross_frontend_png",
+        Some(im_png.len() as u64),
+        Some("image/png"),
+        Some("请记住这张来自 Telegram 私聊的架构图"),
+    )]);
+
+    let (mut sock1, _) = bounded(harness.listener.accept()).await.unwrap();
+    let req1: serde_json::Value =
+        serde_json::from_str(&read_http_request(&mut sock1).await).unwrap();
+    assert_eq!(
+        req1["messages"].as_array().unwrap().last().unwrap()["content"],
+        serde_json::json!([
+            {
+                "type": "image_url",
+                "image_url": { "url": expected_data_url }
+            },
+            {
+                "type": "text",
+                "text": "请记住这张来自 Telegram 私聊的架构图"
+            }
+        ])
+    );
+    write_sse_complete(&mut sock1, None, "IM 首轮图片已记录", Some((30, 10))).await;
+
+    let im_msgs = io.wait_message_count(1).await;
+    assert_eq!(im_msgs[0].1, "IM 首轮图片已记录");
+    io.wait_offset(Some(3902)).await;
+
+    let bound_sid = Ledger::open_and_prune(
+        harness.layout.clone(),
+        Utc::now(),
+        TELEGRAM_REDELIVERY_WINDOW,
+    )
+    .await
+    .unwrap()
+    .bound_session(&chat_key)
+    .await
+    .expect("IM 首轮完成后台账应绑定 SessionId");
+
+    // 2. 经真实 LocalClient（连接同一后台 IPC socket，等价于 `lattice session send --session <id>`）在同一会话上提交纯文本续发
+    let ipc_client = LocalClient::new(harness.layout.clone());
+    let cli_turn_id = new_turn_id();
+    let mut local_turn = ipc_client.start_turn(TurnRequest {
+        turn_id: cli_turn_id,
+        session: bound_sid,
+        workspace: harness.workspace.clone(),
+        parts: vec![UserInputPart::Text {
+            text: "终端 CLI 纯文本续发：请结合上一轮图片回答".into(),
+        }],
+        expected_settings: None,
+    });
+
+    let model_round2 = async {
+        let (mut sock2, _) = bounded(harness.listener.accept()).await.unwrap();
+        let req2: serde_json::Value =
+            serde_json::from_str(&read_http_request(&mut sock2).await).unwrap();
+        let msgs_arr = req2["messages"].as_array().unwrap();
+        let replayed_urls: Vec<String> = msgs_arr
+            .iter()
+            .filter_map(|m| m["content"].as_array())
+            .flatten()
+            .filter_map(|part| part["image_url"]["url"].as_str().map(str::to_owned))
+            .collect();
+        assert_eq!(
+            replayed_urls,
+            vec![expected_data_url.clone()],
+            "LocalClient 纯文本续发请求必须从会话库 BLOBS 精确重放 IM 提交的同一张原始图片"
+        );
+        assert!(
+            msgs_arr.iter().any(|m| m["content"] == "IM 首轮图片已记录"),
+            "续发请求应携带 IM 首轮助手回复上下文"
+        );
+        let last_user = msgs_arr.last().unwrap();
+        assert_eq!(last_user["role"], "user");
+        assert!(
+            last_user["content"] == "终端 CLI 纯文本续发：请结合上一轮图片回答"
+                || last_user["content"]
+                    == serde_json::json!([{"type": "text", "text": "终端 CLI 纯文本续发：请结合上一轮图片回答"}]),
+            "末尾用户消息应为 LocalClient 提交的纯文本续发内容，实际: {}",
+            last_user["content"]
+        );
+        write_sse_complete(
+            &mut sock2,
+            None,
+            "CLI 续发已读取历史图片并完成回答",
+            Some((55, 18)),
+        )
+        .await;
+    };
+
+    let client_collect = async {
+        let mut step_replies = Vec::new();
+        while let Some(upd) = bounded(local_turn.next()).await {
+            if let LocalUpdate::Entry { entry } = upd
+                && let ConversationEntry::Step {
+                    step,
+                    content:
+                        Node::Step {
+                            reply: Some(message),
+                            ..
+                        },
+                    ..
+                } = *entry
+                && step.key.turn_id == cli_turn_id
+            {
+                let text: String = message
+                    .parts
+                    .iter()
+                    .filter_map(|part| match &part.semantic {
+                        MessageSemantic::Text { text } => Some(text.as_str()),
+                        _ => None,
+                    })
+                    .collect();
+                step_replies.push(text);
+            }
+        }
+        let report = bounded(local_turn.detach()).await;
+        (step_replies, report)
+    };
+
+    let ((), (step_replies, report)) = tokio::join!(model_round2, client_collect);
+    assert_eq!(
+        report.summary.map(|s| s.outcome),
+        Some(PublicTurnOutcome::Completed),
+        "LocalClient 续发轮次应正常完成"
+    );
+    assert_eq!(
+        step_replies,
+        vec!["CLI 续发已读取历史图片并完成回答".to_string()],
+        "LocalClient 必须完整收到模型基于重放历史图片生成的回复"
+    );
+    assert_eq!(
+        io.sent_messages.lock().unwrap().len(),
+        1,
+        "外部 LocalClient 发起的轮次不应向 Telegram 重复发送额外消息"
+    );
+
+    let _ = gw_stop.send(());
+    bounded(gw_task).await.unwrap().unwrap();
     harness.shutdown().await;
 }

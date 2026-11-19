@@ -91,6 +91,42 @@ pub(crate) fn is_not_found_or_uninitialized(error: &LocalError) -> bool {
         )
 }
 
+const CLI_UNSUPPORTED_IMAGE_SUFFIX: &str =
+    "；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点";
+const CLI_REQUEST_SIZE_SUFFIX: &str =
+    "，请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+const IM_IMAGE_REJECTION_GUIDANCE: &str =
+    "请减少图片、发送 /new 开启新会话，或在终端执行 lattice session rewind 退回较早节点";
+
+/// 识别后台图片输入或请求体大小拒绝（模型不支持图片输入、超过 32 MiB 本地请求体预算、远端 HTTP 413），
+/// 保留脱敏中文原因并替换为面向 IM 用户的统一可操作引导。
+pub(crate) fn format_backend_image_rejection(sanitized_detail: &str) -> Option<String> {
+    let is_unsupported_image = sanitized_detail.contains("不支持图片输入");
+    let is_local_budget = sanitized_detail.contains("本地请求体预算")
+        || (sanitized_detail.contains("32 MiB")
+            && (sanitized_detail.contains("请求") || sanitized_detail.contains("预算")));
+    let is_http_413 = sanitized_detail.contains("HTTP 413");
+
+    if !is_unsupported_image && !is_local_budget && !is_http_413 {
+        return None;
+    }
+
+    let base = sanitized_detail
+        .strip_suffix(CLI_UNSUPPORTED_IMAGE_SUFFIX)
+        .or_else(|| sanitized_detail.strip_suffix(CLI_REQUEST_SIZE_SUFFIX))
+        .unwrap_or(sanitized_detail)
+        .trim_end_matches(['；', '，', ';', ','])
+        .trim();
+
+    let reason = if is_http_413 && !base.contains("目标服务拒绝了本次请求大小") {
+        format!("{base}；目标服务拒绝了本次请求大小（HTTP 413）")
+    } else {
+        base.to_owned()
+    };
+
+    Some(format!("{reason}；{IM_IMAGE_REJECTION_GUIDANCE}"))
+}
+
 /// 将后台 `LocalError` 转换为面向 IM 用户的脱敏单行中文说明。
 pub(crate) fn describe_local_error(error: &LocalError, redactor: &ImRedactor) -> String {
     match error.kind {
@@ -115,6 +151,8 @@ pub(crate) fn describe_local_error(error: &LocalError, redactor: &ImRedactor) ->
             let detail = redactor.sanitize_single_line(&error.message);
             if detail.is_empty() || detail == "request or frozen configuration is invalid" {
                 "请求或会话配置无效".into()
+            } else if let Some(guided) = format_backend_image_rejection(&detail) {
+                guided
             } else {
                 format!("请求或配置无效（{detail}）")
             }
@@ -306,6 +344,87 @@ mod tests {
             HELP_REPLY.lines().count(),
             6,
             "/help 与 /start 回复应包含 5 条命令加 1 条直接发送说明"
+        );
+    }
+
+    #[test]
+    fn formats_backend_image_and_size_rejections_with_im_guidance_without_affecting_ordinary_errors()
+     {
+        let secret = lattice_server::ImToken::parse("bot-secret-token-415").unwrap();
+        let redactor = ImRedactor::new([secret]);
+
+        let unsupported_raw = "模型 local/text-only-bot-secret-token-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点";
+        let budget_raw = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let http_413_raw = "HTTP 413 INVALID_ARGUMENT: payload bot-secret-token-415 too large；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+
+        for (label, raw_msg, expected_reason) in [
+            ("模型不支持图片输入", unsupported_raw, "不支持图片输入"),
+            (
+                "累计超过 32 MiB 本地请求体预算",
+                budget_raw,
+                "本地请求体预算（32 MiB）",
+            ),
+            (
+                "远端 HTTP 413 拒绝",
+                http_413_raw,
+                "目标服务拒绝了本次请求大小（HTTP 413）",
+            ),
+        ] {
+            let err = LocalError::new(LocalErrorKind::BadRequest, raw_msg);
+            let rendered = describe_local_error(&err, &redactor);
+            assert!(
+                !rendered.contains("bot-secret-token-415"),
+                "{label} 不得泄露机器人凭据：{rendered}"
+            );
+            assert!(
+                rendered.contains(expected_reason),
+                "{label} 应保留脱敏中文原因：{rendered}"
+            );
+            assert!(
+                rendered.contains("减少图片")
+                    && rendered.contains("/new")
+                    && rendered.contains("lattice session rewind"),
+                "{label} 必须同时引导减少图片、发送 /new 与执行 lattice session rewind：{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("减少图片").count(),
+                1,
+                "{label} 不得重复拼接两份引导说明：{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("lattice session rewind").count(),
+                1,
+                "{label} 不得重复出现两处 lattice session rewind：{rendered}"
+            );
+        }
+
+        // 普通 Busy 与普通非图片/非大小类 BadRequest 保持原样不变
+        assert_eq!(
+            describe_local_error(
+                &LocalError::new(LocalErrorKind::Busy, "session is busy"),
+                &redactor,
+            ),
+            "正在忙，可发 /cancel"
+        );
+        assert_eq!(
+            describe_local_error(
+                &LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "request or frozen configuration is invalid",
+                ),
+                &redactor,
+            ),
+            "请求或会话配置无效"
+        );
+        assert_eq!(
+            describe_local_error(
+                &LocalError::new(
+                    LocalErrorKind::BadRequest,
+                    "model reference must be <provider>/<model>",
+                ),
+                &redactor,
+            ),
+            "请求或配置无效（model reference must be <provider>/<model>）"
         );
     }
 }
