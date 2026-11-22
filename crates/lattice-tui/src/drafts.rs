@@ -41,13 +41,9 @@ impl Draft {
     }
 }
 
-enum EditTarget {
-    NewComment(Draft),
-    SavedComment(Draft),
-}
-
 struct Editor {
-    target: EditTarget,
+    draft: Draft,
+    saved: bool,
     input: InputBuffer,
 }
 
@@ -63,18 +59,13 @@ impl Drafts {
     }
 
     pub(crate) fn drafts(&self) -> impl Iterator<Item = &Draft> {
-        let edited = match self.editor.as_ref().map(|editor| &editor.target) {
-            Some(EditTarget::NewComment(draft) | EditTarget::SavedComment(draft)) => Some(draft),
-            None => None,
-        };
-        self.drafts.iter().chain(edited)
+        self.drafts
+            .iter()
+            .chain(self.editor.as_ref().map(|editor| &editor.draft))
     }
 
     pub(crate) fn draft_count(&self) -> usize {
-        let saved = self
-            .editor
-            .as_ref()
-            .is_some_and(|editor| matches!(editor.target, EditTarget::SavedComment(_)));
+        let saved = self.editor.as_ref().is_some_and(|editor| editor.saved);
         self.drafts.len().saturating_add(usize::from(saved))
     }
 
@@ -85,11 +76,10 @@ impl Drafts {
     }
 
     pub(crate) fn editor(&self, id: BlockId) -> Option<&InputBuffer> {
-        let editor = self.editor.as_ref()?;
-        let target = match &editor.target {
-            EditTarget::NewComment(draft) | EditTarget::SavedComment(draft) => draft.id,
-        };
-        (target == id).then_some(&editor.input)
+        self.editor
+            .as_ref()
+            .filter(|editor| editor.draft.id == id)
+            .map(|editor| &editor.input)
     }
 
     pub(crate) fn start_edit(&mut self, id: BlockId) -> bool {
@@ -103,7 +93,8 @@ impl Drafts {
         let mut input = InputBuffer::new();
         input.set_text(&draft.comment.text);
         self.editor = Some(Editor {
-            target: EditTarget::SavedComment(draft),
+            draft,
+            saved: true,
             input,
         });
         true
@@ -131,36 +122,27 @@ impl Drafts {
             return;
         };
         self.editor = Some(Editor {
-            target: EditTarget::NewComment(Draft {
+            draft: Draft {
                 id,
                 comment: anchor.into_comment(n),
-            }),
+            },
+            saved: false,
             input: InputBuffer::new(),
         });
     }
 
     pub(crate) fn finish_edit(&mut self, save: bool) -> Option<Location> {
-        let Editor { target, input } = self.editor.take()?;
-        match target {
-            EditTarget::NewComment(mut draft) => {
-                let location = draft.comment.location.clone();
-                if save && !input.text().trim().is_empty() {
-                    draft.comment.text = input.text();
-                    self.drafts.push(draft);
-                }
-                Some(location)
-            }
-            EditTarget::SavedComment(mut draft) => {
-                let location = draft.comment.location.clone();
-                if save {
-                    draft.comment.text = input.text();
-                }
-                if !draft.comment.text.trim().is_empty() {
-                    self.drafts.push(draft);
-                }
-                Some(location)
-            }
+        let Editor {
+            mut draft, input, ..
+        } = self.editor.take()?;
+        let location = draft.comment.location.clone();
+        if save {
+            draft.comment.text = input.text();
         }
+        if !draft.comment.text.trim().is_empty() {
+            self.drafts.push(draft);
+        }
+        Some(location)
     }
 
     pub(crate) fn edit(&mut self, action: &KeyAction, width: u16) {
@@ -221,16 +203,11 @@ impl Drafts {
             present
         };
         self.drafts.retain(|draft| keep(&draft.comment));
-        let discard_editor = if let Some(editor) = &mut self.editor {
-            match &mut editor.target {
-                EditTarget::NewComment(draft) | EditTarget::SavedComment(draft) => {
-                    !keep(&draft.comment)
-                }
-            }
-        } else {
-            false
-        };
-        if discard_editor {
+        if self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| !keep(&editor.draft.comment))
+        {
             self.editor = None;
         }
         dropped.sort_unstable();

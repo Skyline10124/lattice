@@ -1191,16 +1191,16 @@ impl App {
         self.mark_rejected_comments(turn_id);
         // 评论不进输入历史，总是恢复为草稿。
         let input = self.drafts.restore(message, &mut self.blocks);
-        let kept = if self.input.is_empty() {
+        let kept = if input.is_empty() {
+            KeptInput::Nothing
+        } else if self.input.is_empty() {
             self.input = input;
             self.input.move_to_end();
             KeptInput::Restored
         } else if !input.text().trim().is_empty() {
             KeptInput::History
-        } else if input.image_count() > 0 {
-            KeptInput::Discarded
         } else {
-            KeptInput::Restored
+            KeptInput::Discarded
         };
         self.discard_missing_comments();
         kept

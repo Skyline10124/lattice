@@ -68,7 +68,7 @@ fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
     h.app.apply_action(KeyAction::Submit);
     assert!(
         h.app.drafts.is_editing(),
-        "closed text opens comment editor"
+        "已关闭轮次的正文应打开评论编辑器"
     );
     h.app.apply_action(KeyAction::Paste("note".into()));
     h.app.apply_action(KeyAction::Submit);
@@ -198,7 +198,7 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         assert!(text.contains("草稿 · #1"), "{how}: {text}");
         comment_browse(app, "rejected note");
         app.apply_action(KeyAction::Submit);
-        assert!(app.drafts.is_editing(), "restored draft remains editable");
+        assert!(app.drafts.is_editing(), "归还的草稿应仍可编辑");
         app.apply_action(KeyAction::Clear);
         comment_browse(app, "rejected note");
         app.apply_action(KeyAction::Delete);
@@ -206,7 +206,49 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         assert_eq!(
             app.drafts.drafts().next().unwrap().comment().n,
             2,
-            "retained rejected marker reserves its number"
+            "保留的被拒标记应继续占用原编号"
+        );
+    }
+}
+
+#[test]
+fn comment_only_unknown_then_not_accepted_does_not_claim_input_restored() {
+    for rewound in [false, true] {
+        let mut h = comment_app();
+        let app = &mut h.app;
+        let target = app.head.as_ref().unwrap().turn_id.unwrap();
+        save_comment(app, "comment only");
+        app.focus = Focus::Dock;
+        app.submit().expect("仅含评论的提交应返回请求");
+        let id = app.own_turn.unwrap();
+        app.apply_submission(receipt(id, SubmissionResult::Unknown { error: None }));
+        release_dock(app);
+        app.input.set_text("新草稿");
+        if rewound {
+            rewind_to_user(app, target);
+        }
+        reject(app, id, 3);
+        assert_eq!(app.input.text(), "新草稿", "已有新草稿不应被覆盖");
+        assert_eq!(
+            app.drafts.draft_count(),
+            usize::from(!rewound),
+            "锚点存在时恢复评论草稿，退回后丢弃评论草稿"
+        );
+        if rewound {
+            assert!(
+                transcript(app).contains("锚点 Step 不在当前历史，丢弃评论：#1"),
+                "退回后丢弃评论的提示应保留在对话记录中"
+            );
+        }
+        let err = app.dock.message().expect("查询确认未被接受应暂驻 Error");
+        assert_eq!(err.level, NoticeLevel::Error);
+        assert!(
+            err.text.contains("确认后台没有这个请求")
+                && !err.text.contains("输入已保留")
+                && !err.text.contains("Ctrl+↑")
+                && !err.text.contains("图片未放回"),
+            "仅含评论的提交在查询确认未被接受时不应提示输入已保留：{text}",
+            text = err.text
         );
     }
 }
@@ -455,11 +497,7 @@ fn comment_numbering_continues_from_history_and_drafts() {
         outgoing.comments.iter().map(|c| c.n).collect::<Vec<_>>(),
         [8, 9]
     );
-    assert_eq!(
-        app.history.prev(),
-        None,
-        "comment-only input is not history"
-    );
+    assert_eq!(app.history.prev(), None, "仅含评论的提交不应写入输入历史");
 }
 
 #[test]

@@ -15,7 +15,7 @@ status: accepted
 | 模型上下文组装 | 会话合同规定模型上下文与视图读取的对话只有一种范围——根到当前位置的路径；实际组装为后台 `while` 循环逐节点收集 `UserMessage` 与已有回复的 `Step`，再由 `ModelStepRequest::chat_request` 在头部拼接 `system_prompt` | [表、读取范围与 rewind](../architecture/session/README.md#表读取范围与-rewind)；`crates/lattice-server/src/turn/request.rs:11-47`、`crates/lattice-agent/src/model_step.rs:169-198` |
 | 会话树节点与 Turn 绑定 | `Node` 只有 `Root`、`UserMessage` 与 `Step` 三种；`UserMessage` 同时承担“输入上下文内容”和“启动一轮 Turn（携带 `turn_id`、冻结配置摘要并预留 `Step 0`）”两项职责，无法在不启动模型推理的前提下向会话写入上下文 | `crates/lattice-session/src/store/types.rs:47-72`；[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树) |
 | 上下文来源标识 | `UserMessage` 只保存匿名 `NativeMessage`（`MessageRole::User`），树上不区分输入来自 TUI、CLI、IM 还是其他外部入口；TUI 批注只能经私有字符串格式 `<lattice-comment>` 拼入用户正文 | `crates/lattice-tui/src/comment.rs:83-171` |
-| 上下文操作能力 | 会话层只有 `rewind N`（移动当前位置指针）一种控制手段；触发 `32 MiB` 本地请求体预算、远端 `HTTP 413` 或切换到不支持图片的纯文本模型时，只能回退历史分支或新建会话 | `crates/lattice-agent/src/model_step.rs:395-396`；[表、读取范围与 rewind](../architecture/session/README.md#表读取范围与-rewind) |
+| 上下文操作能力 | 会话层只有 `rewind N`（移动当前位置指针）一种控制手段；触发 `32 MiB` 本地请求体预算、远端 `HTTP 413` 或切换到不支持图片的纯文本模型时，只能回退历史分支或新建会话 | `crates/lattice-llm/src/gateway.rs:337-363`、`crates/lattice-llm/src/protocol/encoding.rs:20`、`crates/lattice-llm/src/transport.rs:54-85`；[表、读取范围与 rewind](../architecture/session/README.md#表读取范围与-rewind) |
 | 多端协调与基线 | `TurnRequest` 仅核对 `expected_settings`，不核对当前位置基线；后台在执行中对并发 `submit`、`configure` 与 `rewind` 一律返回 `Busy` | `crates/lattice-ipc/src/types.rs:534-541`；[操作锁](../architecture/session/concurrency.md#操作锁) |
 | 前端锚点校验 | TUI 评论将锚点绑定到屏幕当前加载的显示块集合，重连回放（#426）与按轮分页（#291）期间频繁出现假阳性丢失与跨端不一致 | `crates/lattice-tui/src/app.rs:1327-1335`、`crates/lattice-tui/src/comment.rs:7-26` |
 
@@ -56,11 +56,11 @@ status: accepted
 
 ```mermaid
 flowchart TB
-    CONV["lattice-conversation\n消息原语 / ImageRef / StepContent / NodeId / 规范化"]
-    CTX["lattice-context\nChannel / ContextInput / ContextOp / resolve / inspect / project"]
-    SESS["lattice-session\nredb 会话树 + blobs"]
-    TRANS["Transcript 读路径\nConversationEntry / session log（给人看）"]
-    MODEL["Model Context 读路径\nEffectiveContext -> Vec<ConversationItem>（给模型看）"]
+    CONV["lattice-conversation<br/>消息原语 / ImageRef / StepContent / NodeId / 规范化"]
+    CTX["lattice-context<br/>Channel / ContextInput / ContextOp / resolve / inspect / project"]
+    SESS["lattice-session<br/>redb 会话树 + blobs"]
+    TRANS["Transcript 读路径<br/>ConversationEntry / session log（给人看）"]
+    MODEL["Model Context 读路径<br/>EffectiveContext -> Vec&lt;ConversationItem&gt;（给模型看）"]
 
     CTX --> CONV
     SESS --> CTX
@@ -265,8 +265,8 @@ pub fn resolve(path: &[PathRecord<'_>]) -> Result<EffectiveContext, ContextError
 | `architecture/tui/README.md`、`dock.md`、`interaction.md`、`transcript.md`、`palette.md` | 移除 TUI 前端排队条款，更新运行中与 `configure` 在途按 `Enter` 的行为 | 0 |
 | `architecture/crates.md` | 新增 `lattice-context` 职责与依赖边界白名单 | 1 |
 | `architecture/storage.md` | 会话库版本 11 与节点记录格式更新 | 2 |
-| `architecture/session/README.md`、`acceptance.md`、`concurrency.md`、`operations.md`、`recovery.md` | 双读路径分离、节点变体与 `Step 0` 元数据、Feed/Trigger 解耦与 `expected_position` | 2、3 |
-| `architecture/tui/README.md`、`interaction.md` 与 `architecture/im.md` | TUI 评论改为自包含表达并接入位置基线；IM 对接 `Channel` 与位置基线 | 4 |
+| `architecture/session/README.md`、`flow.md`、`steps.md`、`acceptance.md`、`concurrency.md`、`operations.md`、`recovery.md` | 双读路径分离、节点变体与 `Step 0` 元数据、Feed/Trigger 解耦与 `expected_position` | 2、3 |
+| `architecture/tui/README.md`、`interaction.md`、`transcript.md`、`layout.md` 与 `architecture/im.md` | TUI 评论改为自包含表达、轮次序号与 statusline 本轮计量改以 `Step 0` 为界并接入位置基线；IM 对接 `Channel` 与位置基线 | 4 |
 | `reference/glossary.md` | 补充模型上下文、Channel、ContextInput、ContextOp 与有效模型上下文等词条（批准后按 `domain-modeling` 规范写入） | 4 |
 
 ### 与其他 ADR 的关系
@@ -274,7 +274,7 @@ pub fn resolve(path: &[PathRecord<'_>]) -> Result<EffectiveContext, ContextError
 | ADR | 关系 |
 | --- | --- |
 | [ADR 0007 第 1 节](0007-session-tree-as-single-authority.md#1-树是会话事实的唯一权威)、[第 4 节](0007-session-tree-as-single-authority.md#4-progress-给出结论)、[第 5 节](0007-session-tree-as-single-authority.md#5-取消自动关闭和进行中-turn标记)、[第 6 节](0007-session-tree-as-single-authority.md#6-接受时确定的事实记在-usermessage-节点上) | 沿用并部分取代：树仍是会话事实唯一权威，`Step` 预留、`progress` 结论与崩溃免自动恢复完全保留；第 6 节中“接受时确定的事实记在 `UserMessage` 节点上”改为记在 `Step 0` 的 `TurnStartMeta`，原 `UserMessage` 内容拆为独立的 `Node::Input` |
-| [ADR 0008 第 2 节](0008-backend-api-commands-view-queries.md#2-对话条目就是节点)、[第 7 节](0008-backend-api-commands-view-queries.md#7-submit-只接受新请求找回改为查询) | 补充：Transcript 视图仍以节点为单位交付；新增上下文投喂、操作与检视命令，并增加 `expected_position` 乐观基线 |
+| [ADR 0008 第 2 节](0008-backend-api-commands-view-queries.md#2-对话条目就是节点)、[第 4 节](0008-backend-api-commands-view-queries.md#4-长会话按轮分页)、[第 7 节](0008-backend-api-commands-view-queries.md#7-submit-只接受新请求找回改为查询)、[第 10 节](0008-backend-api-commands-view-queries.md#10-客户端保留的部分) | 补充并部分取代：Transcript 视图仍以节点为单位交付；新增上下文投喂、操作与检视命令，并增加 `expected_position` 乐观基线；第 4 节以 `UserMessage` 为分页边界与轮次序号计数依据的规则随 `Node::UserMessage` 拆解改为以 `Step 0` 及其前置上下文块为界；第 10 节中前端保留的排队状态在阶段 0 随排队移除而取消 |
 | [ADR 0011 第 5 节](0011-im-gateway-inside-backend.md#5-crate-拆分与依赖规则) | 补充：将纯领域 crate `lattice-context` 纳入前端安全依赖白名单，其余边界与独占消费规则不变 |
 | [ADR 0012 第 1 节](0012-backend-owns-session-settings.md#1-会话设置是下一轮配置的唯一权威)、[第 4 节](0012-backend-owns-session-settings.md#4-提交只使用会话设置)、[第 6 节](0012-backend-owns-session-settings.md#6-会话的状态) | 沿用并小幅修订：`SessionSettings`（含 `system_prompt`）、`configure`、`expected_settings` 与草稿会话定义保持不变；第 3 节与第 7 节中 TUI “执行中排队的消息沿用当前设置 / `configure` 在途按 Enter 入队”随前端排队移除而取消 |
 | [ADR 0013 第 1 节](0013-user-image-input.md#1-图片原语格式识别与单轮上限) | 沿用并复用：`ContextInput` 与 `ReplaceInput` 直接复用 `ImageRef` 与 `normalize_user_message`，`ReplaceImage` 补充按 `ImageRef` 移出或替换历史图片的能力 |
