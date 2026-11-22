@@ -8,31 +8,23 @@ status: active
 
 ## 水平与垂直分配
 
-尺寸以终端字符单元为单位。右侧栏宽度固定为 40 列，列间空隙 `gap = 1`。左列不留边距，正文、标题线与输入区都从左列第一列开始。
+尺寸以终端字符单元为单位。界面采用单列全宽布局，左右不留边距，正文、标题线与输入区都从第一列开始，铺满终端宽度。
 
-| 条件或尺寸 | 规则 |
+| 尺寸或区域 | 规则 |
 | --- | --- |
-| 侧栏可见 | `frame_w >= frame_h × 3` 且 `frame_w - 40 - 1 >= 72` |
-| 侧栏可见时 | `left_w = frame_w - 40 - gap`，`content_w = left_w` |
-| 侧栏隐藏时 | `left_w = frame_w`，`content_w = frame_w` |
-| statusline | 左列最后一行，侧栏可见与否都存在 |
+| 正文宽度 | `content_w = frame_w`，不另设上限 |
+| statusline | 终端最后一行，始终存在 |
 | Dock | 高度由栈顶模块决定，最多 `max(frame_h - 1 - 对话记录行数, (frame_h - 1) / 2)` 行，其中除法向下取整、减法饱和 |
 | 对话记录可用高度 | `frame_h - 1 - dock_h`；内容不足时只占内容行数 |
 
 所有尺寸减法使用饱和运算，极小终端不得下溢或 panic。渲染以实际分配高度为准，不假定对话记录至少有一行。
-`Dock::height()` 统一提供 Dock 高度；渲染、viewport 行数、输入折行和光标定位使用同一 `content_w`。正文宽度不另设上限。
+`Dock::height()` 统一提供 Dock 高度；渲染、viewport 行数、输入折行和光标定位使用同一 `content_w`。
 
-`176 × 50` 显示侧栏，左列与正文宽均为 135；`115 × 47`、`85 × 47`、`56 × 47` 不满足比例条件，`80 × 24` 分栏后正文不足 72 列，均隐藏侧栏。
-
-左列由上至下为对话记录、[Dock](dock.md#dock-与输入区) 与 [statusline](#statusline)。对话记录与 Dock 共享 statusline 之上的高度：Dock 紧贴对话记录最后一个可见行之下，内容不足可用高度时 Dock 随内容上移，其下到 statusline 之间留空；内容填满后 Dock 停在 statusline 之上。statusline 始终在左列最后一行。停在底部时输入区看起来就是对话的最后一段；向上翻看时，Dock 与 statusline 留在原位。侧栏全高，gap 保持空列。界面不画边框。
-
-## 侧栏
-
-侧栏保留显示条件、宽度与 navy-11 底色，不显示内容；身份、phase、翻页与键位提示由 statusline 显示。
+界面由上至下为对话记录、[Dock](dock.md#dock-与输入区) 与 [statusline](#statusline)。对话记录与 Dock 共享 statusline 之上的高度：Dock 紧贴对话记录最后一个可见行之下，内容不足可用高度时 Dock 随内容上移，其下到 statusline 之间留空；内容填满后 Dock 停在 statusline 之上。statusline 始终在终端最后一行。停在底部时输入区看起来就是对话的最后一段；向上翻看时，Dock 与 statusline 留在原位。界面不画边框。
 
 ## statusline
 
-statusline 是独立组件，不属于 Dock。它占左列最后一行，使用 navy-11 底色；左侧显示 session、agent、模型、提供商与推理档位，右侧显示提示、本轮用量、上下文用量与 phase。
+statusline 是独立组件，不属于 Dock。它占终端最后一行，使用 navy-11 底色；左侧显示 session、agent、模型、提供商与推理档位，右侧显示提示、本轮用量、上下文用量与 phase。
 
 | 字段 | 来源 | 尚未取得时 |
 | --- | --- | --- |

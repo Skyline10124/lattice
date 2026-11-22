@@ -249,7 +249,7 @@ const COMMENT_TAG: &str = " COMMENT ";
 /// 左右内边距列数。终端字符单元高约为宽的两倍，两列与上下各一行的留白视觉上接近。
 const CARD_PAD: usize = 2;
 
-/// 评论卡片：锚点正文起点到左列右缘铺底色，左右各留 `CARD_PAD` 列内边距。
+/// 评论卡片：锚点正文起点到行尾铺底色，左右各留 `CARD_PAD` 列内边距。
 /// 自上而下为上边距、标签与右端状态、空行、正文、下边距。
 fn render(transcript: &mut Transcript, placed: PlacedComment<'_>, width: u16) {
     let start = transcript.lines.len();

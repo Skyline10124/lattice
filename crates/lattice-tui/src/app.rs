@@ -24,7 +24,7 @@ use crate::input::{
 use crate::session::{Generating, SessionContext};
 use crate::view::{
     Dock, DockIntent, DockState, Focus, ModelQuery, Panel, PanelChoice, Transcript, Viewport,
-    frame_layout, render_transcript,
+    render_transcript,
 };
 use crossterm::event::{
     DisableBracketedPaste, EnableBracketedPaste, Event, EventStream, KeyCode, KeyEvent,
@@ -298,7 +298,7 @@ impl App {
 
     /// 保留键先执行；其余动作交给 Dock 栈顶解释，模块不接触 LocalTurn。
     pub(crate) fn apply_action(&mut self, action: KeyAction) -> Option<TurnRequest> {
-        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let width = self.term_width;
         let transcript = self.prepare_transcript();
         let lines = &transcript.lines;
         match action {
@@ -493,7 +493,7 @@ impl App {
     }
 
     fn focus_anchor(&mut self, location: &crate::comment::Location) {
-        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let width = self.term_width;
         let transcript = render_transcript(self, width);
         if let Some(cursor) = transcript.anchor_cursor(location) {
             self.focus = Focus::Transcript(cursor);
@@ -628,7 +628,7 @@ impl App {
     }
 
     pub(crate) fn prepare_transcript(&mut self) -> Transcript {
-        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let width = self.term_width;
         let transcript = render_transcript(self, width);
         let previous_scroll = self.viewport.scroll();
         let screen_row = match self.focus {
@@ -1408,10 +1408,9 @@ impl App {
     /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行；
     /// `rows` 是同一宽度下的对话记录行数，Dock 高度随它变化。
     pub(crate) fn transcript_height(&self, rows: usize) -> usize {
-        let layout = frame_layout(self.term_width, self.term_height);
         self.term_height
             .saturating_sub(1)
-            .saturating_sub(Dock::new(self).height(layout.content_w, rows)) as usize
+            .saturating_sub(Dock::new(self).height(self.term_width, rows)) as usize
     }
 
     fn apply_head(&mut self, head: SessionHead) {
@@ -1714,7 +1713,7 @@ impl App {
         let Some(mut at) = self.blocks.node_start(request.before) else {
             return;
         };
-        let width = frame_layout(self.term_width, self.term_height).content_w;
+        let width = self.term_width;
         // 横幅与插入点之前的状态消息不随插入移动；翻到顶部时第 0 行总是横幅，所以以屏幕上
         // 第一行插入点之后的内容为准。记下这一行、它所属的块，及它在这个块自己的各行中的倒数序号：
         // 块前面有了内容时开头会多出分隔空行，从末行数起不受影响；块内穿插的内嵌评论属于别的块，
@@ -2192,7 +2191,7 @@ fn help_lines(kitty: bool) -> Vec<String> {
 }
 
 #[rustfmt::skip]
-/// session 与 agent 由状态行（或侧栏）显示并随接受更新，这里不重复。
+/// session 与 agent 由状态行显示并随接受更新，这里不重复。
 fn startup_banner() -> Vec<String> {
     vec![
         "LATTICE".into(),

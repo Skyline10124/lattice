@@ -2,7 +2,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 use ratatui::Frame;
-use ratatui::layout::{Constraint, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::Paragraph;
@@ -26,43 +26,7 @@ pub(crate) fn statusline_text(app: &App, width: usize) -> String {
     statusline::line(app, width).to_string()
 }
 
-pub(crate) const SIDEBAR_W: u16 = 40;
-pub(crate) const SIDEBAR_ASPECT: u16 = 3;
-pub(crate) const MIN_CONTENT_W_WITH_SIDEBAR: u16 = 72;
-pub(crate) const GAP: u16 = 1;
 const CTRL_C_HINT: &str = "Ctrl+C to quit";
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Sidebar {
-    Visible,
-    Hidden,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct FrameLayout {
-    pub(crate) left_w: u16,
-    pub(crate) content_w: u16,
-    pub(crate) sidebar: Sidebar,
-}
-
-pub(crate) fn frame_layout(frame_w: u16, frame_h: u16) -> FrameLayout {
-    let sidebar_content_w = frame_w.saturating_sub(SIDEBAR_W).saturating_sub(GAP);
-    let sufficiently_landscape = frame_w >= frame_h.saturating_mul(SIDEBAR_ASPECT);
-    let enough_conversation_width = sidebar_content_w >= MIN_CONTENT_W_WITH_SIDEBAR;
-    if sufficiently_landscape && enough_conversation_width {
-        FrameLayout {
-            left_w: sidebar_content_w,
-            content_w: sidebar_content_w,
-            sidebar: Sidebar::Visible,
-        }
-    } else {
-        FrameLayout {
-            left_w: frame_w,
-            content_w: frame_w,
-            sidebar: Sidebar::Hidden,
-        }
-    }
-}
 
 pub(crate) struct Viewport {
     /// First visible transcript row.
@@ -210,25 +174,7 @@ pub(crate) fn draw(frame: &mut Frame, app: &mut App) {
     app.term_width = area.width;
     app.term_height = area.height;
     let transcript = app.prepare_transcript();
-    let geometry = frame_layout(area.width, area.height);
-    match geometry.sidebar {
-        Sidebar::Visible => {
-            let columns = Layout::horizontal([
-                Constraint::Length(geometry.left_w),
-                Constraint::Length(GAP),
-                Constraint::Length(SIDEBAR_W),
-            ])
-            .split(area);
-            draw_left(frame, app, columns[0], geometry.content_w, &transcript);
-            frame.render_widget(Paragraph::new("").style(status_surface_style()), columns[2]);
-        }
-        Sidebar::Hidden => {
-            draw_left(frame, app, area, geometry.content_w, &transcript);
-        }
-    }
-}
-
-fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcript: &Transcript) {
+    let content_w = area.width;
     let dock = Dock::new(app);
     let bottom_h = 1.min(area.height);
     let above = area.height.saturating_sub(bottom_h);
@@ -246,7 +192,7 @@ fn draw_left(frame: &mut Frame, app: &App, area: Rect, content_w: u16, transcrip
         app,
         Rect::new(area.x, area.y, area.width, shown),
         content_w,
-        transcript,
+        &transcript,
     );
     dock.render(frame, Rect::new(area.x, dock_y, area.width, dock_h));
     if bottom_h > 0 {
@@ -878,7 +824,7 @@ fn display_width(text: &str) -> usize {
     UnicodeWidthStr::width(text)
 }
 
-/// 标题线从左列起点画到 `width`。
+/// 标题线从行首画到 `width`。
 pub(crate) fn title_line(title: &str, role: Role, right: &[String], width: usize) -> Line<'static> {
     let dim = role_style(Role::DimMeta);
     if width < 5 {
@@ -971,31 +917,27 @@ mod tests {
     }
 
     #[test]
-    fn layout_boundaries_are_underflow_safe() {
-        for (w, h) in [
-            (1, 1),
-            (7, 3),
-            (43, 10),
-            (44, 10),
-            (112, 37),
-            (113, 37),
-            (113, 38),
-        ] {
-            let _ = frame_layout(w, h);
-        }
+    fn wide_frame_uses_full_width_without_sidebar() -> anyhow::Result<()> {
+        let mut app = test_app();
+        app.show_banner();
+        app.input.set_text("typed");
+        let mut terminal = Terminal::new(TestBackend::new(176, 50))?;
+        terminal.draw(|frame| draw(frame, &mut app))?;
+        let buffer = terminal.backend().buffer();
+        // 右上角保持默认终端背景，不再铺侧栏底色。
+        assert_eq!(buffer[(175, 0)].bg, Color::Reset, "宽屏不应渲染右侧栏");
+        // 输入区标题线铺满全部 176 列（横幅 6 行、空行 1 行，标题线在第 7 行）。
+        assert_eq!(buffer[(0, 7)].symbol(), "─", "输入区标题线应从第 0 列开始");
+        assert_eq!(buffer[(175, 7)].symbol(), "─", "输入区标题线应铺满终端宽度");
+        // 底部 statusline 占满整行并铺 navy-11 底色。
+        let surface_bg = Color::Rgb(0x2c, 0x42, 0x67);
+        assert_eq!(buffer[(0, 49)].bg, surface_bg, "statusline 左端应铺底色");
         assert_eq!(
-            frame_layout(1, 1),
-            FrameLayout {
-                left_w: 1,
-                content_w: 1,
-                sidebar: Sidebar::Hidden,
-            }
+            buffer[(175, 49)].bg,
+            surface_bg,
+            "statusline 应铺满终端宽度"
         );
-        // 正文宽 = w - 41：112x37 正文 71 列，刚好不足；113x37 比例与正文宽度同时达标；
-        // 113x38 正文够宽但比例不足 3:1。
-        assert_eq!(frame_layout(112, 37).sidebar, Sidebar::Hidden);
-        assert_eq!(frame_layout(113, 37).sidebar, Sidebar::Visible);
-        assert_eq!(frame_layout(113, 38).sidebar, Sidebar::Hidden);
+        Ok(())
     }
 
     #[test]
