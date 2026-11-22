@@ -137,7 +137,7 @@ fn status_surface_style() -> Style {
     role_style(Role::DimMeta).bg(Color::Rgb(0x2c, 0x42, 0x67))
 }
 
-/// 挂着草稿、排队或已发送评论的锚点元素底色（iris-12）。
+/// 挂着草稿或已发送评论的锚点元素底色（iris-12）。
 pub(crate) const COMMENT_ANCHOR_BG: Color = Color::Rgb(0x1f, 0x25, 0x4b);
 /// 评论卡片底色（warm-gray-12）。
 pub(crate) const COMMENT_CARD_BG: Color = Color::Rgb(0x2b, 0x28, 0x25);
@@ -313,7 +313,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 if matches!(block, Block::RejectedUser(_)) {
                     let targets = message.comments.iter().map(|comment| {
                         let id = app
-                            .queue
+                            .drafts
                             .pending_comment_id(comment.n)
                             .unwrap_or_else(|| entry.id.comment(comment.n, 0));
                         (id, comment)
@@ -434,66 +434,12 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             row: row.saturating_sub(start),
         }));
     }
-    let mut editor_cursor = None;
-    for message in app.queue.messages() {
-        let start = lines.len();
-        separate(&mut lines);
-        let mut right = vec![
-            if app.queue.is_paused() {
-                "暂停"
-            } else {
-                "排队"
-            }
-            .into(),
-        ];
-        if app.queue.editor(message.id).is_some() {
-            right.push("Enter 完成编辑".into());
-        } else if matches!(app.focus, Focus::Transcript(cursor) if cursor.block.id == message.id) {
-            right.extend(["Enter 编辑".into(), "Delete 删除".into()]);
-        }
-        lines.push(title_line(
-            "USER",
-            Role::User,
-            &right,
-            usize::from(content_w),
-        ));
-        comments::markers(
-            &mut lines,
-            &mut markers,
-            comments::identified(&message.comments, message.id),
-            content_w,
-        );
-        if let Some(editor) = app.queue.editor(message.id) {
-            let (visual, row, col) = input_visual(editor, content_w);
-            editor_cursor = Some((lines.len().saturating_add(row), col));
-            lines.extend(
-                visual
-                    .into_iter()
-                    .map(|text| Line::from(Span::styled(text, role_style(Role::Assistant)))),
-            );
-        } else {
-            let parts = message.input.parts();
-            let rendered = crate::session::format_user_parts(parts.iter().map(|part| match part {
-                lattice_local::UserInputPart::Text { text } => {
-                    crate::session::UserPartRef::Text(text)
-                }
-                lattice_local::UserInputPart::Image { image } => {
-                    crate::session::UserPartRef::Image(&image.meta)
-                }
-            }));
-            lines.extend(body(&rendered, content_w, role_style(Role::DimMeta)));
-        }
-        owners.extend((start..lines.len()).map(|row| BlockPosition {
-            id: message.id,
-            row: row.saturating_sub(start),
-        }));
-    }
     cache.finish_render();
     let mut transcript = Transcript {
         lines,
         owners,
-        editor_width: editor_cursor.map(|_| content_w),
-        editor_cursor,
+        editor_width: None,
+        editor_cursor: None,
         anchors,
         ending_items,
         markers,
@@ -1063,7 +1009,7 @@ mod tests {
     }
 
     #[test]
-    fn transcript_and_queue_image_markers_wrap_whole_while_plain_spaces_still_break() {
+    fn transcript_image_markers_wrap_whole_while_plain_spaces_still_break() {
         let pending = crate::input::PendingImage {
             meta: lattice_local::ImageRef {
                 sha256: [0x44; 32],
@@ -1089,39 +1035,19 @@ mod tests {
         );
         app.blocks.push(Block::User(format!("前缀 {plain_marker}")));
 
-        let mut queued_input = crate::input::InputBuffer::new();
-        queued_input.set_text("前缀");
-        queued_input.insert_image(pending);
-        let queue_id = app.blocks.allocate_id();
-        assert!(
-            app.queue.enqueue(
-                queue_id,
-                queued_input,
-                crate::queue::QueuedSettings::Snapshot(
-                    serde_json::from_value(serde_json::json!("11".repeat(32))).unwrap()
-                ),
-            ),
-            "测试消息应成功入队"
-        );
-
         let lines: Vec<String> = transcript_lines(&app, tight_width)
             .into_iter()
             .map(|line| line.to_string())
             .collect();
         assert_eq!(
             &lines[1..3],
-            &["前缀".to_owned(), nbsp_marker.clone()],
+            &["前缀".to_owned(), nbsp_marker],
             "对话记录中含 U+00A0 的图片标记在恰好放不下时应整体换到下一行：{lines:#?}"
         );
         assert_eq!(
             &lines[5..7],
             &["前缀 [IMAGE 1 · png · 2".to_owned(), "KiB]".to_owned()],
             "普通空格的分词断行规则应保持不变：{lines:#?}"
-        );
-        assert_eq!(
-            &lines[9..11],
-            &["前缀".to_owned(), nbsp_marker],
-            "排队区只读显示的图片标记在恰好放不下时同样应整体换到下一行：{lines:#?}"
         );
     }
 }

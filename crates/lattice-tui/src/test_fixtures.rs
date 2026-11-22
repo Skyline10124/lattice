@@ -412,31 +412,3 @@ pub(super) fn local_error(kind: lattice_local::LocalErrorKind, message: &str) ->
     serde_json::from_value(json!({"kind":kind,"message":message,"recovery":null,"store":null}))
         .unwrap()
 }
-
-/// 已关闭、以完成结束的一轮：会话头指向它且没有 Owner。
-pub(super) fn finish(app: &mut App, turn_id: TurnId, text: &str) {
-    end(app, turn_id, text, None);
-}
-
-/// 以 Stop 关闭的一轮；`outcome` 为 failed 或 cancelled。
-pub(super) fn stop(app: &mut App, turn_id: TurnId, text: &str, outcome: &str) {
-    end(app, turn_id, text, Some(outcome));
-}
-
-fn end(app: &mut App, turn_id: TurnId, text: &str, stopped: Option<&str>) {
-    let node = app.entries.keys().last().map_or(1, |node| node.0 + 1);
-    let ordinal = app
-        .entries
-        .values()
-        .filter(|entry| matches!(entry, ConversationEntry::UserMessage { .. }))
-        .count() as u64
-        + 1;
-    let step = step(node + 1, turn_id, 0).text("live body");
-    let step = match stopped {
-        Some(outcome) => step.stopped(outcome),
-        None => step.finished(),
-    };
-    app.apply_view(LocalUpdate::Head(head(node + 1, Some(turn_id), false)));
-    app.apply_view(entry_update(user(node, turn_id, ordinal, text)));
-    app.apply_view(entry_update(step.entry()));
-}

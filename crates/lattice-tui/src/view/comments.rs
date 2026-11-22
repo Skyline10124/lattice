@@ -169,18 +169,13 @@ pub(super) fn attach<'a>(app: &'a App, transcript: &mut Transcript, width: u16) 
             }
         }
     }
-    for message in app.queue.messages() {
-        for (id, comment) in identified(&message.comments, message.id) {
-            place(id, comment, "排队", Some(message.id), None);
-        }
-    }
-    for draft in app.queue.drafts() {
+    for draft in app.drafts.drafts() {
         place(
             draft.id,
             draft.comment(),
             "草稿",
             None,
-            app.queue.editor(draft.id),
+            app.drafts.editor(draft.id),
         );
     }
     placed.sort_by_key(|p| (p.after, p.comment.n));
@@ -195,7 +190,6 @@ pub(super) fn attach<'a>(app: &'a App, transcript: &mut Transcript, width: u16) 
     }
     let old_owners = std::mem::take(&mut transcript.owners);
     let mut relocation = Vec::with_capacity(old_lines.len());
-    let old_editor = transcript.editor_cursor.take();
     for (row, (line, owner)) in old_lines.into_iter().zip(old_owners).enumerate() {
         relocation.push(transcript.lines.len());
         transcript.lines.push(line);
@@ -216,9 +210,6 @@ pub(super) fn attach<'a>(app: &'a App, transcript: &mut Transcript, width: u16) 
         if let Some(mapped) = relocation.get(marker.row) {
             marker.row = *mapped;
         }
-    }
-    if let Some((row, col)) = old_editor {
-        transcript.editor_cursor = relocation.get(row).map(|r| (*r, col));
     }
 }
 

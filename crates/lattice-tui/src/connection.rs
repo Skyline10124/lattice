@@ -93,14 +93,25 @@ pub(crate) fn recovered_status(turn_id: TurnId) -> Status {
     status(NoticeLevel::Info, recovered_notice(turn_id))
 }
 
+pub(crate) fn submit_busy_status() -> Status {
+    status(
+        NoticeLevel::Warn,
+        "当前有一轮正在执行，请等本轮结束后再提交".into(),
+    )
+}
+
+pub(crate) fn submit_configuring_status() -> Status {
+    status(NoticeLevel::Warn, "正在修改会话设置，请稍后再提交".into())
+}
+
 /// 确定未被接受的提交，原输入留在哪里。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum KeptInput {
-    /// 放回了输入区，或自动发送的一条回到了队首。
+    /// 放回了输入区。
     Restored,
-    /// 没有放回：输入区已有用户的草稿，或结果未知的自动发送不再放回队首；原输入在输入历史中。
+    /// 没有放回：输入区已有用户的草稿；原输入在输入历史中。
     History,
-    /// 没有放回且没有文字历史：纯图片消息未覆盖新草稿，或结果未知的自动发送已释放名额；图片未放回。
+    /// 没有放回且没有文字历史：纯图片消息未覆盖新草稿；图片未放回。
     Discarded,
     /// 没有可归还的输入：这次提交已经有过确定结果，或不是本客户端在等结果的提交。
     Nothing,
@@ -162,16 +173,11 @@ pub(crate) fn clipboard_stage_failed_status(error: &anyhow::Error) -> Status {
     status(NoticeLevel::Error, format!("无法暂存剪贴板图片：{error}"))
 }
 
-/// 提交、入队或发出队首前本地预检未通过，请求尚未发出。
-pub(crate) fn preflight_failed_status(error: &LocalError, from_queue: bool) -> Status {
-    let kept = if from_queue {
-        "已放回队首并暂停"
-    } else {
-        "输入已保留"
-    };
+/// 提交前本地预检未通过，请求尚未发出。
+pub(crate) fn preflight_failed_status(error: &LocalError) -> Status {
     status(
         NoticeLevel::Error,
-        format!("无法提交：{}；{kept}", error.message),
+        format!("无法提交：{}；输入已保留", error.message),
     )
 }
 

@@ -306,15 +306,25 @@ fn own_submission_stays_busy_until_its_head_is_confirmed() {
     app.input.set_text("second");
     app.submit().unwrap();
     let (b, _) = app.submission_identity().unwrap();
-    app.input.set_text("queued");
-    assert!(app.submit().is_none(), "运行中 Enter 入队");
+    app.input.set_text("next");
+    assert!(app.submit().is_none(), "运行中 Enter 不能提交");
+    assert_eq!(app.input.text(), "next", "运行中阻止提交应保留输入");
+    assert_eq!(
+        app.dock.message().map(|s| (&s.level, s.text.as_str())),
+        Some((
+            &NoticeLevel::Warn,
+            "当前有一轮正在执行，请等本轮结束后再提交"
+        ))
+    );
+    app.dock.release();
     app.apply_submission(receipt(b, accepted(b)));
     let busy = |app: &mut App, when: &str| {
         assert_eq!(app.phase, TurnPhase::Streaming, "{when}");
         assert!(
-            app.auto_submit().is_none(),
-            "{when}: 不能凭上一轮的完成发送排队"
+            app.submit().is_none(),
+            "{when}: 不能凭上一轮的完成提交新消息"
         );
+        app.dock.release();
     };
     // B 的会话头已到、当前位置的条目未到：已确认的会话头仍是已完成的 A。
     app.apply_view(LocalUpdate::Head(head(4, Some(b), true)));
@@ -325,8 +335,7 @@ fn own_submission_stays_busy_until_its_head_is_confirmed() {
     app.apply_action(KeyAction::CancelOrClear);
     assert_eq!(app.cancel_requested.take(), Some(CancelTarget::Own));
     app.apply_view(entry_update(step(4, b, 0).sent().entry()));
-    assert!(app.auto_submit().is_none());
-    assert_eq!(app.queue.messages().count(), 1);
+    assert_eq!(app.input.text(), "next");
 }
 
 #[test]
@@ -611,10 +620,9 @@ fn older_turns_arriving_while_a_new_head_is_pending_are_already_ended() {
             entries: vec![user(1, turn(1), 1, "prompt-1"), step(2, turn(1), 0).entry()],
         }),
     );
-    // 会话头随当前位置的条目确认后，旧轮的结局仍不是新消息，也不暂停队列。
+    // 会话头随当前位置的条目确认后，旧轮的结局仍不是新消息。
     app.apply_view(entry_update(user(9, turn(5), 5, "prompt-5")));
     assert!(app.dock.message().is_none(), "{}", docked(&app));
-    assert!(!app.queue.is_paused());
 }
 
 #[test]
@@ -984,7 +992,6 @@ fn lost_observation_marks_running_tools_unknown_and_keeps_the_turn_running() {
     });
     assert_eq!(app.phase, TurnPhase::Streaming);
     assert!(!app.connected);
-    assert!(app.queue.is_paused());
     assert_eq!(tool_states(&app), [ToolState::Unknown]);
     let warn = app.dock.message().unwrap();
     assert_eq!(
@@ -1551,7 +1558,7 @@ fn configure_adjustment_shows_info_and_busy_shows_warn() {
 }
 
 #[test]
-fn settings_changed_rejection_restores_input_and_pauses_queue() {
+fn settings_changed_rejection_restores_input_and_shows_error() {
     let settings_changed = || LocalError {
         conflict: Some(lattice_local::ConflictReason::SettingsChanged),
         ..local_error(
@@ -1560,22 +1567,6 @@ fn settings_changed_rejection_restores_input_and_pauses_queue() {
         )
     };
 
-    // 手动立即发送遇到 SettingsChanged：归还输入、暂停队列并显示说明。
-    let mut manual = test_app(true);
-    let running = turn(1);
-    open_view(
-        &mut manual,
-        head(2, Some(running), true),
-        vec![
-            user(1, running, 1, "first"),
-            step(2, running, 0).sent().entry(),
-        ],
-    );
-    manual.input.set_text("queued later");
-    assert!(manual.submit().is_none());
-    assert!(!manual.queue.is_paused());
-    finish(&mut manual, running, "first");
-    // 先把自动发送取消或先在干净会话测试手动发送：这里在第二个有排队的会话上直接测试手动与自动。
     let mut direct = test_app(true);
     open_view(&mut direct, head(0, None, false), Vec::new());
     direct.input.set_text("manual prompt");
@@ -1599,55 +1590,12 @@ fn settings_changed_rejection_restores_input_and_pauses_queue() {
             error: settings_changed(),
         },
     ));
-    assert_eq!(
-        direct.input.text(),
-        "manual prompt",
-        "手动提交被拒后保留输入"
-    );
-    assert!(direct.queue.is_paused(), "SettingsChanged 应暂停队列");
+    assert_eq!(direct.input.text(), "manual prompt", "提交被拒后保留输入");
     let msg = direct.dock.message().expect("SettingsChanged 应暂驻 Error");
     assert_eq!(msg.level, NoticeLevel::Error);
     assert!(
         msg.text.contains("会话设置已变更"),
         "应说明会话设置已变更：{}",
         msg.text
-    );
-
-    // 自动发送排队消息遇到 SettingsChanged：消息回到队首、不覆盖草稿、暂停队列并显示说明。
-    manual.input.set_text("user draft");
-    let auto_req = manual.auto_submit().expect("上一轮完成后自动发送队首");
-    assert!(
-        auto_req.parts
-            == [UserInputPart::Text {
-                text: "queued later".into()
-            }]
-    );
-    assert_eq!(auto_req.session, sid());
-    assert_eq!(
-        auto_req.workspace,
-        Path::new("/nonexistent-tui-test-workspace")
-    );
-    assert_eq!(auto_req.expected_settings, Some(settings_version(0x11)));
-    let (auto_turn, _) = manual.submission_identity().unwrap();
-    manual.apply_submission(receipt(
-        auto_turn,
-        SubmissionResult::Rejected {
-            error: settings_changed(),
-        },
-    ));
-    assert_eq!(
-        manual.input.text(),
-        "user draft",
-        "自动发送被拒不覆盖输入区草稿"
-    );
-    assert!(manual.queue.is_paused(), "SettingsChanged 应暂停队列");
-    let queued: Vec<_> = manual.queue.messages().map(|m| m.input.text()).collect();
-    assert_eq!(queued, vec!["queued later"], "被拒的排队消息放回队首");
-    let auto_msg = manual.dock.message().expect("SettingsChanged 应暂驻 Error");
-    assert_eq!(auto_msg.level, NoticeLevel::Error);
-    assert!(
-        auto_msg.text.contains("会话设置已变更"),
-        "应说明会话设置已变更：{}",
-        auto_msg.text
     );
 }
