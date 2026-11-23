@@ -26,9 +26,7 @@ macro_rules! redacted_debug { ($($ty:ty),+ $(,)?) => {$ (
     impl std::fmt::Debug for $ty { fn fmt(&self, f:&mut std::fmt::Formatter<'_>)->std::fmt::Result { f.write_str(concat!(stringify!($ty), " { … }")) } }
 )+}; }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
-#[serde(transparent)]
-pub struct NodeId(pub u64);
+pub use lattice_conversation::NodeId;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct StepKey {

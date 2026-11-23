@@ -1,10 +1,11 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 严格类型化的身份值（ADR 0005 第 1 节）。
+//! 严格类型化的身份值（ADR 0005 第 1 节、ADR 0014 第 1 节）。
 //!
 //! `InvocationId` 与 `TurnId` 为带连字符的小写 UUID v4；`SessionId` 为会话创建时由
-//! `Uuid::new_v4().simple()` 生成的 32 位小写十六进制字符串。
+//! `Uuid::new_v4().simple()` 生成的 32 位小写十六进制字符串；`NodeId` 为会话树节点的
+//! 透明 `u64` 序号值类型（根节点恒为 `NodeId(0)`，单调分配由 `lattice-session` 负责）。
 //!
 //! 本模块仅校验解析、显示与 `serde` 表示，不生成身份值：`InvocationId` 由
 //! `lattice-server` 内部的 `TurnCoordinator` 经可注入的 UUID v4 源生成，`SessionId` 与
@@ -286,6 +287,11 @@ impl<'de> Deserialize<'de> for SessionId {
         Self::parse(&raw).map_err(D::Error::custom)
     }
 }
+
+/// 会话树节点序号值类型（ADR 0014 第 1 节）。根节点恒为 `NodeId(0)`，单调分配由 `lattice-session` 负责。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct NodeId(pub u64);
 
 #[cfg(test)]
 mod tests {

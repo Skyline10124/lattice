@@ -11,7 +11,7 @@
 //! - per-attempt usage and interruption/rejection records ([`attempt`]);
 //! - provider origin and bounded part-local opaque replay state;
 //! - 结构化 Step 与其调用结果，以及 provider-neutral 对话历史；
-//! - 身份类型（[`SessionId`]、[`TurnId`]、[`InvocationId`]）、结构地址
+//! - 身份类型（[`SessionId`]、[`TurnId`]、[`InvocationId`]、[`NodeId`]）、结构地址
 //!   （[`ModelMessageAddress`]、[`ToolCallAddress`]、[`ModelAttemptKey`]）、
 //!   规范 JSON（[`canonical_json`]）与参数摘要（[`arguments_digest`]）。
 //!
@@ -44,7 +44,7 @@ pub use canonical::canonical_json;
 pub use digest::arguments_digest;
 pub use effort::{Effort, ParseEffortError};
 pub use history::ConversationItem;
-pub use identity::{IdParseError, InvocationId, SessionId, TurnId};
+pub use identity::{IdParseError, InvocationId, NodeId, SessionId, TurnId};
 pub use image::{
     ImageBytesError, ImageMediaType, ImagePlacementError, ImageRef, ImageRefHasher,
     validate_image_placement,

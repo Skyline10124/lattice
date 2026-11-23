@@ -1,13 +1,13 @@
 # lattice-conversation 工作指引
 
-定义 provider 中立的纯数据对话类型、模型选择值、工具调用绑定 typestate 与字节计量规则，被 `lattice-session`、`lattice-profile`、`lattice-llm`、`lattice-agent` 与 `lattice-server` 使用。
+定义 provider 中立的纯数据对话类型、模型选择值、工具调用绑定 typestate 与字节计量规则，被 `lattice-context`、`lattice-session`、`lattice-profile`、`lattice-llm`、`lattice-agent` 与 `lattice-server` 使用。
 
 ## 模块
 
 | 模块 | 负责 |
 | --- | --- |
 | `src/lib.rs` | 重导出身份类型、结构地址、规范 JSON、参数摘要、图片与输入模态原语、对话类型、单轮用户输入规范化与协议上限常量 |
-| `src/identity.rs` | `SessionId`（32 位小写十六进制）、`TurnId` 与 `InvocationId`（小写连字符 UUID v4）严格解析、显示与 serde 表示，以及 `IdParseError` |
+| `src/identity.rs` | `SessionId`（32 位小写十六进制）、`TurnId` 与 `InvocationId`（小写连字符 UUID v4）严格解析、显示与 serde 表示，`NodeId`（透明 `u64` 会话树节点序号值类型），以及 `IdParseError` |
 | `src/address.rs` | 结构化地址 `ModelMessageAddress`、`ToolCallAddress` 与模型尝试键 `ModelAttemptKey` |
 | `src/canonical.rs` | 键按 UTF-8 字节序显式排序的无空白规范 JSON 序列化 `canonical_json` |
 | `src/digest.rs` | 工具调用参数对象的域分离 SHA-256 摘要 `arguments_digest` |

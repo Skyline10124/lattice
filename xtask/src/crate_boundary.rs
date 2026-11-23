@@ -40,10 +40,15 @@ pub struct ExclusiveConsumerRule {
 
 pub const RULES: &[DirectDependencyRule] = &[
     DirectDependencyRule {
+        package: "lattice-context",
+        policy: WorkspaceDependencyPolicy::AllowOnly(&["lattice-conversation"]),
+    },
+    DirectDependencyRule {
         package: "lattice-ipc",
         policy: WorkspaceDependencyPolicy::AllowOnly(&[
             "lattice-session",
             "lattice-conversation",
+            "lattice-context",
             "lattice-store",
         ]),
     },
@@ -56,6 +61,7 @@ pub const RULES: &[DirectDependencyRule] = &[
         policy: WorkspaceDependencyPolicy::AllowOnly(&[
             "lattice-ipc",
             "lattice-conversation",
+            "lattice-context",
             "lattice-store",
         ]),
     },
@@ -559,6 +565,7 @@ mod tests {
         "lattice-server",
         "lattice-session",
         "lattice-conversation",
+        "lattice-context",
         "lattice-store",
         "lattice-llm",
         "lattice-profile",
@@ -590,7 +597,12 @@ mod tests {
             "lattice-ipc" => CrateSpec::with_deps(concat!(
                 "lattice-session = { path = \"../lattice-session\" }\n",
                 "lattice-conversation = { path = \"../lattice-conversation\" }\n",
+                "lattice-context = { path = \"../lattice-context\" }\n",
                 "lattice-store = { path = \"../lattice-store\" }\n",
+                "outside-util = { path = \"../../../outside-util\" }\n",
+            )),
+            "lattice-context" => CrateSpec::with_deps(concat!(
+                "lattice-conversation = { path = \"../lattice-conversation\" }\n",
                 "outside-util = { path = \"../../../outside-util\" }\n",
             )),
             "lattice-cli" => CrateSpec::with_deps(concat!(
@@ -619,6 +631,7 @@ mod tests {
             "lattice-local" => CrateSpec::with_deps(concat!(
                 "lattice-ipc = { path = \"../lattice-ipc\" }\n",
                 "lattice-conversation = { path = \"../lattice-conversation\" }\n",
+                "lattice-context = { path = \"../lattice-context\" }\n",
                 "lattice-store = { path = \"../lattice-store\" }\n",
                 "outside-util = { path = \"../../../outside-util\" }\n",
             )),
@@ -981,9 +994,18 @@ mod tests {
         );
 
         // 白名单成员可以改名或设为可选；非独占保护成员只出现在 `[dev-dependencies]` 时，生产规则都不报错。
+        let mut context_spec = baseline_spec("lattice-context");
+        context_spec.dev_deps = concat!(
+            "lattice-session = { path = \"../lattice-session\" }\n",
+            "plain-helper = { path = \"../plain-helper\" }\n",
+        )
+        .to_owned();
+        ws.write_member("lattice-context", &context_spec);
+
         let mut ipc_spec = CrateSpec::with_deps(concat!(
             "lattice-session = { path = \"../lattice-session\" }\n",
             "conv_alias = { package = \"lattice-conversation\", path = \"../lattice-conversation\" }\n",
+            "lattice-context = { path = \"../lattice-context\", optional = true }\n",
             "lattice-store = { path = \"../lattice-store\", optional = true }\n",
             "outside-util = { path = \"../../../outside-util\" }\n",
         ));
@@ -1060,9 +1082,21 @@ mod tests {
             &ws,
             "lattice-ipc",
             "lattice-llm",
-            "允许的内部依赖：[lattice-session, lattice-conversation, lattice-store]",
+            "允许的内部依赖：[lattice-session, lattice-conversation, lattice-context, lattice-store]",
         );
         assert_direct_normal_violation(&ws, "lattice-ipc", "plain-helper");
+    }
+
+    #[test]
+    fn direct_rule_lattice_context_rejects_unlisted_workspace_dependencies() {
+        let ws = TestWorkspace::new();
+        assert_direct_rule_rejects_all_forms(
+            &ws,
+            "lattice-context",
+            "lattice-session",
+            "允许的内部依赖：[lattice-conversation]",
+        );
+        assert_direct_normal_violation(&ws, "lattice-context", "plain-helper");
     }
 
     #[test]
@@ -1084,7 +1118,7 @@ mod tests {
             &ws,
             "lattice-local",
             "lattice-session",
-            "允许的内部依赖：[lattice-ipc, lattice-conversation, lattice-store]",
+            "允许的内部依赖：[lattice-ipc, lattice-conversation, lattice-context, lattice-store]",
         );
         assert_direct_normal_violation(&ws, "lattice-local", "plain-helper");
     }
