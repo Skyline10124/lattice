@@ -18,12 +18,7 @@ benchmarks/**/benchmark.env
 .zcode/
 .delta/
 .cursor/
-.pi-subagents/
 .mcp.json
-
-# Pi 本地资源
-.pi/*
-!.pi/agents/
 
 # Cargo
 .cargo/*
