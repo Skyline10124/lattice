@@ -16,7 +16,7 @@ status: active
 | `docs/development/` | 工程规范与操作指南 | 怎样设计、编码、测试与验证 |
 | `docs/reference/` | 术语表与设计资产 | 一个词、一个值是什么意思 |
 | `docs/adr/` | 决策记录 | 为什么这样决定 |
-| `docs/agents/` | Agent skill 的辅助资料 | skill 怎样接入本仓库 |
+| `docs/agents/` | Agent 辅助资料 | 任务跟踪、标签与领域文档读取 |
 | `docs/archive/` | 已删除文档的本地副本；被 `.gitignore` 忽略，不进仓库 | 过去怎样（仅本地参考） |
 | GitHub Issue 与 PR | 任务、提案、进展与审查 | 正在做什么 |
 

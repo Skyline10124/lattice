@@ -1,6 +1,6 @@
 # Agent 工作指引
 
-本文是 Agent 的入口，说明先读什么、怎样推进任务、交付时报告什么。项目介绍见 [README.md](README.md)，文档导航见 [docs/README.md](docs/README.md)。
+本文是 Agent 的入口，说明先读什么、怎样推进任务以及怎样汇报。项目介绍见 [README.md](README.md)，文档导航见 [docs/README.md](docs/README.md)。
 
 ## 阅读顺序
 
@@ -8,6 +8,7 @@
 | --- | --- |
 | 每个任务开始时 | [项目宪章](docs/governance/charter.md)、[Agent 身份与权限](docs/governance/agent-permissions.md) |
 | 设计、写代码或写测试前 | [工程规范](docs/development/engineering.md) |
+| 按 ADR 多 Agent 协作编码前 | [协作编码工作流](docs/development/workflow.md) |
 | 修改某个组件前 | 目标路径沿途的 `AGENTS.md`，以及其中列出的合同 |
 | 写或改文档前 | [文档写作](docs/governance/writing.md) |
 | Git 或 GitHub 操作前 | [Git 与 GitHub](docs/governance/git-operations.md) |
@@ -23,10 +24,7 @@
    - 需要为已有概念新增第二条路径或第二处状态，见[工程规范](docs/development/engineering.md#归属)；
    - 需要修改合同、验收标准或检查本身。
 
-## 交付
+## 汇报
 
-交付报告包含三项：
-
-1. 改了什么。
-2. 验证了什么：命令、结果，以及未覆盖的范围。
-3. 还有什么未解决。
+- 推进过程中有新发现或实质进展时，简短说一句进度，不必每步汇报。
+- 完成后直接说明做了什么即可；确实存在失败、未验证项或待决问题时按事实顺带说明。
