@@ -15,7 +15,7 @@ TUI 面向支持真彩色和 UTF-8 的深色终端，直接使用下列 hex 与 
 | ToolOk | cyan-7 | `#2ab0b0` | 成功勾号、diff 新增行 |
 | ToolErr | signal-red-9 | `#cb2b31` | 失败符号、错误摘要、Error 级状态消息、cancel phase、ERROR 标题和 diff 删除行 |
 | Warn | amber-7 | `#d38926` | WARN 标题 |
-| DimMeta | warm-gray-8 | `#857f78` | 状态、工具名、字节数、标题线与右端状态、排队消息正文、statusline 文字、Info 与释放后的 Warn 状态消息、启动横幅及 Markdown 的引用、链接 URL、分隔线、表格框线、代码块装饰线和 diff 头 |
+| DimMeta | warm-gray-8 | `#857f78` | 状态、工具名、字节数、标题线与右端状态、statusline 文字、Info 与释放后的 Warn 状态消息、启动横幅及 Markdown 的引用、链接 URL、分隔线、表格框线、代码块装饰线和 diff 头 |
 
 | 填充面 | Token | Hex | 文字 |
 | --- | --- | --- | --- |

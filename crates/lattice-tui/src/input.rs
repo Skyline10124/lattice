@@ -243,7 +243,7 @@ impl InputBuffer {
         }
     }
 
-    /// 主输入区与排队编辑器的粘贴入口：可识别为本机受支持图片文件且单张及加入后的单轮张数、
+    /// 主输入区的粘贴入口：可识别为本机受支持图片文件且单张及加入后的单轮张数、
     /// 总量均合规时插入图片原子，图片超限时返回错误，其余按普通文字粘贴。
     pub(crate) fn paste(&mut self, raw: &str) -> lattice_local::Result<()> {
         if let Some(path) = pasted_path(raw) {
@@ -342,7 +342,7 @@ impl InputBuffer {
 }
 
 impl InputBuffer {
-    /// 纯文本编辑，不解释提交、焦点、历史或草稿归属；输入区与排队编辑器共用。
+    /// 纯文本编辑，不解释提交、焦点、历史或草稿归属；输入区与评论编辑器共用。
     pub(crate) fn edit(&mut self, action: &KeyAction, width: u16) {
         match action {
             KeyAction::Insert(c) => self.insert_char(*c),

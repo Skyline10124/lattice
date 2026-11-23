@@ -16,6 +16,7 @@ use crate::connection::{
     not_accepted_status, not_submitted_status, observation_lost_status,
     older_turns_unavailable_status, orphaned_turn_status, paste_image_failed_status,
     preflight_failed_status, recovered_status, rejected_status, submission_unknown_status,
+    submit_busy_status, submit_configuring_status,
 };
 use crate::input::{
     CTRL_C_WINDOW, History, ImageSource, InputBuffer, KeyAction, PendingImage, push_part,
@@ -108,14 +109,6 @@ pub(crate) enum TurnPhase {
     Cancelling,
 }
 
-/// 结果未知的本客户端提交；确定未被接受时据此决定原输入的去向。
-enum UnknownSubmission {
-    /// 手动提交的原文：与直接被拒一样，输入区为空时放回。
-    Manual(crate::queue::Outgoing),
-    /// 自动发送的一条已让出排队名额，不再放回队首，免得队列超过上限；记下迟到拒绝时应给出的保留提示。
-    Automatic { kept: KeptInput },
-}
-
 /// 首次 Ctrl+C 取消的那一轮。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CancelTarget {
@@ -152,8 +145,7 @@ pub(crate) struct App {
     pub(crate) focus: Focus,
     pub(crate) dock: DockState,
     pub(crate) input: InputBuffer,
-    pub(crate) queue: crate::queue::Queue,
-    auto_sent_after: HashSet<TurnId>,
+    pub(crate) drafts: crate::drafts::Drafts,
     pub(crate) history: History,
     pub(crate) viewport: Viewport,
     pub(crate) phase: TurnPhase,
@@ -163,7 +155,6 @@ pub(crate) struct App {
     configure_generation: u64,
     pub(crate) configure_in_flight: BTreeSet<u64>,
     pub(crate) configure_request: Option<PendingConfigure>,
-    send_after_configure: bool,
     pub(crate) turn_usage: Option<UsageSummary>,
     pub(crate) context_tokens: Option<u64>,
     /// 由应用循环取走并执行的请求。
@@ -201,7 +192,7 @@ pub(crate) struct App {
     orphan_warned: Option<TurnId>,
     diagnostic: Option<LocalError>,
     /// 本客户端尚未得到结果的提交。
-    submitted: Option<(TurnId, crate::queue::Outgoing)>,
+    submitted: Option<(TurnId, crate::drafts::Outgoing)>,
     /// 本客户端最近一次提交；会话头所示正在执行的是它时，取消经它的 LocalTurn。
     own_turn: Option<TurnId>,
     /// 已被接受、会话头尚未指向它的那一轮：其间仍按正在运行处理。
@@ -210,7 +201,7 @@ pub(crate) struct App {
     /// 初始条目给完仍没有到达它，它已不在执行，不再等。
     awaiting_before_view: Option<TurnId>,
     /// 结果未知的那次提交，按 TurnId 留到收到它的确定结果为止。
-    unknown_submission: Option<(TurnId, UnknownSubmission)>,
+    unknown_submission: Option<(TurnId, crate::drafts::Outgoing)>,
     /// 已实时显示的提交回执：请求与结果种类。交接报告只省略相同的事实。
     shown_receipts: HashSet<(TurnId, std::mem::Discriminant<SubmissionResult>)>,
     pub(crate) cancel_status: Option<CancelStatus>,
@@ -242,7 +233,6 @@ impl App {
             configure_generation: 0,
             configure_in_flight: BTreeSet::new(),
             configure_request: None,
-            send_after_configure: false,
             session_id,
             project_root,
             blocks: BlockList::default(),
@@ -251,8 +241,7 @@ impl App {
             focus: Focus::Dock,
             dock: DockState::default(),
             input: InputBuffer::new(),
-            queue: Default::default(),
-            auto_sent_after: Default::default(),
+            drafts: Default::default(),
             history: History::load(session_dir),
             viewport: Viewport::new(),
             phase: TurnPhase::Idle,
@@ -305,7 +294,7 @@ impl App {
             KeyAction::ScrollPageUp | KeyAction::ScrollPageDown | KeyAction::ScrollToBottom => {
                 let height = self.transcript_height(lines.len());
                 if width == 0 || height == 0 {
-                    if !self.queue.is_editing() {
+                    if !self.drafts.is_editing() {
                         self.focus_input(lines.len());
                     }
                     return None;
@@ -322,7 +311,7 @@ impl App {
                     if !matches!(action, KeyAction::ScrollToBottom) {
                         self.viewport.pause();
                     }
-                    if !self.queue.is_editing() {
+                    if !self.drafts.is_editing() {
                         self.viewport.clamp_cursor(cursor);
                         cursor.reanchor(&transcript);
                     }
@@ -330,27 +319,16 @@ impl App {
             }
             KeyAction::CancelOrClear => self.cancel_or_clear(),
             KeyAction::Quit => self.should_quit = true,
-            action if self.queue.is_editing() => {
+            action if self.drafts.is_editing() => {
                 match action {
                     KeyAction::Submit | KeyAction::Clear => {
                         if let Some(anchor) =
-                            self.queue.finish_edit(matches!(action, KeyAction::Submit))
+                            self.drafts.finish_edit(matches!(action, KeyAction::Submit))
                         {
                             self.focus_anchor(&anchor);
                         }
-                        return self.auto_submit();
                     }
-                    KeyAction::Paste(raw) if self.queue.queued_editor_mut().is_some() => {
-                        if let Some(editor) = self.queue.queued_editor_mut()
-                            && let Err(error) = editor.paste(&raw)
-                        {
-                            self.push_status(paste_image_failed_status(&error));
-                        }
-                    }
-                    KeyAction::ClipboardPaste if self.queue.queued_editor_mut().is_some() => {
-                        self.clipboard_request = true;
-                    }
-                    action => self.queue.edit(&action, transcript.editor_width(width)),
+                    action => self.drafts.edit(&action, transcript.editor_width(width)),
                 }
                 let transcript = self.prepare_transcript();
                 if let Some((row, _)) = transcript.editor_cursor {
@@ -369,10 +347,10 @@ impl App {
                             }
                             Some(crate::view::CommentNavigation::Compose(anchor)) => {
                                 let id = self.blocks.allocate_id();
-                                self.queue.start_comment(id, anchor, &self.blocks);
+                                self.drafts.start_comment(id, anchor, &self.blocks);
                             }
                             None => {
-                                self.queue.start_edit(cursor.block.id);
+                                self.drafts.start_edit(cursor.block.id);
                             }
                         }
                     }
@@ -381,15 +359,13 @@ impl App {
                         self.viewport.reveal(row);
                     }
                 }
-                // 不在编辑时 Esc 只回到输入区；删除草稿或排队消息用 Delete，避免误删。
+                // 不在编辑时 Esc 只回到输入区；删除草稿用 Delete，避免误删。
                 KeyAction::Clear => self.focus_input(lines.len()),
                 KeyAction::Delete => {
-                    if let Focus::Transcript(cursor) = self.focus {
-                        if let Some(anchor) = self.queue.remove_draft(cursor.block.id) {
-                            self.focus_anchor(&anchor);
-                        } else if self.queue.remove(cursor.block.id) {
-                            self.prepare_transcript();
-                        }
+                    if let Focus::Transcript(cursor) = self.focus
+                        && let Some(anchor) = self.drafts.remove_draft(cursor.block.id)
+                    {
+                        self.focus_anchor(&anchor);
                     }
                 }
                 // 对话记录中的可打印字符与粘贴被忽略，焦点不动，避免误输入。
@@ -568,30 +544,19 @@ impl App {
         result: lattice_local::Result<ConfigureReply>,
     ) {
         self.configure_in_flight.remove(&generation);
-        let is_latest = generation == self.configure_generation;
+        if generation != self.configure_generation {
+            return;
+        }
         match result {
             Ok(reply) => {
-                self.queue
-                    .resolve_configure(generation, reply.head.settings_version);
-                if is_latest {
-                    self.latest_head = reply.head;
-                    self.sync_head_panels();
-                    if let Some(adjustment) = reply.adjustment {
-                        self.push_status(effort_changed_status(adjustment.from, adjustment.to));
-                    }
+                self.latest_head = reply.head;
+                self.sync_head_panels();
+                if let Some(adjustment) = reply.adjustment {
+                    self.push_status(effort_changed_status(adjustment.from, adjustment.to));
                 }
             }
             Err(error) => {
-                let bound = self.queue.fail_configure(generation);
-                if bound {
-                    self.send_after_configure = false;
-                    self.queue.pause();
-                } else if is_latest {
-                    self.send_after_configure = false;
-                }
-                if bound || is_latest {
-                    self.push_status(configure_failed_status(&error));
-                }
+                self.push_status(configure_failed_status(&error));
             }
         }
     }
@@ -650,7 +615,7 @@ impl App {
         if (width == 0
             || self.transcript_height(transcript.lines.len()) == 0
             || transcript.lines.is_empty())
-            && !self.queue.is_editing()
+            && !self.drafts.is_editing()
         {
             self.focus_input(transcript.lines.len());
         }
@@ -679,7 +644,6 @@ impl App {
     }
 
     fn connection_lost(&mut self, cause: &ConnectionStatus) {
-        self.queue.pause();
         self.connected = false;
         for block in self.blocks.iter_mut() {
             if let Block::Tool {
@@ -694,27 +658,18 @@ impl App {
     }
 
     fn apply_handoff(&mut self, report: DetachReport) {
-        // 旧句柄的回执只结清自己的名额，不覆盖新 Turn 的状态或输入。
-        if let Some(id) = report.turn_id {
-            match report.submission.as_ref().map(|receipt| &receipt.result) {
-                Some(SubmissionResult::Accepted { .. }) => {
-                    self.queue.release(id);
-                    self.resolve_unknown(id);
-                }
-                // 交接报告只生成状态消息，不归还输入。
-                Some(SubmissionResult::Rejected { .. } | SubmissionResult::NotAccepted) => {
-                    self.resolve_unknown(id);
-                    if self.queue.reject(id) {
-                        self.mark_rejected_comments(id);
-                        self.discard_missing_comments();
-                    }
-                }
-                Some(SubmissionResult::Unknown { .. }) | None => {
-                    if self.queue.release(id) {
-                        self.queue.pause();
-                    }
-                }
-            }
+        // 旧句柄的交接报告只生成状态消息，不覆盖新 Turn 的状态或归还输入。
+        if let Some(id) = report.turn_id
+            && matches!(
+                report.submission.as_ref().map(|receipt| &receipt.result),
+                Some(
+                    SubmissionResult::Accepted { .. }
+                        | SubmissionResult::Rejected { .. }
+                        | SubmissionResult::NotAccepted
+                )
+            )
+        {
+            self.resolve_unknown(id);
         }
         // 已由本客户端实时显示的同一回执与结局不再重述；未知之后的确定结果、取消与诊断照常显示。
         let mut report = report;
@@ -751,7 +706,7 @@ impl App {
         }
         self.settle(true);
         if self.initial && self.pending_head.is_none() {
-            // 起始会话头当前位置的条目已经到达，初始条目给完；草稿与排队评论的锚点按新路径核对。
+            // 起始会话头当前位置的条目已经到达，初始条目给完；评论草稿的锚点按新路径核对。
             self.initial = false;
             self.discard_missing_comments();
             if let Some(turn) = self.awaiting_before_view.take()
@@ -800,7 +755,6 @@ impl App {
             .insert((turn_id, std::mem::discriminant(&receipt.result)));
         match receipt.result {
             SubmissionResult::Accepted { turn } => {
-                self.queue.release(turn_id);
                 self.resolve_unknown(turn_id);
                 if self
                     .submitted
@@ -821,11 +775,6 @@ impl App {
             }
             SubmissionResult::Rejected { error } => {
                 let kept = self.reject_submission(turn_id);
-                if kept != KeptInput::Nothing
-                    && error.conflict == Some(lattice_local::ConflictReason::SettingsChanged)
-                {
-                    self.queue.pause();
-                }
                 self.push_status(rejected_status(turn_id, &error, kept));
             }
             // 不来自查询的未被接受是取消发生在请求写出之前，这次提交没有发出。
@@ -838,23 +787,9 @@ impl App {
                 });
             }
             SubmissionResult::Unknown { error } => {
-                // 不还原已提交的输入，避免重复提交；队列暂停到用户决定。
-                self.queue.pause();
-                let automatic = self.queue.release(turn_id);
-                if let Some((_, message)) = self.submitted.take_if(|(id, _)| *id == turn_id) {
-                    let held = if automatic {
-                        let kept = if !message.input.text().trim().is_empty() {
-                            KeptInput::History
-                        } else if message.input.image_count() > 0 {
-                            KeptInput::Discarded
-                        } else {
-                            KeptInput::Nothing
-                        };
-                        UnknownSubmission::Automatic { kept }
-                    } else {
-                        UnknownSubmission::Manual(message)
-                    };
-                    self.unknown_submission = Some((turn_id, held));
+                // 不还原已提交的输入，避免重复提交。
+                if let Some((id, message)) = self.submitted.take_if(|(id, _)| *id == turn_id) {
+                    self.unknown_submission = Some((id, message));
                 }
                 self.push_status(submission_unknown_status(turn_id, error.as_ref()));
             }
@@ -1090,7 +1025,7 @@ impl App {
         self.banner = Some((self.blocks.allocate_id(), startup_banner()));
     }
 
-    /// 第一步：由待发片段构造计划请求并做本地上限与帧长度预检；不读图片字节，不改动输入与队列。
+    /// 第一步：由待发片段构造计划请求并做本地上限与帧长度预检；不读图片字节，不改动输入与草稿。
     fn plan_request(
         &self,
         turn_id: TurnId,
@@ -1148,14 +1083,7 @@ impl App {
 
     fn submit(&mut self) -> Option<TurnRequest> {
         let raw = self.input.text();
-        if self.input.is_blank() && self.queue.draft_count() == 0 {
-            if self.phase == TurnPhase::Idle
-                && self.configure_in_flight.is_empty()
-                && self.input.is_empty()
-            {
-                self.queue.resume();
-                return self.send_queue_head();
-            }
+        if self.input.is_blank() && self.drafts.draft_count() == 0 {
             return None;
         }
         if self.input.image_count() == 0 && self.apply_builtin(raw.trim()) {
@@ -1163,47 +1091,18 @@ impl App {
             self.input.clear();
             return None;
         }
-        if self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty() {
-            let current_version = self.current_settings_version();
-            let settings = if self
-                .configure_in_flight
-                .contains(&self.configure_generation)
-            {
-                crate::queue::QueuedSettings::PendingConfigure {
-                    generation: self.configure_generation,
-                    fallback: current_version,
-                }
-            } else {
-                crate::queue::QueuedSettings::Snapshot(current_version)
-            };
-            let expected_settings = match settings {
-                crate::queue::QueuedSettings::Snapshot(version) => version,
-                crate::queue::QueuedSettings::PendingConfigure { fallback, .. } => fallback,
-            };
-            let comments = self.queue.draft_comments();
-            let parts = compose_parts(&self.input, &comments);
-            if let Err(error) =
-                self.plan_request(lattice_local::new_turn_id(), &parts, expected_settings)
-            {
-                self.push_status(preflight_failed_status(&error, false));
-                return None;
-            }
-            if !self.queue.is_full() {
-                let id = self.blocks.allocate_id();
-                let input = std::mem::take(&mut self.input);
-                if self.queue.enqueue(id, input, settings)
-                    && self.phase == TurnPhase::Idle
-                    && !self.configure_in_flight.is_empty()
-                {
-                    self.send_after_configure = true;
-                }
-            }
+        if self.phase != TurnPhase::Idle {
+            self.push_status(submit_busy_status());
+            return None;
+        }
+        if !self.configure_in_flight.is_empty() {
+            self.push_status(submit_configuring_status());
             return None;
         }
         let turn_id = lattice_local::new_turn_id();
         let expected_settings = self.current_settings_version();
         let steps = self.initial.then(|| self.present_steps());
-        let comments = self.queue.draft_comments_in(steps.as_ref());
+        let comments = self.drafts.draft_comments_in(steps.as_ref());
         let parts = compose_parts(&self.input, &comments);
         let (plan, request) = match self
             .plan_request(turn_id, &parts, expected_settings)
@@ -1213,87 +1112,23 @@ impl App {
             }) {
             Ok(pair) => pair,
             Err(error) => {
-                self.push_status(preflight_failed_status(&error, false));
+                self.push_status(preflight_failed_status(&error));
                 return None;
             }
         };
         self.check_comments_before_send();
         let input = std::mem::take(&mut self.input);
-        let message = self.queue.take_message(input, expected_settings);
+        let message = self.drafts.take_message(input);
         Some(self.start_submission(message, &plan, request))
     }
 
-    fn auto_submit(&mut self) -> Option<TurnRequest> {
-        if self.should_quit || self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty()
-        {
-            return None;
-        }
-        if self.send_after_configure {
-            if self.queue.is_paused() {
-                self.send_after_configure = false;
-                return None;
-            }
-            if self.queue.is_editing() {
-                return None;
-            }
-            let request = self.send_queue_head();
-            // 初始回放期间，队首评论的锚点可能尚未到达，保留发送意图等后续条目回放。
-            if request.is_none() && !self.initial {
-                self.send_after_configure = false;
-            }
-            return request;
-        }
-        let turn = self.head.as_ref()?.turn_id?;
-        let completed = self
-            .last_summary(turn)
-            .is_some_and(|summary| summary.outcome == PublicTurnOutcome::Completed);
-        if !(completed && self.turn_ended(turn)) || self.auto_sent_after.contains(&turn) {
-            return None;
-        }
-        let request = self.send_queue_head()?;
-        self.auto_sent_after.insert(turn);
-        Some(request)
-    }
-
-    fn send_queue_head(&mut self) -> Option<TurnRequest> {
-        if self.should_quit || self.phase != TurnPhase::Idle || !self.configure_in_flight.is_empty()
-        {
-            return None;
-        }
-        let steps = self.initial.then(|| self.present_steps());
-        let candidate = self.queue.send_candidate(steps.as_ref())?;
-        let id = lattice_local::new_turn_id();
-        let parts = compose_parts(&candidate.input, &candidate.comments);
-        let (plan, request) = match self
-            .plan_request(id, &parts, candidate.expected_settings)
-            .and_then(|plan| {
-                let request = Self::materialize_request(&plan, &parts)?;
-                Ok((plan, request))
-            }) {
-            Ok(pair) => pair,
-            Err(error) => {
-                self.queue.pause();
-                self.push_status(preflight_failed_status(&error, true));
-                return None;
-            }
-        };
-        self.check_comments_before_send();
-        let message = self
-            .queue
-            .start_send(id)
-            .expect("副本检查通过后清理出的队首必定可发出");
-        Some(self.start_submission(message, &plan, request))
-    }
-
-    // 手动与排队共用提交路径，不借用或覆盖正在编辑的输入区。
     fn start_submission(
         &mut self,
-        message: crate::queue::Outgoing,
+        message: crate::drafts::Outgoing,
         plan: &PlannedTurnRequest,
         request: TurnRequest,
     ) -> TurnRequest {
         let id = request.turn_id;
-        self.send_after_configure = false;
         let text = message.input.text();
         self.history.push(text.trim());
         let echo = crate::session::format_user_parts(plan.parts.iter().map(|part| match part {
@@ -1336,48 +1171,37 @@ impl App {
 
     fn discard_missing_comments(&mut self) {
         let steps = self.present_steps();
-        let dropped = self.queue.retain_steps(&steps);
+        let dropped = self.drafts.retain_steps(&steps);
         if !dropped.is_empty() {
             self.push_status(discarded_comments_status(&dropped));
         }
     }
 
-    /// 自动发送的一条放回队首且不进输入区；手动提交的内容在输入区为空时完整放回，
-    /// 输入区已有用户的草稿时不覆盖：有文字时留在输入历史中，纯图片时标记为未放回。两者都回到空闲。
-    /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，
-    /// 不撤销已知的执行、接管或完成显示。
+    /// 提交的内容在输入区为空时完整放回，输入区已有用户的草稿时不覆盖：
+    /// 有文字时留在输入历史中，纯图片时标记为未放回。结果未知之后才确定未被接受的提交同样处理。
+    /// 只归还本客户端的草稿，不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
-        let automatic = self.queue.reject(turn_id);
-        let mut kept = KeptInput::Restored;
-        let manual = match self.unknown_submission.take_if(|(id, _)| *id == turn_id) {
-            Some((_, UnknownSubmission::Manual(message))) => Some(message),
-            Some((_, UnknownSubmission::Automatic { kept: held })) => {
-                kept = held;
-                None
-            }
-            // 自动发送的一条也记在 submitted 中，原文以排队中的为准。
-            None => self
-                .submitted
-                .take_if(|(id, _)| *id == turn_id)
-                .map(|(_, message)| message)
-                .filter(|_| !automatic),
-        };
-        if !automatic && manual.is_none() && kept == KeptInput::Restored {
+        let Some((_, message)) = self
+            .unknown_submission
+            .take_if(|(id, _)| *id == turn_id)
+            .or_else(|| self.submitted.take_if(|(id, _)| *id == turn_id))
+        else {
             return KeptInput::Nothing;
-        }
+        };
         self.mark_rejected_comments(turn_id);
         // 评论不进输入历史，总是恢复为草稿。
-        if let Some(message) = manual {
-            let input = self.queue.restore(message, &mut self.blocks);
-            if self.input.is_empty() {
-                self.input = input;
-                self.input.move_to_end();
-            } else if !input.text().trim().is_empty() {
-                kept = KeptInput::History;
-            } else if input.image_count() > 0 {
-                kept = KeptInput::Discarded;
-            }
-        }
+        let input = self.drafts.restore(message, &mut self.blocks);
+        let kept = if input.is_empty() {
+            KeptInput::Nothing
+        } else if self.input.is_empty() {
+            self.input = input;
+            self.input.move_to_end();
+            KeptInput::Restored
+        } else if !input.text().trim().is_empty() {
+            KeptInput::History
+        } else {
+            KeptInput::Discarded
+        };
         self.discard_missing_comments();
         kept
     }
@@ -1500,7 +1324,6 @@ impl App {
         }
         if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
             self.submitted = None;
-            self.queue.release(turn);
             if !self.head_reached(turn) {
                 self.awaiting_head = Some(turn);
             }
@@ -1623,19 +1446,15 @@ impl App {
             for node in nodes {
                 self.render_node(node);
             }
-            if ended && fresh && !self.initial {
-                if let Some(start) = self.last_step_start(turn) {
-                    let range = self.blocks.group(start);
-                    self.offer_in(range, |status| {
-                        status.closing.as_ref().is_some_and(|(id, _)| *id == turn)
-                    });
-                }
-                if self
-                    .last_summary(turn)
-                    .is_some_and(|summary| summary.outcome != PublicTurnOutcome::Completed)
-                {
-                    self.queue.pause();
-                }
+            if ended
+                && fresh
+                && !self.initial
+                && let Some(start) = self.last_step_start(turn)
+            {
+                let range = self.blocks.group(start);
+                self.offer_in(range, |status| {
+                    status.closing.as_ref().is_some_and(|(id, _)| *id == turn)
+                });
             }
         }
         // 当前位置那一轮停在未关闭的 Step 上而没有 Owner：执行者已消失，每个视图提示一次。
@@ -1814,10 +1633,7 @@ impl App {
                 self.apply_action(KeyAction::Paste(text));
             }
             Ok(Content::Image(bytes)) => {
-                let existing = match self.queue.queued_editor_mut() {
-                    Some(editor) => editor.image_refs(),
-                    None => self.input.image_refs(),
-                };
+                let existing = self.input.image_refs();
                 let meta = match lattice_local::image_bytes_ref(&bytes, &existing) {
                     Ok(meta) => meta,
                     Err(error) => {
@@ -1832,19 +1648,10 @@ impl App {
                         return;
                     }
                 };
-                let pending = PendingImage {
+                self.input.insert_image(PendingImage {
                     meta,
                     source: ImageSource::Temp(path),
-                };
-                if let Some(editor) = self.queue.queued_editor_mut() {
-                    editor.insert_image(pending);
-                    let transcript = self.prepare_transcript();
-                    if let Some((row, _)) = transcript.editor_cursor {
-                        self.viewport.reveal(row);
-                    }
-                } else {
-                    self.input.insert_image(pending);
-                }
+                });
             }
             Err(error) => {
                 self.push_status(clipboard_failed_status(&error));
@@ -2109,7 +1916,7 @@ where
             }
         }
         dirty = true;
-        if let Some(request) = request.or_else(|| app.auto_submit()) {
+        if let Some(request) = request {
             if let Some(old) = turn.take() {
                 handoffs.push(old.detach().boxed());
             }
@@ -2117,10 +1924,6 @@ where
             turn_open = true;
         }
     };
-    // 输入结束、普通退出和绘制失败都保存尚未发送的原文；不保存编辑器草稿。
-    for text in app.queue.drain() {
-        app.history.push(&text);
-    }
     LoopExit {
         result,
         turn,
