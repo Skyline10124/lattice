@@ -26,6 +26,7 @@
 
 ## 开发与验证
 
+- [协作编码工作流](development/workflow.md)：ADR 定案后 Supervisor、Leader 与 Worker 的角色分工、流转、把关标准与上下文隔离。
 - [工程规范](development/engineering.md)：设计中的归属、代码可读性、测试判定、TDD 与验证范围。
 - [测试工程](development/testing.md)：测试的原则：测试层、harness 的原则、场景的共同规则、失败证据与发布门禁。
 - [验证操作指南](development/validation-guide.md)：动手验证的原则：产物、环境与后台、结果判读、证据与门禁。

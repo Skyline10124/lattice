@@ -8,6 +8,7 @@
 | --- | --- |
 | 每个任务开始时 | [项目宪章](docs/governance/charter.md)、[Agent 身份与权限](docs/governance/agent-permissions.md) |
 | 设计、写代码或写测试前 | [工程规范](docs/development/engineering.md) |
+| 按 ADR 多 Agent 协作编码前 | [协作编码工作流](docs/development/workflow.md) |
 | 修改某个组件前 | 目标路径沿途的 `AGENTS.md`，以及其中列出的合同 |
 | 写或改文档前 | [文档写作](docs/governance/writing.md) |
 | Git 或 GitHub 操作前 | [Git 与 GitHub](docs/governance/git-operations.md) |
