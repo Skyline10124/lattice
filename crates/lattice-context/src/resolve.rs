@@ -8,8 +8,8 @@ use std::fmt;
 
 use lattice_conversation::{
     BoundToolCall, ImageRef, InvocationId, MessagePart, MessageRole, MessageSemantic,
-    NativeMessage, NodeId, ResultPayload, StepContent, SuccessContent, canonical_json,
-    tool_content_digest, validate_image_placement,
+    NativeMessage, NodeId, ResultPayload, StepContent, SuccessContent, ToolResultOutcome,
+    canonical_json, tool_content_digest, validate_image_placement,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -79,6 +79,15 @@ pub enum ContextError {
     /// 目标工具调用已被先前 `OmitInvocation` 成对移出。
     #[error("工具调用 InvocationId({invocation}) 已被移出")]
     InvocationAlreadyOmitted { invocation: InvocationId },
+    /// 目标工具调用的结局无可替换的正文载荷（仅 `Succeeded` 与 `Failed` 允许替换）。
+    #[error(
+        "工具调用 InvocationId({invocation}) 的结局为 {}，无可替换的正文载荷",
+        .outcome.as_str()
+    )]
+    ToolResultNotReplaceable {
+        invocation: InvocationId,
+        outcome: ToolResultOutcome,
+    },
     /// 目标 `Input` 当前有效片段中不含指定的图片引用。
     #[error("Input 节点 NodeId({}) 当前有效片段中不包含目标图片", .node.0)]
     ImageNotFound { node: NodeId, image: ImageRef },
@@ -437,21 +446,34 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     invocation: *invocation,
                 });
             }
-            let value = serde_json::Value::String(text.as_str().to_owned());
-            let bytes = canonical_json(&value);
-            let digest = tool_content_digest(&bytes);
-            let byte_length = bytes.len() as u64;
 
             let result = content
                 .results
                 .iter_mut()
                 .find(|item| item.invocation_id == *invocation)
                 .expect("有效未移出的 InvocationId 必存在对应 StoredToolResult");
-            result.payload = ResultPayload::Succeeded(SuccessContent::Json {
-                value,
-                digest,
-                byte_length,
-            });
+            match &mut result.payload {
+                ResultPayload::Succeeded(_) => {
+                    let value = serde_json::Value::String(text.as_str().to_owned());
+                    let bytes = canonical_json(&value);
+                    let digest = tool_content_digest(&bytes);
+                    let byte_length = bytes.len() as u64;
+                    result.payload = ResultPayload::Succeeded(SuccessContent::Json {
+                        value,
+                        digest,
+                        byte_length,
+                    });
+                }
+                ResultPayload::Failed(err) => {
+                    err.message = text.as_str().to_owned();
+                }
+                ResultPayload::NotExecuted | ResultPayload::Indeterminate(_) => {
+                    return Err(ContextError::ToolResultNotReplaceable {
+                        invocation: *invocation,
+                        outcome: result.payload.outcome(),
+                    });
+                }
+            }
             let status = sanitize_step_after_local_edit(content);
             entry.status = Some(status);
             Ok(())
@@ -521,7 +543,7 @@ fn push_merged_user_text(out: &mut Vec<MessagePart<BoundToolCall>>, text: &str) 
 }
 
 /// 统一 `Step` 局部编辑清洗路径：清除 `provider_origin` 与逐片段 `replay_state`、
-/// 剔除无签名的空文本片段、合并相邻同类 `Text` 与 `Reasoning` 并判定最终状态。
+/// 剔除无签名的空 `Text` 与空 `Reasoning` 片段、合并相邻同类 `Text` 与 `Reasoning` 并判定最终状态。
 fn sanitize_step_after_local_edit(content: &mut StepContent) -> NodeStatus {
     content.assistant.provider_origin = None;
 
@@ -545,6 +567,9 @@ fn sanitize_step_after_local_edit(content: &mut StepContent) -> NodeStatus {
                 }
             }
             MessageSemantic::Reasoning { text } => {
+                if text.is_empty() {
+                    continue;
+                }
                 if let Some(MessagePart {
                     semantic: MessageSemantic::Reasoning { text: prev },
                     ..

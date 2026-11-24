@@ -129,7 +129,8 @@ fn escape_channel_attr(channel: &str) -> String {
 fn escape_body_text(text: &str) -> String {
     text.split('\n')
         .map(|line| {
-            if line.trim_start_matches('\\') == CLOSE_TAG {
+            let content = line.strip_suffix('\r').unwrap_or(line);
+            if content.trim_start_matches('\\') == CLOSE_TAG {
                 format!("\\{line}")
             } else {
                 line.to_owned()

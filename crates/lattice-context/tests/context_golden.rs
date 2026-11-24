@@ -10,7 +10,7 @@ use lattice_context::{
     Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
     ContextText, EffectiveEntrySummary, EmptyContextOpError, InvalidUserMessageError,
     MAX_CHANNEL_BYTES, NodeStatus, NormalizedUserMessage, OperatedNode, PathNodeKind, PathRecord,
-    TextBoundError, ToolResultText, resolve,
+    TextBoundError, ToolResultOutcome, ToolResultText, resolve,
 };
 use lattice_conversation::{
     BoundToolCall, ConversationItem, ImageMediaType, ImageRef, IndeterminateCause, InvocationId,
@@ -1240,6 +1240,360 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
 }
 
 #[test]
+fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outcomes() {
+    let inv_failed = inv("11111111-1111-4111-8111-111111111111");
+    let inv_not_exec = inv("22222222-2222-4222-8222-222222222222");
+    let inv_no_result = inv("33333333-3333-4333-8333-333333333333");
+    let inv_cancelled = inv("44444444-4444-4444-8444-444444444444");
+    let inv_reported = inv("55555555-5555-4555-8555-555555555555");
+
+    let call_failed = bound_call(inv_failed, "read_file", 0, json!({"path": "/secret"}));
+    let call_not_exec = bound_call(inv_not_exec, "t_ne", 1, json!({}));
+    let call_no_result = bound_call(inv_no_result, "t_nr", 2, json!({}));
+    let call_cancelled = bound_call(inv_cancelled, "t_ca", 3, json!({}));
+    let call_reported = bound_call(inv_reported, "t_rp", 4, json!({}));
+
+    let step = step_with_parts(
+        Some(sample_origin()),
+        vec![
+            MessagePart {
+                semantic: MessageSemantic::ToolCall {
+                    call: call_failed.clone(),
+                },
+                replay_state: Some(OpaqueProviderState::new("sig-fail").unwrap()),
+            },
+            MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: call_not_exec.clone(),
+            }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: call_no_result.clone(),
+            }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: call_cancelled.clone(),
+            }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: call_reported.clone(),
+            }),
+        ],
+        vec![
+            StoredToolResult {
+                invocation_id: inv_failed,
+                name: "read_file".to_owned(),
+                payload: ResultPayload::Failed(ToolError {
+                    code: "permission_denied".to_owned(),
+                    message: "原始过长失败堆栈详情".to_owned(),
+                }),
+            },
+            StoredToolResult {
+                invocation_id: inv_not_exec,
+                name: "t_ne".to_owned(),
+                payload: ResultPayload::NotExecuted,
+            },
+            StoredToolResult {
+                invocation_id: inv_no_result,
+                name: "t_nr".to_owned(),
+                payload: ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+            },
+            StoredToolResult {
+                invocation_id: inv_cancelled,
+                name: "t_ca".to_owned(),
+                payload: ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
+            },
+            StoredToolResult {
+                invocation_id: inv_reported,
+                name: "t_rp".to_owned(),
+                payload: ResultPayload::Indeterminate(IndeterminateCause::Reported),
+            },
+        ],
+    );
+
+    let base = resolve(&[PathRecord::Step {
+        id: NodeId(1),
+        content: step.clone(),
+    }])
+    .expect("基线 Step 应归约成功");
+    let base_before = base.clone();
+
+    // NotExecuted 与三种 Indeterminate 在 validate_op() 与 resolve() 中均必须拒绝，且 validate_op 无副作用
+    for (target_inv, expected_outcome) in [
+        (inv_not_exec, ToolResultOutcome::NotExecuted),
+        (inv_no_result, ToolResultOutcome::Indeterminate),
+        (inv_cancelled, ToolResultOutcome::Indeterminate),
+        (inv_reported, ToolResultOutcome::Indeterminate),
+    ] {
+        let bad_op = ContextOp::new(
+            ch("cli"),
+            vec![
+                // 前置合法编辑后接非法 ReplaceToolResult，验证失败时 validate_op 不污染原状态
+                ContextEdit::replace_tool_result(inv_failed, "先改失败消息").unwrap(),
+                ContextEdit::replace_tool_result(target_inv, "不可篡改为成功").unwrap(),
+            ],
+        )
+        .unwrap();
+        let expected_err = ContextError::ToolResultNotReplaceable {
+            invocation: target_inv,
+            outcome: expected_outcome,
+        };
+        assert_eq!(
+            base.validate_op(&bad_op),
+            Err(expected_err.clone()),
+            "validate_op 必须拒绝替换 {expected_outcome:?} 结局的工具结果"
+        );
+        assert_eq!(
+            resolve(&[
+                PathRecord::Step {
+                    id: NodeId(1),
+                    content: step.clone(),
+                },
+                PathRecord::Op {
+                    id: NodeId(2),
+                    op: &bad_op,
+                },
+            ]),
+            Err(expected_err),
+            "resolve 必须拒绝替换 {expected_outcome:?} 结局的工具结果"
+        );
+    }
+    assert_eq!(
+        base, base_before,
+        "validate_op 拒绝后不得污染原 EffectiveContext"
+    );
+
+    // Failed 结局允许替换：保留 Failed 与原 code，仅更新 message，并走统一清洗；支持再次替换与后续 OmitInvocation
+    let op_replace_failed_1 = ContextOp::new(
+        ch("cli"),
+        vec![ContextEdit::replace_tool_result(inv_failed, "精简失败原因").unwrap()],
+    )
+    .unwrap();
+    let ctx_failed_1 = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_replace_failed_1,
+        },
+    ])
+    .expect("替换 Failed 结果应成功");
+
+    let ConversationItem::Step(ref step_after_1) = ctx_failed_1.project()[0] else {
+        panic!("首项应为 Step");
+    };
+    assert_eq!(
+        step_after_1.assistant.provider_origin, None,
+        "替换 Failed 结果后应清除 provider_origin"
+    );
+    assert!(
+        step_after_1
+            .assistant
+            .parts
+            .iter()
+            .all(|part| part.replay_state.is_none()),
+        "替换 Failed 结果后应清除逐片段 replay_state"
+    );
+    assert_eq!(
+        step_after_1.results[0],
+        StoredToolResult {
+            invocation_id: inv_failed,
+            name: "read_file".to_owned(),
+            payload: ResultPayload::Failed(ToolError {
+                code: "permission_denied".to_owned(),
+                message: "精简失败原因".to_owned(),
+            }),
+        },
+        "ReplaceToolResult 作用于 Failed 必须保留 Failed 结局与原机器错误码"
+    );
+
+    // inspect() 须按 Failed 规范 JSON 计长而非 Succeeded 字符串计长
+    let expected_tool_bytes = canonical_json(&json!({
+        "error": { "code": "permission_denied", "message": "精简失败原因" }
+    }))
+    .len()
+        + canonical_json(&json!({"outcome": "not_executed"})).len()
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "no_result"})).len()
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "cancelled"})).len()
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "reported"})).len();
+    assert_eq!(
+        ctx_failed_1.inspect().entries,
+        vec![EffectiveEntrySummary::Step {
+            node: NodeId(1),
+            text_bytes: 0,
+            reasoning_bytes: 0,
+            tool_call_count: 5,
+            tool_result_bytes: expected_tool_bytes,
+        }],
+        "替换后的 Failed 结果在 inspect() 中必须按 Failed 规则计长"
+    );
+
+    // 同一活跃 Failed 调用支持再次 ReplaceToolResult，并可后续 OmitInvocation
+    let op_replace_again = ContextOp::new(
+        ch("cli"),
+        vec![ContextEdit::replace_tool_result(inv_failed, "二版失败说明").unwrap()],
+    )
+    .unwrap();
+    let ctx_failed_2 = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_replace_failed_1,
+        },
+        PathRecord::Op {
+            id: NodeId(3),
+            op: &op_replace_again,
+        },
+    ])
+    .expect("对同一 Failed 调用再次 ReplaceToolResult 应成功");
+    let ConversationItem::Step(ref step_after_2) = ctx_failed_2.project()[0] else {
+        panic!("首项应为 Step");
+    };
+    assert_eq!(
+        step_after_2.results[0].payload,
+        ResultPayload::Failed(ToolError {
+            code: "permission_denied".to_owned(),
+            message: "二版失败说明".to_owned(),
+        })
+    );
+
+    let op_omit_failed =
+        ContextOp::new(ch("cli"), vec![ContextEdit::omit_invocation(inv_failed)]).unwrap();
+    let ctx_after_omit = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: step,
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_replace_failed_1,
+        },
+        PathRecord::Op {
+            id: NodeId(3),
+            op: &op_replace_again,
+        },
+        PathRecord::Op {
+            id: NodeId(4),
+            op: &op_omit_failed,
+        },
+    ])
+    .expect("替换 Failed 后继续 OmitInvocation 应成功");
+    let ConversationItem::Step(ref step_after_omit) = ctx_after_omit.project()[0] else {
+        panic!("首项应为 Step");
+    };
+    assert_eq!(
+        step_after_omit.results.len(),
+        4,
+        "OmitInvocation 应成对移出该 Failed 调用与结果"
+    );
+    assert!(
+        step_after_omit
+            .results
+            .iter()
+            .all(|result| result.invocation_id != inv_failed)
+    );
+}
+
+#[test]
+fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
+    let call_1 = bound_call(inv(INV_1), "read_file", 1, json!({"path": "a.rs"}));
+    let call_2 = bound_call(inv(INV_2), "list_dir", 3, json!({"path": "."}));
+
+    // Step 1：仅含 Anthropic redacted_thinking（空 Reasoning + replay_state）与唯一 ToolCall
+    let redacted_only_step = step_with_parts(
+        Some(ReplayOrigin {
+            protocol: Protocol::Messages,
+            provider_id: ProviderId::parse("anthropic").unwrap(),
+        }),
+        vec![
+            reasoning_part("", Some("redacted:opaque-block-1")),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_1 }),
+        ],
+        vec![json_result(inv(INV_1), "read_file", json!("ok"))],
+    );
+
+    // Step 2：混合非空文本、空 redacted_thinking 与 ToolCall
+    let mixed_step = step_with_parts(
+        Some(ReplayOrigin {
+            protocol: Protocol::Messages,
+            provider_id: ProviderId::parse("anthropic").unwrap(),
+        }),
+        vec![
+            text_part("前半"),
+            reasoning_part("", Some("redacted:opaque-block-2")),
+            text_part("后半"),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_2 }),
+        ],
+        vec![json_result(inv(INV_2), "list_dir", json!([]))],
+    );
+
+    let op = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::omit_invocation(inv(INV_1)),
+            ContextEdit::omit_invocation(inv(INV_2)),
+        ],
+    )
+    .unwrap();
+
+    let ctx = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: redacted_only_step,
+        },
+        PathRecord::Step {
+            id: NodeId(2),
+            content: mixed_step,
+        },
+        PathRecord::Op {
+            id: NodeId(3),
+            op: &op,
+        },
+    ])
+    .expect("局部编辑归约应成功");
+
+    let inspection = ctx.inspect();
+    assert_eq!(
+        inspection.operated_nodes,
+        vec![
+            OperatedNode {
+                node: NodeId(1),
+                status: NodeStatus::SkippedEmpty,
+            },
+            OperatedNode {
+                node: NodeId(2),
+                status: NodeStatus::Modified,
+            },
+        ],
+        "仅剩空 redacted_thinking 的 Step 剥离签名后必须丢弃空 Reasoning 并标为 SkippedEmpty"
+    );
+    assert_eq!(
+        inspection.entries,
+        vec![EffectiveEntrySummary::Step {
+            node: NodeId(2),
+            text_bytes: "前半后半".len(),
+            reasoning_bytes: 0,
+            tool_call_count: 0,
+            tool_result_bytes: 0,
+        }],
+        "Step 1 清空后不得出现在 inspect().entries 中"
+    );
+    assert_eq!(
+        ctx.project(),
+        vec![ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                None,
+                vec![text_part("前半后半")]
+            ),
+            results: vec![],
+        })],
+        "Step 1 应跳过；Step 2 应丢弃空 Reasoning 并将两侧非空文本合并"
+    );
+}
+
+#[test]
 fn resolve_replace_image_merges_text_skips_empty_and_recovers_on_replace_input() {
     let img_a = img(1, 100);
     let img_b = img(2, 250);
@@ -1733,5 +2087,67 @@ fn project_wraps_all_multimodal_shapes_and_escapes_channel_and_close_tags() {
                 "<lattice-context channel=\"screenshot\">\n\\</lattice-context>\n</lattice-context>"
             )],
         ))]
+    );
+}
+
+#[test]
+fn project_escapes_crlf_and_trailing_cr_close_tags_preserving_line_endings() {
+    let crlf_body =
+        "a\r\n</lattice-context>\r\n\\</lattice-context>\r\n </lattice-context>\r\nb\r\n";
+    let expected_crlf_body =
+        "a\r\n\\</lattice-context>\r\n\\\\</lattice-context>\r\n </lattice-context>\r\nb\r\n";
+
+    let trailing_cr_body = "</lattice-context>\r";
+    let expected_trailing_cr_body = "\\</lattice-context>\r";
+
+    let mixed_body = "</lattice-context>\n</lattice-context>\r\n末行";
+    let expected_mixed_body = "\\</lattice-context>\n\\</lattice-context>\r\n末行";
+
+    let input_crlf = ContextInput::new(ch("tui"), vec![text_sem(crlf_body)]).unwrap();
+    let input_cr = ContextInput::new(ch("tui"), vec![text_sem(trailing_cr_body)]).unwrap();
+    let input_mixed = ContextInput::new(ch("tui"), vec![text_sem(mixed_body)]).unwrap();
+
+    let ctx = resolve(&[
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &input_crlf,
+        },
+        PathRecord::Input {
+            id: NodeId(2),
+            input: &input_cr,
+        },
+        PathRecord::Input {
+            id: NodeId(3),
+            input: &input_mixed,
+        },
+    ])
+    .expect("CRLF 正文路径归约应成功");
+
+    assert_eq!(
+        ctx.project(),
+        vec![
+            ConversationItem::Message(NativeMessage::new(
+                MessageRole::User,
+                None,
+                vec![text_part(&format!(
+                    "<lattice-context channel=\"tui\">\n{expected_crlf_body}\n</lattice-context>"
+                ))],
+            )),
+            ConversationItem::Message(NativeMessage::new(
+                MessageRole::User,
+                None,
+                vec![text_part(&format!(
+                    "<lattice-context channel=\"tui\">\n{expected_trailing_cr_body}\n</lattice-context>"
+                ))],
+            )),
+            ConversationItem::Message(NativeMessage::new(
+                MessageRole::User,
+                None,
+                vec![text_part(&format!(
+                    "<lattice-context channel=\"tui\">\n{expected_mixed_body}\n</lattice-context>"
+                ))],
+            )),
+        ],
+        "CRLF 与末尾 CR 闭合标记均须前置反斜杠转义且严格保留原始换行序列"
     );
 }

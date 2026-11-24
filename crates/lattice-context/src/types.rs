@@ -351,7 +351,7 @@ pub enum ContextEdit {
     ReplaceStep { node: NodeId, text: ContextText },
     /// 成对移出单次工具调用（`ToolCall` 片段与对应 `StoredToolResult` 同时移出，不留悬空调用）。
     OmitInvocation { invocation: InvocationId },
-    /// 仅替换单次工具调用的 `StoredToolResult` 载荷为精简文本（保留 `ToolCall` 配对）。
+    /// 仅替换单次工具调用的 `StoredToolResult` 文本载荷（保留原 `Succeeded`/`Failed` 结局与 `ToolCall` 配对；`NotExecuted` 与 `Indeterminate` 不可替换）。
     ReplaceToolResult {
         invocation: InvocationId,
         text: ToolResultText,

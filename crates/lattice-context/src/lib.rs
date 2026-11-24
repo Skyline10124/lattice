@@ -19,6 +19,7 @@ mod types;
 
 pub use channel::{Channel, ChannelError, MAX_CHANNEL_BYTES};
 pub use inspect::{ContextInspection, EffectiveEntrySummary, NodeStatus, OperatedNode};
+pub use lattice_conversation::ToolResultOutcome;
 pub use resolve::{ContextError, EffectiveContext, PathNodeKind, PathRecord, resolve};
 pub use types::{
     ContextEdit, ContextInput, ContextOp, ContextText, EmptyContextOpError,
