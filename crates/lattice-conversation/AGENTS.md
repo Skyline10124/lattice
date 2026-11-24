@@ -21,7 +21,7 @@
 | `src/tool_call.rs` | `UnboundToolCall` / `BoundToolCall` typestate、规范 JSON 参数对象、域分离 SHA-256 摘要与 `validate_tool_call_batch` |
 | `src/limits.rs` | 流式增量计量 `AttemptAssembly`、完整回复边界核验 `validate_assistant_bounds`、助手输出与单轮用户输入上限常量 |
 | `src/outcome.rs` | 闭合的调用结局 `ToolResultOutcome` 与 `IndeterminateCause` |
-| `src/tool_error.rs` | 工具执行失败载荷 `ToolError { code, message }` 与失败消息投影字节上限 `MAX_TOOL_ERROR_MESSAGE_BYTES`（4,096 字节） |
+| `src/tool_error.rs` | 工具执行失败载荷 `ToolError { code, message }` 与按 `MAX_TOOL_CONTENT_BYTES`（65,536 字节）规范 JSON 字符串上限裁剪 UTF-8 前缀的 `bound_tool_error_message` |
 | `src/result.rs` | 结构化工具结果 `StoredToolResult`、`ResultPayload`（含 `Failed(ToolError)`）与 64 KiB 正文保存边界 |
 | `src/attempt.rs` | 模型尝试中断与批次拒绝记录（`AttemptInterruption`、`AttemptRejection`） |
 | `src/usage.rs` | 尝试级 `TokenUsage`、`UsageCompleteness`、费用结果数据 `CostEstimate` 与汇总 `UsageSummary` |

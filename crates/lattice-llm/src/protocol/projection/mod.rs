@@ -37,7 +37,7 @@ use lattice_conversation::{
 };
 use lattice_conversation::{
     ConversationItem, MAX_TOOL_CONTENT_BYTES, ResultPayload, StoredToolResult, SuccessContent,
-    canonical_json, tool_content_digest,
+    bound_tool_error_message, canonical_json, tool_content_digest,
 };
 use serde_json::Value;
 use thiserror::Error;
@@ -432,12 +432,7 @@ fn closure_content(payload: &ResultPayload) -> String {
             "byte_length": byte_length,
         }),
         ResultPayload::Failed(error) => {
-            const BOUNDED_ERROR_CONTENT_BYTES: usize = 4_096;
-            let mut end = error.message.len().min(BOUNDED_ERROR_CONTENT_BYTES);
-            while !error.message.is_char_boundary(end) {
-                end -= 1;
-            }
-            json!({"error":{"code":&error.code, "message":&error.message[..end]}})
+            json!({"error":{"code":&error.code, "message": bound_tool_error_message(&error.message)}})
         }
         ResultPayload::NotExecuted => json!({"outcome":"not_executed"}),
         ResultPayload::Indeterminate(cause) => json!({"outcome":"indeterminate","cause":cause}),

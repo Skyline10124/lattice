@@ -6,8 +6,8 @@
 use std::collections::BTreeMap;
 
 use lattice_conversation::{
-    ImageRef, MAX_TOOL_ERROR_MESSAGE_BYTES, MessageSemantic, NodeId, ResultPayload, StepContent,
-    SuccessContent, canonical_json,
+    ImageRef, MessageSemantic, NodeId, ResultPayload, StepContent, SuccessContent,
+    bound_tool_error_message, canonical_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -211,14 +211,11 @@ fn tool_result_payload_bytes(payload: &ResultPayload) -> usize {
             canonical_json(&value).len()
         }
         ResultPayload::Failed(error) => {
-            let mut end = error.message.len().min(MAX_TOOL_ERROR_MESSAGE_BYTES);
-            while !error.message.is_char_boundary(end) {
-                end -= 1;
-            }
+            let bounded = bound_tool_error_message(&error.message);
             let value = json!({
                 "error": {
                     "code": &error.code,
-                    "message": &error.message[..end],
+                    "message": bounded,
                 }
             });
             canonical_json(&value).len()

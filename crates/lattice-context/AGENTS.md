@@ -24,8 +24,8 @@
 ## 约束
 
 - `Cargo.toml` 仅允许依赖 `lattice-conversation`、`serde`、`serde_json`、`thiserror`，零 I/O、零 `async`、零存储、零 `unsafe`（`#![forbid(unsafe_code)]`）。
-- 直接复用 `lattice-conversation` 的 `NodeId`、`ImageRef`、`normalize_user_message`、`canonical_json`、`tool_content_digest` 与上限常量（含 `MAX_TOOL_ERROR_MESSAGE_BYTES`），不定义平行的规范化逻辑或上限副本。
-- `resolve()` 与 `validate_op()` 共用同一套归约与应用规则，并坚守纯函数确定性、协议成对铁律、回放签名铁律与同路径引用铁律；`ReplaceToolResult` 保留原工具结局（仅允许替换 `Succeeded` 与 `Failed` 正文载荷，其中 `Failed` 替换消息原文上限为 `MAX_TOOL_ERROR_MESSAGE_BYTES` = 4,096 字节，拒绝 `NotExecuted` 与 `Indeterminate`），局部编辑清除 `provider_origin` 后同步剥离全部无来源 `Reasoning` 与空 `Text` 片段。
+- 直接复用 `lattice-conversation` 的 `NodeId`、`ImageRef`、`normalize_user_message`、`canonical_json`、`tool_content_digest`、`bound_tool_error_message` 与上限常量，不定义平行的规范化逻辑、裁剪循环或上限副本。
+- `resolve()` 与 `validate_op()` 共用同一套归约与应用规则，并坚守纯函数确定性、协议成对铁律、回放签名铁律与同路径引用铁律；`ReplaceToolResult` 保留原工具结局（仅允许替换 `Succeeded` 与 `Failed` 正文载荷，二者共享 `MAX_TOOL_CONTENT_BYTES` = 65,536 字节规范 JSON 字符串编码单一标尺，拒绝 `NotExecuted` 与 `Indeterminate`），局部编辑清除 `provider_origin` 后同步剥离全部无来源 `Reasoning` 与空 `Text` 片段；`inspect()` 对历史超长 `Failed` 消息与 `lattice-llm` 投影统一经 `bound_tool_error_message` 裁剪计长。
 - `inspect()` 只产出客观字节与结构统计，不混入 `32 MiB` wire 预算或模型图片模态检查（继续归 `lattice-llm::ResolvedRequest::check_request`）。
 - `project()` 不拼接 `system_prompt`（由 `ModelStepRequest::chat_request` 置顶拼接）。
 - `tests/context_golden.rs` 锁定 `Channel`、强类型 serde 形状、归约与清洗不变量、`inspect()` 统计与 `project()` 标记转义的逐字节行为。

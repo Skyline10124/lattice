@@ -93,7 +93,7 @@ NotExecuted 不带原因。停止原因沿 Turn → Step → 槽位的嵌套只�
 载荷还遵循：
 
 - Succeeded 载荷的规范 JSON 超过 65,536 字节时，不保存正文、不截断，保留完整摘要与长度，ToolResult 标明内容不可用（OutputTooLarge）；outcome 仍为 Succeeded。需要大输出的 Tool 通过自身接口提供分页、游标或摘要。
-- 发给模型的结果文字不存储，由 provider 投影从载荷派生。Failed 投影为 `{"error":{"code":...,"message":...}}`（`message` 按字符边界限制在 4,096 字节内），模型可据此修正参数；NotExecuted 与 Indeterminate 使用固定的最小文案 `{"outcome":"not_executed"}` 与 `{"outcome":"indeterminate","cause":"no_result|cancelled|reported"}`。provider 的错误标记（Anthropic `is_error`、Gemini `error`）只用于 Failed。
+- 发给模型的结果文字不存储，由 provider 投影从载荷派生。Failed 投影为 `{"error":{"code":...,"message":...}}`（`message` 按 UTF-8 字符边界裁剪，使其规范 JSON 字符串编码不超过 65,536 字节，即 `MAX_TOOL_CONTENT_BYTES`），模型可据此修正参数；NotExecuted 与 Indeterminate 使用固定的最小文案 `{"outcome":"not_executed"}` 与 `{"outcome":"indeterminate","cause":"no_result|cancelled|reported"}`。provider 的错误标记（Anthropic `is_error`、Gemini `error`）只用于 Failed。
 
 停止与收尾的写入：
 

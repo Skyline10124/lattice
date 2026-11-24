@@ -9,9 +9,8 @@ use std::str::FromStr;
 use lattice_context::{
     Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
     ContextText, EffectiveEntrySummary, EmptyContextOpError, InvalidUserMessageError,
-    MAX_CHANNEL_BYTES, MAX_TOOL_ERROR_MESSAGE_BYTES, NodeStatus, NormalizedUserMessage,
-    OperatedNode, PathNodeKind, PathRecord, TextBoundError, ToolResultOutcome, ToolResultText,
-    resolve,
+    MAX_CHANNEL_BYTES, NodeStatus, NormalizedUserMessage, OperatedNode, PathNodeKind, PathRecord,
+    TextBoundError, ToolResultOutcome, ToolResultText, resolve,
 };
 use lattice_conversation::{
     BoundToolCall, ConversationItem, ImageMediaType, ImageRef, IndeterminateCause, InvocationId,
@@ -1267,7 +1266,7 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
 }
 
 #[test]
-fn replace_tool_result_preserves_failed_outcome_enforces_error_limit_and_rejects_non_replaceable() {
+fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outcomes() {
     let inv_failed = inv("11111111-1111-4111-8111-111111111111");
     let inv_not_exec = inv("22222222-2222-4222-8222-222222222222");
     let inv_no_result = inv("33333333-3333-4333-8333-333333333333");
@@ -1387,90 +1386,76 @@ fn replace_tool_result_preserves_failed_outcome_enforces_error_limit_and_rejects
             "resolve 必须拒绝替换 {expected_outcome:?} 结局的工具结果"
         );
     }
-
-    // Failed 替换消息上限：恰好 4,096 字节通过且不截断；4,097 字节在 validate_op/resolve 中均拒绝且不污染原状态；
-    // 同一 4,097 字节文本作用于 Succeeded 目标照常通过
-    let exact_failed_text = "e".repeat(MAX_TOOL_ERROR_MESSAGE_BYTES);
-    let over_failed_text = "e".repeat(MAX_TOOL_ERROR_MESSAGE_BYTES + 1);
-
-    let op_over_failed = ContextOp::new(
-        ch("cli"),
-        vec![
-            ContextEdit::replace_tool_result(inv_succeeded, over_failed_text.clone()).unwrap(),
-            ContextEdit::replace_tool_result(inv_failed, over_failed_text.clone()).unwrap(),
-        ],
-    )
-    .unwrap();
-    let expected_over_err = ContextError::ToolErrorTextTooLarge {
-        invocation: inv_failed,
-        limit: MAX_TOOL_ERROR_MESSAGE_BYTES,
-        actual: MAX_TOOL_ERROR_MESSAGE_BYTES + 1,
-    };
     assert_eq!(
-        base.validate_op(&op_over_failed),
-        Err(expected_over_err.clone()),
-        "validate_op 必须拒绝超过 4,096 字节的 Failed 替换消息"
+        base, base_before,
+        "validate_op 拒绝后不得污染原 EffectiveContext"
     );
-    assert_eq!(
-        resolve(&[
+
+    // Failed 与 Succeeded 共享 MAX_TOOL_CONTENT_BYTES（65,536 规范 JSON 字符串）单一标尺，
+    // 16 KiB 与贴近 65,536 上限的 Failed 替换消息均直接通过且零截断，inspect() 与 project() 精确一致
+    let other_results_bytes = canonical_json(&json!({"outcome": "not_executed"})).len()
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "no_result"})).len()
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "cancelled"})).len()
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "reported"})).len()
+        + canonical_json(&json!("ok")).len();
+
+    for (label, replacement) in [
+        ("16 KiB 失败说明", "e".repeat(16_384)),
+        ("贴近上限的多字节中文失败说明", "界".repeat(21_844)),
+        (
+            "恰好 65,536 规范 JSON 的 ASCII 失败说明",
+            "e".repeat(MAX_TOOL_CONTENT_BYTES - 2),
+        ),
+    ] {
+        let op_long_failed = ContextOp::new(
+            ch("cli"),
+            vec![ContextEdit::replace_tool_result(inv_failed, replacement.clone()).unwrap()],
+        )
+        .unwrap();
+        assert_eq!(
+            base.validate_op(&op_long_failed),
+            Ok(()),
+            "validate_op 应接受 {label}"
+        );
+        let ctx_long_failed = resolve(&[
             PathRecord::Step {
                 id: NodeId(1),
                 content: step.clone(),
             },
             PathRecord::Op {
                 id: NodeId(2),
-                op: &op_over_failed,
+                op: &op_long_failed,
             },
-        ]),
-        Err(expected_over_err),
-        "resolve 必须拒绝超过 4,096 字节的 Failed 替换消息"
-    );
-    assert_eq!(
-        base, base_before,
-        "validate_op 拒绝后不得污染原 EffectiveContext"
-    );
+        ])
+        .expect("Failed 长替换消息应零截断通过");
 
-    let op_boundary = ContextOp::new(
-        ch("cli"),
-        vec![
-            ContextEdit::replace_tool_result(inv_failed, exact_failed_text.clone()).unwrap(),
-            ContextEdit::replace_tool_result(inv_succeeded, over_failed_text.clone()).unwrap(),
-        ],
-    )
-    .unwrap();
-    let ctx_boundary = resolve(&[
-        PathRecord::Step {
-            id: NodeId(1),
-            content: step.clone(),
-        },
-        PathRecord::Op {
-            id: NodeId(2),
-            op: &op_boundary,
-        },
-    ])
-    .expect("Failed 恰好 4,096 字节与 Succeeded 4,097 字节均应通过");
-    let ConversationItem::Step(ref step_boundary) = ctx_boundary.project()[0] else {
-        panic!("首项应为 Step");
-    };
-    assert_eq!(
-        step_boundary.results[0].payload,
-        ResultPayload::Failed(ToolError {
-            code: "permission_denied".to_owned(),
-            message: exact_failed_text,
-        }),
-        "恰好 4,096 字节的 Failed 替换消息应原样保留且不截断"
-    );
-    let expected_ok_val = Value::String(over_failed_text);
-    let expected_ok_canonical = canonical_json(&expected_ok_val);
-    assert_eq!(
-        step_boundary.results[5].payload,
-        ResultPayload::Succeeded(SuccessContent::Json {
-            value: expected_ok_val,
-            digest: tool_content_digest(&expected_ok_canonical),
-            byte_length: expected_ok_canonical.len() as u64,
-        }),
-        "同一 4,097 字节文本作用于 Succeeded 目标应按 65,536 规范 JSON 上限通过"
-    );
+        let ConversationItem::Step(ref step_long) = ctx_long_failed.project()[0] else {
+            panic!("首项应为 Step");
+        };
+        assert_eq!(
+            step_long.results[0].payload,
+            ResultPayload::Failed(ToolError {
+                code: "permission_denied".to_owned(),
+                message: replacement.clone(),
+            }),
+            "{label} 必须保留 Failed 结局与原错误码且零截断"
+        );
+        let expected_failed_bytes = canonical_json(&json!({
+            "error": { "code": "permission_denied", "message": replacement }
+        }))
+        .len();
+        assert_eq!(
+            ctx_long_failed.inspect().entries,
+            vec![EffectiveEntrySummary::Step {
+                node: NodeId(1),
+                text_bytes: 0,
+                reasoning_bytes: 0,
+                tool_call_count: 6,
+                tool_result_bytes: expected_failed_bytes + other_results_bytes,
+            }],
+            "{label} 在 inspect() 中的字节统计必须与零截断 Failed 投影完全一致"
+        );
+    }
 
     // Failed 结局允许替换：保留 Failed 与原 code，仅更新 message，并走统一清洗；支持再次替换与后续 OmitInvocation
     let op_replace_failed_1 = ContextOp::new(
@@ -1516,28 +1501,6 @@ fn replace_tool_result_preserves_failed_outcome_enforces_error_limit_and_rejects
             }),
         },
         "ReplaceToolResult 作用于 Failed 必须保留 Failed 结局与原机器错误码"
-    );
-
-    // inspect() 须按 Failed 规范 JSON 计长而非 Succeeded 字符串计长
-    let expected_tool_bytes = canonical_json(&json!({
-        "error": { "code": "permission_denied", "message": "精简失败原因" }
-    }))
-    .len()
-        + canonical_json(&json!({"outcome": "not_executed"})).len()
-        + canonical_json(&json!({"outcome": "indeterminate", "cause": "no_result"})).len()
-        + canonical_json(&json!({"outcome": "indeterminate", "cause": "cancelled"})).len()
-        + canonical_json(&json!({"outcome": "indeterminate", "cause": "reported"})).len()
-        + canonical_json(&json!("ok")).len();
-    assert_eq!(
-        ctx_failed_1.inspect().entries,
-        vec![EffectiveEntrySummary::Step {
-            node: NodeId(1),
-            text_bytes: 0,
-            reasoning_bytes: 0,
-            tool_call_count: 6,
-            tool_result_bytes: expected_tool_bytes,
-        }],
-        "替换后的 Failed 结果在 inspect() 中必须按 Failed 规则计长"
     );
 
     // 同一活跃 Failed 调用支持再次 ReplaceToolResult，并可后续 OmitInvocation
@@ -1902,16 +1865,18 @@ fn inspect_computes_exact_objective_byte_stats_across_all_result_payloads() {
     let input_2 = ContextInput::new(ch("tui"), vec![image_sem(img_b)]).unwrap();
     let input_3 = ContextInput::new(ch("cli"), vec![text_sem("将被移出")]).unwrap();
 
-    // 构造覆盖全部 5 种 ResultPayload 变体的 Step（其中 Failed 含超 4,096 字节多字节中文截断边界）
+    // 构造覆盖全部 5 种 ResultPayload 变体的 Step（其中两条历史 Failed 分别覆盖超 64 KiB 多字节中文与高转义换行裁剪边界）
     let inv_json = inv("11111111-1111-4111-8111-111111111111");
     let inv_large = inv("22222222-2222-4222-8222-222222222222");
-    let inv_failed = inv("33333333-3333-4333-8333-333333333333");
+    let inv_failed_cjk = inv("33333333-3333-4333-8333-333333333333");
+    let inv_failed_escape = inv("66666666-6666-4666-8666-666666666666");
     let inv_not_exec = inv("44444444-4444-4444-8444-444444444444");
     let inv_indet = inv("55555555-5555-4555-8555-555555555555");
 
-    let long_utf8_err = "中".repeat(2_000); // 6,000 字节；截断至 <= 4,096 且落在 3 字节边界即 4,095 字节（1,365 个 '中'）
-    let truncated_err = "中".repeat(4_096 / 3);
-    assert_eq!(truncated_err.len(), 4_095);
+    let long_utf8_err = "中".repeat(22_000); // 66,000 字节；经 bound_tool_error_message 裁剪为 21,844 个 '中'（规范 JSON 65,534 字节）
+    let truncated_cjk_err = "中".repeat(21_844);
+    let long_escape_err = "\n".repeat(40_000); // 原文 40,000 字节、规范 JSON 80,002 字节；裁剪为 32,767 个 '\n'（规范 JSON 65,536 字节）
+    let truncated_escape_err = "\n".repeat(32_767);
 
     let res_json = json_result(inv_json, "t1", json!({"k": "v"}));
     let digest_large = [0x0f; 32];
@@ -1923,12 +1888,20 @@ fn inspect_computes_exact_objective_byte_stats_across_all_result_payloads() {
             byte_length: 70_000,
         }),
     };
-    let res_failed = StoredToolResult {
-        invocation_id: inv_failed,
+    let res_failed_cjk = StoredToolResult {
+        invocation_id: inv_failed_cjk,
         name: "t3".to_owned(),
         payload: ResultPayload::Failed(ToolError {
             code: "io_error".to_owned(),
             message: long_utf8_err,
+        }),
+    };
+    let res_failed_escape = StoredToolResult {
+        invocation_id: inv_failed_escape,
+        name: "t6".to_owned(),
+        payload: ResultPayload::Failed(ToolError {
+            code: "escape_error".to_owned(),
+            message: long_escape_err,
         }),
     };
     let res_not_exec = StoredToolResult {
@@ -1950,8 +1923,12 @@ fn inspect_computes_exact_objective_byte_stats_across_all_result_payloads() {
         "byte_length": 70_000u64,
     }))
     .len();
-    let expected_failed_bytes = canonical_json(&json!({
-        "error": { "code": "io_error", "message": truncated_err }
+    let expected_failed_cjk_bytes = canonical_json(&json!({
+        "error": { "code": "io_error", "message": truncated_cjk_err }
+    }))
+    .len();
+    let expected_failed_escape_bytes = canonical_json(&json!({
+        "error": { "code": "escape_error", "message": truncated_escape_err }
     }))
     .len();
     let expected_not_exec_bytes = canonical_json(&json!({"outcome": "not_executed"})).len();
@@ -1959,7 +1936,8 @@ fn inspect_computes_exact_objective_byte_stats_across_all_result_payloads() {
         canonical_json(&json!({"outcome": "indeterminate", "cause": "cancelled"})).len();
     let expected_tool_result_bytes = expected_json_bytes
         + expected_large_bytes
-        + expected_failed_bytes
+        + expected_failed_cjk_bytes
+        + expected_failed_escape_bytes
         + expected_not_exec_bytes
         + expected_indet_bytes;
 
@@ -1975,16 +1953,26 @@ fn inspect_computes_exact_objective_byte_stats_across_all_result_payloads() {
                 call: bound_call(inv_large, "t2", 3, json!({})),
             }),
             MessagePart::semantic_only(MessageSemantic::ToolCall {
-                call: bound_call(inv_failed, "t3", 4, json!({})),
+                call: bound_call(inv_failed_cjk, "t3", 4, json!({})),
             }),
             MessagePart::semantic_only(MessageSemantic::ToolCall {
-                call: bound_call(inv_not_exec, "t4", 5, json!({})),
+                call: bound_call(inv_failed_escape, "t6", 5, json!({})),
             }),
             MessagePart::semantic_only(MessageSemantic::ToolCall {
-                call: bound_call(inv_indet, "t5", 6, json!({})),
+                call: bound_call(inv_not_exec, "t4", 6, json!({})),
+            }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: bound_call(inv_indet, "t5", 7, json!({})),
             }),
         ],
-        vec![res_json, res_large, res_failed, res_not_exec, res_indet],
+        vec![
+            res_json,
+            res_large,
+            res_failed_cjk,
+            res_failed_escape,
+            res_not_exec,
+            res_indet,
+        ],
     );
 
     let op = ContextOp::new(ch("cli"), vec![ContextEdit::omit_node(NodeId(3))]).unwrap();
@@ -2029,7 +2017,7 @@ fn inspect_computes_exact_objective_byte_stats_across_all_result_payloads() {
                     node: NodeId(2),
                     text_bytes: "正文".len(),
                     reasoning_bytes: "推理".len(),
-                    tool_call_count: 5,
+                    tool_call_count: 6,
                     tool_result_bytes: expected_tool_result_bytes,
                 },
                 EffectiveEntrySummary::Input {

@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use lattice_conversation::{
-    BoundToolCall, ImageRef, InvocationId, MAX_TOOL_ERROR_MESSAGE_BYTES, MessagePart, MessageRole,
-    MessageSemantic, NativeMessage, NodeId, ResultPayload, StepContent, SuccessContent,
-    ToolResultOutcome, canonical_json, tool_content_digest, validate_image_placement,
+    BoundToolCall, ImageRef, InvocationId, MessagePart, MessageRole, MessageSemantic,
+    NativeMessage, NodeId, ResultPayload, StepContent, SuccessContent, ToolResultOutcome,
+    canonical_json, tool_content_digest, validate_image_placement,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -87,15 +87,6 @@ pub enum ContextError {
     ToolResultNotReplaceable {
         invocation: InvocationId,
         outcome: ToolResultOutcome,
-    },
-    /// 失败工具结果的替换消息字节长度超过协议投影上限（4,096 字节）。
-    #[error(
-        "失败工具调用 InvocationId({invocation}) 的替换消息为 {actual} 字节，不能超过 {limit} 字节"
-    )]
-    ToolErrorTextTooLarge {
-        invocation: InvocationId,
-        limit: usize,
-        actual: usize,
     },
     /// 目标 `Input` 当前有效片段中不含指定的图片引用。
     #[error("Input 节点 NodeId({}) 当前有效片段中不包含目标图片", .node.0)]
@@ -470,14 +461,6 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     });
                 }
                 ResultPayload::Failed(err) => {
-                    let actual = text.as_str().len();
-                    if actual > MAX_TOOL_ERROR_MESSAGE_BYTES {
-                        return Err(ContextError::ToolErrorTextTooLarge {
-                            invocation: *invocation,
-                            limit: MAX_TOOL_ERROR_MESSAGE_BYTES,
-                            actual,
-                        });
-                    }
                     err.message = text.as_str().to_owned();
                 }
                 ResultPayload::NotExecuted | ResultPayload::Indeterminate(_) => {

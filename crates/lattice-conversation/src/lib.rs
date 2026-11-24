@@ -73,7 +73,7 @@ pub use tool_call::{
     ArgumentsDigestMismatch, BoundToolCall, RawToolCall, ToolCallValidation, UnboundToolCall,
     validate_tool_call_batch,
 };
-pub use tool_error::{MAX_TOOL_ERROR_MESSAGE_BYTES, ToolError};
+pub use tool_error::{ToolError, bound_tool_error_message};
 pub use usage::{
     CostEstimate, CostSummary, TokenSummary, TokenUsage, UsageCompleteness, UsageSummary,
 };
