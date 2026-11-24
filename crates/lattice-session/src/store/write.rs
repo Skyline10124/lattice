@@ -642,6 +642,7 @@ impl SessionStore {
         input: AcceptTurn,
     ) -> Result<AcceptedTurn> {
         self.check_lock(lock, input.session_id)?;
+        validate_turn_input_batch(&input.inputs)?;
         let path = self.path.clone();
         self.write(lock, Selection::Accept(input.turn_id), |r, tx| {
             if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
@@ -673,6 +674,7 @@ impl SessionStore {
                 if s != input.session_id
                     || existing_session.project_path != input.project_path
                     || meta.trigger_channel != input.trigger_channel
+                    || meta.input_nodes.is_empty()
                     || !inputs_match
                 {
                     return Err(StoreError::Conflict {
@@ -681,7 +683,6 @@ impl SessionStore {
                 }
                 return Ok(AcceptedTurn::Existing(r.turn_detail(s, input.turn_id)?));
             }
-            validate_turn_input_batch(&input.inputs)?;
             validate::config(&input.config)?;
             let s = input.session_id;
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;

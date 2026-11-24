@@ -9,7 +9,7 @@
 | `src/lib.rs` | 声明 `#![forbid(unsafe_code)]`，保持子模块私有，并在根模块扁平重导出全部公开类型、常量与函数 |
 | `src/channel.rs` | 开放受检来源标识 `Channel`、`MAX_CHANNEL_BYTES`（256 字节）与 `ChannelError` 严格解析和 serde 校验 |
 | `src/types.rs` | `NormalizedUserMessage`、`ContextText`、`ToolResultText`、`ContextInput`、`ContextOp`、`ContextEdit` 及其错误类型与便捷构造 |
-| `src/resolve.rs` | `PathRecord`、`PathNodeKind`、`ContextError`、`EffectiveContext`、单遍扫描归约 `resolve()`、`validate_op()` 与助手消息编辑清洗路径 |
+| `src/resolve.rs` | `PathRecord`、`PathNodeKind`、`ContextError`、`EffectiveContext`、增量可回溯树遍历游标 `ContextCursor`/`ContextUndo`、单遍扫描归约 `resolve()`、`validate_op()` 与助手消息编辑清洗路径 |
 | `src/inspect.rs` | `NodeStatus`、`OperatedNode`、`EffectiveEntrySummary`、`ContextInspection` 与纯客观统计 `EffectiveContext::inspect()` |
 | `src/project.rs` | 模型历史投影 `EffectiveContext::project()`、`<lattice-context channel="...">` 属性转义与正文闭合标记转义 |
 

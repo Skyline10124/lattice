@@ -11,7 +11,7 @@
 | `src/store/mod.rs`、`src/store/types.rs` | `SessionStore`（含幂等写闸 `disable_writes`）、`SessionRead`、`SessionExecutionLock`、`ToolReply`、槽位详情状态（`SlotDetail`、`SlotState`、`SlotReason`）与错误 |
 | `src/store/input.rs` | 受检单轮输入 `TurnInput` 与输入片段 `TurnInputPart`（图片字节校验、按摘要去重与保序规范化） |
 | `src/store/binding.rs` | 调用槽位绑定事实（`InvocationBinding`、`BindingIdentity`），经 `store` 导出 |
-| `src/store/codec.rs`、`src/store/open.rs`、`src/store/validate.rs` | redb 表（含第 8 张图片字节表 `blobs`）与格式版本 `11` 编解码、首次创建与严格打开、存在 `sessions.git` 或 `invocations.git` 时的拒绝及全库跨记录一致性校验（含 `blobs` 流式核验、`Input` 与 `ContextOp` 载荷及 `ImageRef` 核对、按叶子路径线性覆盖全部 `ContextOp` 与无前置输入独立触发 `Step 0` 的父链非空有效上下文校验） |
+| `src/store/codec.rs`、`src/store/open.rs`、`src/store/validate.rs` | redb 表（含第 8 张图片字节表 `blobs`）与格式版本 `11` 编解码、首次创建与严格打开、存在 `sessions.git` 或 `invocations.git` 时的拒绝及全库跨记录一致性校验（含 `blobs` 流式核验、`Input` 与 `ContextOp` 载荷及 `ImageRef` 核对、按增量可回溯游标单遍显式栈 DFS 线性覆盖全树全部 `ContextOp` 与无前置输入独立触发 `Step 0` 的父链非空有效上下文校验） |
 | `src/store/write.rs`、`src/store/close.rs` | 单步 `Durability::Immediate` 领域写事务（`feed_input`、`apply_context_op`、`trigger_turn`、`accept_turn` 同事务去重追加写入 `blobs` 及草稿会话整体删除 `delete_draft`），`ToolReply` 终态准备（`prepare_terminal`），以及从持久 `progress` 推导尝试、槽位与 Step 结论的纯函数 |
 | `src/store/read.rs`、`src/store/local.rs` | 两条独立读路径：面向人类与审计的原始历史/列表投影（`log`、`usage`、`view`、`history`、`entry`、`turn_detail`，其中 `log`/`usage` 采用扁平轻量结构零缓冲跳过对话与配置正文）与面向模型请求的归约上下文读路径（`effective_context`、`effective_context_with_pending`），以及 `with_blob` 借用图片字节（含 `test-utils` 下的 `blob_count`）与按会话或 Turn 范围加载记录 |
 | `src/store/settings.rs`、`src/store/config.rs`、`src/store/hex_digest.rs` | 会话设置（`SessionSettings`、`SettingsVersion`、`EffectiveProfile`）、系统提示与工具目录（`tool_identity`）的内容摘要配置表及十六进制摘要编码 |

@@ -16,6 +16,7 @@ use thiserror::Error;
 
 use crate::channel::Channel;
 use crate::inspect::NodeStatus;
+use crate::project::entry_is_projected;
 use crate::types::{ContextEdit, ContextInput, ContextOp};
 
 /// 沿根到当前位置收集的单条路径记录。
@@ -130,6 +131,7 @@ pub(crate) struct ResolveState {
     entry_index: BTreeMap<NodeId, usize>,
     node_kinds: BTreeMap<NodeId, PathNodeKind>,
     invocation_owner: BTreeMap<InvocationId, NodeId>,
+    projected_count: usize,
 }
 
 /// 沿根到当前位置单遍扫描归约得到的有效模型上下文。
@@ -138,65 +140,207 @@ pub struct EffectiveContext {
     pub(crate) state: ResolveState,
 }
 
-/// 对沿根到当前位置收集的顺序路径记录执行单遍扫描归约。
-pub fn resolve(path: &[PathRecord<'_>]) -> Result<EffectiveContext, ContextError> {
-    let mut state = ResolveState::default();
+/// 供 [`ContextCursor::rollback`] 使用的不透明单步回滚凭证。
+#[derive(Debug)]
+pub struct ContextUndo {
+    kind: UndoKind,
+}
 
-    for record in path {
+#[derive(Debug)]
+enum UndoKind {
+    Input {
+        id: NodeId,
+    },
+    Step {
+        id: NodeId,
+        invocations: Vec<InvocationId>,
+    },
+    Op {
+        id: NodeId,
+        snapshots: Vec<(usize, PathEntry)>,
+    },
+}
+
+/// 支持增量推进与零前缀克隆回滚的模型上下文树遍历游标。
+///
+/// 推进、校验与编辑规则与 [`resolve`] 严格同源，供会话树单遍 DFS 校验按分支进退复用共享前缀状态。
+#[derive(Clone, Debug, Default)]
+pub struct ContextCursor {
+    state: ResolveState,
+}
+
+impl ContextCursor {
+    /// 创建位于根节点处的空游标。
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 以 O(1) 判断当前游标路径投影后是否存在至少一条有效模型条目；
+    /// 语义严格等价于 `!self.clone().into_effective().project().is_empty()`。
+    pub fn has_projected_items(&self) -> bool {
+        self.state.projected_count > 0
+    }
+
+    /// 沿路径推进单条记录并返回可逆回滚凭证；失败时保证游标状态零污染。
+    pub fn advance(&mut self, record: PathRecord<'_>) -> Result<ContextUndo, ContextError> {
         match record {
-            PathRecord::Input { id, input } => {
-                ensure_unique_node(&state, *id)?;
-                let index = state.entries.len();
-                state.entries.push(PathEntry {
-                    node: *id,
-                    data: EntryData::Input {
-                        channel: input.channel().clone(),
-                        state: InputState::Active {
-                            parts: input.message().parts.clone(),
-                        },
-                    },
-                    status: None,
-                });
-                state.entry_index.insert(*id, index);
-                state.node_kinds.insert(*id, PathNodeKind::Input);
+            PathRecord::Input { id, input } => self.advance_input(id, input),
+            PathRecord::Step { id, content } => self.advance_step(id, content),
+            PathRecord::Op { id, op } => self.advance_op(id, op),
+        }
+    }
+
+    /// 按与 [`Self::advance`] 严格的 LIFO 顺序撤销单步推进，恢复到父节点状态。
+    pub fn rollback(&mut self, undo: ContextUndo) {
+        match undo.kind {
+            UndoKind::Input { id } => {
+                let popped = self
+                    .state
+                    .entries
+                    .pop()
+                    .expect("rollback 顺序必须与 advance 严格 LIFO 对应");
+                assert_eq!(popped.node, id, "rollback 弹出的 Input 节点与凭证不匹配");
+                if entry_is_projected(&popped) {
+                    decrement_projected_count(&mut self.state.projected_count);
+                }
+                let removed_idx = self.state.entry_index.remove(&id);
+                assert_eq!(removed_idx, Some(self.state.entries.len()));
+                let removed_kind = self.state.node_kinds.remove(&id);
+                assert_eq!(removed_kind, Some(PathNodeKind::Input));
             }
-            PathRecord::Step { id, content } => {
-                ensure_unique_node(&state, *id)?;
-                let invocations = validate_step_entrance(&state, *id, content)?;
-                let index = state.entries.len();
-                state.entries.push(PathEntry {
-                    node: *id,
-                    data: EntryData::Step {
-                        state: StepState::Active {
-                            content: content.clone(),
-                            omitted_invocations: BTreeSet::new(),
-                        },
-                    },
-                    status: None,
-                });
-                state.entry_index.insert(*id, index);
-                state.node_kinds.insert(*id, PathNodeKind::Step);
+            UndoKind::Step { id, invocations } => {
+                let popped = self
+                    .state
+                    .entries
+                    .pop()
+                    .expect("rollback 顺序必须与 advance 严格 LIFO 对应");
+                assert_eq!(popped.node, id, "rollback 弹出的 Step 节点与凭证不匹配");
+                if entry_is_projected(&popped) {
+                    decrement_projected_count(&mut self.state.projected_count);
+                }
+                let removed_idx = self.state.entry_index.remove(&id);
+                assert_eq!(removed_idx, Some(self.state.entries.len()));
+                let removed_kind = self.state.node_kinds.remove(&id);
+                assert_eq!(removed_kind, Some(PathNodeKind::Step));
                 for invocation in invocations {
-                    state.invocation_owner.insert(invocation, *id);
+                    let removed_owner = self.state.invocation_owner.remove(&invocation);
+                    assert_eq!(removed_owner, Some(id));
                 }
             }
-            PathRecord::Op { id, op } => {
-                ensure_unique_node(&state, *id)?;
-                // 在登记本 Op 自身前执行应用，保证编辑只能引用本 Op 之前出现的路径节点。
-                apply_op(&mut state, op)?;
-                state.node_kinds.insert(*id, PathNodeKind::Op);
+            UndoKind::Op { id, snapshots } => {
+                let removed_kind = self.state.node_kinds.remove(&id);
+                assert_eq!(
+                    removed_kind,
+                    Some(PathNodeKind::Op),
+                    "rollback 的 Op 节点与凭证不匹配"
+                );
+                restore_entry_snapshots(&mut self.state, snapshots);
             }
         }
     }
 
-    Ok(EffectiveContext { state })
+    /// 消费当前游标并产出只读的 [`EffectiveContext`]。
+    pub fn into_effective(self) -> EffectiveContext {
+        EffectiveContext { state: self.state }
+    }
+
+    fn advance_ref(&mut self, record: &PathRecord<'_>) -> Result<ContextUndo, ContextError> {
+        match record {
+            PathRecord::Input { id, input } => self.advance_input(*id, input),
+            PathRecord::Step { id, content } => self.advance_step(*id, content.clone()),
+            PathRecord::Op { id, op } => self.advance_op(*id, op),
+        }
+    }
+
+    fn advance_input(
+        &mut self,
+        id: NodeId,
+        input: &ContextInput,
+    ) -> Result<ContextUndo, ContextError> {
+        ensure_unique_node(&self.state, id)?;
+        let entry = PathEntry {
+            node: id,
+            data: EntryData::Input {
+                channel: input.channel().clone(),
+                state: InputState::Active {
+                    parts: input.message().parts.clone(),
+                },
+            },
+            status: None,
+        };
+        let index = self.state.entries.len();
+        if entry_is_projected(&entry) {
+            self.state.projected_count += 1;
+        }
+        self.state.entries.push(entry);
+        self.state.entry_index.insert(id, index);
+        self.state.node_kinds.insert(id, PathNodeKind::Input);
+        Ok(ContextUndo {
+            kind: UndoKind::Input { id },
+        })
+    }
+
+    fn advance_step(
+        &mut self,
+        id: NodeId,
+        content: StepContent,
+    ) -> Result<ContextUndo, ContextError> {
+        ensure_unique_node(&self.state, id)?;
+        let invocations = validate_step_entrance(&self.state, id, &content)?;
+        let entry = PathEntry {
+            node: id,
+            data: EntryData::Step {
+                state: StepState::Active {
+                    content,
+                    omitted_invocations: BTreeSet::new(),
+                },
+            },
+            status: None,
+        };
+        let index = self.state.entries.len();
+        if entry_is_projected(&entry) {
+            self.state.projected_count += 1;
+        }
+        self.state.entries.push(entry);
+        self.state.entry_index.insert(id, index);
+        self.state.node_kinds.insert(id, PathNodeKind::Step);
+        for &invocation in &invocations {
+            self.state.invocation_owner.insert(invocation, id);
+        }
+        Ok(ContextUndo {
+            kind: UndoKind::Step { id, invocations },
+        })
+    }
+
+    fn advance_op(&mut self, id: NodeId, op: &ContextOp) -> Result<ContextUndo, ContextError> {
+        ensure_unique_node(&self.state, id)?;
+        // 在登记本 Op 自身前执行应用，保证编辑只能引用本 Op 之前出现的路径节点；
+        // 若多编辑批中途失败，apply_op_reversible 逆序恢复全部快照，确保零污染。
+        let snapshots = apply_op_reversible(&mut self.state, op)?;
+        self.state.node_kinds.insert(id, PathNodeKind::Op);
+        Ok(ContextUndo {
+            kind: UndoKind::Op { id, snapshots },
+        })
+    }
+}
+
+/// 对沿根到当前位置收集的顺序路径记录执行单遍扫描归约。
+pub fn resolve(path: &[PathRecord<'_>]) -> Result<EffectiveContext, ContextError> {
+    let mut cursor = ContextCursor::new();
+    for record in path {
+        cursor.advance_ref(record)?;
+    }
+    Ok(cursor.into_effective())
 }
 
 impl EffectiveContext {
     /// 只读校验待落树的 [`ContextOp`] 是否对当前有效上下文合法；与 [`resolve`] 共用同一应用规则且无副作用。
     pub fn validate_op(&self, op: &ContextOp) -> Result<(), ContextError> {
         let mut preview = self.state.clone();
-        apply_op(&mut preview, op)
+        for edit in op.edits() {
+            apply_edit(&mut preview, edit, None)?;
+        }
+        Ok(())
     }
 }
 
@@ -259,14 +403,63 @@ fn validate_step_entrance(
     Ok(invocations)
 }
 
-fn apply_op(state: &mut ResolveState, op: &ContextOp) -> Result<(), ContextError> {
+fn apply_op_reversible(
+    state: &mut ResolveState,
+    op: &ContextOp,
+) -> Result<Vec<(usize, PathEntry)>, ContextError> {
+    let mut snapshots = Vec::with_capacity(op.edits().len());
     for edit in op.edits() {
-        apply_edit(state, edit)?;
+        if let Err(err) = apply_edit(state, edit, Some(&mut snapshots)) {
+            restore_entry_snapshots(state, snapshots);
+            return Err(err);
+        }
     }
-    Ok(())
+    Ok(snapshots)
 }
 
-fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), ContextError> {
+fn restore_entry_snapshots(state: &mut ResolveState, snapshots: Vec<(usize, PathEntry)>) {
+    for (idx, old_entry) in snapshots.into_iter().rev() {
+        let before = entry_is_projected(&state.entries[idx]);
+        let after = entry_is_projected(&old_entry);
+        state.entries[idx] = old_entry;
+        adjust_projected_count(&mut state.projected_count, before, after);
+    }
+}
+
+fn decrement_projected_count(projected_count: &mut usize) {
+    *projected_count = projected_count
+        .checked_sub(1)
+        .expect("projected_count 下溢：有效投影条目计数不一致");
+}
+
+fn adjust_projected_count(projected_count: &mut usize, before: bool, after: bool) {
+    match (before, after) {
+        (false, true) => *projected_count += 1,
+        (true, false) => decrement_projected_count(projected_count),
+        (false, false) | (true, true) => {}
+    }
+}
+
+fn mutate_entry(
+    state: &mut ResolveState,
+    idx: usize,
+    undo: Option<&mut Vec<(usize, PathEntry)>>,
+    mutate: impl FnOnce(&mut PathEntry),
+) {
+    if let Some(snapshots) = undo {
+        snapshots.push((idx, state.entries[idx].clone()));
+    }
+    let before = entry_is_projected(&state.entries[idx]);
+    mutate(&mut state.entries[idx]);
+    let after = entry_is_projected(&state.entries[idx]);
+    adjust_projected_count(&mut state.projected_count, before, after);
+}
+
+fn apply_edit(
+    state: &mut ResolveState,
+    edit: &ContextEdit,
+    undo: Option<&mut Vec<(usize, PathEntry)>>,
+) -> Result<(), ContextError> {
     match edit {
         ContextEdit::OmitNode { node } => {
             let kind = lookup_node_kind(state, *node)?;
@@ -276,22 +469,24 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     actual: PathNodeKind::Op,
                 });
             }
-            let entry = entry_mut(state, *node);
-            match &mut entry.data {
-                EntryData::Input { state, .. } => {
-                    if matches!(state, InputState::Omitted) {
-                        return Err(ContextError::NodeAlreadyOmitted { node: *node });
-                    }
-                    *state = InputState::Omitted;
+            let idx = entry_index_of(state, *node);
+            match &state.entries[idx].data {
+                EntryData::Input {
+                    state: InputState::Omitted,
+                    ..
                 }
-                EntryData::Step { state } => {
-                    if matches!(state, StepState::Omitted) {
-                        return Err(ContextError::NodeAlreadyOmitted { node: *node });
-                    }
-                    *state = StepState::Omitted;
-                }
+                | EntryData::Step {
+                    state: StepState::Omitted,
+                } => return Err(ContextError::NodeAlreadyOmitted { node: *node }),
+                EntryData::Input { .. } | EntryData::Step { .. } => {}
             }
-            entry.status = Some(NodeStatus::Omitted);
+            mutate_entry(state, idx, undo, |entry| {
+                match &mut entry.data {
+                    EntryData::Input { state, .. } => *state = InputState::Omitted,
+                    EntryData::Step { state } => *state = StepState::Omitted,
+                }
+                entry.status = Some(NodeStatus::Omitted);
+            });
             Ok(())
         }
         ContextEdit::ReplaceInput { node, message } => {
@@ -302,17 +497,25 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     actual: kind,
                 });
             }
-            let entry = entry_mut(state, *node);
-            let EntryData::Input { state, .. } = &mut entry.data else {
+            let idx = entry_index_of(state, *node);
+            let EntryData::Input {
+                state: input_state, ..
+            } = &state.entries[idx].data
+            else {
                 unreachable!("已确认节点类别为 Input");
             };
-            if matches!(state, InputState::Omitted) {
+            if matches!(input_state, InputState::Omitted) {
                 return Err(ContextError::NodeAlreadyOmitted { node: *node });
             }
-            *state = InputState::Active {
-                parts: message.as_message().parts.clone(),
-            };
-            entry.status = Some(NodeStatus::Modified);
+            mutate_entry(state, idx, undo, |entry| {
+                let EntryData::Input { state, .. } = &mut entry.data else {
+                    unreachable!("已确认节点类别为 Input");
+                };
+                *state = InputState::Active {
+                    parts: message.as_message().parts.clone(),
+                };
+                entry.status = Some(NodeStatus::Modified);
+            });
             Ok(())
         }
         ContextEdit::ReplaceImage { node, image, text } => {
@@ -323,11 +526,14 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     actual: kind,
                 });
             }
-            let entry = entry_mut(state, *node);
-            let EntryData::Input { state, .. } = &mut entry.data else {
+            let idx = entry_index_of(state, *node);
+            let EntryData::Input {
+                state: input_state, ..
+            } = &state.entries[idx].data
+            else {
                 unreachable!("已确认节点类别为 Input");
             };
-            let InputState::Active { parts } = state else {
+            let InputState::Active { parts } = input_state else {
                 return Err(ContextError::NodeAlreadyOmitted { node: *node });
             };
 
@@ -360,11 +566,20 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     image: *image,
                 });
             }
-            *parts = updated;
-            entry.status = Some(if parts.is_empty() {
-                NodeStatus::SkippedEmpty
-            } else {
-                NodeStatus::Modified
+            mutate_entry(state, idx, undo, |entry| {
+                let EntryData::Input {
+                    state: InputState::Active { parts },
+                    ..
+                } = &mut entry.data
+                else {
+                    unreachable!("已确认目标为有效 Input");
+                };
+                *parts = updated;
+                entry.status = Some(if parts.is_empty() {
+                    NodeStatus::SkippedEmpty
+                } else {
+                    NodeStatus::Modified
+                });
             });
             Ok(())
         }
@@ -376,24 +591,29 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     actual: kind,
                 });
             }
-            let entry = entry_mut(state, *node);
-            let EntryData::Step { state } = &mut entry.data else {
+            let idx = entry_index_of(state, *node);
+            let EntryData::Step { state: step_state } = &state.entries[idx].data else {
                 unreachable!("已确认节点类别为 Step");
             };
-            if matches!(state, StepState::Omitted) {
+            if matches!(step_state, StepState::Omitted) {
                 return Err(ContextError::NodeAlreadyOmitted { node: *node });
             }
-            *state = StepState::Replaced(StepContent {
-                assistant: NativeMessage::new(
-                    MessageRole::Assistant,
-                    None,
-                    vec![MessagePart::semantic_only(MessageSemantic::Text {
-                        text: text.as_str().to_owned(),
-                    })],
-                ),
-                results: Vec::new(),
+            mutate_entry(state, idx, undo, |entry| {
+                let EntryData::Step { state } = &mut entry.data else {
+                    unreachable!("已确认节点类别为 Step");
+                };
+                *state = StepState::Replaced(StepContent {
+                    assistant: NativeMessage::new(
+                        MessageRole::Assistant,
+                        None,
+                        vec![MessagePart::semantic_only(MessageSemantic::Text {
+                            text: text.as_str().to_owned(),
+                        })],
+                    ),
+                    results: Vec::new(),
+                });
+                entry.status = Some(NodeStatus::Modified);
             });
-            entry.status = Some(NodeStatus::Modified);
             Ok(())
         }
         ContextEdit::StripReasoning { node } => {
@@ -404,39 +624,45 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     actual: kind,
                 });
             }
-            let entry = entry_mut(state, *node);
-            let (content, _) = active_step_mut(entry, *node)?;
-            let status = sanitize_step_after_assistant_edit(content);
-            entry.status = Some(status);
+            let idx = entry_index_of(state, *node);
+            check_active_step(&state.entries[idx], *node)?;
+            mutate_entry(state, idx, undo, |entry| {
+                let (content, _) = active_step_mut_unchecked(entry);
+                let status = sanitize_step_after_assistant_edit(content);
+                entry.status = Some(status);
+            });
             Ok(())
         }
         ContextEdit::OmitInvocation { invocation } => {
             let owner = lookup_invocation_owner(state, *invocation)?;
-            let entry = entry_mut(state, owner);
-            let (content, omitted_invocations) = active_step_mut(entry, owner)?;
+            let idx = entry_index_of(state, owner);
+            let (_, omitted_invocations) = check_active_step(&state.entries[idx], owner)?;
             if omitted_invocations.contains(invocation) {
                 return Err(ContextError::InvocationAlreadyOmitted {
                     invocation: *invocation,
                 });
             }
-            omitted_invocations.insert(*invocation);
-            content.assistant.parts.retain(|part| {
-                !matches!(
-                    &part.semantic,
-                    MessageSemantic::ToolCall { call } if call.invocation_id == *invocation
-                )
+            mutate_entry(state, idx, undo, |entry| {
+                let (content, omitted_invocations) = active_step_mut_unchecked(entry);
+                omitted_invocations.insert(*invocation);
+                content.assistant.parts.retain(|part| {
+                    !matches!(
+                        &part.semantic,
+                        MessageSemantic::ToolCall { call } if call.invocation_id == *invocation
+                    )
+                });
+                content
+                    .results
+                    .retain(|result| result.invocation_id != *invocation);
+                let status = sanitize_step_after_assistant_edit(content);
+                entry.status = Some(status);
             });
-            content
-                .results
-                .retain(|result| result.invocation_id != *invocation);
-            let status = sanitize_step_after_assistant_edit(content);
-            entry.status = Some(status);
             Ok(())
         }
         ContextEdit::ReplaceToolResult { invocation, text } => {
             let owner = lookup_invocation_owner(state, *invocation)?;
-            let entry = entry_mut(state, owner);
-            let (content, omitted_invocations) = active_step_mut(entry, owner)?;
+            let idx = entry_index_of(state, owner);
+            let (content, omitted_invocations) = check_active_step(&state.entries[idx], owner)?;
             if omitted_invocations.contains(invocation) {
                 return Err(ContextError::InvocationAlreadyOmitted {
                     invocation: *invocation,
@@ -445,34 +671,49 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
 
             let result = content
                 .results
-                .iter_mut()
+                .iter()
                 .find(|item| item.invocation_id == *invocation)
                 .expect("有效未移出的 InvocationId 必存在对应 StoredToolResult");
-            match &mut result.payload {
-                ResultPayload::Succeeded(_) => {
-                    let value = serde_json::Value::String(text.as_str().to_owned());
-                    let bytes = canonical_json(&value);
-                    let digest = tool_content_digest(&bytes);
-                    let byte_length = bytes.len() as u64;
-                    result.payload = ResultPayload::Succeeded(SuccessContent::Json {
-                        value,
-                        digest,
-                        byte_length,
-                    });
-                }
-                ResultPayload::Failed(err) => {
-                    err.message = text.as_str().to_owned();
-                }
-                ResultPayload::NotExecuted | ResultPayload::Indeterminate(_) => {
-                    return Err(ContextError::ToolResultNotReplaceable {
-                        invocation: *invocation,
-                        outcome: result.payload.outcome(),
-                    });
-                }
+            if matches!(
+                result.payload,
+                ResultPayload::NotExecuted | ResultPayload::Indeterminate(_)
+            ) {
+                return Err(ContextError::ToolResultNotReplaceable {
+                    invocation: *invocation,
+                    outcome: result.payload.outcome(),
+                });
             }
-            // 仅修改客户端回填的工具结果，不改动助手回复；保留 `assistant` 的
-            // `provider_origin`、`Reasoning` 与逐片段 `replay_state`（含当前轮工具调用签名）。
-            entry.status = Some(NodeStatus::Modified);
+
+            mutate_entry(state, idx, undo, |entry| {
+                let (content, _) = active_step_mut_unchecked(entry);
+                let result = content
+                    .results
+                    .iter_mut()
+                    .find(|item| item.invocation_id == *invocation)
+                    .expect("有效未移出的 InvocationId 必存在对应 StoredToolResult");
+                match &mut result.payload {
+                    ResultPayload::Succeeded(_) => {
+                        let value = serde_json::Value::String(text.as_str().to_owned());
+                        let bytes = canonical_json(&value);
+                        let digest = tool_content_digest(&bytes);
+                        let byte_length = bytes.len() as u64;
+                        result.payload = ResultPayload::Succeeded(SuccessContent::Json {
+                            value,
+                            digest,
+                            byte_length,
+                        });
+                    }
+                    ResultPayload::Failed(err) => {
+                        err.message = text.as_str().to_owned();
+                    }
+                    ResultPayload::NotExecuted | ResultPayload::Indeterminate(_) => {
+                        unreachable!("进入写回前已校验工具结果结局可替换")
+                    }
+                }
+                // 仅修改客户端回填的工具结果，不改动助手回复；保留 `assistant` 的
+                // `provider_origin`、`Reasoning` 与逐片段 `replay_state`（含当前轮工具调用签名）。
+                entry.status = Some(NodeStatus::Modified);
+            });
             Ok(())
         }
     }
@@ -497,19 +738,18 @@ fn lookup_invocation_owner(
         .ok_or(ContextError::UnknownInvocation { invocation })
 }
 
-fn entry_mut(state: &mut ResolveState, node: NodeId) -> &mut PathEntry {
-    let index = *state
+fn entry_index_of(state: &ResolveState, node: NodeId) -> usize {
+    *state
         .entry_index
         .get(&node)
-        .expect("已核验的 Input/Step 节点必存在索引");
-    &mut state.entries[index]
+        .expect("已核验的 Input/Step 节点必存在索引")
 }
 
-fn active_step_mut(
-    entry: &mut PathEntry,
+fn check_active_step(
+    entry: &PathEntry,
     node: NodeId,
-) -> Result<(&mut StepContent, &mut BTreeSet<InvocationId>), ContextError> {
-    let EntryData::Step { state } = &mut entry.data else {
+) -> Result<(&StepContent, &BTreeSet<InvocationId>), ContextError> {
+    let EntryData::Step { state } = &entry.data else {
         unreachable!("调用前已确认目标节点类别为 Step");
     };
     match state {
@@ -520,6 +760,21 @@ fn active_step_mut(
         StepState::Replaced(_) => Err(ContextError::StepAlreadyReplaced { node }),
         StepState::Omitted => Err(ContextError::NodeAlreadyOmitted { node }),
     }
+}
+
+fn active_step_mut_unchecked(
+    entry: &mut PathEntry,
+) -> (&mut StepContent, &mut BTreeSet<InvocationId>) {
+    let EntryData::Step {
+        state: StepState::Active {
+            content,
+            omitted_invocations,
+        },
+    } = &mut entry.data
+    else {
+        unreachable!("已核验目标节点为 Active Step");
+    };
+    (content, omitted_invocations)
 }
 
 fn push_merged_user_text(out: &mut Vec<MessagePart<BoundToolCall>>, text: &str) {

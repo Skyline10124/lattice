@@ -782,3 +782,370 @@ fn open_rejects_corrupted_context_op_on_rewound_branch_and_empty_trigger_step0()
         ));
     }
 }
+
+#[test]
+fn accept_turn_rejects_empty_batch_before_idempotency_and_never_mutates_store() {
+    let (_dir, layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let version = create_draft(&db, &lock);
+
+    db.feed_input(
+        &lock,
+        FeedInput {
+            session_id: sid(1),
+            project_path: project(1),
+            channel: channel("cli"),
+            input: TurnInput::text("先投喂再独立触发".into()).unwrap(),
+            accepted_at: now(),
+        },
+    )
+    .expect("前置投喂应成功");
+
+    let trigger_req = TriggerTurn {
+        session_id: sid(1),
+        turn_id: tid(1),
+        project_path: project(1),
+        trigger_channel: channel("cli"),
+        config: config(),
+        accepted_at: now(),
+        settings_version: version,
+    };
+    let AcceptedTurn::Accepted(triggered_detail) = db
+        .trigger_turn(&lock, trigger_req.clone())
+        .expect("独立触发应成功")
+    else {
+        panic!("首次独立触发必须返回 Accepted");
+    };
+    assert!(triggered_detail.input_nodes.is_empty());
+
+    let snapshot = || {
+        let read = db.begin_read().unwrap();
+        (
+            read.log(sid(1)).unwrap(),
+            read.turn_detail(sid(1), tid(1)).unwrap(),
+            read.blob_count().unwrap(),
+        )
+    };
+    let baseline = snapshot();
+
+    // 1. 以相同 TurnId 调用空批 accept_turn：必须在查询 turn_index 前直接返回 InvalidInput，
+    //    绝不能误命中独立触发的幂等结果，且持久库零改动。
+    let mut empty_same_tid = accept(sid(1), tid(1));
+    empty_same_tid.trigger_channel = channel("cli");
+    empty_same_tid.settings_version = version;
+    empty_same_tid.inputs = Vec::new();
+    let err_same = db
+        .accept_turn(&lock, empty_same_tid)
+        .expect_err("相同 TurnId 的空批 accept_turn 必须返回 InvalidInput");
+    assert!(
+        matches!(
+            err_same,
+            StoreError::InvalidInput {
+                field: "inputs",
+                ..
+            }
+        ),
+        "期望 InvalidInput(inputs)，实际得到 {err_same:?}"
+    );
+    assert_eq!(snapshot(), baseline, "空批拒绝后持久库记录不得产生任何变化");
+
+    // 2. 以全新 TurnId 调用空批 accept_turn：同样返回 InvalidInput 且不写入任何记录。
+    let mut empty_fresh_tid = accept(sid(1), tid(2));
+    empty_fresh_tid.trigger_channel = channel("cli");
+    empty_fresh_tid.settings_version = version;
+    empty_fresh_tid.inputs = Vec::new();
+    let err_fresh = db
+        .accept_turn(&lock, empty_fresh_tid)
+        .expect_err("全新 TurnId 的空批 accept_turn 必须返回 InvalidInput");
+    assert!(
+        matches!(
+            err_fresh,
+            StoreError::InvalidInput {
+                field: "inputs",
+                ..
+            }
+        ),
+        "期望 InvalidInput(inputs)，实际得到 {err_fresh:?}"
+    );
+    assert!(matches!(
+        db.begin_read().unwrap().turn_detail(sid(1), tid(2)),
+        Err(StoreError::NotFound { .. })
+    ));
+    assert_eq!(snapshot(), baseline, "全新 TurnId 空批拒绝后持久库不得改动");
+
+    // 3. 原独立触发幂等仍正常命中，且重开严格校验通过。
+    assert!(matches!(
+        db.trigger_turn(&lock, trigger_req).unwrap(),
+        AcceptedTurn::Existing(existing) if existing == triggered_detail
+    ));
+    drop(lock);
+    drop(db);
+    SessionStore::open(&layout).expect("空批拒绝后重开会话库必须通过");
+}
+
+#[test]
+fn open_validates_large_branched_tree_and_repeated_empty_triggers_linearly() {
+    // 1. 构造「250 节点长共享前缀 + 250 个末端分叉（均含 ContextOp）+ 40 次连续独立触发 Step 0」
+    //    的大规模分叉会话树，验证单遍 DFS + ContextCursor 线性通过严格重开校验，并精准捕获非当前分叉损坏。
+    {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        let version = create_draft(&db, &lock);
+        db.feed_input(
+            &lock,
+            FeedInput {
+                session_id: sid(1),
+                project_path: project(1),
+                channel: channel("cli"),
+                input: TurnInput::text("共享前缀首输入".into()).unwrap(),
+                accepted_at: now(),
+            },
+        )
+        .unwrap();
+        db.trigger_turn(
+            &lock,
+            TriggerTurn {
+                session_id: sid(1),
+                turn_id: tid(1),
+                project_path: project(1),
+                trigger_channel: channel("cli"),
+                config: config(),
+                accepted_at: now(),
+                settings_version: version,
+            },
+        )
+        .unwrap();
+        db.start_request(&lock, key(tid(1), 0, 0), origin(), now())
+            .unwrap();
+        db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 0, 0), 0)), now())
+            .unwrap();
+        drop(lock);
+        drop(db);
+
+        // 在单个写事务内批量追加长共享前缀、大量末端 ContextOp 分叉与连续独立触发 Step 0，
+        // 避免数百次独立 fsync 拖慢测试，同时完全遵循 v11 规范编码与索引不变量。
+        let s = sid(1);
+        let prefix_len: u64 = 250;
+        let branch_count: u64 = 250;
+        let trigger_count: u64 = 40;
+        let prefix_start: u64 = 3;
+        let prefix_end: u64 = prefix_start + prefix_len - 1; // 252
+        let branch_start: u64 = prefix_end + 1; // 253
+        let trigger_start: u64 = branch_start + branch_count; // 503
+        let last_node_id = NodeId(trigger_start + trigger_count - 1);
+
+        {
+            let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
+            let tx = raw.begin_write().unwrap();
+            {
+                let mut nodes = tx.open_table(NODES).unwrap();
+                let mut turn_index = tx.open_table(TURN_INDEX).unwrap();
+                let mut sessions = tx.open_table(SESSIONS).unwrap();
+                let template_step: Node = decode(
+                    "nodes",
+                    &format!("{s}/2"),
+                    nodes
+                        .get(node_key(s, NodeId(2)).as_slice())
+                        .unwrap()
+                        .unwrap()
+                        .value(),
+                )
+                .unwrap();
+
+                // 250 个链式共享前缀 Input 节点（NodeId(3)..=NodeId(252)）。
+                for i in 0..prefix_len {
+                    let id = NodeId(prefix_start + i);
+                    let parent = NodeId(id.0 - 1);
+                    let node = Node::Input {
+                        parent,
+                        accepted_at: now(),
+                        input: ContextInput::new(
+                            channel("cli"),
+                            vec![MessageSemantic::Text {
+                                text: format!("共享前缀节点-{i}"),
+                            }],
+                        )
+                        .unwrap(),
+                    };
+                    nodes
+                        .insert(
+                            node_key(s, id).as_slice(),
+                            encode(&node).unwrap().as_slice(),
+                        )
+                        .unwrap();
+                }
+
+                // 250 个挂在共享前缀末端 NodeId(252) 下的单节点 ContextOp 分叉，各移出一个不同前置节点。
+                for b in 0..branch_count {
+                    let id = NodeId(branch_start + b);
+                    let target = NodeId(prefix_start + b);
+                    let node = Node::ContextOp {
+                        parent: NodeId(prefix_end),
+                        accepted_at: now(),
+                        op: ContextOp::new(channel("cli"), vec![ContextEdit::omit_node(target)])
+                            .unwrap(),
+                    };
+                    nodes
+                        .insert(
+                            node_key(s, id).as_slice(),
+                            encode(&node).unwrap().as_slice(),
+                        )
+                        .unwrap();
+                }
+
+                // 40 次连续独立触发 Step 0（input_nodes 为空），链式挂在共享前缀末端之后。
+                let mut prev = NodeId(prefix_end);
+                for k in 0..trigger_count {
+                    let id = NodeId(trigger_start + k);
+                    let turn_id = tid(100 + k);
+                    let mut node = template_step.clone();
+                    let Node::Step {
+                        parent,
+                        turn_id: node_turn_id,
+                        ..
+                    } = &mut node
+                    else {
+                        panic!("NodeId(2) 必须为已关闭的独立触发 Step 0");
+                    };
+                    *parent = prev;
+                    *node_turn_id = turn_id;
+                    nodes
+                        .insert(
+                            node_key(s, id).as_slice(),
+                            encode(&node).unwrap().as_slice(),
+                        )
+                        .unwrap();
+                    let tkey = turn_id.to_string();
+                    turn_index
+                        .insert(
+                            tkey.as_str(),
+                            encode(&NodeRef {
+                                session_id: s,
+                                node: id,
+                            })
+                            .unwrap()
+                            .as_slice(),
+                        )
+                        .unwrap();
+                    prev = id;
+                }
+
+                // 将当前位置移至末次独立触发节点，使 250 个 ContextOp 分叉全部处于非当前历史分支。
+                let skey = s.to_string();
+                let mut rec: SessionRecord = decode(
+                    "sessions",
+                    &skey,
+                    sessions.get(skey.as_str()).unwrap().unwrap().value(),
+                )
+                .unwrap();
+                rec.current = last_node_id;
+                sessions
+                    .insert(skey.as_str(), encode(&rec).unwrap().as_slice())
+                    .unwrap();
+            }
+            tx.commit().unwrap();
+        }
+
+        // 合法的大规模分叉树应快速通过严格打开校验。
+        let reopened = SessionStore::open(&layout)
+            .expect("含长共享前缀、大量末端分叉与连续独立触发的大规模会话树应通过打开校验");
+        assert_eq!(
+            reopened.begin_read().unwrap().log(s).unwrap().nodes.len(),
+            (last_node_id.0 + 1) as usize
+        );
+
+        // 篡改其中一个非当前历史分叉（第 120 号分叉）的 ContextOp 使其引用不存在节点，open() 必须精准捕获。
+        let corrupt_branch = NodeId(branch_start + 120);
+        reopened
+            .edit_test_node(
+                NodeRef {
+                    session_id: s,
+                    node: corrupt_branch,
+                },
+                |wire| {
+                    wire["op"]["edits"][0]["node"] = json!(999_999);
+                },
+            )
+            .unwrap();
+        drop(reopened);
+        assert!(matches!(
+            SessionStore::open(&layout),
+            Err(StoreError::Corruption { ref table, ref key, .. })
+                if table == "nodes" && key == &format!("{s}/{}", corrupt_branch.0)
+        ));
+    }
+
+    // 2. 在将前置有效条目全部 OmitNode 移出的非根分叉上注入独立触发 Step 0，open() 必须返回 Corruption。
+    {
+        let (_dir, layout, db) = store();
+        let lock = db.try_lock_session(sid(1)).unwrap();
+        let version = create_draft(&db, &lock);
+        let n1 = db
+            .feed_input(
+                &lock,
+                FeedInput {
+                    session_id: sid(1),
+                    project_path: project(1),
+                    channel: channel("tui"),
+                    input: TurnInput::text("将被分叉移出的前置输入".into()).unwrap(),
+                    accepted_at: now(),
+                },
+            )
+            .unwrap();
+        assert_eq!(n1, NodeId(1));
+        let n2 = db
+            .apply_context_op(
+                &lock,
+                ApplyContextOp::new(
+                    sid(1),
+                    project(1),
+                    ContextOp::new(channel("tui"), vec![ContextEdit::omit_node(NodeId(1))])
+                        .unwrap(),
+                    now(),
+                ),
+            )
+            .unwrap();
+        assert_eq!(n2, NodeId(2));
+
+        // 退回到 NodeId(1) 合法创建一个独立触发 Step 0（NodeId(3)），再将其父指针篡改挂到
+        // 已将全部前置有效条目 OmitNode 清空的 NodeId(2) 下，模拟落盘篡改。
+        db.rewind(&lock, NodeId(1), &project(1), now()).unwrap();
+        let AcceptedTurn::Accepted(detail) = db
+            .trigger_turn(
+                &lock,
+                TriggerTurn {
+                    session_id: sid(1),
+                    turn_id: tid(1),
+                    project_path: project(1),
+                    trigger_channel: channel("tui"),
+                    config: config(),
+                    accepted_at: now(),
+                    settings_version: version,
+                },
+            )
+            .unwrap()
+        else {
+            panic!("预期独立触发成功");
+        };
+        assert_eq!(detail.start_node, NodeId(3));
+
+        db.edit_test_node(
+            NodeRef {
+                session_id: sid(1),
+                node: NodeId(3),
+            },
+            |wire| {
+                wire["parent"] = json!(2);
+            },
+        )
+        .unwrap();
+        drop(lock);
+        drop(db);
+
+        assert!(matches!(
+            SessionStore::open(&layout),
+            Err(StoreError::Corruption { ref table, ref key, .. })
+                if table == "nodes" && key == &format!("{}/3", sid(1))
+        ));
+    }
+}

@@ -646,40 +646,74 @@ pub(super) fn records(r: &Records) -> Result<()> {
             ));
         }
     }
-    // 按每个会话的所有叶子分叉路径执行一次 `resolve()`（前缀单调，在线性时间内覆盖全树全部 ContextOp），
+    enum DfsAction {
+        Enter(NodeId),
+        Exit(lattice_context::ContextUndo),
+    }
+
+    // 按增量可回溯游标与显式栈迭代 DFS 单遍遍历每棵会话树，线性时间覆盖全树全部 ContextOp，
     // 并核验所有独立触发 Step 0（input_nodes 为空）的父路径有效模型上下文非空。
     for &s in r.sessions.keys() {
-        let mut has_child = BTreeSet::new();
-        let mut session_nodes = Vec::new();
+        let mut children: BTreeMap<NodeId, Vec<NodeId>> = BTreeMap::new();
         for ((_, n), value) in r.nodes.range((s, NodeId(0))..=(s, NodeId(u64::MAX))) {
-            session_nodes.push((*n, value));
             if let Some(parent) = value.parent() {
-                has_child.insert(parent);
+                children.entry(parent).or_default().push(*n);
             }
         }
-        for (n, value) in session_nodes {
-            if n != NodeId(0) && !has_child.contains(&n) {
-                read::resolve_path_with_loader(s, n, None, &[], |id| {
-                    Ok(r.nodes.get(&(s, id)).cloned())
-                })?;
-            }
-            if let Node::Step {
-                parent,
-                step_ordinal: 0,
-                turn_start: Some(meta),
-                ..
-            } = value
-                && meta.input_nodes.is_empty()
-            {
-                let effective = read::resolve_path_with_loader(s, *parent, None, &[], |id| {
-                    Ok(r.nodes.get(&(s, id)).cloned())
-                })?;
-                if effective.project().is_empty() {
-                    return Err(err(
-                        "nodes",
-                        format!("{s}/{}", n.0),
-                        "独立触发的 Step 0 父路径有效模型上下文为空",
-                    ));
+
+        let mut cursor = lattice_context::ContextCursor::new();
+        let mut stack = vec![DfsAction::Enter(NodeId(0))];
+        while let Some(action) = stack.pop() {
+            match action {
+                DfsAction::Enter(n) => {
+                    let node = r.nodes.get(&(s, n)).ok_or_else(|| {
+                        err("nodes", format!("{s}/{}", n.0), "missing session node")
+                    })?;
+                    if let Node::Step {
+                        step_ordinal: 0,
+                        turn_start: Some(meta),
+                        ..
+                    } = node
+                        && meta.input_nodes.is_empty()
+                        && !cursor.has_projected_items()
+                    {
+                        return Err(err(
+                            "nodes",
+                            format!("{s}/{}", n.0),
+                            "独立触发的 Step 0 父路径有效模型上下文为空",
+                        ));
+                    }
+                    let record = match node {
+                        Node::Root => None,
+                        Node::Input { input, .. } => {
+                            Some(lattice_context::PathRecord::Input { id: n, input })
+                        }
+                        Node::ContextOp { op, .. } => {
+                            Some(lattice_context::PathRecord::Op { id: n, op })
+                        }
+                        Node::Step { .. } => node
+                            .step_content()
+                            .map(|content| lattice_context::PathRecord::Step { id: n, content }),
+                    };
+                    if let Some(record) = record {
+                        let undo = cursor.advance(record).map_err(|e| {
+                            err(
+                                "nodes",
+                                format!("{s}/{}", n.0),
+                                &format!("无效的模型上下文路径：{e}"),
+                            )
+                        })?;
+                        // LIFO：先压入当前节点的 Exit，再逆序压入全部子节点 Enter。
+                        stack.push(DfsAction::Exit(undo));
+                    }
+                    if let Some(kids) = children.get(&n) {
+                        for &child in kids.iter().rev() {
+                            stack.push(DfsAction::Enter(child));
+                        }
+                    }
+                }
+                DfsAction::Exit(undo) => {
+                    cursor.rollback(undo);
                 }
             }
         }
