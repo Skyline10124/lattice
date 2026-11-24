@@ -352,8 +352,9 @@ pub enum ContextEdit {
     ReplaceStep { node: NodeId, text: ContextText },
     /// 成对移出单次工具调用（`ToolCall` 片段与对应 `StoredToolResult` 同时移出，不留悬空调用）。
     OmitInvocation { invocation: InvocationId },
-    /// 仅替换单次工具调用的 `StoredToolResult` 文本载荷（保留原 `Succeeded`/`Failed` 结局与 `ToolCall` 配对，
-    /// 二者共享 `MAX_TOOL_CONTENT_BYTES` 规范 JSON 字符串上限；`NotExecuted` 与 `Indeterminate` 不可替换）。
+    /// 仅替换单次工具调用的 `StoredToolResult` 文本载荷（保留原 `Succeeded`/`Failed` 结局、`ToolCall` 配对
+    /// 以及 `assistant` 消息的同源回放状态 `provider_origin` 与逐片段 `replay_state`；
+    /// `Succeeded` 与 `Failed` 共享 `MAX_TOOL_CONTENT_BYTES` 规范 JSON 字符串上限，`NotExecuted` 与 `Indeterminate` 不可替换）。
     ReplaceToolResult {
         invocation: InvocationId,
         text: ToolResultText,

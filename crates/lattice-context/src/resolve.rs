@@ -406,7 +406,7 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
             }
             let entry = entry_mut(state, *node);
             let (content, _) = active_step_mut(entry, *node)?;
-            let status = sanitize_step_after_local_edit(content);
+            let status = sanitize_step_after_assistant_edit(content);
             entry.status = Some(status);
             Ok(())
         }
@@ -429,7 +429,7 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
             content
                 .results
                 .retain(|result| result.invocation_id != *invocation);
-            let status = sanitize_step_after_local_edit(content);
+            let status = sanitize_step_after_assistant_edit(content);
             entry.status = Some(status);
             Ok(())
         }
@@ -470,8 +470,9 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     });
                 }
             }
-            let status = sanitize_step_after_local_edit(content);
-            entry.status = Some(status);
+            // 仅修改客户端回填的工具结果，不改动助手回复；保留 `assistant` 的
+            // `provider_origin`、`Reasoning` 与逐片段 `replay_state`（含当前轮工具调用签名）。
+            entry.status = Some(NodeStatus::Modified);
             Ok(())
         }
     }
@@ -538,9 +539,10 @@ fn push_merged_user_text(out: &mut Vec<MessagePart<BoundToolCall>>, text: &str) 
     }
 }
 
-/// 统一 `Step` 局部编辑清洗路径：清除 `provider_origin` 与逐片段 `replay_state`、
-/// 剥离无来源的 `Reasoning` 与空 `Text` 片段、合并相邻 `Text` 并判定最终状态。
-fn sanitize_step_after_local_edit(content: &mut StepContent) -> NodeStatus {
+/// 仅在助手回复片段发生局部删改（`StripReasoning` / `OmitInvocation`）时执行的清洗路径：
+/// 清除 `provider_origin` 与逐片段 `replay_state`、剥离无来源 `Reasoning` 与空 `Text` 片段、
+/// 合并相邻 `Text` 并判定最终状态。
+fn sanitize_step_after_assistant_edit(content: &mut StepContent) -> NodeStatus {
     content.assistant.provider_origin = None;
 
     let mut cleaned: Vec<MessagePart<BoundToolCall>> =

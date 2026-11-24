@@ -145,7 +145,7 @@ pub fn resolve(path: &[PathRecord<'_>]) -> Result<EffectiveContext, ContextError
 
 1. **纯函数确定性**：给定相同的路径节点序列，`resolve()` 与 `project()` 每次产出完全一致的 `EffectiveContext` 与 `Vec<ConversationItem>`，不依赖当前时钟、随机数或外部环境状态。是否追求前缀逐字节不变、何时批量落 `ContextOp` 以复用 Prompt Cache，均属上层策略（Policy），基础设施不做硬性承诺。
 2. **协议成对铁律**：`OmitNode` 对 `Step` 整步同进同退；`OmitInvocation` 同时移出对应的 `ToolCall` 与 `ToolResult`；若 `ReplaceImage { text: None }` 使整条 `ContextInput` 片段清空，或 `OmitInvocation` / `StripReasoning` 使某 `Step` 既无剩余回复片段也无工具调用，归约结果自动跳过该空条目。
-3. **回放签名铁律**：凡被 `ReplaceStep`、`OmitInvocation`、`ReplaceToolResult` 或 `StripReasoning` 修改过的 `Step`，归约时自动清除其 `provider_origin` 与逐片段 `replay_state`（见[回放与跨 provider 投影](../architecture/session/conversation.md#回放与跨-provider-投影)），避免原 provider 验签拒绝；未经修改的 `Step` 完整保留同源回放状态。
+3. **回放签名铁律**：凡修改了 `Step` 助手回复内容的操作（`ReplaceStep`、`OmitInvocation` 或 `StripReasoning`），归约时自动清除其 `provider_origin` 与逐片段 `replay_state` 并剥离无来源 `Reasoning`（见[回放与跨 provider 投影](../architecture/session/conversation.md#回放与跨-provider-投影)），避免原 provider 验签拒绝；未经修改的 `Step` 以及仅替换工具结果载荷而未改动助手回复的 `ReplaceToolResult`，完整保留助手消息的同源回放状态（含 Gemini `thoughtSignature` 等当前轮工具调用签名）。
 4. **同路径引用铁律**：`ContextOp` 中每条 `ContextEdit` 引用的 `NodeId` 或 `InvocationId` 必须存在于该 `Op` 之前的同一路径上，节点类型与操作变体严格匹配（`ReplaceImage` 还须核验目标 `ContextInput` 确含该 `ImageRef`），且 `Op` 在同一 `ContextOp` 内部或跨 `ContextOp` 叠加时目标仍处于可操作状态（已整节点 `OmitNode` 的节点拒绝再施加局部改写）。
 
 `EffectiveContext` 对外只暴露三个纯只读接口：

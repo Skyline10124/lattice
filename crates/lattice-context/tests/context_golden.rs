@@ -1457,7 +1457,7 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
         );
     }
 
-    // Failed 结局允许替换：保留 Failed 与原 code，仅更新 message，并走统一清洗；支持再次替换与后续 OmitInvocation
+    // Failed 结局允许替换：保留 Failed、原 code 与 assistant 同源回放状态；支持再次替换与后续 OmitInvocation
     let op_replace_failed_1 = ContextOp::new(
         ch("cli"),
         vec![ContextEdit::replace_tool_result(inv_failed, "精简失败原因").unwrap()],
@@ -1479,16 +1479,8 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
         panic!("首项应为 Step");
     };
     assert_eq!(
-        step_after_1.assistant.provider_origin, None,
-        "替换 Failed 结果后应清除 provider_origin"
-    );
-    assert!(
-        step_after_1
-            .assistant
-            .parts
-            .iter()
-            .all(|part| part.replay_state.is_none()),
-        "替换 Failed 结果后应清除逐片段 replay_state"
+        step_after_1.assistant, step.assistant,
+        "单独执行 ReplaceToolResult 必须原样保留 assistant 的 provider_origin 与逐片段 replay_state"
     );
     assert_eq!(
         step_after_1.results[0],
@@ -1503,7 +1495,7 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
         "ReplaceToolResult 作用于 Failed 必须保留 Failed 结局与原机器错误码"
     );
 
-    // 同一活跃 Failed 调用支持再次 ReplaceToolResult，并可后续 OmitInvocation
+    // 同一活跃 Failed 调用支持再次 ReplaceToolResult，且继续保留 assistant 同源回放状态，并可后续 OmitInvocation
     let op_replace_again = ContextOp::new(
         ch("cli"),
         vec![ContextEdit::replace_tool_result(inv_failed, "二版失败说明").unwrap()],
@@ -1527,6 +1519,10 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
     let ConversationItem::Step(ref step_after_2) = ctx_failed_2.project()[0] else {
         panic!("首项应为 Step");
     };
+    assert_eq!(
+        step_after_2.assistant, step.assistant,
+        "再次执行 ReplaceToolResult 仍须原样保留 assistant 的 provider_origin 与逐片段 replay_state"
+    );
     assert_eq!(
         step_after_2.results[0].payload,
         ResultPayload::Failed(ToolError {
@@ -1560,6 +1556,18 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
         panic!("首项应为 Step");
     };
     assert_eq!(
+        step_after_omit.assistant.provider_origin, None,
+        "叠加 OmitInvocation 修改助手消息后必须清除 provider_origin"
+    );
+    assert!(
+        step_after_omit
+            .assistant
+            .parts
+            .iter()
+            .all(|part| part.replay_state.is_none()),
+        "叠加 OmitInvocation 修改助手消息后必须清除剩余片段的 replay_state"
+    );
+    assert_eq!(
         step_after_omit.results.len(),
         5,
         "OmitInvocation 应成对移出该 Failed 调用与结果"
@@ -1569,6 +1577,272 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
             .results
             .iter()
             .all(|result| result.invocation_id != inv_failed)
+    );
+}
+
+#[test]
+fn replace_tool_result_preserves_assistant_signatures_and_commutes_with_assistant_edits() {
+    let call_1 = bound_call(inv(INV_1), "read_file", 1, json!({"path": "a.rs"}));
+    let call_2 = bound_call(inv(INV_2), "write_file", 2, json!({"path": "b.rs"}));
+
+    // 模拟 Gemini 3 GenerateContent 当前轮 Step：
+    // 携带 provider_origin、Reasoning + thoughtSignature、两个 ToolCall + thoughtSignature、空文本签名载体
+    let gemini_step = step_with_parts(
+        Some(sample_origin()),
+        vec![
+            reasoning_part("思考", Some("thought-sig-reasoning")),
+            MessagePart {
+                semantic: MessageSemantic::ToolCall {
+                    call: call_1.clone(),
+                },
+                replay_state: Some(OpaqueProviderState::new("thought-sig-call-1").unwrap()),
+            },
+            MessagePart {
+                semantic: MessageSemantic::ToolCall {
+                    call: call_2.clone(),
+                },
+                replay_state: Some(OpaqueProviderState::new("thought-sig-call-2").unwrap()),
+            },
+            MessagePart {
+                semantic: text_sem(""),
+                replay_state: Some(OpaqueProviderState::new("thought-sig-empty-text").unwrap()),
+            },
+        ],
+        vec![
+            json_result(inv(INV_1), "read_file", json!("超长文件内容")),
+            StoredToolResult {
+                invocation_id: inv(INV_2),
+                name: "write_file".to_owned(),
+                payload: ResultPayload::Failed(ToolError {
+                    code: "permission_denied".to_owned(),
+                    message: "原始拒绝详情".to_owned(),
+                }),
+            },
+        ],
+    );
+
+    // 1) 单独执行 ReplaceToolResult（同时覆盖 Succeeded 与 Failed）：assistant 逐字节保留
+    let op_replace_both = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_tool_result(inv(INV_1), "精简文件摘要").unwrap(),
+            ContextEdit::replace_tool_result(inv(INV_2), "精简拒绝原因").unwrap(),
+        ],
+    )
+    .unwrap();
+    let ctx_replaced = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: gemini_step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_replace_both,
+        },
+    ])
+    .expect("单独替换两条工具结果应成功");
+
+    let expected_ok_val = Value::String("精简文件摘要".to_owned());
+    let expected_ok_canonical = canonical_json(&expected_ok_val);
+    let expected_failed_canonical = canonical_json(&json!({
+        "error": { "code": "permission_denied", "message": "精简拒绝原因" }
+    }));
+
+    assert_eq!(
+        ctx_replaced.project(),
+        vec![ConversationItem::Step(StepContent {
+            assistant: gemini_step.assistant.clone(),
+            results: vec![
+                StoredToolResult {
+                    invocation_id: inv(INV_1),
+                    name: "read_file".to_owned(),
+                    payload: ResultPayload::Succeeded(SuccessContent::Json {
+                        value: expected_ok_val.clone(),
+                        digest: tool_content_digest(&expected_ok_canonical),
+                        byte_length: expected_ok_canonical.len() as u64,
+                    }),
+                },
+                StoredToolResult {
+                    invocation_id: inv(INV_2),
+                    name: "write_file".to_owned(),
+                    payload: ResultPayload::Failed(ToolError {
+                        code: "permission_denied".to_owned(),
+                        message: "精简拒绝原因".to_owned(),
+                    }),
+                },
+            ],
+        })],
+        "单独 ReplaceToolResult 后 assistant 的 provider_origin、Reasoning、空签名载体与全部 thoughtSignature 必须逐字节保留"
+    );
+
+    let insp_replaced = ctx_replaced.inspect();
+    assert_eq!(
+        insp_replaced.operated_nodes,
+        vec![OperatedNode {
+            node: NodeId(1),
+            status: NodeStatus::Modified,
+        }]
+    );
+    assert_eq!(
+        insp_replaced.entries,
+        vec![EffectiveEntrySummary::Step {
+            node: NodeId(1),
+            text_bytes: 0,
+            reasoning_bytes: "思考".len(),
+            tool_call_count: 2,
+            tool_result_bytes: expected_ok_canonical.len() + expected_failed_canonical.len(),
+        }],
+        "单独 ReplaceToolResult 后 inspect() 必须保留原 reasoning_bytes 并反映更新后的 tool_result_bytes"
+    );
+
+    // 2a) 与 StripReasoning 叠加且满足正反顺序交换律
+    let op_replace_then_strip = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_tool_result(inv(INV_1), "精简文件摘要").unwrap(),
+            ContextEdit::strip_reasoning(NodeId(1)),
+        ],
+    )
+    .unwrap();
+    let op_strip_then_replace = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::strip_reasoning(NodeId(1)),
+            ContextEdit::replace_tool_result(inv(INV_1), "精简文件摘要").unwrap(),
+        ],
+    )
+    .unwrap();
+    let ctx_rs = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: gemini_step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_replace_then_strip,
+        },
+    ])
+    .expect("[ReplaceToolResult, StripReasoning] 应归约成功");
+    let ctx_sr = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: gemini_step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_strip_then_replace,
+        },
+    ])
+    .expect("[StripReasoning, ReplaceToolResult] 应归约成功");
+
+    assert_eq!(
+        ctx_rs, ctx_sr,
+        "ReplaceToolResult 与 StripReasoning 正反顺序归约出的 EffectiveContext 必须完全相等"
+    );
+    assert_eq!(ctx_rs.inspect(), ctx_sr.inspect());
+    assert_eq!(ctx_rs.project(), ctx_sr.project());
+    assert_eq!(
+        ctx_rs.project(),
+        vec![ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                None,
+                vec![
+                    MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_1 }),
+                    MessagePart::semantic_only(MessageSemantic::ToolCall {
+                        call: call_2.clone(),
+                    }),
+                ],
+            ),
+            results: vec![
+                StoredToolResult {
+                    invocation_id: inv(INV_1),
+                    name: "read_file".to_owned(),
+                    payload: ResultPayload::Succeeded(SuccessContent::Json {
+                        value: expected_ok_val,
+                        digest: tool_content_digest(&expected_ok_canonical),
+                        byte_length: expected_ok_canonical.len() as u64,
+                    }),
+                },
+                StoredToolResult {
+                    invocation_id: inv(INV_2),
+                    name: "write_file".to_owned(),
+                    payload: ResultPayload::Failed(ToolError {
+                        code: "permission_denied".to_owned(),
+                        message: "原始拒绝详情".to_owned(),
+                    }),
+                },
+            ],
+        })],
+        "叠加 StripReasoning 后必须清除 provider_origin 与全部 replay_state、剥离 Reasoning 与空文本载体"
+    );
+
+    // 2b) 与 OmitInvocation 叠加且满足正反顺序交换律
+    let op_replace_then_omit = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_tool_result(inv(INV_2), "精简拒绝原因").unwrap(),
+            ContextEdit::omit_invocation(inv(INV_1)),
+        ],
+    )
+    .unwrap();
+    let op_omit_then_replace = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::omit_invocation(inv(INV_1)),
+            ContextEdit::replace_tool_result(inv(INV_2), "精简拒绝原因").unwrap(),
+        ],
+    )
+    .unwrap();
+    let ctx_ro = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: gemini_step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_replace_then_omit,
+        },
+    ])
+    .expect("[ReplaceToolResult(inv2), OmitInvocation(inv1)] 应归约成功");
+    let ctx_or = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: gemini_step,
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_omit_then_replace,
+        },
+    ])
+    .expect("[OmitInvocation(inv1), ReplaceToolResult(inv2)] 应归约成功");
+
+    assert_eq!(
+        ctx_ro, ctx_or,
+        "ReplaceToolResult(inv2) 与 OmitInvocation(inv1) 正反顺序归约出的 EffectiveContext 必须完全相等"
+    );
+    assert_eq!(ctx_ro.inspect(), ctx_or.inspect());
+    assert_eq!(ctx_ro.project(), ctx_or.project());
+    assert_eq!(
+        ctx_ro.project(),
+        vec![ConversationItem::Step(StepContent {
+            assistant: NativeMessage::new(
+                MessageRole::Assistant,
+                None,
+                vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                    call: call_2,
+                })],
+            ),
+            results: vec![StoredToolResult {
+                invocation_id: inv(INV_2),
+                name: "write_file".to_owned(),
+                payload: ResultPayload::Failed(ToolError {
+                    code: "permission_denied".to_owned(),
+                    message: "精简拒绝原因".to_owned(),
+                }),
+            }],
+        })],
+        "叠加 OmitInvocation 后必须成对移出 inv1、保留替换后的 inv2，并清除签名与无来源 Reasoning/空文本载体"
     );
 }
 
