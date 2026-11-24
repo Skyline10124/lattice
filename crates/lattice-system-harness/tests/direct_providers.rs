@@ -235,19 +235,17 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         let reopened = captures[2].raw["input"].as_array().unwrap();
         assert_eq!(&reopened[..input.len()], input);
         assert_eq!(reopened[8], final_step);
-        assert_eq!(reopened[9]["content"][0]["text"], "continue after restart");
+        assert_eq!(
+            reopened[9]["content"][0]["text"],
+            "<lattice-context channel=\"ipc\">\ncontinue after restart\n</lattice-context>"
+        );
         let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
         let view = watcher.initial();
         assert_eq!(
             view.head.as_ref().unwrap().provider.as_deref(),
             Some("interactions-fixture")
         );
-        let user = *view
-            .entries
-            .iter()
-            .find(|(_, entry)| entry.user_ordinal() == Some(2))
-            .unwrap()
-            .0;
+        let user = view.turn_start_node(2).unwrap();
         let history = support::history(&world, spec.step_timeout(), sid, user, 100).unwrap();
         assert_eq!(
             history,
@@ -661,7 +659,10 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         let reopened = captures[2].raw["input"].as_array().unwrap();
         assert_eq!(&reopened[..inputs.len()], inputs);
         assert_eq!(reopened[7], final_item);
-        assert_eq!(reopened[8]["content"][0]["text"], "continue after restart");
+        assert_eq!(
+            reopened[8]["content"][0]["text"],
+            "<lattice-context channel=\"ipc\">\ncontinue after restart\n</lattice-context>"
+        );
         assert_eq!(captures[2].raw["prompt_cache_key"], sid);
         assert_eq!(
             captures[2].raw["include"],
@@ -674,12 +675,7 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
             view.head.as_ref().unwrap().provider.as_deref(),
             Some("responses-fixture")
         );
-        let current_user = *view
-            .entries
-            .iter()
-            .find(|(_, entry)| entry.user_ordinal() == Some(2))
-            .unwrap()
-            .0;
+        let current_user = view.turn_start_node(2).unwrap();
         let history =
             support::history(&world, spec.step_timeout(), sid, current_user, 100).unwrap();
         assert_eq!(
@@ -2051,9 +2047,15 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         }));
         let restored = &captures[4].raw["messages"];
         assert_eq!(restored.as_array().unwrap().len(), 5);
-        assert_eq!(restored[1]["content"], "read notes");
+        assert_eq!(
+            restored[1]["content"],
+            "<lattice-context channel=\"ipc\">\nread notes\n</lattice-context>"
+        );
         assert_eq!(restored[2]["reasoning_content"], "source-a-reasoning");
-        assert_eq!(restored[4]["content"], "return to source");
+        assert_eq!(
+            restored[4]["content"],
+            "<lattice-context channel=\"ipc\">\nreturn to source\n</lattice-context>"
+        );
         for excluded in [
             "source-b-reasoning",
             "first done",

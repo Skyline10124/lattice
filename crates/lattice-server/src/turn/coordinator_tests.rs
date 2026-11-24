@@ -38,12 +38,17 @@ fn input() -> AcceptTurn {
         },
     };
     let settings = lattice_session::store::SessionSettings::for_test(&config);
+    let channel = super::super::execute::default_submit_channel();
     AcceptTurn {
         settings_version: settings.version().unwrap(),
         session_id: sid(),
         turn_id: tid(1),
         project_path: ProjectPath::from_bytes(b"/coordinator-test".as_slice()).unwrap(),
-        input: TurnInput::text("原始输入\n".into()).expect("构造测试输入"),
+        trigger_channel: channel.clone(),
+        inputs: vec![(
+            channel,
+            TurnInput::text("原始输入\n".into()).expect("构造测试输入"),
+        )],
         accepted_at: chrono::Utc::now(),
         config,
     }
@@ -633,7 +638,8 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
         panic!("not accepted")
     };
     let sid = turn.session_id;
-    assert_eq!(turn.user_node, NodeId(1));
+    assert_eq!(turn.input_nodes, vec![NodeId(1)]);
+    assert_eq!(turn.start_node, NodeId(2));
     execution.completion.await.unwrap().unwrap();
     let mut retry = request;
     retry.test_llm = None;

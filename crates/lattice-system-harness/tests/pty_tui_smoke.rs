@@ -232,7 +232,7 @@ fn pty_tui_smoke_runs_turn_and_quits_cleanly() {
         evidence.record_command("检查首轮会话树（--json session log）", &log_out);
         assert!(log_out.is_clean_exit(0));
         let log: serde_json::Value = serde_json::from_slice(&log_out.stdout).unwrap();
-        let first_tid = log["nodes"][1]["turn_start"]["turn_id"].as_str().unwrap();
+        let first_tid = log["nodes"][2]["turn_start"]["turn_id"].as_str().unwrap();
         let turn_out = session
             .run_command(&["--json", "session", "turn", first_tid])
             .unwrap();
@@ -916,7 +916,7 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
             assert!(log.is_clean_exit(0));
             let value: serde_json::Value = serde_json::from_slice(&log.stdout).unwrap();
             if value["unclosed_turn"].is_null() {
-                let turn = &value["nodes"][1]["turn_start"];
+                let turn = &value["nodes"][2]["turn_start"];
                 assert_eq!(turn["summary"]["outcome"], "cancelled");
                 break;
             }
@@ -1258,16 +1258,18 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         });
         let mut watcher = support::Watcher::open(&world, step(), sid);
         let view = watcher.initial();
-        let users = view
+        let starts = view
             .entries
             .values()
-            .filter(|entry| entry.raw["kind"] == "user_message")
+            .filter(|entry| {
+                entry.raw["kind"] == "step" && entry.raw["content"]["step_ordinal"] == 0
+            })
             .collect::<Vec<_>>();
-        assert_eq!(users.len(), 3);
+        assert_eq!(starts.len(), 3);
         let final_head = view.head.as_ref().unwrap();
-        let mut observed_turns = users
+        let mut observed_turns = starts
             .iter()
-            .map(|user| user.raw["content"]["turn_id"].as_str().unwrap())
+            .map(|step| step.raw["content"]["turn_id"].as_str().unwrap())
             .collect::<Vec<_>>();
         let mut accepted_turns = vec![
             first,
@@ -1278,12 +1280,15 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         accepted_turns.sort_unstable();
         assert_eq!(
             observed_turns, accepted_turns,
-            "三次提交与公开 UserMessage 的身份一致"
+            "三次提交与公开 Step 0 的身份一致"
         );
-        for user in users {
-            assert_eq!(user.raw["content"]["provider"], "openai-chat");
-            assert_eq!(user.raw["content"]["model"], "gpt-6-luna");
-            assert_eq!(user.raw["content"]["effort"], "off");
+        for start in starts {
+            assert_eq!(
+                start.raw["content"]["turn_start"]["provider"],
+                "openai-chat"
+            );
+            assert_eq!(start.raw["content"]["turn_start"]["model"], "gpt-6-luna");
+            assert_eq!(start.raw["content"]["turn_start"]["effort"], "off");
         }
         assert_eq!(final_head.effort.as_deref(), Some("off"));
         let captures = server.captured_requests();

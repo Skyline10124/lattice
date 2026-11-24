@@ -177,6 +177,12 @@ pub enum AttemptState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepEntry {
     pub ordinal: u64,
+    /// 仅 `Step 0` 携带轮次序号（从 1 起算）。
+    pub turn_ordinal: Option<u64>,
+    /// 仅 `Step 0` 携带轮次启动元数据中的 agent 名称。
+    pub agent_name: Option<String>,
+    /// 仅 `Step 0` 携带本轮认领的前置输入节点列表。
+    pub input_nodes: Vec<u64>,
     pub progress: StepProgress,
     /// 回复的正文与推理片段，按原顺序且未合并；工具调用见 `slots`。
     pub reply: Vec<Segment>,
@@ -189,12 +195,9 @@ pub struct StepEntry {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EntryContent {
-    UserMessage {
-        ordinal: u64,
-        agent_name: String,
-        text: String,
-    },
-    Step(StepEntry),
+    Input { channel: String, text: String },
+    ContextOp { channel: String },
+    Step(Box<StepEntry>),
 }
 
 /// 一个对话条目；`raw` 是条目本身的 JSON（不含 `--json` 与视图记录的 `type` 标签），
@@ -203,7 +206,8 @@ pub enum EntryContent {
 pub struct Entry {
     pub node: u64,
     pub parent: u64,
-    pub turn_id: String,
+    /// 仅 `Step` 条目归属轮次，`Input` 与 `ContextOp` 为 `None`。
+    pub turn_id: Option<String>,
     pub content: EntryContent,
     pub raw: Value,
 }
@@ -211,14 +215,15 @@ impl Entry {
     pub fn step(&self) -> Option<&StepEntry> {
         match &self.content {
             EntryContent::Step(step) => Some(step),
-            EntryContent::UserMessage { .. } => None,
+            EntryContent::Input { .. } | EntryContent::ContextOp { .. } => None,
         }
     }
-    pub fn user_ordinal(&self) -> Option<u64> {
-        match &self.content {
-            EntryContent::UserMessage { ordinal, .. } => Some(*ordinal),
-            EntryContent::Step(_) => None,
-        }
+    pub fn is_input(&self) -> bool {
+        matches!(self.content, EntryContent::Input { .. })
+    }
+    /// `Step 0` 携带的轮次序号（从 1 起算）。
+    pub fn turn_ordinal(&self) -> Option<u64> {
+        self.step().and_then(|step| step.turn_ordinal)
     }
 }
 
@@ -271,7 +276,8 @@ pub struct TextChunk {
 pub enum ReceiptResult {
     Accepted {
         session_id: String,
-        user_node: u64,
+        start_node: u64,
+        input_nodes: Vec<u64>,
     },
     Rejected(LocalError),
     /// 按 `TurnId` 查询为 `NotFound`：确定未被接受。
@@ -680,38 +686,75 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
     let node = uint(value, "node")?;
     let content = &value["content"];
     let parent = uint(content, "parent")?;
-    let turn_id = string(content, "turn_id")?.to_owned();
     let kind = string(value, "kind")?;
     if kind != string(content, "kind")? {
         return Err("条目外层 `kind` 与节点内容不一致".into());
     }
-    let parsed = match kind {
-        "user_message" => {
-            for field in ["step", "retries", "summary"] {
+    let (turn_id, parsed) = match kind {
+        "input" => {
+            for field in ["ordinal", "step", "retries", "summary"] {
                 if value.get(field).is_some() {
-                    return Err(format!("用户消息条目不得携带 `{field}`"));
+                    return Err(format!("输入条目不得携带 `{field}`"));
                 }
             }
-            let ordinal = uint(value, "ordinal")?;
-            if ordinal == 0 {
-                return Err("用户消息序号必须从 1 起算".into());
-            }
-            let text = message_segments(&content["message"], true)?
+            string(content, "accepted_at")?;
+            let input = &content["input"];
+            let channel = string(input, "channel")?.to_owned();
+            let text = message_segments(&input["message"], true)?
                 .into_iter()
                 .filter(|segment| segment.kind == SegmentKind::Text)
                 .map(|segment| segment.text)
                 .collect();
-            EntryContent::UserMessage {
-                ordinal,
-                agent_name: string(content, "agent_name")?.into(),
-                text,
+            (None, EntryContent::Input { channel, text })
+        }
+        "context_op" => {
+            for field in ["ordinal", "step", "retries", "summary"] {
+                if value.get(field).is_some() {
+                    return Err(format!("上下文操作条目不得携带 `{field}`"));
+                }
             }
+            string(content, "accepted_at")?;
+            let op = &content["op"];
+            let channel = string(op, "channel")?.to_owned();
+            if array(op, "edits")?.is_empty() {
+                return Err("上下文操作条目的 `edits` 不能为空".into());
+            }
+            (None, EntryContent::ContextOp { channel })
         }
         "step" => {
-            if value.get("ordinal").is_some() {
-                return Err("`Step` 条目顶层不得携带 `ordinal`".into());
-            }
+            let turn_id = string(content, "turn_id")?.to_owned();
             let ordinal = uint(content, "step_ordinal")?;
+            let turn_ordinal = match (ordinal == 0, value.get("ordinal")) {
+                (true, Some(raw)) => {
+                    let n = raw
+                        .as_u64()
+                        .ok_or_else(|| "`Step 0` 条目顶层 `ordinal` 必须为无符号整数".to_owned())?;
+                    if n == 0 {
+                        return Err("轮次序号必须从 1 起算".into());
+                    }
+                    Some(n)
+                }
+                (false, None | Some(Value::Null)) => None,
+                (true, None) => return Err("`Step 0` 条目顶层必须携带 `ordinal`".into()),
+                (false, Some(_)) => return Err("非 `Step 0` 条目顶层不得携带 `ordinal`".into()),
+            };
+            let (agent_name, input_nodes) = match (ordinal == 0, content.get("turn_start")) {
+                (true, Some(meta)) if meta.is_object() => {
+                    let agent_name = string(meta, "agent_name")?.to_owned();
+                    let input_nodes = array(meta, "input_nodes")?
+                        .iter()
+                        .map(|item| {
+                            item.as_u64().ok_or_else(|| {
+                                "`turn_start.input_nodes` 的元素必须为无符号整数".to_owned()
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
+                    (Some(agent_name), input_nodes)
+                }
+                (false, None | Some(Value::Null)) => (None, Vec::new()),
+                (true, _) => return Err("`Step 0` 节点内容必须携带 `turn_start` 对象".into()),
+                (false, Some(_)) => return Err("非 `Step 0` 节点内容不得携带 `turn_start`".into()),
+            };
             let progress = step_progress(&content["progress"])?;
             let stored_attempts = array(content, "attempts")?.len();
             let reply = match &content["reply"] {
@@ -766,17 +809,23 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                     return Err("有且仅有不以 `continue` 关闭的步骤携带轮次摘要".into());
                 }
             };
-            EntryContent::Step(StepEntry {
-                ordinal,
-                progress,
-                reply,
-                attempts,
-                slots,
-                retries,
-                summary,
-            })
+            (
+                Some(turn_id),
+                EntryContent::Step(Box::new(StepEntry {
+                    ordinal,
+                    turn_ordinal,
+                    agent_name,
+                    input_nodes,
+                    progress,
+                    reply,
+                    attempts,
+                    slots,
+                    retries,
+                    summary,
+                })),
+            )
         }
-        _ => return Err("条目内容必须为用户消息或步骤".into()),
+        _ => return Err("条目内容必须为输入、上下文操作或步骤".into()),
     };
     Ok(Entry {
         node,
@@ -792,8 +841,12 @@ fn head(value: &Value) -> Result<Head, String> {
     }
     let position = uint(value, "position")?;
     let turn_id = nullable_string(value, "turn_id")?;
-    if (position == 0) != turn_id.is_none() {
-        return Err("有且仅有根位置不带 Turn".into());
+    let owner = boolean(value, "owner")?;
+    if position == 0 && turn_id.is_some() {
+        return Err("根位置不得携带 Turn".into());
+    }
+    if owner && turn_id.is_none() {
+        return Err("存在执行者时会话头必须携带 Turn".into());
     }
     let model = nullable_string(value, "model")?;
     let provider = nullable_string(value, "provider")?;
@@ -817,7 +870,7 @@ fn head(value: &Value) -> Result<Head, String> {
         effort: nullable_string(value, "effort")?,
         settings_version,
         turn_id,
-        owner: boolean(value, "owner")?,
+        owner,
         diagnostic: match value.get("diagnostic") {
             Some(Value::Null) => None,
             Some(error) => Some(local_error(error)?),
@@ -846,9 +899,18 @@ fn submit(value: &Value) -> Result<Submit, String> {
                     if string(turn, "turn_id")? != turn_id {
                         return Err("接受回执中的 `turn_id` 与提交身份不一致".into());
                     }
+                    let input_nodes = array(turn, "input_nodes")?
+                        .iter()
+                        .map(|item| {
+                            item.as_u64().ok_or_else(|| {
+                                "接受回执中的 `input_nodes` 元素必须为无符号整数".to_owned()
+                            })
+                        })
+                        .collect::<Result<Vec<_>, _>>()?;
                     ReceiptResult::Accepted {
                         session_id: string(turn, "session_id")?.into(),
-                        user_node: uint(turn, "user_node")?,
+                        start_node: uint(turn, "start_node")?,
+                        input_nodes,
                     }
                 }
                 "rejected" => ReceiptResult::Rejected(local_error(&value["error"])?),
@@ -959,7 +1021,7 @@ pub fn parse_record(value: &Value) -> Result<SendRecord, String> {
     })
 }
 
-/// 同一节点的新值只能延续旧值；同一个值重推允许。`UserMessage` 与已关闭的 `Step` 不再改变；
+/// 同一节点的新值只能延续旧值；同一个值重推允许。`Input`、`ContextOp` 与已关闭的 `Step` 不再改变；
 /// 未关闭的 `Step` 阶段不回退，已写入的回复、已结束的尝试与已到终态的槽位原样保留，
 /// 尚未结束的尝试与槽位只前进，重试提示只在末尾追加（会话合同“已写入的节点”）。
 fn continues(old: &Entry, new: &Entry) -> bool {
@@ -974,6 +1036,8 @@ fn continues(old: &Entry, new: &Entry) -> bool {
         && old.parent == new.parent
         && old.turn_id == new.turn_id
         && before.ordinal == after.ordinal
+        && before.turn_ordinal == after.turn_ordinal
+        && old.raw["content"]["turn_start"] == new.raw["content"]["turn_start"]
         && after.progress.rank() >= before.progress.rank()
         && (old.raw["content"]["reply"].is_null()
             || old.raw["content"]["reply"] == new.raw["content"]["reply"])
@@ -1056,6 +1120,15 @@ impl ViewState {
     /// 条目按 `NodeId` 排列；同一 Session 路径上的节点按追加顺序编号，因此即路径顺序。
     pub fn raw_entries(&self) -> Vec<&Value> {
         self.entries.values().map(|entry| &entry.raw).collect()
+    }
+    /// 查找指定轮次序号对应的分页起点节点：优先取该轮 `Step 0` 认领的首个输入节点，
+    /// 独立触发无前置输入时取 `Step 0` 自身节点。
+    pub fn turn_start_node(&self, turn_ordinal: u64) -> Option<u64> {
+        self.entries.values().find_map(|entry| {
+            let step = entry.step()?;
+            (step.turn_ordinal == Some(turn_ordinal))
+                .then(|| step.input_nodes.first().copied().unwrap_or(entry.node))
+        })
     }
 }
 
@@ -1250,13 +1323,14 @@ fn closed_result(records: &[SendRecord]) -> Option<(&str, &str, Outcome)> {
         .into_values()
         .filter(|entry| entry.step().is_some())
         .max_by_key(|entry| entry.step().map(|step| step.ordinal))?;
+    let last_turn_id = last.turn_id.as_deref()?;
     let summary = last.step()?.summary.as_ref()?;
     let head = records.iter().rev().find_map(|record| match record {
         SendRecord::Head(head) => Some(head),
         _ => None,
     });
-    let abandoned = head
-        .is_some_and(|head| head.turn_id.as_deref() == Some(last.turn_id.as_str()) && !head.owner);
+    let abandoned =
+        head.is_some_and(|head| head.turn_id.as_deref() == Some(last_turn_id) && !head.owner);
     if !summary.progress.is_closed() && !abandoned {
         return None;
     }
@@ -1266,7 +1340,7 @@ fn closed_result(records: &[SendRecord]) -> Option<(&str, &str, Outcome)> {
             _ => None,
         })
     })?;
-    Some((session_id, &last.turn_id, summary.outcome))
+    Some((session_id, last_turn_id, summary.outcome))
 }
 fn usage_error(error: &LocalError) -> bool {
     matches!(

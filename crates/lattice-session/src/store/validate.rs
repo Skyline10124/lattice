@@ -172,37 +172,60 @@ fn bound_reply(
 
 pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
     let err = || corrupt("nodes", &t.to_string(), "invalid turn/step relation");
-    let user_ref = r.turn_index.get(&t).ok_or_else(err)?;
-    if user_ref.session_id != s || user_ref.node == NodeId(0) {
+    let start_ref = r.turn_index.get(&t).ok_or_else(err)?;
+    if start_ref.session_id != s || start_ref.node == NodeId(0) {
         return Err(err());
     }
-    let Some(Node::UserMessage {
-        parent: user_parent,
+    let Some(Node::Step {
+        parent: step0_parent,
         turn_id,
-        provider: provider_name,
-        limits,
-        config_digest,
+        step_ordinal: 0,
+        turn_start: Some(meta),
         ..
-    }) = r.nodes.get(&(s, user_ref.node))
+    }) = r.nodes.get(&(s, start_ref.node))
     else {
         return Err(err());
     };
-    if *turn_id != t || *user_parent >= user_ref.node || !r.nodes.contains_key(&(s, *user_parent)) {
+    if *turn_id != t
+        || *step0_parent >= start_ref.node
+        || !r.nodes.contains_key(&(s, *step0_parent))
+    {
         return Err(err());
     }
-    limits.validate().map_err(|_| err())?;
-    let stored = r.configs.get(config_digest).ok_or_else(err)?;
+    meta.limits.validate().map_err(|_| err())?;
+    let stored = r.configs.get(&meta.config_digest).ok_or_else(err)?;
+    if !meta.input_nodes.is_empty() {
+        let mut cursor = *step0_parent;
+        for &input_id in meta.input_nodes.iter().rev() {
+            if input_id != cursor {
+                return Err(err());
+            }
+            let Some(Node::Input { parent, .. }) = r.nodes.get(&(s, input_id)) else {
+                return Err(err());
+            };
+            if *parent >= input_id || !r.nodes.contains_key(&(s, *parent)) {
+                return Err(err());
+            }
+            cursor = *parent;
+        }
+    }
     let steps = r.turn_steps(s, t)?;
     if steps.is_empty() {
         return Err(err());
     }
-    let mut expected_parent = user_ref.node;
+    let mut expected_parent = *step0_parent;
     for (ordinal, (node_id, step_node)) in steps.iter().enumerate() {
-        let expected_id = next_sequence(expected_parent.0, "node").map(NodeId)?;
+        let expected_id = start_ref
+            .node
+            .0
+            .checked_add(ordinal as u64)
+            .map(NodeId)
+            .ok_or(StoreError::SequenceExhausted { kind: "node" })?;
         let Node::Step {
             parent,
             turn_id: step_turn,
             step_ordinal,
+            turn_start,
             progress,
             attempts,
             reply,
@@ -216,6 +239,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
             || *parent != expected_parent
             || *step_turn != t
             || *step_ordinal != ordinal as u32
+            || (*step_ordinal == 0) != turn_start.is_some()
         {
             return Err(err());
         }
@@ -230,7 +254,7 @@ pub(super) fn turn(r: &Records, s: SessionId, t: TurnId) -> Result<()> {
             return Err(err());
         }
         for attempt in attempts {
-            attempt_origin(&attempt.origin, provider_name).map_err(|_| err())?;
+            attempt_origin(&attempt.origin, &meta.provider).map_err(|_| err())?;
         }
         if let Some(reply) = reply {
             let completed = attempts.last().ok_or_else(err)?;
@@ -279,6 +303,33 @@ fn user_message(s: SessionId, n: NodeId, message: &NativeMessage<BoundToolCall>)
     }
 }
 
+fn check_message_blobs(
+    r: &Records,
+    s: SessionId,
+    n: NodeId,
+    message: &NativeMessage<BoundToolCall>,
+) -> Result<()> {
+    for part in &message.parts {
+        if let MessageSemantic::Image { image } = &part.semantic {
+            let Some(meta) = r.blobs.get(&image.sha256) else {
+                return Err(corrupt(
+                    "nodes",
+                    &format!("{s}/{}", n.0),
+                    "节点引用的图片在 blobs 表中不存在",
+                ));
+            };
+            if meta.media_type != image.media_type || meta.byte_length != image.byte_length {
+                return Err(corrupt(
+                    "nodes",
+                    &format!("{s}/{}", n.0),
+                    "节点引用的图片元数据与 blobs 表不一致",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
 fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
     let err = || {
         corrupt(
@@ -302,30 +353,63 @@ fn node(r: &Records, s: SessionId, n: NodeId) -> Result<()> {
     if parent >= n || !r.nodes.contains_key(&(s, parent)) {
         return Err(err());
     }
-    let id = node.turn_id().ok_or_else(err)?;
-    let user_ref = r.turn_index.get(&id).ok_or_else(err)?;
-    if user_ref.session_id != s {
-        return Err(err());
-    }
     match node {
-        Node::UserMessage { message, .. } => {
-            if user_ref.node != n {
+        Node::Root => return Err(err()),
+        Node::Input { input, .. } => {
+            user_message(s, n, input.message())?;
+        }
+        Node::ContextOp { op, .. } => {
+            if op.edits().is_empty() {
                 return Err(err());
             }
-            user_message(s, n, message)?;
+            for edit in op.edits() {
+                if let ContextEdit::ReplaceInput { message, .. } = edit {
+                    user_message(s, n, message.as_message())?;
+                }
+            }
         }
-        Node::Step { step_ordinal, .. } => {
-            let expected = user_ref
+        Node::Step {
+            turn_id,
+            step_ordinal,
+            turn_start,
+            ..
+        } => {
+            if (*step_ordinal == 0) != turn_start.is_some() {
+                return Err(err());
+            }
+            let start_ref = r.turn_index.get(turn_id).ok_or_else(err)?;
+            if start_ref.session_id != s {
+                return Err(err());
+            }
+            let expected = start_ref
                 .node
                 .0
-                .checked_add(1)
-                .and_then(|base| base.checked_add(u64::from(*step_ordinal)))
+                .checked_add(u64::from(*step_ordinal))
                 .map(NodeId);
             if expected != Some(n) {
                 return Err(err());
             }
+            if *step_ordinal > 0 {
+                if parent != NodeId(n.0 - 1) {
+                    return Err(err());
+                }
+                let Some(Node::Step {
+                    turn_id: prev_turn,
+                    step_ordinal: prev_ordinal,
+                    progress:
+                        StepProgress::Closed {
+                            end: StepEnd::Continue,
+                        },
+                    ..
+                }) = r.nodes.get(&(s, parent))
+                else {
+                    return Err(err());
+                };
+                if *prev_turn != *turn_id || *prev_ordinal != *step_ordinal - 1 {
+                    return Err(err());
+                }
+            }
         }
-        Node::Root => return Err(err()),
     }
     Ok(())
 }
@@ -359,7 +443,12 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
         if node_ref.session_id != s
             || !matches!(
                 r.nodes.get(&(s, node_ref.node)),
-                Some(Node::UserMessage { turn_id: actual, .. }) if *actual == turn_id
+                Some(Node::Step {
+                    turn_id: actual,
+                    step_ordinal: 0,
+                    turn_start: Some(_),
+                    ..
+                }) if *actual == turn_id
             )
         {
             return Err(err());
@@ -380,8 +469,26 @@ pub(super) fn local(r: &Records, scope: &local::Scope) -> Result<()> {
             return Err(err());
         }
         match n {
-            Node::UserMessage { message, .. } => user_message(s, *node_id, message)?,
-            Node::Step { slots, .. } => {
+            Node::Input { input, .. } => user_message(s, *node_id, input.message())?,
+            Node::ContextOp { op, .. } => {
+                if op.edits().is_empty() {
+                    return Err(err());
+                }
+                for edit in op.edits() {
+                    if let ContextEdit::ReplaceInput { message, .. } = edit {
+                        user_message(s, *node_id, message.as_message())?;
+                    }
+                }
+            }
+            Node::Step {
+                step_ordinal,
+                turn_start,
+                slots,
+                ..
+            } => {
+                if (*step_ordinal == 0) != turn_start.is_some() {
+                    return Err(err());
+                }
                 for slot in slots {
                     let id = slot.binding.invocation_id;
                     if !ids.insert(id) {
@@ -440,53 +547,60 @@ pub(super) fn records(r: &Records) -> Result<()> {
             "orphan session settings",
         ));
     }
-    let mut user_nodes = BTreeMap::new();
+    let mut start_nodes = BTreeMap::new();
     let mut all_slots = BTreeMap::new();
     for ((s, n), value) in &r.nodes {
         node(r, *s, *n)?;
         match value {
             Node::Root => {}
-            Node::UserMessage {
-                turn_id, message, ..
-            } => {
-                for part in &message.parts {
-                    if let MessageSemantic::Image { image } = &part.semantic {
-                        let Some(meta) = r.blobs.get(&image.sha256) else {
-                            return Err(err(
-                                "nodes",
-                                format!("{s}/{}", n.0),
-                                "用户消息引用的图片在 blobs 表中不存在",
-                            ));
-                        };
-                        if meta.media_type != image.media_type
-                            || meta.byte_length != image.byte_length
-                        {
-                            return Err(err(
-                                "nodes",
-                                format!("{s}/{}", n.0),
-                                "用户消息引用的图片元数据与 blobs 表不一致",
-                            ));
-                        }
+            Node::Input { input, .. } => {
+                check_message_blobs(r, *s, *n, input.message())?;
+            }
+            Node::ContextOp { op, .. } => {
+                for edit in op.edits() {
+                    if let ContextEdit::ReplaceInput { message, .. } = edit {
+                        check_message_blobs(r, *s, *n, message.as_message())?;
                     }
                 }
-                if user_nodes
-                    .insert(
-                        *turn_id,
-                        NodeRef {
-                            session_id: *s,
-                            node: *n,
-                        },
-                    )
-                    .is_some()
-                {
+            }
+            Node::Step {
+                turn_id,
+                step_ordinal,
+                turn_start,
+                slots,
+                ..
+            } => {
+                if *step_ordinal == 0 {
+                    if turn_start.is_none() {
+                        return Err(err(
+                            "nodes",
+                            format!("{s}/{}", n.0),
+                            "Step 0 缺少 turn_start 元数据",
+                        ));
+                    }
+                    if start_nodes
+                        .insert(
+                            *turn_id,
+                            NodeRef {
+                                session_id: *s,
+                                node: *n,
+                            },
+                        )
+                        .is_some()
+                    {
+                        return Err(err(
+                            "nodes",
+                            turn_id.to_string(),
+                            "duplicate start step for turn",
+                        ));
+                    }
+                } else if turn_start.is_some() {
                     return Err(err(
                         "nodes",
-                        turn_id.to_string(),
-                        "duplicate user message for turn",
+                        format!("{s}/{}", n.0),
+                        "非 Step 0 节点不能携带 turn_start 元数据",
                     ));
                 }
-            }
-            Node::Step { slots, .. } => {
                 for slot in slots {
                     if all_slots
                         .insert(slot.binding.invocation_id, (*s, slot))
@@ -502,11 +616,11 @@ pub(super) fn records(r: &Records) -> Result<()> {
             }
         }
     }
-    if user_nodes != r.turn_index {
+    if start_nodes != r.turn_index {
         return Err(err(
             "turn_index",
             "set".into(),
-            "turn index differs from user message nodes",
+            "turn index differs from step 0 nodes",
         ));
     }
     for (&turn_id, &node_ref) in &r.turn_index {
@@ -530,6 +644,44 @@ pub(super) fn records(r: &Records) -> Result<()> {
                 id.to_string(),
                 "index address mismatch",
             ));
+        }
+    }
+    // 按每个会话的所有叶子分叉路径执行一次 `resolve()`（前缀单调，在线性时间内覆盖全树全部 ContextOp），
+    // 并核验所有独立触发 Step 0（input_nodes 为空）的父路径有效模型上下文非空。
+    for &s in r.sessions.keys() {
+        let mut has_child = BTreeSet::new();
+        let mut session_nodes = Vec::new();
+        for ((_, n), value) in r.nodes.range((s, NodeId(0))..=(s, NodeId(u64::MAX))) {
+            session_nodes.push((*n, value));
+            if let Some(parent) = value.parent() {
+                has_child.insert(parent);
+            }
+        }
+        for (n, value) in session_nodes {
+            if n != NodeId(0) && !has_child.contains(&n) {
+                read::resolve_path_with_loader(s, n, None, &[], |id| {
+                    Ok(r.nodes.get(&(s, id)).cloned())
+                })?;
+            }
+            if let Node::Step {
+                parent,
+                step_ordinal: 0,
+                turn_start: Some(meta),
+                ..
+            } = value
+                && meta.input_nodes.is_empty()
+            {
+                let effective = read::resolve_path_with_loader(s, *parent, None, &[], |id| {
+                    Ok(r.nodes.get(&(s, id)).cloned())
+                })?;
+                if effective.project().is_empty() {
+                    return Err(err(
+                        "nodes",
+                        format!("{s}/{}", n.0),
+                        "独立触发的 Step 0 父路径有效模型上下文为空",
+                    ));
+                }
+            }
         }
     }
     Ok(())

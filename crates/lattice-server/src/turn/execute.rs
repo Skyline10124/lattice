@@ -12,6 +12,7 @@ use crate::{
     session::{ApiError, RequestConflict, Result, SessionApi},
 };
 use futures::FutureExt;
+use lattice_context::Channel;
 use lattice_conversation::{SessionId, TurnId};
 use lattice_session::store::*;
 use std::sync::{
@@ -19,6 +20,13 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::oneshot;
+
+/// S2 过渡期通过现有 `submit` 提交时的默认输入与触发通道。
+pub(crate) const DEFAULT_SUBMIT_CHANNEL: &str = "ipc";
+
+pub(crate) fn default_submit_channel() -> Channel {
+    Channel::parse(DEFAULT_SUBMIT_CHANNEL).expect("默认提交通道名必须合法")
+}
 
 pub(crate) struct ExecutionInput {
     pub session: SessionApi,
@@ -289,9 +297,13 @@ async fn execute_owned(
     let turn_tools: Arc<dyn TurnTools> = Arc::from(tools.open_turn(session_id, &workspace).await?);
     let config = super::live::freeze_config(&settings, &target, turn_tools.specs())?;
     let timeout = config.limits.timeout_secs;
+    let submit_channel = default_submit_channel();
     if let Some((resolved, auth)) = precheck {
         let precheck_config = config.clone();
-        let precheck_message = request.input.message().clone();
+        let (precheck_input, _) = request
+            .input
+            .clone()
+            .into_context_input(submit_channel.clone());
         let chat = coordinator
             .io
             .read(move |read| {
@@ -299,7 +311,7 @@ async fn execute_owned(
                     read,
                     session_id,
                     &precheck_config,
-                    &precheck_message,
+                    &[precheck_input],
                 )
             })
             .await?;
@@ -333,7 +345,8 @@ async fn execute_owned(
             session_id,
             turn_id,
             project_path: project,
-            input: request.input,
+            trigger_channel: submit_channel.clone(),
+            inputs: vec![(submit_channel, request.input)],
             config,
             accepted_at: chrono::Utc::now(),
             settings_version,
@@ -410,7 +423,8 @@ async fn execute_owned(
             session_id,
             turn_id,
         },
-        user_node: turn.user_node,
+        input_nodes: turn.input_nodes.clone(),
+        start_node: turn.start_node,
     });
     let detail = super::saga::run_coordinator_saga(
         &coordinator,

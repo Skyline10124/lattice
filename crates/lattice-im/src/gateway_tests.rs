@@ -3862,13 +3862,23 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
     assert_eq!(user_msg1["role"], "user");
     assert_eq!(
         user_msg1["content"],
-        serde_json::json!([{
-            "type": "image_url",
-            "image_url": {
-                "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_1))
+        serde_json::json!([
+            {
+                "type": "text",
+                "text": "<lattice-context channel=\"ipc\">"
+            },
+            {
+                "type": "image_url",
+                "image_url": {
+                    "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_1))
+                }
+            },
+            {
+                "type": "text",
+                "text": "</lattice-context>"
             }
-        }]),
-        "无 caption 的单张 photo 必须以单一 [Image] 内容块发往模型"
+        ]),
+        "无 caption 的单张 photo 必须以包裹 channel 的单图多段内容发往模型"
     );
     write_sse_complete(&mut s1, None, "第1轮纯图回复", None).await;
     let msgs1 = io.wait_message_count(1).await;
@@ -3910,6 +3920,10 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         user_msg2["content"],
         serde_json::json!([
             {
+                "type": "text",
+                "text": "<lattice-context channel=\"ipc\">"
+            },
+            {
                 "type": "image_url",
                 "image_url": {
                     "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_2))
@@ -3917,10 +3931,10 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
             },
             {
                 "type": "text",
-                "text": "请核对这张截图"
+                "text": "请核对这张截图\n</lattice-context>"
             }
         ]),
-        "带说明文字的图片必须严格按 [Image, Text] 顺序发送"
+        "带说明文字的图片必须严格按 [Image, Text] 顺序发送并保留渠道包裹"
     );
     write_sse_complete(&mut s2, None, "第2轮图文回复", None).await;
     let msgs2 = io.wait_message_count(2).await;
@@ -3946,6 +3960,10 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         msgs_arr3.last().unwrap()["content"],
         serde_json::json!([
             {
+                "type": "text",
+                "text": "<lattice-context channel=\"ipc\">"
+            },
+            {
                 "type": "image_url",
                 "image_url": {
                     "url": format!("data:image/jpeg;base64,{}", test_base64_encode(&jpeg_3))
@@ -3953,7 +3971,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
             },
             {
                 "type": "text",
-                "text": "/new"
+                "text": "/new\n</lattice-context>"
             }
         ])
     );
@@ -4006,12 +4024,22 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         let last_user = req_json["messages"].as_array().unwrap().last().unwrap();
         assert_eq!(
             last_user["content"],
-            serde_json::json!([{
-                "type": "image_url",
-                "image_url": {
-                    "url": format!("data:{expected_mime};base64,{}", test_base64_encode(bytes))
+            serde_json::json!([
+                {
+                    "type": "text",
+                    "text": "<lattice-context channel=\"ipc\">"
+                },
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": format!("data:{expected_mime};base64,{}", test_base64_encode(bytes))
+                    }
+                },
+                {
+                    "type": "text",
+                    "text": "</lattice-context>"
                 }
-            }]),
+            ]),
             "未压缩文档 {fid} 应按魔数识别为 {expected_mime} 并编码完整字节"
         );
         write_sse_complete(&mut sock, None, reply_label, None).await;
@@ -4050,10 +4078,11 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
     let last_user7 = msgs_arr7.last().unwrap();
     assert_eq!(last_user7["role"], "user");
     assert!(
-        last_user7["content"] == "总结以上全部图片"
+        last_user7["content"]
+            == "<lattice-context channel=\"ipc\">\n总结以上全部图片\n</lattice-context>"
             || last_user7["content"]
-                == serde_json::json!([{"type": "text", "text": "总结以上全部图片"}]),
-        "第 7 轮末尾用户消息正文必须为“总结以上全部图片”，实际: {}",
+                == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"ipc\">\n总结以上全部图片\n</lattice-context>"}]),
+        "第 7 轮末尾用户消息正文必须为包裹 channel 后的“总结以上全部图片”，实际: {}",
         last_user7["content"]
     );
     write_sse_complete(&mut s7, None, "第7轮总结回复", None).await;
@@ -4084,12 +4113,12 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         while msgs.len() < 7 {
             match observed.next().await {
                 Some(LocalUpdate::Entry { entry }) => {
-                    if let ConversationEntry::UserMessage {
-                        content: Node::UserMessage { message, .. },
+                    if let ConversationEntry::Input {
+                        content: Node::Input { input, .. },
                         ..
                     } = *entry
                     {
-                        msgs.push(message);
+                        msgs.push(input.message().clone());
                     }
                 }
                 Some(_) => {}
@@ -4390,7 +4419,7 @@ async fn rejects_disguised_empty_oversized_and_invalid_path_images_without_ledge
     let req_body = read_http_request(&mut sock).await;
     let req_val: serde_json::Value = serde_json::from_str(&req_body).unwrap();
     let data_url =
-        req_val["messages"].as_array().unwrap().last().unwrap()["content"][0]["image_url"]["url"]
+        req_val["messages"].as_array().unwrap().last().unwrap()["content"][1]["image_url"]["url"]
             .as_str()
             .expect("应包含 base64 图片 URL");
     let b64_part = data_url
@@ -4890,6 +4919,10 @@ async fn merges_out_of_order_album_batches_after_600ms_and_acks_atomically_after
         last_user["content"],
         serde_json::json!([
             {
+                "type": "text",
+                "text": "<lattice-context channel=\"ipc\">"
+            },
+            {
                 "type": "image_url",
                 "image_url": {
                     "url": format!("data:image/png;base64,{}", test_base64_encode(&png_99))
@@ -4903,7 +4936,7 @@ async fn merges_out_of_order_album_batches_after_600ms_and_acks_atomically_after
             },
             {
                 "type": "text",
-                "text": "cap99\ncap101"
+                "text": "cap99\ncap101\n</lattice-context>"
             }
         ]),
         "相册闭合后必须按数值 update_id 升序发送全部图片与换行拼接的说明文字"
@@ -5194,7 +5227,7 @@ async fn early_closes_album_preserving_fifo_before_text_or_new_isolates_chats_an
         serde_json::from_str(&read_http_request(&mut sock_a1).await).unwrap();
     let user_a1 = req_a1["messages"].as_array().unwrap().last().unwrap();
     assert_eq!(
-        user_a1["content"][0]["image_url"]["url"],
+        user_a1["content"][1]["image_url"]["url"],
         format!("data:image/png;base64,{}", test_base64_encode(&img_a1)),
         "FIFO 队首必须先提交刚闭合的相册 ga-1，而非后续文本消息"
     );
@@ -5784,7 +5817,7 @@ async fn late_fragment_of_closed_album_closes_different_open_album_before_late_r
         serde_json::from_str(&read_http_request(&mut sock_b1).await).unwrap();
     let b1_user = req_b1["messages"].as_array().unwrap().last().unwrap();
     assert_eq!(
-        b1_user["content"][0]["image_url"]["url"],
+        b1_user["content"][1]["image_url"]["url"],
         format!("data:image/png;base64,{}", test_base64_encode(&png_b1)),
         "B1 必须独立成轮提交给模型，不受随后迟到的视频分片 B2 污染"
     );
@@ -5921,8 +5954,11 @@ async fn preserves_unclosed_album_offset_across_shutdown_and_recovers_registered
     let content_sw = req_sw["messages"].as_array().unwrap().last().unwrap()["content"]
         .as_array()
         .unwrap();
-    assert_eq!(content_sw.len(), 3);
-    assert_eq!(content_sw[2]["text"], "窗口内首图\n窗口内次图");
+    assert_eq!(content_sw.len(), 4);
+    assert_eq!(
+        content_sw[3]["text"],
+        "窗口内首图\n窗口内次图\n</lattice-context>"
+    );
     write_sse_complete(&mut sock_sw, None, "停机重投相册回复", None).await;
 
     let msgs_sw = io2.wait_message_count(1).await;
@@ -7269,12 +7305,16 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
         req1["messages"].as_array().unwrap().last().unwrap()["content"],
         serde_json::json!([
             {
+                "type": "text",
+                "text": "<lattice-context channel=\"ipc\">"
+            },
+            {
                 "type": "image_url",
                 "image_url": { "url": expected_data_url }
             },
             {
                 "type": "text",
-                "text": "请记住这张来自 Telegram 私聊的架构图"
+                "text": "请记住这张来自 Telegram 私聊的架构图\n</lattice-context>"
             }
         ])
     );
@@ -7331,9 +7371,10 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
         let last_user = msgs_arr.last().unwrap();
         assert_eq!(last_user["role"], "user");
         assert!(
-            last_user["content"] == "终端 CLI 纯文本续发：请结合上一轮图片回答"
+            last_user["content"]
+                == "<lattice-context channel=\"ipc\">\n终端 CLI 纯文本续发：请结合上一轮图片回答\n</lattice-context>"
                 || last_user["content"]
-                    == serde_json::json!([{"type": "text", "text": "终端 CLI 纯文本续发：请结合上一轮图片回答"}]),
+                    == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"ipc\">\n终端 CLI 纯文本续发：请结合上一轮图片回答\n</lattice-context>"}]),
             "末尾用户消息应为 LocalClient 提交的纯文本续发内容，实际: {}",
             last_user["content"]
         );

@@ -79,7 +79,8 @@ pub struct AuthLoggedOut {
 pub struct TurnView {
     pub session_id: SessionId,
     pub turn_id: TurnId,
-    pub user_node: NodeId,
+    pub start_node: NodeId,
+    pub input_nodes: Vec<NodeId>,
     pub agent_name: String,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
     pub ended_at: chrono::DateTime<chrono::Utc>,
@@ -92,7 +93,8 @@ impl From<&TurnDetail> for TurnView {
         Self {
             session_id: turn.session_id,
             turn_id: turn.turn_id,
-            user_node: turn.user_node,
+            start_node: turn.start_node,
+            input_nodes: turn.input_nodes.clone(),
             agent_name: turn.agent_name.as_str().to_owned(),
             accepted_at: turn.accepted_at,
             ended_at: turn.ended_at,

@@ -849,12 +849,18 @@ fn direct_failure_session_lock_rejects_busy_then_accepts_explicit_retry() {
             "会话树应包含根节点与恰好三轮完整对话",
         )?;
         let previous = final_turn(&a)["steps"][0]["node"].clone();
+        let b_step = rows
+            .iter()
+            .find(|r| r["turn_start"]["turn_id"] == b.accepted_turn_id().unwrap());
+        let b_input_parent = b_step.and_then(|step| {
+            let input_id = &step["node"]["parent"];
+            rows.iter()
+                .find(|r| &r["node"]["id"] == input_id && r["node"]["kind"]["kind"] == "input")
+                .map(|input| &input["node"]["parent"])
+        });
         require(
-            rows.iter().any(|r| {
-                r["turn_start"]["turn_id"] == b.accepted_turn_id().unwrap()
-                    && r["node"]["parent"] == previous
-            }),
-            "轮次 B 的用户节点父指针应指向轮次 A 的末节点，而非旧头节点",
+            b_input_parent == Some(&previous),
+            "轮次 B 的输入节点父指针应指向轮次 A 的末节点，而非旧头节点",
         )
     })();
     let mut captures = baseline_server.captured_requests();

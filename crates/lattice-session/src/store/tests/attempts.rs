@@ -27,15 +27,19 @@ fn replay_origin_records_no_endpoint() {
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);
     let r = records(&db);
     let session = encode(&r.sessions[&sid(1)]).unwrap();
-    assert_eq!(&session[..4], &10u32.to_be_bytes(), "会话记录格式版本为 10");
+    assert_eq!(
+        &session[..4],
+        &VERSION.to_be_bytes(),
+        "会话记录格式版本为 11"
+    );
     assert_no_endpoint("会话记录", &String::from_utf8_lossy(&session[4..]));
     let mut origins = 0;
     for ((_, id), node) in &r.nodes {
         let bytes = encode(node).unwrap();
         assert_eq!(
             &bytes[..4],
-            &10u32.to_be_bytes(),
-            "节点 {id:?} 格式版本为 10"
+            &VERSION.to_be_bytes(),
+            "节点 {id:?} 格式版本为 11"
         );
         let text = String::from_utf8_lossy(&bytes[4..]).into_owned();
         origins += text.matches("\"origin\"").count();

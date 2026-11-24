@@ -44,6 +44,14 @@ pub const RULES: &[DirectDependencyRule] = &[
         policy: WorkspaceDependencyPolicy::AllowOnly(&["lattice-conversation"]),
     },
     DirectDependencyRule {
+        package: "lattice-session",
+        policy: WorkspaceDependencyPolicy::AllowOnly(&[
+            "lattice-context",
+            "lattice-conversation",
+            "lattice-store",
+        ]),
+    },
+    DirectDependencyRule {
         package: "lattice-ipc",
         policy: WorkspaceDependencyPolicy::AllowOnly(&[
             "lattice-session",
@@ -605,6 +613,12 @@ mod tests {
                 "lattice-conversation = { path = \"../lattice-conversation\" }\n",
                 "outside-util = { path = \"../../../outside-util\" }\n",
             )),
+            "lattice-session" => CrateSpec::with_deps(concat!(
+                "lattice-context = { path = \"../lattice-context\" }\n",
+                "lattice-conversation = { path = \"../lattice-conversation\" }\n",
+                "lattice-store = { path = \"../lattice-store\" }\n",
+                "outside-util = { path = \"../../../outside-util\" }\n",
+            )),
             "lattice-cli" => CrateSpec::with_deps(concat!(
                 "lattice-local = { path = \"../lattice-local\" }\n",
                 "lattice-tui = { path = \"../lattice-tui\" }\n",
@@ -638,6 +652,7 @@ mod tests {
             "lattice-server" => CrateSpec::with_deps(concat!(
                 "lattice-ipc = { path = \"../lattice-ipc\" }\n",
                 "lattice-session = { path = \"../lattice-session\" }\n",
+                "lattice-context = { path = \"../lattice-context\" }\n",
                 "lattice-conversation = { path = \"../lattice-conversation\" }\n",
                 "lattice-store = { path = \"../lattice-store\" }\n",
                 "lattice-llm = { path = \"../lattice-llm\" }\n",
@@ -1002,6 +1017,10 @@ mod tests {
         .to_owned();
         ws.write_member("lattice-context", &context_spec);
 
+        let mut session_spec = baseline_spec("lattice-session");
+        session_spec.dev_deps = "plain-helper = { path = \"../plain-helper\" }\n".to_owned();
+        ws.write_member("lattice-session", &session_spec);
+
         let mut ipc_spec = CrateSpec::with_deps(concat!(
             "lattice-session = { path = \"../lattice-session\" }\n",
             "conv_alias = { package = \"lattice-conversation\", path = \"../lattice-conversation\" }\n",
@@ -1097,6 +1116,18 @@ mod tests {
             "允许的内部依赖：[lattice-conversation]",
         );
         assert_direct_normal_violation(&ws, "lattice-context", "plain-helper");
+    }
+
+    #[test]
+    fn direct_rule_lattice_session_rejects_unlisted_workspace_dependencies() {
+        let ws = TestWorkspace::new();
+        assert_direct_rule_rejects_all_forms(
+            &ws,
+            "lattice-session",
+            "lattice-llm",
+            "允许的内部依赖：[lattice-context, lattice-conversation, lattice-store]",
+        );
+        assert_direct_normal_violation(&ws, "lattice-session", "plain-helper");
     }
 
     #[test]

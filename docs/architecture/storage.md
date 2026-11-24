@@ -6,7 +6,7 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[宿主平台](platform.md)
-> 决策记录：[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0011](../adr/0011-im-gateway-inside-backend.md)、[ADR 0013](../adr/0013-user-image-input.md)
+> 决策记录：[ADR 0006](../adr/0006-tree-session-and-global-redb-store.md)、[ADR 0011](../adr/0011-im-gateway-inside-backend.md)、[ADR 0013](../adr/0013-user-image-input.md)、[ADR 0014](../adr/0014-model-context-domain.md)
 
 ## 目的与范围
 
@@ -96,20 +96,20 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 
 ### 身份、版本与打开
 
-会话库保存一张元信息表，记录库格式版本（当前为 `10`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md)、[ADR 0013](../adr/0013-user-image-input.md#2-会话库-v10-内容寻址-blobs-表)）。
+会话库保存一张元信息表，记录库格式版本（当前为 `11`）；各记录的值带同一格式版本。表定义、值格式及其演化由 `lattice-session` 维护（[ADR 0009](../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)、[ADR 0012](../adr/0012-backend-owns-session-settings.md)、[ADR 0013](../adr/0013-user-image-input.md#2-会话库-v10-内容寻址-blobs-表)、[ADR 0014](../adr/0014-model-context-domain.md)）。
 
 | 打开时的状态 | 处理 |
 | --- | --- |
 | 存在 `sessions.git` 或 `projects/*/invocations.git` | 拒绝打开，错误列出路径 |
 | 库文件不存在 | 返回未初始化；是否创建由调用路径决定，见[首次创建](#首次创建) |
-| 不是 redb 库、元信息缺失或格式版本不符（含版本 `9` 及更早旧库） | 拒绝打开并报告损坏或 `UnsupportedVersion` |
+| 不是 redb 库、元信息缺失或格式版本不符（含版本 `10` 及更早旧库） | 拒绝打开并报告损坏或 `UnsupportedVersion` |
 | 记录无法解码、图片条目损坏或违反业务不变量 | 领域返回类型化损坏，停止受影响路径 |
 
 会话库包含 8 张表：`meta`、`sessions`、`session_settings`、`nodes`、`configs`、`turn_index`、`invocation_index` 与第 8 张表 `blobs`：
 
-- **`blobs` 表格式**：键为 64 位小写十六进制 SHA-256 摘要字符串；值为 4 字节大端格式版本头（`10`）后接原始图片字节，不做 JSON 包装。
-- **打开时逐条流式核验**：遍历 `blobs` 表时只借用 redb 只读切片而不拷贝进长期内存：先解码键（非 64 位小写十六进制报 `Corruption`），再校验 4 字节版本头（短于 4 字节报 `Corruption`，版本号不等于 `10` 报 `UnsupportedVersion`），接着用 `ImageRef::from_bytes` 核验正文长度落在 `(0, MAX_IMAGE_BYTES]` 内且文件头魔数受支持（空正文、超长或未知格式报 `Corruption`），最后核对算出的 SHA-256 与键一致（不符报 `Corruption`）。核验后立即释放切片，内存中只保留 `(media_type, byte_length)` 元数据，不常驻图片字节。
-- **全库用户消息与图片引用核对**：全库校验遍历全部会话、全部分支（不仅限于当前路径）上的 `UserMessage` 节点，核对消息保持[规范化形态](session/conversation.md#用户图片与单轮输入规范化)，且其中每个 `ImageRef` 在 `blobs` 元数据表中均存在并具有相同的 `media_type` 与 `byte_length`；缺失或不一致时返回 `Corruption` 并指出对应的 `nodes` 键。
+- **`blobs` 表格式**：键为 64 位小写十六进制 SHA-256 摘要字符串；值为 4 字节大端格式版本头（`11`）后接原始图片字节，不做 JSON 包装。
+- **打开时逐条流式核验**：遍历 `blobs` 表时只借用 redb 只读切片而不拷贝进长期内存：先解码键（非 64 位小写十六进制报 `Corruption`），再校验 4 字节版本头（短于 4 字节报 `Corruption`，版本号不等于 `11` 报 `UnsupportedVersion`），接着用 `ImageRef::from_bytes` 核验正文长度落在 `(0, MAX_IMAGE_BYTES]` 内且文件头魔数受支持（空正文、超长或未知格式报 `Corruption`），最后核对算出的 SHA-256 与键一致（不符报 `Corruption`）。核验后立即释放切片，内存中只保留 `(media_type, byte_length)` 元数据，不常驻图片字节。
+- **全库输入、上下文操作与图片引用核对**：全库校验遍历全部会话、全部分支（不仅限于当前路径）上的 `Node::Input` 与 `Node::ContextOp` 节点，核对消息保持[规范化形态](session/conversation.md#用户图片与单轮输入规范化)且其中每个 `ImageRef`（含 `ReplaceInput` 替换内容中的图片引用）在 `blobs` 元数据表中均存在并具有相同的 `media_type` 与 `byte_length`；按每个会话的全部叶子路径线性调用 `lattice_context::resolve` 覆盖全部分支上的每一个 `ContextOp`；同时核对每个 `input_nodes` 为空的独立触发 `Step 0` 的父节点路径归约并投影后非空；任何不满足均返回 `Corruption` 并指出对应的 `nodes` 键。
 
 打开不初始化、不修复我们自己的记录，不回退旧路径，也不迁移或替换旧版本库。redb 在异常退出后打开时执行的自身崩溃恢复属于库的提交协议，不是记录修复。不符合当前格式的库需要另行获准处理。
 

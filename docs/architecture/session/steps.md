@@ -26,7 +26,7 @@ StepEnd = Continue | Finish | Stop { cause }
 
 | 事务 | 写入内容 | 之后的状态 |
 | --- | --- | --- |
-| 接受 | `blobs` 表中尚无的图片条目（按摘要去重）、UserMessage 节点、TurnId 索引、配置表中尚无的配置、预留的第 0 步 | Step `Reserved` |
+| 接受 | `blobs` 表中尚无的图片条目（按摘要去重）、本轮 `Input` 节点（若有）、配置表中尚无的配置、带 `turn_start` 元数据的预留第 0 步与 TurnId 索引 | Step `Reserved` |
 | 开始请求 | Step 推进到 `Requesting`；新增一次尝试，`Sent` | 等待 provider |
 | 尝试停止 | 该尝试推进到 `Ended`，带实际终态与诊断；安排重试时同一事务写入等待时长，不再重试时同一事务关闭 Step | 重试或关闭 |
 | 登记调用 | 该尝试推进到 `Ended`，终态为 `Completed`；写入完整回复；每个调用一个槽位，`Registered`；写入 InvocationId 索引；Step 推进到 `Executing` | `Executing` |
@@ -53,7 +53,7 @@ stateDiagram-v2
 
 不变量：
 
-- 同一 Turn 的节点序号连续：UserMessage 之后依次是第 0 步、第 1 步，以此类推。执行这一轮的协调层独占该 Session 的执行锁，期间没有其他操作向这个 Session 写入节点。
+- 同一 Turn 的 Step 节点序号连续：第 0 步之后依次是第 1 步、第 2 步，以此类推；通过 `accept_turn` 写入的前置 `Input` 节点紧邻并连向第 0 步。执行这一轮的协调层独占该 Session 的执行锁，期间没有其他操作向这个 Session 写入节点。
 - 一个 Turn 中，除最后一个 Step 外，每个 Step 都以 `Continue` 关闭，且之后有同一事务预留的下一个 Step。
 - 一个 Session 中可改写的节点至多一个，即序号最大的节点，且它是未关闭的 Step。
 

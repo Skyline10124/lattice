@@ -6,10 +6,14 @@
 use std::collections::BTreeMap;
 use std::fmt;
 
+use lattice_context::{Channel, ContextEdit, ContextInput};
 use lattice_conversation::{
-    BoundToolCall, ImageBytesError, ImageRef, MessageSemantic, NativeMessage, UserInputError,
-    normalize_user_message,
+    BoundToolCall, ImageBytesError, ImageRef, MAX_IMAGE_BYTES, MAX_USER_IMAGE_TOTAL_BYTES,
+    MAX_USER_IMAGES_PER_TURN, MAX_USER_TEXT_BYTES, MessageSemantic, NativeMessage, NodeId,
+    UserInputError, normalize_user_message,
 };
+
+use super::{Result as StoreResult, invalid};
 
 /// 接受边界的原始输入片段。
 #[derive(Clone, PartialEq, Eq)]
@@ -89,6 +93,107 @@ impl TurnInput {
     pub(super) fn into_parts(self) -> (NativeMessage<BoundToolCall>, BTreeMap<[u8; 32], Vec<u8>>) {
         (self.message, self.blobs)
     }
+
+    /// 绑定来源通道并拆出 [`ContextInput`] 与去重后的图片字节映射。
+    pub fn into_context_input(
+        self,
+        channel: Channel,
+    ) -> (ContextInput, BTreeMap<[u8; 32], Vec<u8>>) {
+        let (message, blobs) = self.into_parts();
+        let input = ContextInput::from_message(channel, message)
+            .expect("TurnInput 构造时已通过单轮用户输入规范化校验");
+        (input, blobs)
+    }
+
+    /// 构造替换指定 `Input` 节点的 [`ContextEdit::ReplaceInput`] 及随附的去重图片字节映射。
+    pub fn into_replace_input(self, node: NodeId) -> (ContextEdit, BTreeMap<[u8; 32], Vec<u8>>) {
+        let (message, blobs) = self.into_parts();
+        let edit = ContextEdit::replace_input_message(node, message)
+            .expect("TurnInput 构造时已通过单轮用户输入规范化校验");
+        (edit, blobs)
+    }
+}
+
+/// 跨整批 `1..=N` 条输入累计核验单轮用户输入上限，复用 [`UserInputError`] 错误文本。
+pub fn validate_turn_input_batch(inputs: &[(Channel, TurnInput)]) -> StoreResult<()> {
+    if inputs.is_empty() {
+        return Err(invalid("inputs", &UserInputError::Empty.to_string()));
+    }
+
+    let mut text_bytes: usize = 0;
+    for (_, item) in inputs {
+        for part in &item.message.parts {
+            if let MessageSemantic::Text { text } = &part.semantic {
+                text_bytes = text_bytes.checked_add(text.len()).ok_or_else(|| {
+                    invalid(
+                        "inputs",
+                        &UserInputError::TextTooLarge { actual: usize::MAX }.to_string(),
+                    )
+                })?;
+            }
+        }
+    }
+    if text_bytes > MAX_USER_TEXT_BYTES {
+        return Err(invalid(
+            "inputs",
+            &UserInputError::TextTooLarge { actual: text_bytes }.to_string(),
+        ));
+    }
+
+    let max_image_bytes = u64::try_from(MAX_IMAGE_BYTES).expect("MAX_IMAGE_BYTES 可转换为 u64");
+    let max_total_bytes =
+        u64::try_from(MAX_USER_IMAGE_TOTAL_BYTES).expect("MAX_USER_IMAGE_TOTAL_BYTES 可转换为 u64");
+    let mut image_count: usize = 0;
+    let mut image_total_bytes: u64 = 0;
+    for (_, item) in inputs {
+        for part in &item.message.parts {
+            if let MessageSemantic::Image { image } = &part.semantic {
+                image_count = image_count.checked_add(1).ok_or_else(|| {
+                    invalid(
+                        "inputs",
+                        &UserInputError::TooManyImages { actual: usize::MAX }.to_string(),
+                    )
+                })?;
+                if image.byte_length == 0 || image.byte_length > max_image_bytes {
+                    return Err(invalid(
+                        "inputs",
+                        &UserInputError::InvalidImageLength {
+                            image: image_count,
+                            actual: image.byte_length,
+                        }
+                        .to_string(),
+                    ));
+                }
+                image_total_bytes = image_total_bytes
+                    .checked_add(image.byte_length)
+                    .ok_or_else(|| {
+                        invalid(
+                            "inputs",
+                            &UserInputError::ImageTotalTooLarge { actual: u64::MAX }.to_string(),
+                        )
+                    })?;
+            }
+        }
+    }
+    if image_count > MAX_USER_IMAGES_PER_TURN {
+        return Err(invalid(
+            "inputs",
+            &UserInputError::TooManyImages {
+                actual: image_count,
+            }
+            .to_string(),
+        ));
+    }
+    if image_total_bytes > max_total_bytes {
+        return Err(invalid(
+            "inputs",
+            &UserInputError::ImageTotalTooLarge {
+                actual: image_total_bytes,
+            }
+            .to_string(),
+        ));
+    }
+    Ok(())
 }
 
 impl fmt::Debug for TurnInput {

@@ -182,80 +182,83 @@ fn cli_killed_after_accept_completes_turn_for_later_follow() {
     let (world, spec) = direct_world("background-cli-detach", "background", "");
     let budget = world.budget(&spec);
     let mut evidence = support::evidence(&world, &spec);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        world.start_daemon().expect("显式启动后台");
-        let (server, gate) = wire_gated_fake_llm(
-            &world,
-            "background",
-            SseScript::plain("detached durable answer"),
-        );
-        let front = command(
-            &world,
-            &budget,
-            &["--json", "run", "keep running", "--agent", "background"],
-        );
-        gate.wait_until_stalled(1, wait(&budget)).unwrap();
-        let running = running_turns(&world, &budget, &mut evidence);
-        assert_eq!(running.len(), 1);
-        let (sid, tid) = running[0].clone();
-        // 另起的客户端按轮次标识查询：已接受，属于同一会话。
-        let found = turn_lookup(&world, wait(&budget), &tid);
-        assert_eq!(found["response"], "turn", "{found}");
-        assert_eq!(found["value"]["status"], "accepted");
-        assert_eq!(found["value"]["turn"]["session_id"], sid);
-        let owners = world.daemon_pids().unwrap();
-        assert_eq!(owners.len(), 1);
-        assert_ne!(owners[0], front.pgid());
-        let killed = front.kill_and_wait().unwrap();
-        evidence.record_command("接受回执后强制分离前端 CLI", &killed);
-        assert_forced_kill(&killed);
-        assert_eq!(world.daemon_pids().unwrap(), owners);
-        assert_ne!(
-            detail(&world, &budget, &mut evidence, &tid)["summary"]["progress"]["progress"],
-            "closed"
-        );
-        gate.release(wait(&budget)).unwrap();
-        assert_eq!(
-            closed(&world, &budget, &mut evidence, &tid)["summary"]["outcome"],
-            "completed"
-        );
-        let observed = run(
-            &world,
-            &budget,
-            &mut evidence,
-            &["--json", "session", "turn", &tid, "--follow"],
-        );
-        assert!(observed.is_clean_exit(0), "{}", observed.summary());
-        let followed = records(&observed);
-        assert_eq!(
-            followed.closed_result(),
-            Some((sid.as_str(), tid.as_str(), "completed"))
-        );
-        assert_eq!(followed.reply_text(), "detached durable answer");
-        assert!(followed.entries().iter().all(|entry| entry.turn_id == tid));
-        assert_eq!(server.captured_requests().len(), 1);
-        evidence.record_captures(server.captured_requests());
-        archive_state(&world, &budget, &mut evidence, &[&tid]);
-        evidence
-            .record_json(
-                "parameters",
-                &json!({
-                    "turn": tid,
-                    "script": "gated plain detached durable answer",
-                    "frontend": "SIGKILL after acceptance",
-                    "backend_pids": owners,
-                }),
-            )
-            .unwrap();
-        world.stop_daemon().unwrap();
-        for pid in owners {
-            assert!(
-                lattice_system_harness::processes_in_pgid(pid)
-                    .unwrap()
-                    .is_empty()
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            world.start_daemon().expect("显式启动后台");
+            let (server, gate) = wire_gated_fake_llm(
+                &world,
+                "background",
+                SseScript::plain("detached durable answer"),
             );
-        }
-    }));
+            let front = command(
+                &world,
+                &budget,
+                &["--json", "run", "keep running", "--agent", "background"],
+            );
+            gate.wait_until_stalled(1, wait(&budget)).unwrap();
+            let running = running_turns(&world, &budget, &mut evidence);
+            assert_eq!(running.len(), 1);
+            let (sid, tid) = running[0].clone();
+            // 另起的客户端按轮次标识查询：已接受，属于同一会话。
+            let found = turn_lookup(&world, wait(&budget), &tid);
+            assert_eq!(found["response"], "turn", "{found}");
+            assert_eq!(found["value"]["status"], "accepted");
+            assert_eq!(found["value"]["turn"]["session_id"], sid);
+            let owners = world.daemon_pids().unwrap();
+            assert_eq!(owners.len(), 1);
+            assert_ne!(owners[0], front.pgid());
+            let killed = front.kill_and_wait().unwrap();
+            evidence.record_command("接受回执后强制分离前端 CLI", &killed);
+            assert_forced_kill(&killed);
+            assert_eq!(world.daemon_pids().unwrap(), owners);
+            assert_ne!(
+                detail(&world, &budget, &mut evidence, &tid)["summary"]["progress"]["progress"],
+                "closed"
+            );
+            gate.release(wait(&budget)).unwrap();
+            assert_eq!(
+                closed(&world, &budget, &mut evidence, &tid)["summary"]["outcome"],
+                "completed"
+            );
+            let observed = run(
+                &world,
+                &budget,
+                &mut evidence,
+                &["--json", "session", "turn", &tid, "--follow"],
+            );
+            assert!(observed.is_clean_exit(0), "{}", observed.summary());
+            let followed = records(&observed);
+            assert_eq!(
+                followed.closed_result(),
+                Some((sid.as_str(), tid.as_str(), "completed"))
+            );
+            assert_eq!(followed.reply_text(), "detached durable answer");
+            assert!(followed.entries().iter().all(|entry| {
+                entry.is_input() || entry.turn_id.as_deref() == Some(tid.as_ref())
+            }));
+            assert_eq!(server.captured_requests().len(), 1);
+            evidence.record_captures(server.captured_requests());
+            archive_state(&world, &budget, &mut evidence, &[&tid]);
+            evidence
+                .record_json(
+                    "parameters",
+                    &json!({
+                        "turn": tid,
+                        "script": "gated plain detached durable answer",
+                        "frontend": "SIGKILL after acceptance",
+                        "backend_pids": owners,
+                    }),
+                )
+                .unwrap();
+            world.stop_daemon().unwrap();
+            for pid in owners {
+                assert!(
+                    lattice_system_harness::processes_in_pgid(pid)
+                        .unwrap()
+                        .is_empty()
+                );
+            }
+        }));
     support::finish_recorded(evidence, result);
 }
 #[test]
@@ -721,7 +724,8 @@ fn concurrent_lattice_daemon_has_one_owner_and_midway_watch_matches_history() {
         assert_eq!(head.turn_id.as_deref(), Some(tid.as_str()));
         let entries: Vec<_> = view.entries.values().collect();
         assert_eq!(entries.len(), 2, "{entries:?}");
-        assert_eq!(entries[0].user_ordinal(), Some(1));
+        assert!(entries[0].is_input());
+        assert_eq!(entries[1].turn_ordinal(), Some(1));
         assert_eq!(entries[1].node, head.position);
         assert!(!entries[1].step().unwrap().progress.is_closed());
         let midway = watcher.received.clone();
@@ -1330,7 +1334,12 @@ fn a_live_new_turn_does_not_block_old_closed_observation() {
         assert!(observed.is_clean_exit(0), "{}", observed.summary());
         // `--follow` 只输出所跟的那一轮，不含正在执行的新一轮。
         let followed = records(&observed);
-        assert!(followed.entries().iter().all(|entry| entry.turn_id == tid));
+        assert!(
+            followed
+                .entries()
+                .iter()
+                .all(|entry| { entry.is_input() || entry.turn_id.as_deref() == Some(tid) })
+        );
         assert_eq!(
             followed.closed_result().map(|(_, t, o)| (t, o)),
             Some((tid, "completed"))
@@ -1771,11 +1780,12 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
             evidence.record_command(format!("第 {n} 轮发送"), &sent.command);
             assert_clean_send(&sent).unwrap();
             assert_accepted_and_closed(&sent).unwrap();
-            // `session send --json` 只输出本轮：一条用户消息与一个步骤。
+            // `session send --json` 只输出本轮：一条用户输入与一个步骤。
             let entries = sent.entries();
             assert_eq!(entries.len(), 2);
             assert_eq!(entries[0].node, 2 * n - 1);
-            assert_eq!(entries[0].user_ordinal(), Some(n));
+            assert!(entries[0].is_input());
+            assert_eq!(entries[1].turn_ordinal(), Some(n));
         }
         let sid = send.session_id().unwrap();
         let user = |n: u64| 2 * n - 1;
@@ -1791,7 +1801,7 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
         assert_eq!(
             view.entries
                 .values()
-                .filter_map(|entry| entry.user_ordinal())
+                .filter_map(|entry| entry.turn_ordinal())
                 .collect::<Vec<_>>(),
             (first_loaded..=turns).collect::<Vec<_>>()
         );
@@ -1802,7 +1812,7 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
             .range(user(8)..user(11))
             .map(|(_, entry)| entry.raw.clone())
             .collect();
-        // 往上翻页：以已装入的最早一轮的用户消息节点为 `before`，余下轮数不足所请求页大小。
+        // 往上翻页：以已装入的最早一轮的首个输入节点为 `before`，余下轮数不足所请求页大小。
         let earlier = history(&world, wait(&budget), sid, user(first_loaded), 10).unwrap();
         assert_eq!(
             earlier
@@ -1811,9 +1821,9 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
                 .collect::<Vec<_>>(),
             (1..user(first_loaded)).map(Value::from).collect::<Vec<_>>()
         );
-        assert_eq!(earlier[0]["ordinal"], 1);
-        assert_eq!(earlier[2]["ordinal"], 2);
-        // 分页边界只落在用户消息节点之前：三轮正好是六个节点，首条为用户消息节点。
+        assert_eq!(earlier[1]["ordinal"], 1);
+        assert_eq!(earlier[3]["ordinal"], 2);
+        // 分页边界落在轮次边界之前：三轮正好是六个节点，首条为输入节点，紧随其后的 Step 0 携带轮次序号 8。
         let page = history(&world, wait(&budget), sid, user(11), 3).unwrap();
         assert_eq!(
             page.iter()
@@ -1821,8 +1831,8 @@ fn long_session_pages_by_turn_and_rewind_replaces_the_path() {
                 .collect::<Vec<_>>(),
             (user(8)..user(11)).map(Value::from).collect::<Vec<_>>()
         );
-        assert_eq!(page[0]["content"]["kind"], "user_message");
-        assert_eq!(page[0]["ordinal"], 8);
+        assert_eq!(page[0]["content"]["kind"], "input");
+        assert_eq!(page[1]["ordinal"], 8);
         // 历史查询与视图给出同一种条目：同一区间逐字段相同。
         assert_eq!(page, watched_page);
         let zero = history(&world, wait(&budget), sid, user(11), 0).unwrap_err();
@@ -2312,8 +2322,11 @@ fn public_choices_persist_and_model_changes_use_supported_fallbacks() {
             );
             let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
             let view = watcher.initial();
-            let user = &view.entries[&(2 * ordinal - 1)];
-            assert_eq!(user.raw["content"]["effort"], json!(expected_effort));
+            let step0 = &view.entries[&(2 * ordinal)];
+            assert_eq!(
+                step0.raw["content"]["turn_start"]["effort"],
+                json!(expected_effort)
+            );
         };
         for (model, effort, expected_model, expected_effort) in cases {
             submit(model, effort, expected_model, expected_effort, "local");
@@ -2626,16 +2639,21 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
         for output in [&first, &inherited, &failure] {
             let sent = records(output);
             let id = accepted_turn(output);
-            let user = view
+            let start = view
                 .entries
                 .values()
                 .find(|entry| {
-                    entry.raw["kind"] == "user_message" && entry.raw["content"]["turn_id"] == id
+                    entry.raw["kind"] == "step"
+                        && entry.raw["content"]["step_ordinal"] == 0
+                        && entry.raw["content"]["turn_id"] == id
                 })
                 .unwrap();
-            assert_eq!(user.raw["content"]["model"], "gpt-6-luna");
-            assert_eq!(user.raw["content"]["provider"], "openai-chat");
-            assert_eq!(user.raw["content"]["effort"], "off");
+            assert_eq!(start.raw["content"]["turn_start"]["model"], "gpt-6-luna");
+            assert_eq!(
+                start.raw["content"]["turn_start"]["provider"],
+                "openai-chat"
+            );
+            assert_eq!(start.raw["content"]["turn_start"]["effort"], "off");
             assert!(sent.rejection().is_none());
         }
         let captures = server.captured_requests();
@@ -2726,14 +2744,16 @@ fn cli_off_survives_tool_retry_restart_and_provider_failure() {
         assert_eq!(view.head.as_ref().unwrap().effort.as_deref(), Some("off"));
         for (output, effort) in [(&low, "low"), (&failed_off, "off"), (&continued, "off")] {
             let id = accepted_turn(output);
-            let user = view
+            let start = view
                 .entries
                 .values()
                 .find(|entry| {
-                    entry.raw["kind"] == "user_message" && entry.raw["content"]["turn_id"] == id
+                    entry.raw["kind"] == "step"
+                        && entry.raw["content"]["step_ordinal"] == 0
+                        && entry.raw["content"]["turn_id"] == id
                 })
                 .unwrap();
-            assert_eq!(user.raw["content"]["effort"], effort);
+            assert_eq!(start.raw["content"]["turn_start"]["effort"], effort);
         }
         let captures = server.captured_requests();
         assert_eq!(captures.len(), 9);
@@ -2997,7 +3017,7 @@ fn accepted_effort_survives_retry_and_tools_while_global_budget_reloads() {
         assert_eq!(head["value"]["effort"], "high");
         let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
         assert_eq!(
-            watcher.initial().entries[&1].raw["content"]["effort"],
+            watcher.initial().entries[&2].raw["content"]["turn_start"]["effort"],
             "high"
         );
         evidence.record_captures(server.captured_requests());
@@ -3123,7 +3143,7 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
             reopened_head
         );
 
-        // 为已有草稿选定模型后提交：本轮完成，用户消息节点记录所选模型。
+        // 为已有草稿选定模型后提交：本轮完成，首步 `turn_start` 记录所选模型。
         let updated = ipc(
             &world,
             wait(&budget),
@@ -3155,8 +3175,14 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
         assert_eq!(completed["summary"]["outcome"], "completed");
         let mut watcher = Watcher::open(&world, wait(&budget), NEW_SESSION);
         let view = watcher.initial();
-        assert_eq!(view.entries[&1].raw["content"]["model"], "background");
-        assert_eq!(view.entries[&1].raw["content"]["provider"], "local");
+        assert_eq!(
+            view.entries[&2].raw["content"]["turn_start"]["model"],
+            "background"
+        );
+        assert_eq!(
+            view.entries[&2].raw["content"]["turn_start"]["provider"],
+            "local"
+        );
         assert_eq!(server.captured_requests().len(), 1);
         assert_eq!(server.captured_requests()[0].raw["model"], "background");
 
@@ -3194,8 +3220,14 @@ fn draft_without_model_survives_restart_and_enforces_settings_version() {
         assert_eq!(fresh_done["summary"]["outcome"], "completed");
         assert_eq!(server.captured_requests().len(), 2);
         let first_entries = history(&world, wait(&budget), NEW_SESSION, 3, 1).unwrap();
-        assert_eq!(first_entries[0]["content"]["model"], "background");
-        assert_eq!(first_entries[0]["content"]["provider"], "local");
+        assert_eq!(
+            first_entries[1]["content"]["turn_start"]["model"],
+            "background"
+        );
+        assert_eq!(
+            first_entries[1]["content"]["turn_start"]["provider"],
+            "local"
+        );
         let final_log = read(
             &world,
             &budget,

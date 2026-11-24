@@ -41,3 +41,7 @@ h2 = "0.4"
 http = "1"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 tokio-rustls = "0.26"
+
+[dev-dependencies]
+# 仅用于系统测试直接构造 v10 旧格式 `lattice.redb` 验证拒绝合同（通用嵌入式数据库库，非产品 crate，且显式固定版本不继承 workspace）。
+redb = "4.3.0"

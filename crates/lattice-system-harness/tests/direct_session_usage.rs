@@ -522,9 +522,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             &["--json", "session", "rewind", &sid, "1"],
         );
         let user_only = usage(&send, &mut evidence, &sid);
-        assert_eq!(user_only["turns"].as_array().unwrap().len(), 1);
-        assert_eq!(user_only["turns"][0]["turn_id"], a);
-        assert_summary(&user_only["turns"][0]["usage"], &empty);
+        assert_eq!(user_only["turns"], json!([]));
         assert_summary(&user_only["path_total"], &empty);
         assert_summary(&user_only["session_total"], &session_summary);
         query(

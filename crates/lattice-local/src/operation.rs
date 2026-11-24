@@ -4,13 +4,13 @@
 //! 本地会话提交、观察、重连、取消与空闲超时的前端状态机。
 
 use std::{
-    collections::{BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet, VecDeque},
     time::Duration,
 };
 
 use lattice_ipc::{
     Acceptance, CancelStatus, ConfigureReply, ConnectionStatus, ConversationEntry, LocalError,
-    LocalErrorKind, LocalUpdate, NodeId, Result, SessionHead, SessionId, StoreDiagnostic,
+    LocalErrorKind, LocalUpdate, Node, NodeId, Result, SessionHead, SessionId, StoreDiagnostic,
     SubmissionReceipt, SubmissionResult, SubmissionUpdate, TurnDetail, TurnId, TurnRequest,
     TurnSummary, TurnView, ViewUpdate,
 };
@@ -76,7 +76,7 @@ impl LocalClient {
         let (mut handle, mut worker) =
             LocalTurn::prepare(self.clone(), request.session, Some(request.turn_id), true);
         worker.own_view = own_view;
-        worker.awaiting_user_message = true;
+        worker.awaiting_turn_entry = true;
         if !own_view {
             let (sender, receiver) = mpsc::channel(16);
             handle.external_view = Some(sender);
@@ -102,6 +102,7 @@ impl LocalClient {
     pub fn follow_turn(&self, turn: TurnDetail) -> LocalTurn {
         let (mut handle, mut worker) =
             LocalTurn::prepare(self.clone(), turn.session_id, Some(turn.turn_id), true);
+        worker.turn_inputs = Some(turn.input_nodes.iter().copied().collect());
         worker.report.summary = Some(turn.summary);
         handle.task = Some(tokio::spawn(worker.run()));
         handle
@@ -190,8 +191,10 @@ struct Worker {
     view: Option<LocalWatch>,
     progress: Option<watch::Receiver<Instant>>,
     nodes: BTreeSet<NodeId>,
-    awaiting_user_message: bool,
-    head_after_user_message: bool,
+    turn_inputs: Option<BTreeSet<NodeId>>,
+    buffered_inputs: BTreeMap<NodeId, ConversationEntry>,
+    awaiting_turn_entry: bool,
+    head_after_turn_entry: bool,
     seen_position: bool,
     observed_end: bool,
     finished: bool,
@@ -240,8 +243,10 @@ impl Worker {
             view: None,
             progress: None,
             nodes: BTreeSet::new(),
-            awaiting_user_message: false,
-            head_after_user_message: false,
+            turn_inputs: None,
+            buffered_inputs: BTreeMap::new(),
+            awaiting_turn_entry: false,
+            head_after_turn_entry: false,
             seen_position: false,
             observed_end: false,
             finished: false,
@@ -290,6 +295,7 @@ impl Worker {
         self.progress = None;
         self.seen_position = false;
         self.nodes.clear();
+        self.buffered_inputs.clear();
         let client = self.client.clone();
         let sid = self.report.session_id;
         self.connection = Some(tokio::spawn(async move { client.open_watch(sid).await }));
@@ -322,6 +328,15 @@ impl Worker {
     }
 
     fn accepted(&mut self, turn: TurnView, recovered: bool) {
+        let input_set: BTreeSet<NodeId> = turn.input_nodes.iter().copied().collect();
+        for input_id in &turn.input_nodes {
+            if self.buffered_inputs.remove(input_id).is_some() {
+                self.awaiting_turn_entry = false;
+                self.nodes.insert(*input_id);
+            }
+        }
+        self.buffered_inputs.clear();
+        self.turn_inputs = Some(input_set);
         // 外部视图可能先于接受回执确认结局，不能用接受时的旧投影覆盖它。
         if self.own_view || !self.observed_end {
             self.report.summary = Some(turn.summary.clone());
@@ -398,36 +413,89 @@ impl Worker {
         let mut ended = false;
         let include = match &update {
             ViewUpdate::Head(head) => {
-                self.head_after_user_message = !self.awaiting_user_message;
+                self.head_after_turn_entry = !self.awaiting_turn_entry;
                 // 同一位置也可能已经提交了新值，旧批次的条目不能确认这条头。
                 self.seen_position = head.position == NodeId(0);
                 if head.path_replaced {
                     self.nodes.clear();
+                    self.buffered_inputs.clear();
                 }
                 self.live_evidence |= head.owner && head.turn_id == self.report.turn_id;
                 self.report.head = Some(head.clone());
                 true
             }
             ViewUpdate::Entry { entry } => {
-                let content = match entry.as_ref() {
-                    ConversationEntry::UserMessage { content, .. }
-                    | ConversationEntry::Step { content, .. } => content,
-                };
-                let selected = content.turn_id() == self.report.turn_id;
-                if selected {
-                    if matches!(entry.as_ref(), ConversationEntry::UserMessage { .. }) {
-                        self.awaiting_user_message = false;
+                let selected = match entry.as_ref() {
+                    ConversationEntry::Input { node, .. } => {
+                        if !self.following {
+                            true
+                        } else if let Some(inputs) = &self.turn_inputs {
+                            if inputs.contains(node) {
+                                self.awaiting_turn_entry = false;
+                                self.nodes.insert(*node);
+                                true
+                            } else {
+                                false
+                            }
+                        } else {
+                            // 回执尚未到达时先暂存输入，待 Step 0 按 turn_start.input_nodes 认领后再按序冲刷。
+                            self.buffered_inputs.insert(*node, entry.as_ref().clone());
+                            false
+                        }
                     }
-                    self.nodes.insert(entry.node());
-                    if let ConversationEntry::Step {
-                        summary: Some(summary),
+                    ConversationEntry::ContextOp { .. } => !self.following,
+                    ConversationEntry::Step {
+                        node,
+                        content,
+                        summary,
                         ..
-                    } = entry.as_ref()
-                    {
-                        ended = summary.progress.is_closed();
-                        self.report.summary = Some(summary.clone());
+                    } => {
+                        let is_target = content.turn_id() == self.report.turn_id;
+                        if is_target {
+                            self.awaiting_turn_entry = false;
+                            if let Node::Step {
+                                step_ordinal: 0,
+                                turn_start: Some(meta),
+                                ..
+                            } = content
+                            {
+                                let input_set: BTreeSet<NodeId> =
+                                    meta.input_nodes.iter().copied().collect();
+                                // 先将匹配的暂存输入按树路径顺序推入 pending，再在下方推入 Step 0 本身。
+                                for input_id in &meta.input_nodes {
+                                    if let Some(buffered) = self.buffered_inputs.remove(input_id) {
+                                        let inserted = self.nodes.insert(*input_id);
+                                        if inserted && forward {
+                                            self.pending.push_back(LocalUpdate::Entry {
+                                                entry: Box::new(buffered),
+                                            });
+                                        }
+                                    }
+                                }
+                                self.buffered_inputs.clear();
+                                self.turn_inputs = Some(input_set);
+                            }
+                            self.nodes.insert(*node);
+                            if let Some(summary) = summary {
+                                ended = summary.progress.is_closed();
+                                self.report.summary = Some(summary.clone());
+                            }
+                        } else if self.following
+                            && self.turn_inputs.is_none()
+                            && let Node::Step {
+                                step_ordinal: 0,
+                                turn_start: Some(meta),
+                                ..
+                            } = content
+                        {
+                            // 初连历史重放遇到旧轮 Step 0 时顺手移除其已归属的前置暂存输入。
+                            for input_id in &meta.input_nodes {
+                                self.buffered_inputs.remove(input_id);
+                            }
+                        }
+                        is_target
                     }
-                }
+                };
                 if self
                     .report
                     .head
@@ -456,10 +524,10 @@ impl Worker {
             .head
             .as_ref()
             .is_some_and(|h| h.turn_id == self.report.turn_id);
-        // 提交回执与 watch 没有跨连接顺序；只有本轮 UserMessage 能排除积压的旧头。
-        // 本轮的头本身已经属于接受后的视图，其余头必须晚于这条 UserMessage。
+        // 提交回执与 watch 没有跨连接顺序；只有本轮条目（前置 Input 或 Step 0）能排除积压的旧头。
+        // 本轮的头本身已经属于接受后的视图，其余头必须晚于本轮条目。
         let current_view =
-            !self.awaiting_user_message && (self.head_after_user_message || selected_head);
+            !self.awaiting_turn_entry && (self.head_after_turn_entry || selected_head);
         if ended || (no_owner && current_view && (resolved || selected_head)) {
             self.observed_end = true;
         }

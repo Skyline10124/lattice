@@ -21,8 +21,8 @@ status: active
 
 ## 设置与一轮的配置
 
-- **表示下一轮的配置。** 接受一轮时，后台从当前会话设置与本轮工具目录冻结这一轮的执行配置，见[执行配置冻结](acceptance.md#执行配置冻结)；这一轮实际使用的 agent、provider、模型与推理档位记在它的 UserMessage 节点上。
-- **与历史轮次独立。** 最后一轮之后通过 `configure` 修改过设置时，会话设置与最后一轮 UserMessage 节点上记录的配置不同。
+- **表示下一轮的配置。** 接受一轮时，后台从当前会话设置与本轮工具目录冻结这一轮的执行配置，见[执行配置冻结](acceptance.md#执行配置冻结)；这一轮实际使用的 agent、provider、模型与推理档位记在它 `Step 0` 的 `turn_start` 元数据上。
+- **与历史轮次独立。** 最后一轮之后通过 `configure` 修改过设置时，会话设置与最后一轮 `Step 0` 的 `turn_start` 记录的配置不同。
 - **当前 agent。** 会话的当前 agent 就是会话设置中的 `profile.agent_name`。
 - **`rewind` 保持设置不变。** `rewind` 只移动会话的当前节点指针，会话设置原封不动。
 - **磁盘 profile 的作用边界。** 修改磁盘上的 `agent.toml` 或提示文件只影响此后显式给出 `agent` 的 `configure` 调用；未给出 `agent` 时，会话继续使用已保存在会话设置中的 `profile` 与 `system_prompt`。

@@ -31,7 +31,7 @@ _Avoid_: terminal connection, background process, workspace copy
 _Avoid_: 评论草稿（TUI）, 空会话, 临时会话
 
 **会话树**:
-Session 内由根节点 `0`、UserMessage 与 Step 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径。它记录对话与工具调用历史，不拥有 Local Workspace 内容。
+Session 内由根节点 `0`、`Input`、`ContextOp` 与 `Step` 节点组成的只追加单根树。根节点没有内容、不属于任何 Turn，代表空对话。新节点以当前位置为父；发给模型的上下文是根到当前位置的路径经 `lattice-context` 归约与投影后的结果。它记录对话、上下文操作与工具调用历史，不拥有 Local Workspace 内容。
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
 
@@ -41,7 +41,7 @@ _Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
 _Avoid_: Git OID, branch name, TurnId
 
 **Turn**:
-一次已接受任务：一个 UserMessage 节点加若干 Step 节点，结局由最后一个 Step 节点得出；一个 Turn 可以有多个 Step。
+一次已接受任务：以携带 `turn_start` 元数据的 `Step 0` 为起点、后接若干后续 `Step` 节点（普通提交在同一事务中先追加本轮 `Input` 节点并在 `turn_start.input_nodes` 认领），结局由最后一个 Step 节点得出；一个 Turn 可以有多个 Step。
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: model attempt, single tool call, terminal lifetime
 
@@ -106,7 +106,7 @@ _Avoid_: disabled tool flag, runtime plugin fallback
 _Avoid_: production fallback tool, mock LLM server
 
 **持久对话内容**:
-已写入会话树的 UserMessage 与 Step 节点，作为对话条目交付，也供后续模型请求使用。
+已写入会话树的 `Input`、`ContextOp` 与 `Step` 节点，作为原始对话条目交付，也在发往模型前经有效上下文归约与投影。
 它与尚未保存的临时流式文字分开，见[用户读到的几种事实](../architecture/session/flow.md#用户读到的几种事实)。
 _Avoid_: token replay, layout body width, frozen configuration
 
@@ -121,7 +121,7 @@ _Avoid_: 内联 base64 节点, 路径引用, 扩展名格式
 _Avoid_: snapshot, event window, subscription cursor, Gap
 
 **对话条目**:
-视图与历史查询交付的会话内容单位，一个条目对应一个节点，以 NodeId 标识，同一节点的新值整条替换旧值。UserMessage 条目带轮次序号，Step 条目带结论与重试提示，本轮最后一步的条目另带 `TurnSummary`。
+视图与历史查询交付的会话内容单位，一个条目对应一个非根节点（`Input`、`ContextOp` 或 `Step`），以 NodeId 标识，同一节点的新值整条替换旧值。`Step 0` 条目带轮次序号与 `turn_start` 元数据，Step 条目带结论与重试提示，本轮最后一步的条目另带 `TurnSummary`。
 见[观察与重连](../architecture/session/recovery.md#观察与重连)。
 _Avoid_: TurnEvent, HistoryEntry, per-call item
 

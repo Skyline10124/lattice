@@ -2334,6 +2334,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "chrono",
+ "lattice-context",
  "lattice-conversation",
  "lattice-session",
  "rustix",
@@ -2419,6 +2420,7 @@ dependencies = [
  "chrono",
  "futures",
  "lattice-agent",
+ "lattice-context",
  "lattice-conversation",
  "lattice-ipc",
  "lattice-llm",
@@ -2447,6 +2449,7 @@ name = "lattice-session"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "lattice-context",
  "lattice-conversation",
  "lattice-store",
  "redb",
@@ -2481,6 +2484,7 @@ dependencies = [
  "http",
  "libc",
  "portable-pty",
+ "redb",
  "serde",
  "serde_json",
  "tempfile",

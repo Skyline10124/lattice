@@ -324,7 +324,8 @@ fn render_log(log: &lattice_local::SessionLog) -> String {
     while let Some((row, depth)) = stack.pop() {
         let kind = match row.node.kind {
             lattice_local::NodeKind::Root => "root".into(),
-            lattice_local::NodeKind::UserMessage => "user".into(),
+            lattice_local::NodeKind::Input => "input".into(),
+            lattice_local::NodeKind::ContextOp => "context_op".into(),
             lattice_local::NodeKind::Step { ordinal } => format!("step {ordinal}"),
         };
         let _ = writeln!(
@@ -605,18 +606,20 @@ mod session_cli {
             "current_agent":"beta", "unclosed_turn":"20000000-0000-4000-8000-000000000002",
             "nodes":[
                 {"node":{"id":0,"parent":null,"turn_id":null,"kind":{"kind":"root"}},"current":false,"turn_start":null},
-                {"node":{"id":1,"parent":0,"turn_id":"10000000-0000-4000-8000-000000000001","kind":{"kind":"user_message"}},"current":false,"turn_start":{"turn_id":"10000000-0000-4000-8000-000000000001","agent_name":"alpha","summary":{"outcome":"cancelled","progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"notice":{"level":"info","text":"cancelled notice"}}}},
-                {"node":{"id":2,"parent":1,"turn_id":"10000000-0000-4000-8000-000000000001","kind":{"kind":"step","ordinal":0}},"current":false,"turn_start":null},
-                {"node":{"id":3,"parent":0,"turn_id":"20000000-0000-4000-8000-000000000002","kind":{"kind":"user_message"}},"current":false,"turn_start":{"turn_id":"20000000-0000-4000-8000-000000000002","agent_name":"beta","summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}}}},
-                {"node":{"id":4,"parent":3,"turn_id":"20000000-0000-4000-8000-000000000002","kind":{"kind":"step","ordinal":0}},"current":true,"turn_start":null}
+                {"node":{"id":1,"parent":0,"turn_id":null,"kind":{"kind":"input"}},"current":false,"turn_start":null},
+                {"node":{"id":2,"parent":1,"turn_id":"10000000-0000-4000-8000-000000000001","kind":{"kind":"step","ordinal":0}},"current":false,"turn_start":{"turn_id":"10000000-0000-4000-8000-000000000001","agent_name":"alpha","summary":{"outcome":"cancelled","progress":{"progress":"closed","end":{"end":"stop","cause":{"cause":"cancelled"}}},"notice":{"level":"info","text":"cancelled notice"}}}},
+                {"node":{"id":3,"parent":0,"turn_id":null,"kind":{"kind":"input"}},"current":false,"turn_start":null},
+                {"node":{"id":4,"parent":3,"turn_id":"20000000-0000-4000-8000-000000000002","kind":{"kind":"step","ordinal":0}},"current":true,"turn_start":{"turn_id":"20000000-0000-4000-8000-000000000002","agent_name":"beta","summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}}}},
+                {"node":{"id":5,"parent":2,"turn_id":null,"kind":{"kind":"context_op"}},"current":false,"turn_start":null}
             ]
         })).unwrap();
         let text = render_log(&log);
         assert!(text.contains("current=4 agent=beta"));
         assert!(text.contains("  0 root"));
-        assert!(text.contains("    1 user"));
+        assert!(text.contains("    1 input"));
         assert!(text.contains("      2 step 0"));
-        assert!(text.contains("    3 user"));
+        assert!(text.contains("        5 context_op"));
+        assert!(text.contains("    3 input"));
         assert!(text.contains("    * 4 step 0"));
         assert!(text.contains("cancelled notice"));
         assert!(text.contains("alpha"));
@@ -626,7 +629,7 @@ mod session_cli {
         let turn: lattice_local::TurnDetail = serde_json::from_value(serde_json::json!({
             "session_id":"11111111111141118111111111111111",
             "turn_id":"10000000-0000-4000-8000-000000000001",
-            "user_node":1,"agent_name":"alpha",
+            "start_node":2,"input_nodes":[1],"agent_name":"alpha",
             "accepted_at":"2026-09-27T00:00:00Z","ended_at":"2026-09-27T00:00:01Z",
             "summary":{"outcome":"failed","progress":{"progress":"reserved"},"notice":{"level":"error","text":"process exited"}},
             "usage":lattice_local::UsageSummary::from_attempts([]),
@@ -673,7 +676,8 @@ mod session_cli {
         let turn: lattice_local::TurnDetail = serde_json::from_value(serde_json::json!({
             "session_id": "11111111111141118111111111111111",
             "turn_id": "10000000-0000-4000-8000-000000000001",
-            "user_node": 1,
+            "start_node": 2,
+            "input_nodes": [1],
             "agent_name": "alpha",
             "accepted_at": "2026-09-27T00:00:00Z",
             "ended_at": "2026-09-27T00:00:01Z",

@@ -6,8 +6,8 @@ status: active
 
 | 项 | 内容 |
 | --- | --- |
-| 目标 | 状态根中存在旧版 `sessions.git` 或 `projects/<key>/invocations.git` 时，会话库打开失败并指出路径 |
-| 前提 | 在自有状态根分别放置两种旧库目录 |
+| 目标 | 状态根中存在旧版 `sessions.git`、`projects/<key>/invocations.git` 或 v10 旧格式 `lattice.redb` 时，会话库打开失败并指出路径与版本诊断 |
+| 前提 | 在自有状态根分别放置两种旧 `*.git` 目录或构造 v10 `lattice.redb` |
 | 相关测试 | `direct_tree_session`：`legacy_stores_are_refused_before_any_new_database_or_request` |
 
 ## 操作
@@ -16,6 +16,6 @@ status: active
 
 ## 断言
 
-- 错误列出旧库路径。
-- 状态根中没有新建的 `lattice.redb`，旧库内容不变，provider 没有收到请求。
-- 记录错误输出、退出状态与状态根中的文件列表。
+- 错误分别返回 `legacy_stores`（列出旧库路径）或 `unsupported_version`（附路径、`found = 10`、`supported = 11`）。
+- 状态根中没有新建的 `lattice.redb`（已有 v10 `lattice.redb` 时领域表与元信息记录保持不变），旧库内容不变，provider 没有收到请求。
+- 记录错误输出、退出状态与状态根中的文件摘要。

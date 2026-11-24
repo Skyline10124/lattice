@@ -265,6 +265,7 @@ fn reload_comment(app: &mut App, target: TurnId, wire: &str, on_path: bool) {
     entries.push(user(node, new_turn, node / 2 + 1, wire));
     entries.push(
         step(node + 1, new_turn, 0)
+            .turn_ordinal(node / 2 + 1)
             .text("following answer")
             .finished()
             .entry(),
@@ -334,11 +335,16 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
         vec![
             user(5, target, 3, "prompt-3"),
             step(6, target, 0)
+                .turn_ordinal(3)
                 .text("comment target\n\nlater paragraph")
                 .finished()
                 .entry(),
             user(7, last, 4, wire),
-            step(8, last, 0).text("answer-4").finished().entry(),
+            step(8, last, 0)
+                .turn_ordinal(4)
+                .text("answer-4")
+                .finished()
+                .entry(),
         ],
     );
     let mut request = None;
@@ -377,11 +383,11 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
     assert_eq!(top(app), before, "视图停在原来看到的那一行");
 }
 
-/// CLI 退回到被评论那一轮的 UserMessage：这一轮仍在路径上，被评论的 Step 已不在。
+/// CLI 退回到被评论那一轮的前置 Input 节点：被评论的 Step 已不在当前路径。
 fn rewind_to_user(app: &mut App, target: TurnId) {
     let rewound = SessionHead {
         path_replaced: true,
-        ..head(1, Some(target), false)
+        ..head(1, None, false)
     };
     app.apply_view(LocalUpdate::Head(rewound));
     app.apply_view(entry_update(user(1, target, 1, "original prompt")));
@@ -454,12 +460,14 @@ fn comment_adjacent_text_fragments_and_generating_text_are_not_commentable() {
     h.app.input.set_text("run");
     h.app.submit().unwrap();
     let live = h.app.own_turn.unwrap();
-    h.app.apply_submission(receipt(live, accepted(live)));
+    h.app
+        .apply_submission(receipt(live, accepted_at(live, &[3], 4)));
     h.app
         .apply_view(LocalUpdate::Head(head(4, Some(live), true)));
     h.app.apply_view(entry_update(user(3, live, 2, "run")));
-    h.app
-        .apply_view(entry_update(step(4, live, 0).sent().entry()));
+    h.app.apply_view(entry_update(
+        step(4, live, 0).turn_ordinal(2).sent().entry(),
+    ));
     h.app
         .apply_view(text(4, 0, 0, &[("live comment target", false)]));
     comment_browse(&mut h.app, "live comment target");
@@ -820,7 +828,11 @@ fn entry_reply(entry: ConversationEntry) -> Value {
 }
 /// 接受回执，会话取请求写明的那一个。
 fn accepted_reply(request: &Value) -> Value {
-    let mut turn = serde_json::to_value(turn_view(request_turn(request))).unwrap();
+    accepted_reply_at(request, &[1], 2)
+}
+fn accepted_reply_at(request: &Value, input_nodes: &[u64], start_node: u64) -> Value {
+    let mut turn =
+        serde_json::to_value(turn_view_at(request_turn(request), input_nodes, start_node)).unwrap();
     turn["session_id"] = json!(request_session(request));
     response("acceptance", json!({"acceptance":"accepted","turn":turn}))
 }
@@ -1012,7 +1024,7 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
+        "submit" => Reply::Now(accepted_reply_at(r, &[3], 4)),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
@@ -1057,11 +1069,14 @@ async fn metering_waits_for_position_and_counts_retries_and_steps_once() {
             .await;
         assert_eq!(loading.phase, TurnPhase::Streaming);
         let retry = || {
-            step(4, id, 0).retried("info", "retry").metering(
-                json!({"input":100,"output":10,"cache_read":0}),
-                Partial,
-                Some((0.01, false)),
-            )
+            step(4, id, 0)
+                .turn_ordinal(2)
+                .retried("info", "retry")
+                .metering(
+                    json!({"input":100,"output":10,"cache_read":0}),
+                    Partial,
+                    Some((0.01, false)),
+                )
         };
         view_tx.push([entry_reply(retry().sent().entry())]);
         let live = remote
@@ -1345,7 +1360,7 @@ async fn cancel_after_acceptance_reaches_the_new_turn_despite_stale_heads() {
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
+        "submit" => Reply::Now(accepted_reply_at(r, &[3], 4)),
         "cancel" => Reply::Now(response("cancelled", json!({"owned":true}))),
         _ => Reply::Never,
     });
@@ -2278,7 +2293,7 @@ async fn idle_submit_preflight_failure_preserves_input_draft_and_never_sends() {
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
+        "submit" => Reply::Now(accepted_reply_at(r, &[3], 4)),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
@@ -2396,7 +2411,7 @@ async fn paste_interleaved_text_and_image_submits_exact_parts_in_order() {
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
+        "submit" => Reply::Now(accepted_reply_at(r, &[3], 4)),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
@@ -2478,7 +2493,7 @@ async fn modified_image_file_after_paste_blocks_submit_and_preserves_input() {
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
+        "submit" => Reply::Now(accepted_reply_at(r, &[3], 4)),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);
@@ -2548,7 +2563,7 @@ async fn deleted_image_file_after_paste_blocks_submit_and_preserves_input() {
     let view_tx = views.clone();
     let peer = Peer::start(move |r| match r["operation"].as_str().unwrap() {
         "watch" => views.subscribe(),
-        "submit" => Reply::Now(accepted_reply(r)),
+        "submit" => Reply::Now(accepted_reply_at(r, &[3], 4)),
         _ => Reply::Never,
     });
     let mut h = Harness::new(false);

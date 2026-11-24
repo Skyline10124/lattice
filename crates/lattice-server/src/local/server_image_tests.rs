@@ -5,7 +5,7 @@ use super::service_tests::{TestEnv, bounded, configure_new_request, turn_request
 use super::*;
 use lattice_conversation::MAX_IMAGE_BYTES;
 use lattice_local::{new_session_id, new_turn_id};
-use lattice_session::store::{TurnInput, TurnInputPart};
+use lattice_session::store::{NodeKind, TurnInput, TurnInputPart};
 
 const BUDGET_EXCEEDED_MESSAGE: &str = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
 
@@ -411,8 +411,15 @@ async fn configure_to_text_model_rejects_image_history_until_rewind() {
         final_log
             .nodes
             .iter()
-            .any(|row| { row.node.id == NodeId(1) && row.node.turn_id == Some(vision_turn) }),
-        "原含图分支的 UserMessage 必须仍在会话树上"
+            .any(|row| row.node.id == NodeId(1) && row.node.kind == NodeKind::Input),
+        "原含图分支的 Input 节点必须仍在会话树上"
+    );
+    assert!(
+        final_log
+            .nodes
+            .iter()
+            .any(|row| row.node.id == NodeId(2) && row.node.turn_id == Some(vision_turn)),
+        "原含图分支的 Step 0 必须仍在会话树上"
     );
     assert!(
         final_log
@@ -485,7 +492,7 @@ async fn small_interleaved_images_are_sent_as_ordered_data_urls() {
     assert_eq!(
         user_msg["content"],
         serde_json::json!([
-            { "type": "text", "text": "第一段文字" },
+            { "type": "text", "text": "<lattice-context channel=\"ipc\">\n第一段文字" },
             {
                 "type": "image_url",
                 "image_url": {
@@ -499,9 +506,9 @@ async fn small_interleaved_images_are_sent_as_ordered_data_urls() {
                     "url": format!("data:image/jpeg;base64,{}", encode_base64_standard(&jpeg))
                 }
             },
-            { "type": "text", "text": "末尾文字" }
+            { "type": "text", "text": "末尾文字\n</lattice-context>" }
         ]),
-        "请求体中的用户消息必须按原顺序包含文本块与 data URL 图片块"
+        "请求体中的用户消息必须按原顺序包含通道包裹的文本块与 data URL 图片块"
     );
     env.shutdown().await;
 }

@@ -154,7 +154,8 @@ macro_rules! load_local {
                     let (_, n) = decode_node_key(key.value())?;
                     let decoded: Node =
                         decode("nodes", &format!("{session}/{}", n.0), value.value())?;
-                    if n != node_ref.node && matches!(decoded, Node::UserMessage { .. } | Node::Root)
+                    if n != node_ref.node
+                        && !matches!(&decoded, Node::Step { turn_id: actual, .. } if *actual == id)
                     {
                         break;
                     }
@@ -170,7 +171,36 @@ macro_rules! load_local {
                 }
             }
         }
-        // 仅取直接引用的父节点和所属 Turn 的 UserMessage 节点；不追读无关分支。
+        // 补读 Step 0 关联的前置 Input 节点，供局部一致性核验与幂等重查使用。
+        let input_nodes: BTreeSet<_> = r
+            .nodes
+            .values()
+            .filter_map(|n| match n {
+                Node::Step {
+                    step_ordinal: 0,
+                    turn_start: Some(meta),
+                    ..
+                } => Some(meta.input_nodes.as_slice()),
+                _ => None,
+            })
+            .flatten()
+            .copied()
+            .collect();
+        for input_node in input_nodes {
+            scope.nodes.insert(input_node);
+            if let std::collections::btree_map::Entry::Vacant(entry) =
+                r.nodes.entry((session, input_node))
+            {
+                if let Some(value) = nodes.get(node_key(session, input_node).as_slice())? {
+                    entry.insert(decode(
+                        "nodes",
+                        &format!("{session}/{}", input_node.0),
+                        value.value(),
+                    )?);
+                }
+            }
+        }
+        // 仅取直接引用的父节点和所属 Turn 的 Step 0 节点；不追读无关分支。
         let parents: BTreeSet<_> = r.nodes.values().filter_map(Node::parent).collect();
         for parent in parents {
             if let std::collections::btree_map::Entry::Vacant(entry) =
@@ -210,7 +240,7 @@ macro_rules! load_local {
                         corrupt(
                             "nodes",
                             &format!("{session}/{}", node_ref.node.0),
-                            "missing turn user node",
+                            "missing turn start step node",
                         )
                     })?;
                 entry.insert(decode(
@@ -224,7 +254,11 @@ macro_rules! load_local {
             .nodes
             .values()
             .filter_map(|n| match n {
-                Node::UserMessage { config_digest, .. } => Some(*config_digest),
+                Node::Step {
+                    step_ordinal: 0,
+                    turn_start: Some(meta),
+                    ..
+                } => Some(meta.config_digest),
                 _ => None,
             })
             .collect();

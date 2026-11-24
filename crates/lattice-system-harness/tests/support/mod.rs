@@ -6,10 +6,11 @@
 #[cfg(feature = "crash-barriers")]
 pub(crate) mod crash;
 use lattice_system_harness::{
-    AssertError, CapturedRequest, CommandOutcome, FAKE_API_KEY, FakeLlmServer, HarnessIntervention,
-    LatticeCommand, LatticeDaemonDriver, LatticeDriver, ProcessTermination, ProviderFixture,
-    ReceiptResult, ResponseGate, ScenarioEvidence, ScenarioSpec, ScenarioWorld, SendExecution,
-    SendOutcome, SendRecord, SlotOutcome, SseScript, Submit, ViewState, parse_record,
+    AssertError, CapturedRequest, CommandOutcome, EntryContent, FAKE_API_KEY, FakeLlmServer,
+    HarnessIntervention, LatticeCommand, LatticeDaemonDriver, LatticeDriver, ProcessTermination,
+    ProviderFixture, ReceiptResult, ResponseGate, ScenarioEvidence, ScenarioSpec, ScenarioWorld,
+    SendExecution, SendOutcome, SendRecord, SlotOutcome, SseScript, Submit, ViewState,
+    parse_record,
 };
 use serde_json::{Value, json};
 use std::{
@@ -77,17 +78,46 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
             .is_some_and(|(sid, tid, _)| sid == session_id && tid == turn_id),
         "关闭结果必须归属本次提交的轮次",
     )?;
-    // 逐条看原始记录：每条 `entry` 属于这一轮，每条 `text` 的节点是这一轮的条目节点。
+    let Some(ReceiptResult::Accepted {
+        start_node,
+        input_nodes,
+        ..
+    }) = outcome.receipt().map(|receipt| &receipt.result)
+    else {
+        return require(false, "接受回执必须为 Accepted");
+    };
+    let allowed_inputs: std::collections::BTreeSet<u64> = input_nodes.iter().copied().collect();
+    // 逐条看原始记录：每条 `step` 属于这一轮、每条 `input` 属于本轮认领输入集合，每条 `text` 的节点是这一轮的条目节点。
     let mut nodes = std::collections::BTreeSet::new();
     for record in &outcome.records {
         if let SendRecord::Entry(entry) = record {
-            require(
-                entry.turn_id == *turn_id,
-                format!("条目节点 {} 属于另一轮次", entry.node),
-            )?;
+            match &entry.content {
+                EntryContent::Step(_) => {
+                    require(
+                        entry.turn_id.as_deref() == Some(turn_id.as_str()),
+                        format!("步骤节点 {} 属于另一轮次", entry.node),
+                    )?;
+                }
+                EntryContent::Input { .. } => {
+                    require(
+                        allowed_inputs.contains(&entry.node),
+                        format!("输入节点 {} 不属于本轮认领的输入集合", entry.node),
+                    )?;
+                }
+                EntryContent::ContextOp { .. } => {
+                    return require(
+                        false,
+                        format!("session send 不应输出上下文操作节点 {}", entry.node),
+                    );
+                }
+            }
             nodes.insert(entry.node);
         }
     }
+    require(
+        nodes.contains(start_node),
+        format!("session send 输出缺少本轮起始步骤节点 {start_node}"),
+    )?;
     require(
         outcome.records.iter().all(|record| match record {
             SendRecord::Text(text) => nodes.contains(&text.node),
@@ -317,7 +347,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
 }
 
 /// 与 `lattice_local::test_support::FRAME_MAGIC` 相同；测试框架不能依赖产品 crate，用同一版本号拼出帧魔数。
-const PROTOCOL_VERSION: u8 = 66;
+const PROTOCOL_VERSION: u8 = 67;
 const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
 
 /// 公开本地 IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
@@ -533,13 +563,14 @@ fn describe(view: &ViewState) -> String {
         .values()
         .map(|entry| {
             let node = entry.node;
-            match entry.step() {
-                Some(step) => {
+            match &entry.content {
+                EntryContent::Step(step) => {
                     let progress = &step.progress;
                     let outcome = step.summary.as_ref().map(|summary| summary.outcome);
                     format!("{node}:step {progress:?} summary={outcome:?}")
                 }
-                None => format!("{node}:user"),
+                EntryContent::Input { .. } => format!("{node}:input"),
+                EntryContent::ContextOp { .. } => format!("{node}:context_op"),
             }
         })
         .collect();
@@ -558,7 +589,7 @@ fn describe(view: &ViewState) -> String {
 /// 视图中这一轮的最后一个 `Step` 条目已带关闭的结局。
 pub(crate) fn turn_closed(view: &ViewState, turn_id: &str) -> bool {
     view.entries.values().any(|entry| {
-        entry.turn_id == turn_id
+        entry.turn_id.as_deref() == Some(turn_id)
             && entry.step().is_some_and(|step| {
                 step.summary
                     .as_ref()

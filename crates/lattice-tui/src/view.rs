@@ -255,19 +255,31 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 agent: name,
                 ..
             } => {
-                turn = Some((*turn_id, *ordinal));
-                agent = Some(name);
-                turns.insert(*turn_id, (*ordinal, name.as_str()));
+                turn = turn_id.map(|id| (id, *ordinal));
+                agent = (!name.is_empty()).then_some(name.as_str());
+                if let Some(id) = turn_id {
+                    turns.insert(*id, (*ordinal, name.as_str()));
+                }
             }
+            Block::ContextOp { .. } => {}
             // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。新条目接在末尾，
             // 这一轮的步骤可能接在别的 USER 块（例如本地未被接受的提交）之后，这时另起标题线，
             // 不显得挂在那个 USER 之下。
-            Block::Step { key, .. } => {
-                if turn.is_some_and(|(id, _)| id != key.turn_id) {
+            Block::Step {
+                key,
+                ordinal,
+                agent: step_agent,
+                ..
+            } => {
+                if let Some(name) = step_agent.as_deref() {
+                    turns.insert(key.turn_id, (*ordinal, name));
+                }
+                if turn.is_none_or(|(id, _)| id != key.turn_id) {
                     turn = None;
-                    if let Some(&(ordinal, name)) = turns.get(&key.turn_id) {
-                        turn = Some((key.turn_id, ordinal));
+                    if let Some(&(ord, name)) = turns.get(&key.turn_id) {
+                        turn = Some((key.turn_id, ord));
                         agent = Some(name);
+                        assistant_header = false;
                         ensure_assistant_header(
                             &mut lines,
                             &mut assistant_header,
@@ -276,14 +288,20 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                             content_w,
                         );
                     }
-                } else if key.ordinal == 0 {
-                    ensure_assistant_header(
-                        &mut lines,
-                        &mut assistant_header,
-                        agent,
-                        turn.map(|(_, n)| n),
-                        content_w,
-                    );
+                } else {
+                    if let Some(&(ord, name)) = turns.get(&key.turn_id) {
+                        turn = Some((key.turn_id, ord));
+                        agent = Some(name);
+                    }
+                    if key.ordinal == 0 {
+                        ensure_assistant_header(
+                            &mut lines,
+                            &mut assistant_header,
+                            agent,
+                            turn.map(|(_, n)| n),
+                            content_w,
+                        );
+                    }
                 }
             }
             Block::User(text) => {

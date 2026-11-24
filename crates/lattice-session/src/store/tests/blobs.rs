@@ -57,7 +57,7 @@ fn assistant_replies_with_images_are_rejected_without_mutating_records() {
 }
 
 #[test]
-fn opening_v10_store_with_dangling_user_image_ref_reports_corruption() {
+fn opening_v11_store_with_dangling_user_image_ref_reports_corruption() {
     let (_dir, layout, db) = store();
     let lock = db.try_lock_session(sid(1)).unwrap();
     accept_prepared(&db, &lock, accept(sid(1), tid(1))).unwrap();
@@ -68,27 +68,30 @@ fn opening_v10_store_with_dangling_user_image_ref_reports_corruption() {
             node: NodeId(1),
         },
         |wire| {
-            wire["message"]["parts"].as_array_mut().unwrap().push(json!({
-                "semantic": {
-                    "image": {
+            wire["input"]["message"]["parts"]
+                .as_array_mut()
+                .unwrap()
+                .push(json!({
+                    "semantic": {
                         "image": {
-                            "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-                            "media_type": "png",
-                            "byte_length": 256
+                            "image": {
+                                "sha256": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+                                "media_type": "png",
+                                "byte_length": 256
+                            }
                         }
-                    }
-                },
-                "replay_state": null
-            }));
+                    },
+                    "replay_state": null
+                }));
         },
     )
-    .expect("测试注入含悬空图片引用的用户节点应成功提交");
+    .expect("测试注入含悬空图片引用的 Input 节点应成功提交");
 
     drop(lock);
     drop(db);
 
     let err = match SessionStore::open(&layout) {
-        Ok(_) => panic!("含悬空图片引用的格式 10 会话库打开时必须报损坏"),
+        Ok(_) => panic!("含悬空图片引用的格式 11 会话库打开时必须报损坏"),
         Err(err) => err,
     };
     assert!(
@@ -97,7 +100,7 @@ fn opening_v10_store_with_dangling_user_image_ref_reports_corruption() {
             StoreError::Corruption { table, key, .. }
                 if table == "nodes" && key == &format!("{}/1", sid(1))
         ),
-        "打开含悬空图片引用用户节点的错误与预期不符：{err:?}"
+        "打开含悬空图片引用 Input 节点的错误与预期不符：{err:?}"
     );
 }
 
@@ -288,15 +291,18 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 
     // 1. 原子性：因设置版本变化被拒时不写图片。
     let mut rejected = accept(sid(1), tid(1));
-    rejected.input = TurnInput::new(vec![
-        TurnInputPart::Text {
-            text: "不应落盘".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img1.clone(),
-        },
-    ])
-    .unwrap();
+    rejected.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![
+            TurnInputPart::Text {
+                text: "不应落盘".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img1.clone(),
+            },
+        ])
+        .unwrap(),
+    )];
     let stale_settings = SessionSettings::for_test(&rejected.config);
     db.create_session(&lock1, project(1), stale_settings, now())
         .unwrap();
@@ -312,15 +318,18 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 
     // 2. 原子性：注入提交失败时图片与节点都不存在。
     let mut faulty = accept(sid(1), tid(1));
-    faulty.input = TurnInput::new(vec![
-        TurnInputPart::Text {
-            text: "提交失败回滚".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img1.clone(),
-        },
-    ])
-    .unwrap();
+    faulty.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![
+            TurnInputPart::Text {
+                text: "提交失败回滚".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img1.clone(),
+            },
+        ])
+        .unwrap(),
+    )];
     faulty.settings_version = db
         .begin_read()
         .unwrap()
@@ -347,21 +356,24 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
     // 3. 接受含图轮次、去重与幂等/冲突判定。
     let lock1 = db.try_lock_session(sid(1)).unwrap();
     let mut turn1 = accept(sid(1), tid(1));
-    turn1.input = TurnInput::new(vec![
-        TurnInputPart::Text {
-            text: "先看".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img1.clone(),
-        },
-        TurnInputPart::Text {
-            text: "再看".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img2.clone(),
-        },
-    ])
-    .unwrap();
+    turn1.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![
+            TurnInputPart::Text {
+                text: "先看".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img1.clone(),
+            },
+            TurnInputPart::Text {
+                text: "再看".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img2.clone(),
+            },
+        ])
+        .unwrap(),
+    )];
     turn1.settings_version = db
         .begin_read()
         .unwrap()
@@ -376,7 +388,7 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 
     // turn_input 返回完整保序片段。
     let stored_parts = db.begin_read().unwrap().turn_input(sid(1), tid(1)).unwrap();
-    assert_eq!(stored_parts, turn1.input.message().parts);
+    assert_eq!(stored_parts, turn1.inputs[0].1.message().parts);
 
     // 相同 TurnId + 相同保序图文 -> Existing。
     assert!(matches!(
@@ -386,21 +398,24 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 
     // 相同 TurnId + 文本相同但图片顺序不同 -> Conflict。
     let mut swapped = turn1.clone();
-    swapped.input = TurnInput::new(vec![
-        TurnInputPart::Text {
-            text: "先看".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img2.clone(),
-        },
-        TurnInputPart::Text {
-            text: "再看".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img1.clone(),
-        },
-    ])
-    .unwrap();
+    swapped.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![
+            TurnInputPart::Text {
+                text: "先看".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img2.clone(),
+            },
+            TurnInputPart::Text {
+                text: "再看".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img1.clone(),
+            },
+        ])
+        .unwrap(),
+    )];
     assert!(matches!(
         db.accept_turn(&lock1, swapped),
         Err(StoreError::Conflict { turn_id }) if turn_id == tid(1)
@@ -408,21 +423,24 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 
     // 相同 TurnId + 图片摘要不同 -> Conflict。
     let mut other_digest = turn1.clone();
-    other_digest.input = TurnInput::new(vec![
-        TurnInputPart::Text {
-            text: "先看".into(),
-        },
-        TurnInputPart::Image {
-            bytes: png_bytes(b"different-image"),
-        },
-        TurnInputPart::Text {
-            text: "再看".into(),
-        },
-        TurnInputPart::Image {
-            bytes: img2.clone(),
-        },
-    ])
-    .unwrap();
+    other_digest.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![
+            TurnInputPart::Text {
+                text: "先看".into(),
+            },
+            TurnInputPart::Image {
+                bytes: png_bytes(b"different-image"),
+            },
+            TurnInputPart::Text {
+                text: "再看".into(),
+            },
+            TurnInputPart::Image {
+                bytes: img2.clone(),
+            },
+        ])
+        .unwrap(),
+    )];
     assert!(matches!(
         db.accept_turn(&lock1, other_digest),
         Err(StoreError::Conflict { turn_id }) if turn_id == tid(1)
@@ -430,24 +448,30 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 
     // 同会话第二轮、不同会话分别复用同一张 img1（并带重复出现）-> blobs 仍只有 2 条。
     let mut turn2 = accept(sid(1), tid(2));
-    turn2.input = TurnInput::new(vec![
-        TurnInputPart::Image {
-            bytes: img1.clone(),
-        },
-        TurnInputPart::Image {
-            bytes: img1.clone(),
-        },
-    ])
-    .unwrap();
+    turn2.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![
+            TurnInputPart::Image {
+                bytes: img1.clone(),
+            },
+            TurnInputPart::Image {
+                bytes: img1.clone(),
+            },
+        ])
+        .unwrap(),
+    )];
     turn2.settings_version = turn1.settings_version;
     db.accept_turn(&lock1, turn2).unwrap();
 
     let lock2 = db.try_lock_session(sid(2)).unwrap();
     let mut turn3 = accept(sid(2), tid(3));
-    turn3.input = TurnInput::new(vec![TurnInputPart::Image {
-        bytes: img1.clone(),
-    }])
-    .unwrap();
+    turn3.inputs = vec![(
+        channel("ipc"),
+        TurnInput::new(vec![TurnInputPart::Image {
+            bytes: img1.clone(),
+        }])
+        .unwrap(),
+    )];
     accept_prepared(&db, &lock2, turn3).unwrap();
 
     // 创建草稿会话 3 并删除，然后对会话 1 rewind 到根节点 0。
@@ -506,7 +530,7 @@ fn blobs_deduplicate_persist_idempotency_atomicity_and_with_blob() {
 }
 
 #[test]
-fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
+fn opening_v10_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
     let img = png_bytes(b"valid-png-data");
     let valid_ref = lattice_conversation::ImageRef::from_bytes(&img).unwrap();
     let valid_key = blob_key(&valid_ref.sha256);
@@ -515,30 +539,35 @@ fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
         let (dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         let mut a = accept(sid(1), tid(1));
-        a.input = TurnInput::new(vec![
-            TurnInputPart::Text { text: "图".into() },
-            TurnInputPart::Image { bytes: img.clone() },
-        ])
-        .unwrap();
+        a.inputs = vec![(
+            channel("ipc"),
+            TurnInput::new(vec![
+                TurnInputPart::Text { text: "图".into() },
+                TurnInputPart::Image { bytes: img.clone() },
+            ])
+            .unwrap(),
+        )];
         accept_prepared(&db, &lock, a).unwrap();
         drop(lock);
         drop(db);
         (dir, layout)
     };
 
-    // 1. 元数据版本 9（即使删去 blobs 表）以 UnsupportedVersion 拒绝打开。
-    {
+    // 1. 元数据版本 9 与 10 均以 UnsupportedVersion 拒绝打开。
+    for old_ver in [9_u32, 10_u32] {
         let (_dir, layout) = seed_store();
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
-        tx.delete_table(BLOBS).unwrap();
+        if old_ver == 9 {
+            tx.delete_table(BLOBS).unwrap();
+        }
         {
             let mut meta = tx.open_table(META).unwrap();
             for (k, v) in [
                 ("store_kind", "\"lattice-session\"".to_owned()),
-                ("store_format_version", "9".to_owned()),
+                ("store_format_version", old_ver.to_string()),
             ] {
-                let mut bytes = 9_u32.to_be_bytes().to_vec();
+                let mut bytes = old_ver.to_be_bytes().to_vec();
                 bytes.extend_from_slice(v.as_bytes());
                 meta.insert(k, bytes.as_slice()).unwrap();
             }
@@ -547,19 +576,19 @@ fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
         drop(raw);
         let err = SessionStore::open(&layout)
             .err()
-            .expect("v9 会话库必须拒绝打开");
+            .expect("旧版本会话库必须拒绝打开");
         assert!(matches!(
             err,
             StoreError::UnsupportedVersion {
-                found: 9,
-                supported: 10,
+                found,
+                supported: 11,
                 ..
-            }
+            } if found == old_ver
         ));
     }
 
-    // 2. blobs 值版本头不是 10 时，打开与 with_blob 均报 UnsupportedVersion。
-    for bad_ver in [9_u32, 11_u32] {
+    // 2. blobs 值版本头不是 11 时，打开与 with_blob 均报 UnsupportedVersion。
+    for bad_ver in [10_u32, 12_u32] {
         let (_dir, layout) = seed_store();
         {
             let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -580,13 +609,13 @@ fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
             StoreError::UnsupportedVersion {
                 ref table,
                 found,
-                supported: 10,
+                supported: 11,
                 ..
             } if table == "blobs" && found == bad_ver
         ));
     }
 
-    // 2b. 用户消息未规范化（如空文本片段或相邻文本未合并）在打开时按损坏拒绝。
+    // 2b. Input 消息未规范化（如空文本片段或相邻文本未合并）在打开时按损坏拒绝。
     for bad_parts in [
         json!([]),
         json!([{"semantic": {"text": {"text": ""}}, "replay_state": null}]),
@@ -604,7 +633,7 @@ fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
                 node: NodeId(1),
             },
             |wire| {
-                wire["message"]["parts"] = bad_parts;
+                wire["input"]["message"]["parts"] = bad_parts;
             },
         )
         .unwrap();
@@ -685,7 +714,10 @@ fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
         let (_dir, layout, db) = store();
         let lock = db.try_lock_session(sid(1)).unwrap();
         let mut a = accept(sid(1), tid(1));
-        a.input = TurnInput::new(vec![TurnInputPart::Image { bytes: img.clone() }]).unwrap();
+        a.inputs = vec![(
+            channel("ipc"),
+            TurnInput::new(vec![TurnInputPart::Image { bytes: img.clone() }]).unwrap(),
+        )];
         accept_prepared(&db, &lock, a).unwrap();
         db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
         drop(lock);
@@ -720,7 +752,7 @@ fn opening_v9_and_corrupted_blobs_and_node_refs_fail_with_typed_errors() {
                 node: NodeId(1),
             },
             |wire| {
-                let image = &mut wire["message"]["parts"][1]["semantic"]["image"]["image"];
+                let image = &mut wire["input"]["message"]["parts"][1]["semantic"]["image"]["image"];
                 if mismatch == "media_type" {
                     image["media_type"] = json!("jpeg");
                 } else {

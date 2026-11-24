@@ -44,6 +44,7 @@ fn seed(
             chrono::Utc::now(),
         )
         .unwrap();
+    let channel = super::execute::default_submit_channel();
     fixture
         .store
         .accept_turn(
@@ -52,7 +53,11 @@ fn seed(
                 session_id: sid,
                 turn_id: turn,
                 project_path: fixture.root.project_path(),
-                input: TurnInput::text("old request".into()).expect("构造测试输入"),
+                trigger_channel: channel.clone(),
+                inputs: vec![(
+                    channel,
+                    TurnInput::text("old request".into()).expect("构造测试输入"),
+                )],
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,

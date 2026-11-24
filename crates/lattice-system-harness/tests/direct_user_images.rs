@@ -40,20 +40,20 @@ fn accepted(command: CommandOutcome) -> Result<SendExecution, AssertError> {
     Ok(execution)
 }
 
-/// 本轮用户消息条目的片段（含结构化图片引用）。
+/// 本轮用户输入条目的片段（含结构化图片引用）。
 fn user_message_parts(execution: &SendExecution) -> Result<Vec<Value>, AssertError> {
     let entry = execution
         .entries()
         .into_iter()
-        .find(|entry| entry.user_ordinal().is_some())
+        .find(|entry| entry.is_input())
         .ok_or_else(|| AssertError::StdoutMissing {
-            expected: "逐行输出中缺少本轮用户消息条目".into(),
+            expected: "逐行输出中缺少本轮用户输入条目".into(),
         })?;
-    entry.raw["content"]["message"]["parts"]
+    entry.raw["content"]["input"]["message"]["parts"]
         .as_array()
         .cloned()
         .ok_or_else(|| AssertError::StdoutMissing {
-            expected: "用户消息条目的片段列表必须为数组".into(),
+            expected: "用户输入条目的片段列表必须为数组".into(),
         })
 }
 
@@ -71,33 +71,40 @@ fn assert_image_part(part: &Value, media_type: &str, byte_length: u64) -> Result
     )
 }
 
-/// 五种协议里，本轮“文本 + PNG + JPEG”用户消息的内容块（见 `docs/architecture/llm/protocols.md`）。
-fn expected_user_blocks(protocol: ProviderProtocol, text: &str) -> [Value; 3] {
+/// 五种协议里，本轮“文本 + PNG + JPEG”用户输入经模型上下文投影后的内容块（见 `docs/architecture/llm/protocols.md`）。
+fn expected_user_blocks(protocol: ProviderProtocol, text: &str) -> [Value; 4] {
+    let open = format!("<lattice-context channel=\"ipc\">\n{text}");
+    let close = "</lattice-context>";
     match protocol {
         ProviderProtocol::ChatCompletions => [
-            json!({"type": "text", "text": text}),
+            json!({"type": "text", "text": open}),
             json!({"type": "image_url", "image_url": {"url": format!("data:image/png;base64,{PNG_B64}")}}),
             json!({"type": "image_url", "image_url": {"url": format!("data:image/jpeg;base64,{JPEG_B64}")}}),
+            json!({"type": "text", "text": close}),
         ],
         ProviderProtocol::Responses => [
-            json!({"type": "input_text", "text": text}),
+            json!({"type": "input_text", "text": open}),
             json!({"type": "input_image", "image_url": format!("data:image/png;base64,{PNG_B64}"), "detail": "auto"}),
             json!({"type": "input_image", "image_url": format!("data:image/jpeg;base64,{JPEG_B64}"), "detail": "auto"}),
+            json!({"type": "input_text", "text": close}),
         ],
         ProviderProtocol::AnthropicMessages => [
-            json!({"type": "text", "text": text}),
+            json!({"type": "text", "text": open}),
             json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": PNG_B64}}),
             json!({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": JPEG_B64}}),
+            json!({"type": "text", "text": close}),
         ],
         ProviderProtocol::GenerateContent => [
-            json!({"text": text}),
+            json!({"text": open}),
             json!({"inlineData": {"mimeType": "image/png", "data": PNG_B64}}),
             json!({"inlineData": {"mimeType": "image/jpeg", "data": JPEG_B64}}),
+            json!({"text": close}),
         ],
         ProviderProtocol::Interactions => [
-            json!({"type": "text", "text": text}),
+            json!({"type": "text", "text": open}),
             json!({"type": "image", "mime_type": "image/png", "data": PNG_B64}),
             json!({"type": "image", "mime_type": "image/jpeg", "data": JPEG_B64}),
+            json!({"type": "text", "text": close}),
         ],
     }
 }

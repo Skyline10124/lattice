@@ -7,6 +7,7 @@
 //! （`TurnDetail`、`StepDetail`、`AttemptDetail`、`SlotDetail`、`SessionLog`、`SessionUsage`），
 //! 不调用生产派生函数（如 `resolve_*`、`UsageSummary::from_attempts`）或摘要函数。
 
+use lattice_context::{Channel, ContextEdit, ContextInput, ContextOp};
 use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, IndeterminateCause, MessagePart, MessageRole,
     MessageSemantic, ModelMessageAddress, NativeMessage, ResultPayload, SessionId,
@@ -20,7 +21,7 @@ use lattice_session::store::{
     Notice, NoticeLevel, PublicTurnOutcome, RetryNotice, SessionListRow as StoreSessionListRow,
     SessionLog, SessionRecord, SessionUsage, SlotDetail, SlotProgress, SlotReason, SlotState,
     StepDetail, StepEnd, StepKey, StepProgress, StopCause, Timestamp, TurnDetail,
-    TurnExecutionLimits, TurnLogSummary, TurnSummary, TurnUsageRow,
+    TurnExecutionLimits, TurnLogSummary, TurnStartMeta, TurnSummary, TurnUsageRow,
 };
 
 use super::{
@@ -50,40 +51,55 @@ struct TurnSpec {
     turn_id: TurnId,
     turn_ordinal: u64,
     effort: Option<Effort>,
-    user_parts: Vec<MessagePart<BoundToolCall>>,
+    user_parts: Vec<MessageSemantic<BoundToolCall>>,
     steps: Vec<StepSpec>,
 }
 
-fn user_text_parts(text: &str) -> Vec<MessagePart<BoundToolCall>> {
-    vec![MessagePart {
-        semantic: MessageSemantic::Text {
-            text: text.to_owned(),
-        },
-        replay_state: None,
+fn channel_ipc() -> Channel {
+    Channel::parse("ipc").expect("固定通道名 ipc 应合法")
+}
+
+fn channel_tui() -> Channel {
+    Channel::parse("tui").expect("固定通道名 tui 应合法")
+}
+
+fn user_text_parts(text: &str) -> Vec<MessageSemantic<BoundToolCall>> {
+    vec![MessageSemantic::Text {
+        text: text.to_owned(),
     }]
 }
 
-fn user_interleaved_image_parts(before: &str, after: &str) -> Vec<MessagePart<BoundToolCall>> {
+fn user_interleaved_image_parts(before: &str, after: &str) -> Vec<MessageSemantic<BoundToolCall>> {
     vec![
-        MessagePart {
-            semantic: MessageSemantic::Text {
-                text: before.to_owned(),
-            },
-            replay_state: None,
+        MessageSemantic::Text {
+            text: before.to_owned(),
         },
-        MessagePart {
-            semantic: MessageSemantic::Image {
-                image: image_ref_sample(),
-            },
-            replay_state: None,
+        MessageSemantic::Image {
+            image: image_ref_sample(),
         },
-        MessagePart {
-            semantic: MessageSemantic::Text {
-                text: after.to_owned(),
-            },
-            replay_state: None,
+        MessageSemantic::Text {
+            text: after.to_owned(),
         },
     ]
+}
+
+pub(super) fn sample_context_op_entry() -> ConversationEntry {
+    let op = ContextOp::new(
+        channel_tui(),
+        vec![
+            ContextEdit::omit_node(NodeId(1)),
+            ContextEdit::strip_reasoning(NodeId(2)),
+        ],
+    )
+    .expect("固定 ContextOp 应合法");
+    ConversationEntry::ContextOp {
+        node: NodeId(4),
+        content: Node::ContextOp {
+            parent: NodeId(3),
+            accepted_at: ts_ended(),
+            op,
+        },
+    }
 }
 
 struct StepSpec {
@@ -482,29 +498,18 @@ fn hand_usage_summary(attempts: &[&AttemptRecord]) -> UsageSummary {
 
 fn build_scenario(spec: TurnSpec) -> BuiltScenario {
     assert!(!spec.steps.is_empty(), "真实 Turn 至少包含一个 Step");
-    let user_node_id = NodeId(1);
-    let user_node = Node::UserMessage {
+    let input_node_id = NodeId(1);
+    let start_node_id = NodeId(2);
+    let input_node = Node::Input {
         parent: NodeId(0),
-        turn_id: spec.turn_id,
         accepted_at: ts_accepted(),
-        agent_name: agent_coder(),
-        model: model_gpt5(),
-        provider: provider_openai(),
-        effort: spec.effort,
-        limits: turn_limits(),
-        config_digest: hex_32(CONFIG_DIGEST_HEX),
-        message: NativeMessage {
-            role: MessageRole::User,
-            provider_origin: None,
-            parts: spec.user_parts,
-        },
+        input: ContextInput::new(channel_ipc(), spec.user_parts).expect("固定用户输入应合法"),
     };
 
     let mut entries = Vec::with_capacity(1 + spec.steps.len());
-    entries.push(ConversationEntry::UserMessage {
-        node: user_node_id,
-        content: user_node,
-        ordinal: spec.turn_ordinal,
+    entries.push(ConversationEntry::Input {
+        node: input_node_id,
+        content: input_node,
     });
 
     let mut step_details = Vec::with_capacity(spec.steps.len());
@@ -513,7 +518,7 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
 
     for (idx, step_spec) in spec.steps.iter().enumerate() {
         let step_ordinal = idx as u32;
-        let node_id = NodeId(user_node_id.0 + 1 + u64::from(step_ordinal));
+        let node_id = NodeId(start_node_id.0 + u64::from(step_ordinal));
         let parent_id = NodeId(node_id.0 - 1);
 
         let is_continue = matches!(
@@ -619,10 +624,23 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
             ))
         };
 
+        let turn_start = (step_ordinal == 0).then(|| TurnStartMeta {
+            accepted_at: ts_accepted(),
+            trigger_channel: channel_ipc(),
+            input_nodes: vec![input_node_id],
+            agent_name: agent_coder(),
+            model: model_gpt5(),
+            provider: provider_openai(),
+            effort: spec.effort,
+            limits: turn_limits(),
+            config_digest: hex_32(CONFIG_DIGEST_HEX),
+        });
+
         let raw_step_node = Node::Step {
             parent: parent_id,
             turn_id: spec.turn_id,
             step_ordinal,
+            turn_start,
             progress: step_spec.progress.clone(),
             attempts: step_spec.attempts.clone(),
             reply: step_spec.reply.clone(),
@@ -634,6 +652,7 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
             node: node_id,
             content: raw_step_node,
             step: step_detail.clone(),
+            ordinal: (step_ordinal == 0).then_some(spec.turn_ordinal),
             retries,
             summary: entry_summary,
         });
@@ -644,12 +663,13 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
     let turn_summary =
         hand_turn_summary(&last_step.progress, &last_step.attempts, &last_step.slots);
     let usage = hand_usage_summary(&all_attempts);
-    let tip_node_id = NodeId(user_node_id.0 + total_steps as u64);
+    let tip_node_id = NodeId(input_node_id.0 + total_steps as u64);
 
     let turn_detail = TurnDetail {
         turn_id: spec.turn_id,
         session_id: spec.session_id,
-        user_node: user_node_id,
+        start_node: start_node_id,
+        input_nodes: vec![input_node_id],
         agent_name: agent_coder(),
         accepted_at: ts_accepted(),
         ended_at: last_step.updated_at,
@@ -672,20 +692,16 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
     });
     log_rows.push(LogRow {
         node: NodeHeader {
-            id: user_node_id,
+            id: input_node_id,
             parent: Some(NodeId(0)),
-            turn_id: Some(spec.turn_id),
-            kind: NodeKind::UserMessage,
+            turn_id: None,
+            kind: NodeKind::Input,
         },
         current: false,
-        turn_start: Some(TurnLogSummary {
-            turn_id: spec.turn_id,
-            summary: turn_summary,
-            agent_name: agent_coder(),
-        }),
+        turn_start: None,
     });
     for ordinal in 0..total_steps {
-        let id = NodeId(user_node_id.0 + 1 + ordinal as u64);
+        let id = NodeId(start_node_id.0 + ordinal as u64);
         log_rows.push(LogRow {
             node: NodeHeader {
                 id,
@@ -696,7 +712,11 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
                 },
             },
             current: id == tip_node_id,
-            turn_start: None,
+            turn_start: (ordinal == 0).then(|| TurnLogSummary {
+                turn_id: spec.turn_id,
+                summary: turn_summary.clone(),
+                agent_name: agent_coder(),
+            }),
         });
     }
 
@@ -1115,9 +1135,114 @@ pub(super) fn register(book: &mut CaseBook) {
         "node_kind",
         NodeKind {
             ("root", NodeKind::Root => NodeKind::Root),
-            ("user_message", NodeKind::UserMessage => NodeKind::UserMessage),
+            ("input", NodeKind::Input => NodeKind::Input),
+            ("context_op", NodeKind::ContextOp => NodeKind::ContextOp),
             ("step", NodeKind::Step { .. } => NodeKind::Step { ordinal: 0 }),
         }
+    );
+
+    enum_fragments!(
+        book,
+        "context_edit",
+        ContextEdit {
+            ("omit_node", ContextEdit::OmitNode { .. } => ContextEdit::omit_node(NodeId(1))),
+            (
+                "replace_input",
+                ContextEdit::ReplaceInput { .. } => ContextEdit::replace_input(
+                    NodeId(1),
+                    user_interleaved_image_parts("替换前文本", "替换后文本"),
+                )
+                .expect("固定 ReplaceInput 编辑应合法")
+            ),
+            (
+                "replace_step",
+                ContextEdit::ReplaceStep { .. } => ContextEdit::replace_step(
+                    NodeId(2),
+                    "精简后的助手结论",
+                )
+                .expect("固定 ReplaceStep 编辑应合法")
+            ),
+            (
+                "omit_invocation",
+                ContextEdit::OmitInvocation { .. } => ContextEdit::omit_invocation(invocation_id_1())
+            ),
+            (
+                "replace_tool_result",
+                ContextEdit::ReplaceToolResult { .. } => ContextEdit::replace_tool_result(
+                    invocation_id_1(),
+                    "{\"lines\":42}",
+                )
+                .expect("固定 ReplaceToolResult 编辑应合法")
+            ),
+            (
+                "strip_reasoning",
+                ContextEdit::StripReasoning { .. } => ContextEdit::strip_reasoning(NodeId(2))
+            ),
+            (
+                "replace_image",
+                ContextEdit::ReplaceImage { .. } => ContextEdit::replace_image(
+                    NodeId(1),
+                    image_ref_sample(),
+                    Some("[图片摘要：状态面板正常]".to_owned()),
+                )
+                .expect("固定 ReplaceImage 编辑应合法")
+            ),
+        }
+    );
+    book.insert(
+        "fragment/context_edit/replace_image_without_text",
+        &ContextEdit::replace_image(NodeId(1), image_ref_sample(), None)
+            .expect("无替代文本的 ReplaceImage 编辑应合法"),
+    );
+
+    let context_input_full = ContextInput::new(
+        channel_ipc(),
+        user_interleaved_image_parts("请结合截图检查服务连通性：", "定位报错原因"),
+    )
+    .expect("固定多模态 ContextInput 应合法");
+    let context_input_minimal =
+        ContextInput::new(channel_tui(), user_text_parts("请查看 Cargo.toml 的行数"))
+            .expect("固定纯文本 ContextInput 应合法");
+    book.insert_struct_pair("context_input", &context_input_full, &context_input_minimal);
+
+    let context_op_entry = sample_context_op_entry();
+    let ConversationEntry::ContextOp {
+        content: ref raw_context_op_node,
+        ..
+    } = context_op_entry
+    else {
+        unreachable!()
+    };
+    if let Node::ContextOp { op, .. } = raw_context_op_node {
+        book.insert("fragment/context_op/full", op);
+    }
+
+    let turn_start_meta_full = TurnStartMeta {
+        accepted_at: ts_accepted(),
+        trigger_channel: channel_ipc(),
+        input_nodes: vec![NodeId(1)],
+        agent_name: agent_coder(),
+        model: model_gpt5(),
+        provider: provider_openai(),
+        effort: Some(Effort::High),
+        limits: turn_limits(),
+        config_digest: hex_32(CONFIG_DIGEST_HEX),
+    };
+    let turn_start_meta_minimal = TurnStartMeta {
+        accepted_at: ts_accepted(),
+        trigger_channel: channel_tui(),
+        input_nodes: Vec::new(),
+        agent_name: agent_coder(),
+        model: model_gpt5(),
+        provider: provider_openai(),
+        effort: None,
+        limits: turn_limits(),
+        config_digest: hex_32(CONFIG_DIGEST_HEX),
+    };
+    book.insert_struct_pair(
+        "turn_start_meta",
+        &turn_start_meta_full,
+        &turn_start_meta_minimal,
     );
 
     enum_fragments!(
@@ -1347,8 +1472,8 @@ pub(super) fn register(book: &mut CaseBook) {
         }
     );
 
-    let ConversationEntry::UserMessage {
-        content: ref raw_user_node,
+    let ConversationEntry::Input {
+        content: ref raw_input_node,
         ..
     } = success.entries[0]
     else {
@@ -1361,29 +1486,44 @@ pub(super) fn register(book: &mut CaseBook) {
     else {
         unreachable!()
     };
+    let ConversationEntry::Step {
+        content: ref raw_finish_step_node,
+        ..
+    } = success.entries[2]
+    else {
+        unreachable!()
+    };
 
     enum_fragments!(
         book,
         "node",
         Node {
             ("root", Node::Root => Node::Root),
-            ("user_message", Node::UserMessage { .. } => raw_user_node.clone()),
+            ("input", Node::Input { .. } => raw_input_node.clone()),
+            ("context_op", Node::ContextOp { .. } => raw_context_op_node.clone()),
             ("step", Node::Step { .. } => raw_continue_step_node.clone()),
         }
     );
+    book.insert("fragment/node/step_continuation", raw_finish_step_node);
 
-    // ConversationEntry::Step 片段直接取 Continue 步骤（summary 为 None，验证 skip_serializing_if 省略形态）。
+    // ConversationEntry::Step 主片段取 Step 0（ordinal 为 Some(1)、summary 为 None，验证省略形态），
+    // 并补充 step_continuation（Step 1：ordinal 为 None、summary 为 Some）。
     enum_fragments!(
         book,
         "conversation_entry",
         ConversationEntry {
-            ("user_message", ConversationEntry::UserMessage { .. } => success.entries[0].clone()),
+            ("input", ConversationEntry::Input { .. } => success.entries[0].clone()),
+            ("context_op", ConversationEntry::ContextOp { .. } => context_op_entry.clone()),
             ("step", ConversationEntry::Step { .. } => success.entries[1].clone()),
         }
     );
     book.insert(
-        "fragment/conversation_entry/user_message_with_image",
+        "fragment/conversation_entry/input_with_image",
         &retried.entries[0],
+    );
+    book.insert(
+        "fragment/conversation_entry/step_continuation",
+        &success.entries[2],
     );
 
     let turn_summary_full = indeterminate.turn_detail.summary.clone();
@@ -1440,11 +1580,11 @@ pub(super) fn register(book: &mut CaseBook) {
         &store_session_list_row_minimal(),
     );
 
-    let node_header_full = success.session_log.nodes[1].node.clone();
+    let node_header_full = success.session_log.nodes[2].node.clone();
     let node_header_minimal = success.session_log.nodes[0].node.clone();
     book.insert_struct_pair("node_header", &node_header_full, &node_header_minimal);
 
-    let log_row_full = success.session_log.nodes[1].clone();
+    let log_row_full = success.session_log.nodes[2].clone();
     let log_row_minimal = success.session_log.nodes[0].clone();
     book.insert_struct_pair("log_row", &log_row_full, &log_row_minimal);
 

@@ -3,6 +3,9 @@
 
 //! 全局事务会话库：Session、会话树、Step/Turn、调用槽位与只读投影。
 
+pub use lattice_context::{
+    Channel, ContextEdit, ContextError, ContextInput, ContextOp, EffectiveContext,
+};
 pub use lattice_store::StateLayout;
 
 pub mod model;

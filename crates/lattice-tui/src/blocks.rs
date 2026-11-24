@@ -53,7 +53,7 @@ fn slot_of(block: &Block, counts: &mut [usize; 6]) -> Slot {
             ..
         }) => return Slot::Closing(*turn),
         Block::Tool { id, .. } => return Slot::Tool(id.clone()),
-        Block::UserTurn { .. } | Block::Step { .. } => 0,
+        Block::UserTurn { .. } | Block::ContextOp { .. } | Block::Step { .. } => 0,
         Block::User(_) | Block::CommentedUser(_) | Block::RejectedUser(_) => 1,
         // 生成中的文字由条目中的回复取代时仍是同一块。
         Block::Assistant(_) | Block::HistoryAssistant(_) => 2,
@@ -112,7 +112,7 @@ impl BlockList {
             .enumerate()
             .skip(start.saturating_add(1))
             .find(|(_, entry)| match &entry.block {
-                Block::UserTurn { .. } | Block::Step { .. } => true,
+                Block::UserTurn { .. } | Block::ContextOp { .. } | Block::Step { .. } => true,
                 Block::Status(status) => status.retry.is_none() && status.closing.is_none(),
                 _ => false,
             })
@@ -123,9 +123,13 @@ impl BlockList {
     /// 节点的段开头位置。
     pub(crate) fn node_start(&self, node: NodeId) -> Option<usize> {
         self.entries.iter().position(|entry| {
-            matches!(entry.block,
-                Block::UserTurn { node: Some(known), .. } | Block::Step { node: known, .. }
-                    if known == node)
+            matches!(
+                entry.block,
+                Block::UserTurn { node: Some(known), .. }
+                    | Block::ContextOp { node: known }
+                    | Block::Step { node: known, .. }
+                    if known == node
+            )
         })
     }
 

@@ -1691,7 +1691,7 @@ fn redb_commit_windows_read_conclusions_without_writes_and_preserve_facts() {
                 .view
                 .entries
                 .values()
-                .filter(|entry| entry.turn_id == tid)
+                .filter(|entry| entry.node <= head.position)
                 .map(|entry| entry.raw.clone())
                 .collect();
             assert_eq!(preserved, old_entries);
@@ -2286,7 +2286,8 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         );
         let next = parse_send_stdout(&next.stdout, next.exit_code());
         let next_user = &next.entries()[0];
-        assert_eq!(next_user.user_ordinal(), Some(2));
+        assert!(next_user.is_input());
+        assert_eq!(next.entries()[1].turn_ordinal(), Some(2));
         let reread =
             support::history(&world, timeout(&world, &spec), sid, next_user.node, 1).unwrap();
         assert_eq!(reread, finished);
@@ -2737,7 +2738,13 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
             .filter(|m| m["role"] == "user")
             .map(|m| m["content"].clone())
             .collect();
-        assert_eq!(users, vec![json!("cancel input"), json!("new input")]);
+        assert_eq!(
+            users,
+            vec![
+                json!("<lattice-context channel=\"ipc\">\ncancel input\n</lattice-context>"),
+                json!("<lattice-context channel=\"ipc\">\nnew input\n</lattice-context>"),
+            ]
+        );
         let tree = read_json(
             &world,
             &spec,
@@ -3002,11 +3009,22 @@ fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
             assert!(head["value"]["settings_version"].as_str().is_some());
             let mut watcher = Watcher::open(&world, timeout(&world, &spec), SESSION);
             let view = watcher.initial();
-            let node = if replacement { 3 } else { 1 };
-            assert_eq!(view.entries[&node].raw["content"]["model"], "replacement");
-            assert_eq!(view.entries[&node].raw["content"]["effort"], "off");
+            let input_node = if replacement { 3 } else { 1 };
+            let start_node = input_node + 1;
+            assert_eq!(
+                view.entries[&start_node].raw["content"]["turn_start"]["model"],
+                "replacement"
+            );
+            assert_eq!(
+                view.entries[&start_node].raw["content"]["turn_start"]["effort"],
+                "off"
+            );
             let accepted = turn_lookup(&world, timeout(&world, &spec), OTHER);
-            assert_eq!(accepted["value"]["turn"]["user_node"], node);
+            assert_eq!(accepted["value"]["turn"]["start_node"], start_node);
+            assert_eq!(
+                accepted["value"]["turn"]["input_nodes"],
+                json!([input_node])
+            );
             let duplicate = ipc(
                 &world,
                 timeout(&world, &spec),

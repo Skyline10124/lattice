@@ -118,17 +118,35 @@ pub(super) fn text(
     })
 }
 
-pub(super) fn user(node: u64, turn_id: TurnId, ordinal: u64, text: &str) -> ConversationEntry {
+pub(super) fn user(node: u64, _turn_id: TurnId, _ordinal: u64, text: &str) -> ConversationEntry {
     serde_json::from_value(json!({
-        "kind": "user_message",
+        "kind": "input",
         "node": node,
-        "ordinal": ordinal,
         "content": {
-            "kind":"user_message","parent":node.saturating_sub(1),"turn_id":turn_id,"accepted_at":AT,
-            "agent_name":"unused","model":"model-a","provider":"openai",
-            "limits":{"timeout_secs":300,"max_model_steps":32,"max_model_attempts":3},
-            "config_digest":"0".repeat(64),
-            "message":{"role":"user","parts":[{"semantic":{"text":{"text":text}}}]}
+            "kind": "input",
+            "parent": node.saturating_sub(1),
+            "accepted_at": AT,
+            "input": {
+                "channel": "ipc",
+                "message": {"role": "user", "parts": [{"semantic": {"text": {"text": text}}}]}
+            }
+        }
+    }))
+    .unwrap()
+}
+
+pub(super) fn context_op(node: u64, target: u64) -> ConversationEntry {
+    serde_json::from_value(json!({
+        "kind": "context_op",
+        "node": node,
+        "content": {
+            "kind": "context_op",
+            "parent": node.saturating_sub(1),
+            "accepted_at": AT,
+            "op": {
+                "channel": "ipc",
+                "edits": [{"kind": "omit_node", "node": target}]
+            }
         }
     }))
     .unwrap()
@@ -145,6 +163,7 @@ pub(super) fn turns(range: std::ops::RangeInclusive<u64>) -> Vec<ConversationEnt
             [
                 user(2 * n - 1, numbered_turn(n), n, &format!("prompt-{n}")),
                 step(2 * n, numbered_turn(n), 0)
+                    .turn_ordinal(n)
                     .text(&format!("answer-{n}"))
                     .stopped("failed")
                     .entry(),
@@ -162,6 +181,8 @@ pub(super) struct StepEntry {
     node: u64,
     turn_id: TurnId,
     ordinal: u32,
+    turn_ordinal: u64,
+    input_nodes: Vec<u64>,
     progress: Value,
     parts: Option<Vec<Value>>,
     attempts: Vec<Value>,
@@ -171,10 +192,17 @@ pub(super) struct StepEntry {
 }
 
 pub(super) fn step(node: u64, turn_id: TurnId, ordinal: u32) -> StepEntry {
+    let input_nodes = if ordinal == 0 && node > 1 {
+        vec![node - 1]
+    } else {
+        Vec::new()
+    };
     StepEntry {
         node,
         turn_id,
         ordinal,
+        turn_ordinal: 1,
+        input_nodes,
         progress: json!({"progress":"requesting"}),
         parts: None,
         attempts: Vec::new(),
@@ -198,6 +226,10 @@ fn diagnostic() -> Value {
 }
 
 impl StepEntry {
+    pub(super) fn turn_ordinal(mut self, ordinal: u64) -> Self {
+        self.turn_ordinal = ordinal;
+        self
+    }
     pub(super) fn text(self, text: &str) -> Self {
         self.parts(json!([{"semantic":{"text":{"text":text}}}]))
     }
@@ -323,12 +355,28 @@ impl StepEntry {
         let reply = self
             .parts
             .map(|parts| json!({"role":"assistant","origin":"open_ai_compatible","parts":parts}));
+        let turn_start = (self.ordinal == 0).then(|| {
+            json!({
+                "accepted_at": AT,
+                "agent_name": "unused",
+                "model": "model-a",
+                "provider": "openai",
+                "limits": {
+                    "timeout_secs": 300,
+                    "max_model_steps": 32,
+                    "max_model_attempts": 3
+                },
+                "config_digest": "0".repeat(64),
+                "trigger_channel": "ipc",
+                "input_nodes": self.input_nodes,
+            })
+        });
         let mut value = json!({
             "kind": "step",
             "node": self.node,
             "content": {
                 "kind":"step","parent":self.node.saturating_sub(1),"turn_id":self.turn_id,
-                "step_ordinal":self.ordinal,"progress":self.progress,"attempts":self.attempts,
+                "step_ordinal":self.ordinal,"turn_start":turn_start,"progress":self.progress,"attempts":self.attempts,
                 "reply":reply,"slots":self.slots,"updated_at":AT
             },
             "step": {
@@ -337,6 +385,9 @@ impl StepEntry {
             },
             "retries": self.retries,
         });
+        if self.ordinal == 0 {
+            value["ordinal"] = json!(self.turn_ordinal);
+        }
         if let Some(summary) = self.summary {
             value["summary"] = summary;
         }
@@ -388,14 +439,30 @@ pub(super) fn receipt(turn_id: TurnId, result: SubmissionResult) -> LocalUpdate 
 }
 
 pub(super) fn accepted(turn_id: TurnId) -> SubmissionResult {
+    accepted_at(turn_id, &[1], 2)
+}
+
+pub(super) fn accepted_at(
+    turn_id: TurnId,
+    input_nodes: &[u64],
+    start_node: u64,
+) -> SubmissionResult {
     SubmissionResult::Accepted {
-        turn: turn_view(turn_id),
+        turn: turn_view_at(turn_id, input_nodes, start_node),
     }
 }
 
 pub(super) fn turn_view(turn_id: TurnId) -> lattice_local::TurnView {
+    turn_view_at(turn_id, &[1], 2)
+}
+
+pub(super) fn turn_view_at(
+    turn_id: TurnId,
+    input_nodes: &[u64],
+    start_node: u64,
+) -> lattice_local::TurnView {
     serde_json::from_value(json!({
-        "session_id":SESSION,"turn_id":turn_id,"user_node":1,"agent_name":"unused",
+        "session_id":SESSION,"turn_id":turn_id,"start_node":start_node,"input_nodes":input_nodes,"agent_name":"unused",
         "accepted_at":AT,"ended_at":AT,"summary":summary("failed", json!({"progress":"reserved"})),
         "usage":lattice_local::UsageSummary::from_attempts([])
     }))

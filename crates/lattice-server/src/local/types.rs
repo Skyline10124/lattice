@@ -14,9 +14,7 @@ pub(crate) use lattice_ipc::{
 pub(crate) use lattice_session::store::Page;
 
 #[cfg(test)]
-pub(crate) use lattice_conversation::{
-    Effort, MessageRole, ModelAttemptKey, ModelId, ModelRef, NativeMessage, ProviderId,
-};
+pub(crate) use lattice_conversation::{Effort, ModelAttemptKey, ModelId, ModelRef, ProviderId};
 #[cfg(test)]
 pub(crate) use lattice_ipc::{
     AuthLoginOutcome, AuthStatus, Availability, CancelStatus, ConfigurationRequirement,

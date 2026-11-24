@@ -64,9 +64,11 @@ fn assert_live_text_turn(
     let text_parts = |text: &str| json!([{"replay_state":null,"semantic":{"text":{"text":text}}}]);
     require(
         entries.len() == 2
-            && entries.iter().all(|entry| entry.turn_id == turn_id)
-            && entries[0].user_ordinal() == Some(ordinal)
-            && entries[0].raw["content"]["message"]["parts"] == text_parts(prompt)
+            && entries[0].is_input()
+            && entries[0].turn_id.is_none()
+            && entries[0].raw["content"]["input"]["message"]["parts"] == text_parts(prompt)
+            && entries[1].turn_id.as_deref() == Some(turn_id)
+            && entries[1].turn_ordinal() == Some(ordinal)
             && entries[1].raw["content"]["reply"]["parts"] == text_parts(reply)
             && entries[1].raw["content"]["slots"] == json!([])
             && entries[1].raw["summary"]
@@ -135,8 +137,12 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
             captures[0].model == "dl-plain"
                 && messages.len() == 2
                 && messages[0].0 == "system"
-                && messages[1] == ("user", "ping"),
-            "假 provider 必须收到目标模型 dl-plain 与原样当前用户输入",
+                && messages[1]
+                    == (
+                        "user",
+                        "<lattice-context channel=\"ipc\">\nping\n</lattice-context>",
+                    ),
+            "假 provider 必须收到目标模型 dl-plain 与经模型上下文投影的当前用户输入",
         )?;
         Ok(())
     })();
@@ -225,16 +231,26 @@ fn direct_local_session_reopen_after_external_change() {
             captures.iter().all(|capture| capture.model == "dl-reopen")
                 && first_messages.len() == 2
                 && first_messages[0].0 == "system"
-                && first_messages[1] == ("user", "ping")
+                && first_messages[1]
+                    == (
+                        "user",
+                        "<lattice-context channel=\"ipc\">\nping\n</lattice-context>",
+                    )
                 && second_messages.len() == 4
                 && second_messages[0].0 == "system"
                 && second_messages[1..]
                     == [
-                        ("user", "ping"),
+                        (
+                            "user",
+                            "<lattice-context channel=\"ipc\">\nping\n</lattice-context>",
+                        ),
                         ("assistant", "pong-one"),
-                        ("user", "again"),
+                        (
+                            "user",
+                            "<lattice-context channel=\"ipc\">\nagain\n</lattice-context>",
+                        ),
                     ],
-            "两次真实请求必须携带原样输入以及上一轮用户与助手上下文",
+            "两次真实请求必须携带经模型上下文投影的输入以及上一轮用户与助手上下文",
         )?;
 
         let turn_ids: Vec<_> = [&first, &second]

@@ -107,8 +107,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 r.nodes.insert((sid(1), NodeId(4)), Node::Root);
             }
             "user_parent" => {
-                let Node::UserMessage { parent, .. } =
-                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
+                let Node::Input { parent, .. } = r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
                 else {
                     unreachable!()
                 };
@@ -128,7 +127,7 @@ fn read_validation_rejects_broken_relations_and_shapes() {
                 r.turn_index.insert(tid(2), r.turn_index[&tid(1)]);
             }
             "turn_index_session" => r.turn_index.get_mut(&tid(1)).unwrap().session_id = sid(2),
-            "turn_index_node" => r.turn_index.get_mut(&tid(1)).unwrap().node = NodeId(2),
+            "turn_index_node" => r.turn_index.get_mut(&tid(1)).unwrap().node = NodeId(1),
             "turn_index_root" => r.turn_index.get_mut(&tid(1)).unwrap().node = NodeId(0),
             "config_missing" => r.configs.clear(),
             "config_digest" => {
@@ -263,36 +262,43 @@ fn read_validation_rejects_broken_relations_and_shapes() {
             "strict open missed {case}"
         );
     }
-    for case in ["user_provider", "consistent_invalid_provider"] {
+    for case in ["start_provider", "consistent_invalid_provider"] {
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
         let tx = raw.begin_write().unwrap();
         overwrite_records(&tx, &base);
         {
             let mut nodes = tx.open_table(NODES).unwrap();
-            let user_key = node_key(sid(1), NodeId(1));
-            let mut user_wire: Value = {
-                let value = nodes.get(user_key.as_slice()).unwrap().unwrap();
+            let start_key = node_key(sid(1), NodeId(2));
+            let mut start_wire: Value = {
+                let value = nodes.get(start_key.as_slice()).unwrap().unwrap();
                 serde_json::from_slice(&value.value()[4..]).unwrap()
             };
-            user_wire["provider"] = json!("Bad_id");
+            start_wire["turn_start"]["provider"] = json!("Bad_id");
+            if case == "consistent_invalid_provider" {
+                for attempt in start_wire["attempts"].as_array_mut().unwrap() {
+                    attempt["origin"]["provider_id"] = json!("Bad_id");
+                }
+                start_wire["reply"]["provider_origin"]["provider_id"] = json!("Bad_id");
+            }
             nodes
-                .insert(user_key.as_slice(), encode(&user_wire).unwrap().as_slice())
+                .insert(
+                    start_key.as_slice(),
+                    encode(&start_wire).unwrap().as_slice(),
+                )
                 .unwrap();
             if case == "consistent_invalid_provider" {
-                for n in [2, 3] {
-                    let step_key = node_key(sid(1), NodeId(n));
-                    let mut step_wire: Value = {
-                        let value = nodes.get(step_key.as_slice()).unwrap().unwrap();
-                        serde_json::from_slice(&value.value()[4..]).unwrap()
-                    };
-                    for attempt in step_wire["attempts"].as_array_mut().unwrap() {
-                        attempt["origin"]["provider_id"] = json!("Bad_id");
-                    }
-                    step_wire["reply"]["provider_origin"]["provider_id"] = json!("Bad_id");
-                    nodes
-                        .insert(step_key.as_slice(), encode(&step_wire).unwrap().as_slice())
-                        .unwrap();
+                let step_key = node_key(sid(1), NodeId(3));
+                let mut step_wire: Value = {
+                    let value = nodes.get(step_key.as_slice()).unwrap().unwrap();
+                    serde_json::from_slice(&value.value()[4..]).unwrap()
+                };
+                for attempt in step_wire["attempts"].as_array_mut().unwrap() {
+                    attempt["origin"]["provider_id"] = json!("Bad_id");
                 }
+                step_wire["reply"]["provider_origin"]["provider_id"] = json!("Bad_id");
+                nodes
+                    .insert(step_key.as_slice(), encode(&step_wire).unwrap().as_slice())
+                    .unwrap();
             }
         }
         tx.commit().unwrap();
@@ -402,7 +408,7 @@ fn ordinary_operations_load_only_referenced_turns() {
         entry_ordinals(&[read
             .entry(NodeRef {
                 session_id: sid(1),
-                node: NodeId(3)
+                node: NodeId(4)
             })
             .unwrap()]),
         vec![1]
@@ -464,15 +470,14 @@ fn strict_open_rejects_corruption() {
 
 #[test]
 fn local_reads_reject_broken_references() {
-    for case in ["user_identity", "index_address", "step_missing"] {
+    for case in ["step_identity", "index_address", "step_missing"] {
         let (_dir, _layout, db) = store();
         let (lock, _) = running(&db, sid(1), tid(1), 1, 1);
         let tx = db.db.begin_write().unwrap();
         let mut r = load_write(&tx).unwrap();
         match case {
-            "user_identity" => {
-                let Node::UserMessage { turn_id, .. } =
-                    r.nodes.get_mut(&(sid(1), NodeId(1))).unwrap()
+            "step_identity" => {
+                let Node::Step { turn_id, .. } = r.nodes.get_mut(&(sid(1), NodeId(2))).unwrap()
                 else {
                     unreachable!()
                 };

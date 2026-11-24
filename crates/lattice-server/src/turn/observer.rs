@@ -25,7 +25,7 @@ pub(crate) struct PushState {
 #[derive(Default)]
 struct ObservationState {
     owner_generation: u64,
-    user_node: Option<NodeId>,
+    start_node: Option<NodeId>,
     current: Option<NodeId>,
     attempt: Option<AttemptSegments>,
     closed_turn: Option<lattice_conversation::TurnId>,
@@ -139,7 +139,7 @@ impl ObserverSink {
     }
     pub(crate) fn replace_path(&self, position: NodeId) {
         let mut state = self.state.lock().expect("observation lock");
-        state.user_node = None;
+        state.start_node = None;
         state.current = (position != NodeId(0)).then_some(position);
         state.attempt = None;
         state.closed_turn = None;
@@ -205,15 +205,20 @@ impl ObserverSink {
         let mut state = self.state.lock().expect("observation lock");
         let mut nodes = Vec::new();
         match &event {
-            TurnEvent::TurnStarted { user_node, .. } => {
-                state.user_node = Some(*user_node);
-                state.current = Some(NodeId(user_node.0 + 1));
+            TurnEvent::TurnStarted {
+                input_nodes,
+                start_node,
+                ..
+            } => {
+                state.start_node = Some(*start_node);
+                state.current = Some(*start_node);
                 state.closed_turn = None;
-                nodes.extend([*user_node, NodeId(user_node.0 + 1)]);
+                nodes.extend(input_nodes.iter().copied());
+                nodes.push(*start_node);
             }
             TurnEvent::ModelStarted { key, .. } => {
-                if let Some(user) = state.user_node {
-                    state.current = Some(NodeId(user.0 + 1 + u64::from(key.model_step_ordinal)));
+                if let Some(start) = state.start_node {
+                    state.current = Some(NodeId(start.0 + u64::from(key.model_step_ordinal)));
                 }
                 if state.closed_turn == Some(key.turn_id) {
                     state.closed_turn = None;
@@ -394,10 +399,7 @@ impl ObserverSink {
     }
 }
 fn content(entry: &ConversationEntry) -> &Node {
-    match entry {
-        ConversationEntry::UserMessage { content, .. }
-        | ConversationEntry::Step { content, .. } => content,
-    }
+    entry.content()
 }
 fn session_record(
     read: &SessionRead,

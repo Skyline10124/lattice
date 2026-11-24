@@ -45,17 +45,21 @@ async fn run_turn_result_and_saved_nodes_preserve_contract_fields() {
         serde_json::to_value(&detail.steps[0].attempts[0].origin).unwrap(),
         serde_json::json!({"protocol":"chat-completions","provider_id":"local"})
     );
-    let Node::UserMessage { provider, .. } = read
+    let Node::Step {
+        turn_start: Some(meta),
+        ..
+    } = read
         .node(NodeRef {
             session_id: result.turn.session_id,
-            node: detail.user_node,
+            node: detail.start_node,
         })
         .unwrap()
     else {
-        panic!("user message")
+        panic!("预期读取到带 turn_start 的 Step 0 节点")
     };
-    assert_eq!(provider, "local");
-    assert_eq!(detail.user_node, NodeId(1));
+    assert_eq!(meta.provider, "local");
+    assert_eq!(detail.input_nodes, vec![NodeId(1)]);
+    assert_eq!(detail.start_node, NodeId(2));
     assert_eq!(read.log(result.turn.session_id).unwrap().nodes.len(), 3);
     let node = read
         .node(NodeRef {
@@ -308,25 +312,26 @@ async fn run_turn_request_with_images_preserves_order_and_reads_blobs_via_sessio
     let read = fixture.store.begin_read().expect("打开会话库读事务");
     let log = read.log(result.turn.session_id).expect("读取会话日志");
     assert_eq!(log.nodes.len(), 3);
-    let user_node_id = log
+    let input_node_id = log
         .nodes
         .iter()
-        .find(|row| row.node.kind == NodeKind::UserMessage)
-        .expect("日志应包含用户节点")
+        .find(|row| row.node.kind == NodeKind::Input)
+        .expect("日志应包含输入节点")
         .node
         .id;
-    let Node::UserMessage { message, .. } = read
+    let Node::Input { input, .. } = read
         .node(NodeRef {
             session_id: result.turn.session_id,
-            node: user_node_id,
+            node: input_node_id,
         })
-        .expect("读取用户节点")
+        .expect("读取输入节点")
     else {
-        panic!("期望读取到 UserMessage 节点");
+        panic!("期望读取到 Input 节点");
     };
     assert_eq!(
-        message.parts, expected_parts,
-        "会话节点用户消息必须保留图文顺序与 ImageRef"
+        input.message().parts,
+        expected_parts,
+        "会话节点输入消息必须保留图文顺序与 ImageRef"
     );
     assert_eq!(
         read.turn_input(result.turn.session_id, result.turn.turn_id)
@@ -356,7 +361,7 @@ async fn run_turn_request_with_images_preserves_order_and_reads_blobs_via_sessio
         seen_parts,
         vec![
             MessagePart::semantic_only(MessageSemantic::Text {
-                text: "图一之前".into()
+                text: "<lattice-context channel=\"ipc\">\n图一之前".into()
             }),
             MessagePart::semantic_only(MessageSemantic::Image { image: ref_png }),
             MessagePart::semantic_only(MessageSemantic::Text {
@@ -364,7 +369,7 @@ async fn run_turn_request_with_images_preserves_order_and_reads_blobs_via_sessio
             }),
             MessagePart::semantic_only(MessageSemantic::Image { image: ref_webp }),
             MessagePart::semantic_only(MessageSemantic::Text {
-                text: "图二之后".into()
+                text: "图二之后\n</lattice-context>".into()
             }),
         ]
     );

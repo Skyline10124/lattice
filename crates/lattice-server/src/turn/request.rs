@@ -1,49 +1,41 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! 模型步骤请求的组装：读取父链历史、转换冻结工具目录并构造步骤请求。
+//! 模型步骤请求的组装：经会话库有效上下文读路径投影历史、转换冻结工具目录并构造步骤请求。
 
 use lattice_agent::ModelStepRequest;
-use lattice_conversation::{BoundToolCall, ConversationItem, NativeMessage, SessionId};
+use lattice_context::ContextInput;
+use lattice_conversation::{ConversationItem, SessionId, TurnId};
 use lattice_llm::ChatRequest;
 use lattice_session::store::*;
 
-pub(super) fn history(
+/// 从当前执行中步骤的父节点归约并投影模型上下文历史。
+pub(super) fn step_history(
     read: &SessionRead,
     session_id: SessionId,
+    turn_id: TurnId,
+    step_ordinal: u32,
 ) -> lattice_session::store::Result<Vec<ConversationItem>> {
-    let mut current = read.session(session_id)?.current;
-    let mut items = Vec::new();
-    while current != NodeId(0) {
-        let node = read.node(NodeRef {
-            session_id,
-            node: current,
-        })?;
-        let content = node.step_content();
-        match node {
-            Node::UserMessage {
-                parent, message, ..
-            } => {
-                items.push(ConversationItem::Message(message));
-                current = parent;
-            }
-            Node::Step { parent, .. } => {
-                if let Some(content) = content {
-                    items.push(ConversationItem::Step(content));
-                }
-                current = parent;
-            }
-            Node::Root => {
-                return Err(StoreError::Corruption {
-                    table: "nodes".into(),
-                    key: current.0.to_string(),
-                    detail: "nonzero root".into(),
-                });
-            }
+    let current = read.session(session_id)?.current;
+    let step_parent = match read.node(NodeRef {
+        session_id,
+        node: current,
+    })? {
+        Node::Step {
+            parent,
+            turn_id: actual,
+            step_ordinal: actual_ordinal,
+            ..
+        } if actual == turn_id && actual_ordinal == step_ordinal => parent,
+        _ => {
+            return Err(StoreError::Corruption {
+                table: "nodes".into(),
+                key: format!("{session_id}/{}", current.0),
+                detail: format!("当前位置节点与执行中的轮次 {turn_id} 步骤 {step_ordinal} 不匹配"),
+            });
         }
-    }
-    items.reverse();
-    Ok(items)
+    };
+    Ok(read.effective_context(session_id, step_parent)?.project())
 }
 
 fn tool_definitions(config: &FrozenTurnConfig) -> Vec<lattice_llm::ToolDefinition> {
@@ -80,15 +72,23 @@ pub(super) fn step_request(
     }
 }
 
-/// 本轮首步请求的预览：当前父链历史加上尚未写入的用户消息，与接受后首步实际发送的请求相同。
+/// 本轮首步请求的预览：在当前路径有效上下文之上叠加待提交输入并投影，与接受后首步实际发送的请求相同。
 pub(super) fn first_step_chat_request(
     read: &SessionRead,
     session: SessionId,
     config: &FrozenTurnConfig,
-    message: &NativeMessage<BoundToolCall>,
+    pending: &[ContextInput],
 ) -> lattice_session::store::Result<ChatRequest> {
-    let mut items = history(read, session)?;
-    items.push(ConversationItem::Message(message.clone()));
+    let position = read.session(session)?.current;
+    let items = read
+        .effective_context_with_pending(session, position, pending)?
+        .project();
+    if items.is_empty() {
+        return Err(StoreError::InvalidInput {
+            field: "context",
+            detail: "当前路径有效模型上下文为空，无法触发新轮次".into(),
+        });
+    }
     Ok(step_request(session, config, items).chat_request())
 }
 
@@ -272,6 +272,7 @@ mod tests {
             .expect("创建测试会话");
 
         // 先完成一轮历史对话，验证预览与首步实际请求在非空历史链上同样一致。
+        let channel = super::super::execute::default_submit_channel();
         let first_turn =
             lattice_conversation::TurnId::parse("00000000-0000-4000-8000-000000000011")
                 .expect("解析首轮 TurnId");
@@ -282,7 +283,11 @@ mod tests {
                     session_id: session,
                     turn_id: first_turn,
                     project_path: project_path.clone(),
-                    input: TurnInput::text("先看上一轮文本".into()).expect("构造首轮文本输入"),
+                    trigger_channel: channel.clone(),
+                    inputs: vec![(
+                        channel.clone(),
+                        TurnInput::text("先看上一轮文本".into()).expect("构造首轮文本输入"),
+                    )],
                     config: config.clone(),
                     accepted_at: chrono::Utc::now(),
                     settings_version,
@@ -310,7 +315,7 @@ mod tests {
                     usage: None,
                     usage_kind: lattice_conversation::UsageCompleteness::Partial,
                     cost: None,
-                    message: NativeMessage::new(
+                    message: lattice_conversation::NativeMessage::new(
                         lattice_conversation::MessageRole::Assistant,
                         Some(lattice_conversation::ReplayOrigin {
                             protocol: lattice_conversation::Protocol::ChatCompletions,
@@ -344,10 +349,11 @@ mod tests {
             },
         ])
         .expect("构造图文交错输入");
+        let (pending_context_input, _) = second_input.clone().into_context_input(channel.clone());
 
         let preview = {
             let read = store.begin_read().expect("打开接受前读事务");
-            first_step_chat_request(&read, session, &config, second_input.message())
+            first_step_chat_request(&read, session, &config, &[pending_context_input])
                 .expect("构造接受前首步预览请求")
         };
 
@@ -361,7 +367,8 @@ mod tests {
                     session_id: session,
                     turn_id: second_turn,
                     project_path,
-                    input: second_input,
+                    trigger_channel: channel.clone(),
+                    inputs: vec![(channel, second_input)],
                     config,
                     accepted_at: chrono::Utc::now(),
                     settings_version,
@@ -374,13 +381,27 @@ mod tests {
             let persisted_config = read
                 .turn_config(session, second_turn)
                 .expect("读取已持久化的冻结配置");
-            let items = history(&read, session).expect("读取接受后的父链历史");
+            let items = step_history(&read, session, second_turn, 0)
+                .expect("读取接受后的有效模型上下文历史");
             step_request(session, &persisted_config, items).chat_request()
         };
 
         assert_eq!(
             preview, persisted,
             "接受前由 first_step_chat_request 生成的预览必须与接受后首步实际请求完全相等"
+        );
+        // 核验首轮文本与第二轮图文交错输入均已通过通道边界投影为 `<lattice-context channel="ipc">`。
+        let first_user_text = match &persisted.messages[1] {
+            ConversationItem::Message(msg) => match &msg.parts[0].semantic {
+                lattice_conversation::MessageSemantic::Text { text } => text.as_str(),
+                other => panic!("预期首轮用户消息首段为文本，实际为 {other:?}"),
+            },
+            other => panic!("预期首轮历史项为用户消息，实际为 {other:?}"),
+        };
+        assert_eq!(
+            first_user_text,
+            "<lattice-context channel=\"ipc\">\n先看上一轮文本\n</lattice-context>",
+            "投影后的用户消息必须携带默认 ipc 通道标记"
         );
     }
 }
