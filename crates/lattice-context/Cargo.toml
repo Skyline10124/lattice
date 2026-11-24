@@ -1,0 +1,17 @@
+[package]
+name = "lattice-context"
+version.workspace = true
+license.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+description = "Pure synchronous model context domain: Channel, ContextInput, ContextOp/ContextEdit, single-pass resolve, validate_op, inspect, and project (ADR 0014)"
+
+[features]
+default = []
+
+[dependencies]
+lattice-conversation = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }

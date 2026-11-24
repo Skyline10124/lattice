@@ -18,7 +18,7 @@ Tool 参数经 [`lattice-conversation`](../../../crates/lattice-conversation/src
 
 空串、数组、标量、畸形 JSON 不能作为 Tool 参数对象。拒绝尝试不产生可执行调用或 InvocationId，也不把该尝试的助手正文作为成功消息；停止尝试的部分内容不保存，不成为回复，也不发给 provider。超限批次不截断为可执行批次。这些限制让每个调用槽位始终对应一条完整有效回复。
 
-工具结果 `StoredToolResult` 以 `ResultPayload` 按结局保存载荷：成功输出按 65,536 字节规范 JSON 上限保存正文或 `OutputTooLarge` 摘要；失败载荷为 `ToolError { code, message }`，保存字符串机器错误码 `code` 与说明文本 `message`（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）；不确定结果保存 `IndeterminateCause`，未执行结果不带载荷。provider 投影将 `Failed(ToolError)` 编码为 `{"error":{"code":<code 字符串>,"message":<message>}}`（`message` 按 UTF-8 字符边界限制在 4,096 字节内），见[调用槽位](steps.md#调用槽位)。
+工具结果 `StoredToolResult` 以 `ResultPayload` 按结局保存载荷：成功输出按 65,536 字节规范 JSON 上限保存正文或 `OutputTooLarge` 摘要；失败载荷为 `ToolError { code, message }`，保存字符串机器错误码 `code` 与说明文本 `message`（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）；不确定结果保存 `IndeterminateCause`，未执行结果不带载荷。provider 投影将 `Failed(ToolError)` 编码为 `{"error":{"code":<code 字符串>,"message":<message>}}`（`message` 按 UTF-8 字符边界裁剪，使其规范 JSON 字符串编码不超过 65,536 字节，即 `MAX_TOOL_CONTENT_BYTES`），见[调用槽位](steps.md#调用槽位)。
 
 ### 用户图片与单轮输入规范化
 

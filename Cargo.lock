@@ -2269,6 +2269,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "lattice-context"
+version = "0.1.0"
+dependencies = [
+ "lattice-conversation",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "lattice-conversation"
 version = "0.1.0"
 dependencies = [

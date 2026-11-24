@@ -10,6 +10,7 @@ members = [
     "crates/lattice-im",
     "crates/lattice-session",
     "crates/lattice-conversation",
+    "crates/lattice-context",
     "crates/lattice-agent",
     "crates/lattice-tui",
     "crates/lattice-cli",
@@ -37,6 +38,7 @@ lattice-server   = { path = "crates/lattice-server" }
 lattice-im       = { path = "crates/lattice-im" }
 lattice-session  = { path = "crates/lattice-session" }
 lattice-conversation = { path = "crates/lattice-conversation" }
+lattice-context = { path = "crates/lattice-context" }
 lattice-agent    = { path = "crates/lattice-agent" }
 lattice-tui      = { path = "crates/lattice-tui" }
 lattice-profile  = { path = "crates/lattice-profile" }

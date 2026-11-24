@@ -10,8 +10,8 @@
 use std::str::FromStr;
 
 use lattice_conversation::{
-    IdParseError, InvocationId, ModelAttemptKey, ModelMessageAddress, SessionId, ToolCallAddress,
-    TurnId, arguments_digest, canonical_json,
+    IdParseError, InvocationId, ModelAttemptKey, ModelMessageAddress, NodeId, SessionId,
+    ToolCallAddress, TurnId, arguments_digest, canonical_json,
 };
 use serde_json::{Value, json};
 
@@ -811,4 +811,47 @@ fn image_semantic_and_input_modality_serde_exact_and_roundtrip() {
         encoded_modalities, r#"["text","image","audio","video"]"#,
         "InputModality 列表 JSON 输出不匹配"
     );
+}
+
+// ============================================================================
+// g. NodeId 透明整数序列化、排序一致与非法 JSON 拒绝
+// ============================================================================
+
+#[test]
+fn node_id_transparent_json_roundtrip_ordering_and_rejection() {
+    let cases = [
+        (NodeId(0), "0"),
+        (NodeId(42), "42"),
+        (NodeId(u64::MAX), "18446744073709551615"),
+    ];
+
+    for (node, expected_json) in cases {
+        let encoded = serde_json::to_string(&node).expect("NodeId 序列化应成功");
+        assert_eq!(
+            encoded, expected_json,
+            "NodeId 应透明编码为无符号 JSON 整数"
+        );
+        let decoded: NodeId = serde_json::from_str(&encoded).expect("NodeId 反序列化应成功");
+        assert_eq!(decoded, node, "NodeId 序列化往返应相等");
+    }
+
+    assert!(
+        NodeId(0) < NodeId(42) && NodeId(42) < NodeId(u64::MAX),
+        "NodeId 排序应与内部 u64 数值序一致"
+    );
+
+    for (label, invalid_json) in [
+        ("负数", "-1"),
+        ("数字字符串", "\"42\""),
+        ("零字符串", "\"0\""),
+        ("浮点数", "1.5"),
+        ("带小数点的零", "0.0"),
+        ("超出 u64 上限", "18446744073709551616"),
+        ("空值", "null"),
+    ] {
+        assert!(
+            serde_json::from_str::<NodeId>(invalid_json).is_err(),
+            "NodeId 反序列化必须拒绝{label}：{invalid_json}"
+        );
+    }
 }

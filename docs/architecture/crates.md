@@ -6,7 +6,7 @@ status: active
 
 > 类型：架构合同
 > 上位依据：[项目宪章](../governance/charter.md)、[工程规范](../development/engineering.md)
-> 决策记录：[ADR 0011](../adr/0011-im-gateway-inside-backend.md)
+> 决策记录：[ADR 0011](../adr/0011-im-gateway-inside-backend.md)、[ADR 0014](../adr/0014-model-context-domain.md)
 
 本合同规定本地 IPC 协议（`lattice-ipc`）、本地前端客户端门面（`lattice-local`）、后台协调服务（`lattice-server`）、进程内 IM 网关库（`lattice-im`）、独立后台宿主（`lattice-daemon`）与前端（`lattice-cli`、`lattice-tui`）的职责切分、类型归属、依赖边界门禁与线上形状快照门禁。
 
@@ -39,6 +39,7 @@ flowchart LR
     LLM --> NET
     IPC --> SESSION
     IPC --> CONV
+    CTX["lattice-context"] --> CONV
 ```
 
 | Crate | 持有的状态与类型 | 执行的规则 | 对外接口 |
@@ -69,13 +70,13 @@ flowchart LR
 | IM 平台凭据、组件托管与进程内服务句柄 | `lattice-server`（[`im_auth.rs`](../../crates/lattice-server/src/im_auth.rs)、[`local/components.rs`](../../crates/lattice-server/src/local/components.rs)、[`local/service.rs`](../../crates/lattice-server/src/local/service.rs)，经根模块导出） | `ImAuthStore` 与零化包装 `ImToken`（不实现 `Debug` 或 `Display`）由 `lattice-server` 持有并供进程内组件（如 `lattice-im`）只读访问；`ComponentRegistration` 与 `ComponentRemountHandle` 供 `lattice-daemon` 挂载与重新挂载进程内组件；`Service` 额外只读暴露后台启动期信任根字节 `tls_roots_der()`，使 `lattice-im` 与 `lattice-daemon` 无需依赖 `lattice-llm` |
 | 模型查询与模型/凭据展示类型 | `lattice-ipc`（[`models.rs`](../../crates/lattice-ipc/src/models.rs)、[`auth.rs`](../../crates/lattice-ipc/src/auth.rs)，经根模块导出） | 后台在调用 `lattice-llm` 前将 IPC `ModelCandidateQuery` 转为 `lattice-llm` 查询，在脱敏完成后将 `lattice-llm` 的模型候选与凭据状态逐字段转为 `lattice-ipc` 展示类型；不经 JSON 往返，也不重新计算可用性、价格、档位或告警，转换测试直接针对手写契约值断言枚举全分支及结构体 `full`/`minimal` 形态（仅测试使用的反向转换保持 `#[cfg(test)]`） |
 | 供应商可用性诊断文案 | `lattice-llm`（[`availability.rs`](../../crates/lattice-llm/src/availability.rs)） | 诊断文案由 `lattice-llm::Availability::diagnostic` 单一持有，后台在 [`local/presentation.rs`](../../crates/lattice-server/src/local/presentation.rs) 结合自身配置目录下的 `<config_dir>/providers.toml` 生成 `ProviderAuthStatus.diagnostic: Option<String>`（`Ready` 为 `None`）并随 `AuthStatus` 与 `AuthLoginResult::SignedIn` 经 IPC 下发；`lattice-ipc` 与前端不再重复维护诊断文案或本地拼接配置路径 |
-| 会话与对话领域值类型 | `lattice-session`、`lattice-conversation` | 持久格式、校验与存储事务归原 crate 持有；`lattice-ipc` 仅按线上消息所需显式选择性重导出领域只读值类型，再由 `lattice-local` 扁平重导出给前端，不重导出 `SessionStore` 或写入接口 |
+| 会话、对话与模型上下文领域值类型 | `lattice-session`、`lattice-conversation`、`lattice-context` | 持久格式、校验、归约与存储事务归原 crate 持有；`lattice-ipc` 仅按线上消息所需显式选择性重导出领域只读值类型，再由 `lattice-local` 扁平重导出给前端，不重导出 `SessionStore` 或写入接口 |
 | 共用的 `--drain-timeout` 时长解析 | [`lattice-ipc`](../../crates/lattice-ipc/src/lib.rs)（私有模块 [`drain_timeout.rs`](../../crates/lattice-ipc/src/drain_timeout.rs)，经根模块显式导出） | `DrainTimeout` 与 `parse_drain_timeout` 只用于命令行参数解析，不实现 `serde`、不进入线上快照；`lattice-daemon` 直接使用 `lattice-ipc` 的导出，`lattice-local` 为 CLI 重导出所需条目 |
 | 前端与后台托管消费路径 | `lattice-tui`、`lattice-cli`、`lattice-im`、`lattice-daemon` | 内部直接依赖（`dependencies` 与 `build-dependencies`）受白名单约束（`dev-dependencies` 允许按需用于跨前端与后台测试）：`lattice-tui` 只依赖 `lattice-local`；`lattice-cli` 只依赖 `lattice-local` 与 `lattice-tui`；`lattice-im` 内部直接依赖仅限 `lattice-server`、`lattice-ipc`、`lattice-store` 与 `net-guard`，且整个工作区中只有 `lattice-daemon` 允许依赖 `lattice-im`（含 `dev-dependencies`）；后台守护进程由独立的 `lattice-daemon` 二进制承担 |
 
 ## 依赖边界门禁
 
-[`xtask/src/crate_boundary.rs`](../../xtask/src/crate_boundary.rs) 同时执行七条内部直接依赖检查（`RULES`）、一条内部独占消费限制检查（`EXCLUSIVE_CONSUMER_RULES`）与三条普通依赖闭包检查（`CLOSURE_RULES`）；门禁在本地 `cargo xtask ci` 与 GitHub Actions（`ci.yml`、`full-gate.yml`）中一并运行，并以中文输出总结、分组标签与违规/异常诊断（包名、依赖段名、`target` 表达式、依赖改名与 Cargo 原始错误保持原文）。
+[`xtask/src/crate_boundary.rs`](../../xtask/src/crate_boundary.rs) 同时执行八条内部直接依赖检查（`RULES`）、一条内部独占消费限制检查（`EXCLUSIVE_CONSUMER_RULES`）与三条普通依赖闭包检查（`CLOSURE_RULES`）；门禁在本地 `cargo xtask ci` 与 GitHub Actions（`ci.yml`、`full-gate.yml`）中一并运行，并以中文输出总结、分组标签与违规/异常诊断（包名、依赖段名、`target` 表达式、依赖改名与 Cargo 原始错误保持原文）。
 
 ### 内部直接依赖规则
 
@@ -83,9 +84,10 @@ flowchart LR
 
 | 受检包 | 内部直接依赖规则 |
 | --- | --- |
-| `lattice-ipc` | 只允许依赖 `lattice-session`、`lattice-conversation`、`lattice-store` |
+| `lattice-context` | 只允许依赖 `lattice-conversation` |
+| `lattice-ipc` | 只允许依赖 `lattice-session`、`lattice-conversation`、`lattice-context`、`lattice-store` |
 | `lattice-tui` | 只允许依赖 `lattice-local` |
-| `lattice-local` | 只允许依赖 `lattice-ipc`、`lattice-conversation`、`lattice-store` |
+| `lattice-local` | 只允许依赖 `lattice-ipc`、`lattice-conversation`、`lattice-context`、`lattice-store` |
 | `lattice-cli` | 只允许依赖 `lattice-local`、`lattice-tui` |
 | `lattice-daemon` | 只允许依赖 `lattice-server`、`lattice-ipc`、`lattice-store`、`lattice-im` |
 | `lattice-im` | 只允许依赖 `lattice-server`、`lattice-ipc`、`lattice-store`、`net-guard` |

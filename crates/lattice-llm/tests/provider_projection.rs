@@ -1392,7 +1392,7 @@ fn structured_result_outcomes_and_large_success() {
     use lattice_conversation::ToolError;
     let rejected = ToolError {
         code: "capability_not_granted".into(),
-        message: "界".repeat(2000),
+        message: "界".repeat(22_000),
     };
     let variants = [
         success(
@@ -1471,7 +1471,7 @@ fn structured_result_outcomes_and_large_success() {
                 ),
                 2 => assert_eq!(
                     json,
-                    serde_json::json!({"error":{"code":"capability_not_granted","message":"界".repeat(1365)}})
+                    serde_json::json!({"error":{"code":"capability_not_granted","message":"界".repeat(21_844)}})
                 ),
                 3 => assert_eq!(
                     json,
