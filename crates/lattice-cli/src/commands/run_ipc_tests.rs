@@ -391,7 +391,7 @@ pub(super) fn detail(id: TurnId, outcome: &str) -> TurnDetail {
     } else {
         json!({"progress":"closed","end":end})
     };
-    serde_json::from_value(json!({"session_id":sid(),"turn_id":id,"user_node":1,"agent_name":"test","accepted_at":"2026-10-17T00:00:00Z","ended_at":"2026-10-17T00:00:01Z","summary":{"outcome":if outcome=="reserved"{"failed"}else{outcome},"progress":progress,"notice":if outcome=="completed"{Value::Null}else{json!({"level":"error","text":"exact notice"})}},"usage":lattice_local::UsageSummary::from_attempts([]),"steps":[{"node":2,"key":{"turn_id":id,"ordinal":0},"progress":progress,"end":end,"attempts":[],"slots":[],"updated_at":"2026-10-17T00:00:01Z"}]})).unwrap()
+    serde_json::from_value(json!({"session_id":sid(),"turn_id":id,"start_node":2,"input_nodes":[1],"agent_name":"test","accepted_at":"2026-10-17T00:00:00Z","ended_at":"2026-10-17T00:00:01Z","summary":{"outcome":if outcome=="reserved"{"failed"}else{outcome},"progress":progress,"notice":if outcome=="completed"{Value::Null}else{json!({"level":"error","text":"exact notice"})}},"usage":lattice_local::UsageSummary::from_attempts([]),"steps":[{"node":2,"key":{"turn_id":id,"ordinal":0},"progress":progress,"end":end,"attempts":[],"slots":[],"updated_at":"2026-10-17T00:00:01Z"}]})).unwrap()
 }
 pub(super) fn head(id: TurnId, owner: bool) -> SessionHead {
     SessionHead {
@@ -416,6 +416,21 @@ pub(super) fn entry(id: TurnId, outcome: &str) -> Box<ConversationEntry> {
             parent: NodeId(1),
             turn_id: id,
             step_ordinal: 0,
+            turn_start: Some(lattice_local::TurnStartMeta {
+                accepted_at: turn.accepted_at,
+                trigger_channel: lattice_local::Channel::parse("ipc").expect("解析测试通道"),
+                input_nodes: vec![NodeId(1)],
+                agent_name: lattice_local::AgentName::parse("test").unwrap(),
+                model: lattice_local::ModelId::parse("test").unwrap(),
+                provider: lattice_local::ProviderId::parse("openai-compatible").unwrap(),
+                effort: None,
+                limits: lattice_session::store::TurnExecutionLimits {
+                    timeout_secs: lattice_session::store::TurnTimeout::default(),
+                    max_model_steps: 32,
+                    max_model_attempts: 1,
+                },
+                config_digest: [0; 32],
+            }),
             progress: turn.summary.progress.clone(),
             attempts: vec![],
             reply: (outcome == "completed")
@@ -424,6 +439,7 @@ pub(super) fn entry(id: TurnId, outcome: &str) -> Box<ConversationEntry> {
             updated_at: turn.ended_at,
         },
         step: turn.steps[0].clone(),
+        ordinal: Some(1),
         retries: vec![],
         summary: Some(turn.summary),
     })
@@ -642,24 +658,18 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
                 latest.steps[1].key.ordinal = 1;
             }
             if user_position {
-                *middle = ConversationEntry::UserMessage {
+                *middle = ConversationEntry::Input {
                     node: NodeId(1),
-                    ordinal: 1,
-                    content: Node::UserMessage {
-                        effort: None,
+                    content: Node::Input {
                         parent: NodeId(0),
-                        turn_id: id,
                         accepted_at: latest.accepted_at,
-                        agent_name: lattice_local::AgentName::parse("test").unwrap(),
-                        model: lattice_local::ModelId::parse("test").unwrap(),
-                        provider: lattice_local::ProviderId::parse("test").unwrap(),
-                        limits: lattice_session::store::TurnExecutionLimits {
-                            timeout_secs: lattice_session::store::TurnTimeout::default(),
-                            max_model_steps: 32,
-                            max_model_attempts: 1,
-                        },
-                        config_digest: [0; 32],
-                        message: lattice_session::test_helpers::user_msg("input"),
+                        input: lattice_local::ContextInput::new(
+                            lattice_local::Channel::parse("ipc").expect("解析测试通道"),
+                            vec![lattice_local::MessageSemantic::Text {
+                                text: "input".into(),
+                            }],
+                        )
+                        .expect("构造测试输入"),
                     },
                 };
             }

@@ -16,10 +16,10 @@ use super::{
     },
     non_utf8_workspace_path, provider_openai,
     session::{
-        scenario_cancelled, scenario_indeterminate_no_result, scenario_orphan_executing,
-        scenario_orphan_requesting, scenario_orphan_reserved, scenario_retry_then_success,
-        scenario_success_tool_then_finish, scenario_tool_failed, session_record_at,
-        store_session_list_row_full, store_session_list_row_minimal,
+        sample_context_op_entry, scenario_cancelled, scenario_indeterminate_no_result,
+        scenario_orphan_executing, scenario_orphan_requesting, scenario_orphan_reserved,
+        scenario_retry_then_success, scenario_success_tool_then_finish, scenario_tool_failed,
+        session_record_at, store_session_list_row_full, store_session_list_row_minimal,
     },
     session_id_primary, session_id_secondary, settings_version_fixed, ts_created, ts_ended,
     turn_id_1, turn_id_2, utf8_store_path,
@@ -1011,9 +1011,15 @@ pub(super) fn register(book: &mut CaseBook) {
         &Response::Turn(TurnLookup::InFlight),
     );
     book.insert(
-        "frame/response/view/entry_user_message",
+        "frame/response/view/entry_input",
         &Response::View(ViewUpdate::Entry {
             entry: Box::new(success.entries[0].clone()),
+        }),
+    );
+    book.insert(
+        "frame/response/view/entry_context_op",
+        &Response::View(ViewUpdate::Entry {
+            entry: Box::new(sample_context_op_entry()),
         }),
     );
     book.insert(

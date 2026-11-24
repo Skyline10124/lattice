@@ -60,7 +60,8 @@ pub(crate) struct RunTurnResult {
 pub(crate) enum TurnEvent {
     TurnStarted {
         turn: TurnRef,
-        user_node: lattice_session::store::NodeId,
+        input_nodes: Vec<lattice_session::store::NodeId>,
+        start_node: lattice_session::store::NodeId,
     },
     ModelStarted {
         key: lattice_conversation::ModelAttemptKey,

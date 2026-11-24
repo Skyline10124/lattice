@@ -90,7 +90,7 @@ impl From<ApiError> for LocalError {
                         result.kind = Busy;
                         None
                     }
-                    StoreError::InvalidInput { .. } => {
+                    StoreError::InvalidInput { .. } | StoreError::Context(_) => {
                         result.kind = BadRequest;
                         None
                     }
@@ -222,6 +222,25 @@ mod tests {
         assert!(
             !generic.message.contains("包含内部上下文的字符串"),
             "普通 BadRequest 不得透传内部字符串"
+        );
+    }
+
+    #[test]
+    fn context_store_error_maps_to_bad_request() {
+        let context_err = lattice_context::ContextError::UnknownNode {
+            node: lattice_session::store::NodeId(7),
+        };
+        let expected_text = context_err.to_string();
+        let api_err = ApiError::from(StoreError::Context(context_err));
+        assert!(
+            matches!(&api_err, ApiError::BadRequest(msg) if msg == &expected_text),
+            "StoreError::Context 必须映射为 ApiError::BadRequest：{api_err:?}"
+        );
+        let local_err = LocalError::from(api_err);
+        assert_eq!(
+            local_err.kind,
+            LocalErrorKind::BadRequest,
+            "上下文错误经 LocalError 转换后必须为 BadRequest"
         );
     }
 }

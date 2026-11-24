@@ -74,7 +74,7 @@ fn first_prompt_is_the_only_session_creation_and_request() {
                 .unwrap()
                 .last()
                 .unwrap()["content"],
-            "first real input"
+            "<lattice-context channel=\"ipc\">\nfirst real input\n</lattice-context>"
         );
         evidence.record_captures(captures);
         provider.shutdown(spec.step_timeout()).unwrap();
@@ -501,18 +501,25 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
             step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"],
             json!({"appended":true})
         );
+        let first_text = fork_history["entries"][0]["content"]["input"]["message"]["parts"][0]
+            ["semantic"]["text"]["text"]
+            .as_str()
+            .unwrap();
         let expected = json!([
             {"role":"system","content":"Beta isolated prompt."},
-            {"role":"user","content":fork_history["entries"][0]["content"]["message"]["parts"][0]["semantic"]["text"]["text"]},
+            {"role":"user","content":format!("<lattice-context channel=\"ipc\">\n{first_text}\n</lattice-context>")},
             {"role":"assistant","content":null,"tool_calls":[{"id":"create","type":"function","function":{
                 "name":"write_marker","arguments":serde_json::to_string(&call["arguments"]).unwrap()}}]},
             {"role":"tool","tool_call_id":"create","content":serde_json::to_string(&step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"]).unwrap()},
-            {"role":"user","content":"fork"},
+            {"role":"user","content":"<lattice-context channel=\"ipc\">\nfork\n</lattice-context>"},
         ]);
         assert_eq!(captures[2].raw["messages"], expected);
         assert_eq!(
             captures[4].raw["messages"],
-            json!([{"role":"system","content":"Beta isolated prompt."},{"role":"user","content":"root input"}])
+            json!([
+                {"role":"system","content":"Beta isolated prompt."},
+                {"role":"user","content":"<lattice-context channel=\"ipc\">\nroot input\n</lattice-context>"}
+            ])
         );
         for request in &captures {
             let tools = request.raw["tools"].as_array().unwrap();
@@ -647,4 +654,112 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
         }));
         support::finish_recorded(evidence, result);
     }
+
+    // 同时验证 v10 旧格式 `lattice.redb` 被拒绝且不初始化/改写领域记录、不派发 provider 请求。
+    let (world, spec) = support::direct_world("legacy-v10-store-refusal", "reader", "");
+    world.budget(&spec);
+    world.start_daemon().expect("显式启动后台");
+    let mut server =
+        support::wire_fake_llm(&world, "reader", SseScript::plain("must not dispatch"));
+    let db_path = world.session_store_dir().join("lattice.redb");
+    std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+    let meta: redb::TableDefinition<&str, &[u8]> = redb::TableDefinition::new("meta");
+    let expected_kind = {
+        let mut bytes = 10u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(br#""lattice-session""#);
+        bytes
+    };
+    let expected_version = {
+        let mut bytes = 10u32.to_be_bytes().to_vec();
+        bytes.extend_from_slice(b"10");
+        bytes
+    };
+    {
+        let db = redb::Database::create(&db_path).unwrap();
+        let tx = db.begin_write().unwrap();
+        {
+            let mut table = tx.open_table(meta).unwrap();
+            table
+                .insert("store_kind", expected_kind.as_slice())
+                .unwrap();
+            table
+                .insert("store_format_version", expected_version.as_slice())
+                .unwrap();
+        }
+        tx.commit().unwrap();
+    }
+    let snapshot_redb = |path: &std::path::Path| -> (Vec<String>, Vec<(String, Vec<u8>)>) {
+        use redb::{ReadableDatabase, ReadableTable, TableHandle};
+        let db = redb::ReadOnlyDatabase::open(path).unwrap();
+        let tx = db.begin_read().unwrap();
+        let mut tables: Vec<String> = tx
+            .list_tables()
+            .unwrap()
+            .map(|handle| handle.name().to_owned())
+            .collect();
+        tables.sort();
+        let meta_table = tx.open_table(meta).unwrap();
+        let mut rows = Vec::new();
+        for entry in meta_table.iter().unwrap() {
+            let (k, v) = entry.unwrap();
+            rows.push((k.value().to_owned(), v.value().to_vec()));
+        }
+        (tables, rows)
+    };
+    let canonical_db = std::fs::canonicalize(&db_path).unwrap();
+    let before_redb = snapshot_redb(&db_path);
+    assert_eq!(before_redb.0, vec!["meta".to_owned()]);
+    let mut evidence = support::evidence(&world, &spec);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        for args in [
+            vec!["--json", "session", "send", "input", "--agent", "reader"],
+            vec!["--json", "session", "list"],
+        ] {
+            let out = support::cli(&world, &spec, &args);
+            evidence.record_command(format!("v10 旧库拒绝检查（{}）", args.join(" ")), &out);
+            assert!(out.is_clean_exit(1), "{}", out.summary());
+            assert!(out.stderr.is_empty());
+            let records: Vec<Value> = std::str::from_utf8(&out.stdout)
+                .unwrap()
+                .lines()
+                .map(|line| serde_json::from_str(line).unwrap())
+                .collect();
+            let error = if args[1] == "session" && args[2] == "send" {
+                let sent = support::parse_send_stdout(&out.stdout, out.exit_code());
+                assert!(sent.rejection().is_some(), "{:?}", sent.type_sequence());
+                &records[1]["error"]
+            } else {
+                records.last().unwrap()
+            };
+            assert_eq!(error["kind"], "store_unavailable", "{error}");
+            assert_eq!(error["store"]["type"], "unsupported_version", "{error}");
+            assert_eq!(error["store"]["found"], 10, "{error}");
+            assert_eq!(error["store"]["supported"], 11, "{error}");
+            assert_eq!(
+                error["store"]["path"],
+                serde_json::json!(canonical_db),
+                "{error}"
+            );
+            assert!(server.captured_requests().is_empty());
+            assert_eq!(
+                snapshot_redb(&db_path),
+                before_redb,
+                "拒绝旧版库不得新建表或改写原库领域记录"
+            );
+        }
+        evidence
+            .record_json(
+                "state-summary",
+                &serde_json::json!({
+                    "v10_db_path": canonical_db,
+                    "tables_after": snapshot_redb(&db_path).0,
+                    "provider_requests": 0,
+                    "log_turn": "not applicable: v10 store rejected before acceptance",
+                }),
+            )
+            .unwrap();
+        evidence.record_captures(server.captured_requests());
+        server.shutdown(spec.step_timeout()).unwrap();
+    }));
+    support::finish_recorded(evidence, result);
 }

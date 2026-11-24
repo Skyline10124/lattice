@@ -34,7 +34,10 @@ pub enum ApiError {
 
 impl From<StoreError> for ApiError {
     fn from(error: StoreError) -> Self {
-        Self::Store(Arc::new(error))
+        match error {
+            StoreError::Context(err) => Self::BadRequest(err.to_string()),
+            other => Self::Store(Arc::new(other)),
+        }
     }
 }
 impl From<crate::turn::coordinator::CoordinatorIoError> for ApiError {

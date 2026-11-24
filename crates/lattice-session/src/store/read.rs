@@ -11,24 +11,27 @@ use lattice_conversation::{
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CountedNodeKind {
-    UserMessage,
+    Root,
+    Input,
+    ContextOp,
     Step,
 }
 
-// 根节点不参与计数；扁平投影让无关字段直接跳过，避免内部标签枚举缓存整份正文。
+// 扁平投影让无关正文（input/op/reply/slots/config_digest）直接跳过，严禁内部标签枚举缓冲整条节点。
 #[derive(serde::Deserialize)]
 struct CountedNode {
     kind: CountedNodeKind,
-    parent: NodeId,
-    turn_id: TurnId,
+    parent: Option<NodeId>,
+    turn_id: Option<TurnId>,
+    step_ordinal: Option<u32>,
 }
 
 #[derive(serde::Deserialize)]
 struct StepAttempts {
     kind: CountedNodeKind,
-    turn_id: TurnId,
-    step_ordinal: u32,
-    attempts: Vec<AttemptState>,
+    turn_id: Option<TurnId>,
+    step_ordinal: Option<u32>,
+    attempts: Option<Vec<AttemptState>>,
 }
 
 #[derive(serde::Deserialize)]
@@ -50,20 +53,32 @@ enum AttemptStateKind {
 }
 
 #[derive(serde::Deserialize)]
-struct TurnAgent {
-    kind: CountedNodeKind,
-    turn_id: TurnId,
+struct TurnStartAgent {
     agent_name: AgentName,
 }
 
-// 扁平投影跳过正文与执行材料，只保留父链、轮的模型身份和尝试计量。
+#[derive(serde::Deserialize)]
+struct TurnAgent {
+    kind: CountedNodeKind,
+    turn_id: Option<TurnId>,
+    step_ordinal: Option<u32>,
+    turn_start: Option<TurnStartAgent>,
+}
+
+#[derive(serde::Deserialize)]
+struct UsageTurnStart {
+    provider: ProviderId,
+    model: ModelId,
+}
+
+// 扁平投影跳过正文、上下文操作、槽位与配置摘要，只保留父链、Step 0 模型身份和尝试计量。
 #[derive(serde::Deserialize)]
 struct UsageNode {
     kind: CountedNodeKind,
-    parent: NodeId,
-    turn_id: TurnId,
-    provider: Option<ProviderId>,
-    model: Option<ModelId>,
+    parent: Option<NodeId>,
+    turn_id: Option<TurnId>,
+    step_ordinal: Option<u32>,
+    turn_start: Option<UsageTurnStart>,
     attempts: Option<Vec<UsageAttempt>>,
 }
 
@@ -78,6 +93,28 @@ impl UsageAttempt {
     fn metering(&self) -> (Option<TokenUsage>, UsageCompleteness, Option<CostEstimate>) {
         (self.usage, self.usage_kind, self.cost)
     }
+}
+
+#[derive(serde::Deserialize)]
+struct LogAttempt {
+    progress: AttemptProgress,
+}
+
+// 扁平投影供 `log()` 使用：跳过 input、op、reply、slots 与 turn_start.config_digest。
+#[derive(serde::Deserialize)]
+struct LogNode {
+    kind: CountedNodeKind,
+    parent: Option<NodeId>,
+    turn_id: Option<TurnId>,
+    step_ordinal: Option<u32>,
+    turn_start: Option<TurnStartAgent>,
+    progress: Option<StepProgress>,
+    attempts: Option<Vec<LogAttempt>>,
+}
+
+#[derive(serde::Deserialize)]
+struct StepSlots {
+    slots: Vec<InvocationSlot>,
 }
 
 fn payload_summary(
@@ -237,7 +274,12 @@ fn positive_turns(turns: u32) -> Result<()> {
     }
 }
 
-fn step_entry(session: SessionId, node: NodeId, content: Node) -> Result<ConversationEntry> {
+fn step_entry(
+    session: SessionId,
+    node: NodeId,
+    content: Node,
+    ordinal: Option<u64>,
+) -> Result<ConversationEntry> {
     let Node::Step {
         progress,
         attempts,
@@ -263,9 +305,21 @@ fn step_entry(session: SessionId, node: NodeId, content: Node) -> Result<Convers
         node,
         content,
         step,
+        ordinal,
         retries,
         summary,
     })
+}
+
+fn is_unit_start(node: &Node, parent: &Node) -> bool {
+    !matches!(
+        node,
+        Node::Root
+            | Node::Step {
+                step_ordinal: 1..,
+                ..
+            }
+    ) && matches!(parent, Node::Root | Node::Step { .. })
 }
 
 fn entries(
@@ -273,33 +327,110 @@ fn entries(
     path: Vec<(NodeId, Node)>,
     mut ordinal: u64,
 ) -> Result<Vec<ConversationEntry>> {
-    let mut has_user = false;
     let mut entries = Vec::new();
     for (node, content) in path {
         match &content {
-            Node::UserMessage { .. } => {
-                ordinal += 1;
-                has_user = true;
-                entries.push(ConversationEntry::UserMessage {
-                    node,
-                    content,
-                    ordinal,
-                });
+            Node::Input { .. } => {
+                entries.push(ConversationEntry::Input { node, content });
             }
-            Node::Step { .. } => {
-                if !has_user {
-                    return Err(corrupt(
-                        "nodes",
-                        &node.0.to_string(),
-                        "step has no user ancestor",
-                    ));
-                }
-                entries.push(step_entry(session, node, content)?);
+            Node::ContextOp { .. } => {
+                entries.push(ConversationEntry::ContextOp { node, content });
+            }
+            Node::Step { step_ordinal, .. } => {
+                let turn_ordinal = if *step_ordinal == 0 {
+                    ordinal += 1;
+                    Some(ordinal)
+                } else {
+                    None
+                };
+                entries.push(step_entry(session, node, content, turn_ordinal)?);
             }
             Node::Root => {}
         }
     }
     Ok(entries)
+}
+
+pub(super) fn resolve_path_with_loader(
+    session: SessionId,
+    position: NodeId,
+    next_pending_id: Option<NodeId>,
+    pending: &[ContextInput],
+    mut load_node: impl FnMut(NodeId) -> Result<Option<Node>>,
+) -> Result<EffectiveContext> {
+    let mut cursor = position;
+    let mut chain = Vec::new();
+    while cursor != NodeId(0) {
+        let node = load_node(cursor)?.ok_or_else(|| {
+            corrupt(
+                "nodes",
+                &format!("{session}/{}", cursor.0),
+                "missing path node",
+            )
+        })?;
+        let Some(parent) = node.parent() else {
+            return Err(corrupt(
+                "nodes",
+                &format!("{session}/{}", cursor.0),
+                "nonzero root",
+            ));
+        };
+        if parent >= cursor {
+            return Err(corrupt(
+                "nodes",
+                &format!("{session}/{}", cursor.0),
+                "invalid path parent",
+            ));
+        }
+        chain.push((cursor, node));
+        cursor = parent;
+    }
+    if load_node(NodeId(0))? != Some(Node::Root) {
+        return Err(corrupt(
+            "nodes",
+            &format!("{session}/0"),
+            "missing root node",
+        ));
+    }
+    chain.reverse();
+
+    let mut records = Vec::with_capacity(chain.len() + pending.len());
+    for (id, node) in &chain {
+        match node {
+            Node::Root => {
+                return Err(corrupt(
+                    "nodes",
+                    &format!("{session}/{}", id.0),
+                    "nonzero root",
+                ));
+            }
+            Node::Input { input, .. } => {
+                records.push(PathRecord::Input { id: *id, input });
+            }
+            Node::ContextOp { op, .. } => {
+                records.push(PathRecord::Op { id: *id, op });
+            }
+            Node::Step { .. } => {
+                if let Some(content) = node.step_content() {
+                    records.push(PathRecord::Step { id: *id, content });
+                }
+            }
+        }
+    }
+    if !pending.is_empty() {
+        let mut next = next_pending_id.expect("存在 pending 输入时必须提供起始节点序号");
+        for input in pending {
+            records.push(PathRecord::Input { id: next, input });
+            next = next_sequence(next.0, "node").map(NodeId)?;
+        }
+    }
+    lattice_context::resolve(&records).map_err(|err| {
+        corrupt(
+            "nodes",
+            &format!("{session}/{}", position.0),
+            &format!("路径上下文归约失败：{err}"),
+        )
+    })
 }
 
 impl Records {
@@ -320,22 +451,22 @@ impl Records {
     }
 
     pub(super) fn turn_detail(&self, s: SessionId, t: TurnId) -> Result<TurnDetail> {
-        let user_ref = self
+        let start_ref = self
             .turn_index
             .get(&t)
             .filter(|r| r.session_id == s)
             .ok_or_else(|| missing("turn", t))?;
-        let Some(Node::UserMessage {
+        let Some(Node::Step {
             turn_id,
-            accepted_at,
-            agent_name,
+            step_ordinal: 0,
+            turn_start: Some(meta),
             ..
-        }) = self.nodes.get(&(s, user_ref.node))
+        }) = self.nodes.get(&(s, start_ref.node))
         else {
             return Err(corrupt(
                 "nodes",
-                &format!("{s}/{}", user_ref.node.0),
-                "missing turn user node",
+                &format!("{s}/{}", start_ref.node.0),
+                "missing turn start step node",
             ));
         };
         let raw_steps = self.turn_steps(s, t)?;
@@ -364,15 +495,52 @@ impl Records {
         Ok(TurnDetail {
             turn_id: *turn_id,
             session_id: s,
-            user_node: user_ref.node,
-            agent_name: agent_name.clone(),
-            accepted_at: *accepted_at,
+            start_node: start_ref.node,
+            input_nodes: meta.input_nodes.clone(),
+            agent_name: meta.agent_name.clone(),
+            accepted_at: meta.accepted_at,
             ended_at: *ended_at,
             summary,
             usage: Box::new(usage),
             steps,
         })
     }
+}
+
+fn validate_usage_node(session_id: SessionId, id: NodeId, node: &UsageNode) -> Result<NodeId> {
+    let err = || {
+        corrupt(
+            "nodes",
+            &format!("{session_id}/{}", id.0),
+            "invalid usage node header",
+        )
+    };
+    let parent = node.parent.ok_or_else(err)?;
+    if parent >= id {
+        return Err(err());
+    }
+    match node.kind {
+        CountedNodeKind::Root => return Err(err()),
+        CountedNodeKind::Input | CountedNodeKind::ContextOp => {
+            if node.turn_id.is_some()
+                || node.step_ordinal.is_some()
+                || node.turn_start.is_some()
+                || node.attempts.is_some()
+            {
+                return Err(err());
+            }
+        }
+        CountedNodeKind::Step => {
+            let ordinal = node.step_ordinal.ok_or_else(err)?;
+            if node.turn_id.is_none()
+                || node.attempts.is_none()
+                || (ordinal == 0) != node.turn_start.is_some()
+            {
+                return Err(err());
+            }
+        }
+    }
+    Ok(parent)
 }
 
 impl SessionRead {
@@ -385,21 +553,15 @@ impl SessionRead {
         let mut path = Vec::new();
         while head != NodeId(0) {
             let node: UsageNode = self.projected_node(session_id, head)?;
-            if node.parent >= head {
-                return Err(corrupt(
-                    "nodes",
-                    &format!("{session_id}/{}", head.0),
-                    "invalid path parent",
-                ));
-            }
-            head = node.parent;
-            path.push(node);
+            let parent = validate_usage_node(session_id, head, &node)?;
+            path.push((head, node));
+            head = parent;
         }
         path.reverse();
         let path_total = UsageSummary::from_attempts(
             path.iter()
-                .filter(|node| matches!(node.kind, CountedNodeKind::Step))
-                .flat_map(|node| node.attempts.iter().flatten().map(UsageAttempt::metering)),
+                .filter(|(_, node)| matches!(node.kind, CountedNodeKind::Step))
+                .flat_map(|(_, node)| node.attempts.iter().flatten().map(UsageAttempt::metering)),
         );
         let table = self.tx.open_table(NODES).map_err(table_error)?;
         let mut session_attempts = Vec::new();
@@ -413,6 +575,7 @@ impl SessionRead {
             let bytes = attach_path(&self.path, payload("nodes", &key, value.value()))?;
             let node: UsageNode = serde_json::from_slice(bytes)
                 .map_err(|_| corrupt("nodes", &key, "invalid record encoding"))?;
+            validate_usage_node(session_id, id, &node)?;
             if matches!(node.kind, CountedNodeKind::Step) {
                 session_attempts.extend(
                     node.attempts
@@ -424,37 +587,55 @@ impl SessionRead {
             UsageSummary::from_attempts(session_attempts.iter().map(UsageAttempt::metering));
         let mut nodes = path.into_iter().peekable();
         let mut turns = Vec::new();
-        while let Some(user) = nodes.next() {
-            let invalid_turn = || {
-                corrupt(
-                    "nodes",
-                    &user.turn_id.to_string(),
-                    "invalid usage path turn",
-                )
-            };
-            if !matches!(user.kind, CountedNodeKind::UserMessage) {
-                return Err(invalid_turn());
-            }
-            let provider = user.provider.ok_or_else(invalid_turn)?;
-            let model = user.model.ok_or_else(invalid_turn)?;
-            let mut attempts = Vec::new();
-            while nodes
-                .peek()
-                .is_some_and(|node| matches!(node.kind, CountedNodeKind::Step))
-            {
-                let step = nodes.next().expect("peeked step");
-                if step.turn_id != user.turn_id {
-                    return Err(invalid_turn());
+        while let Some((node_id, node)) = nodes.next() {
+            match node.kind {
+                CountedNodeKind::Input | CountedNodeKind::ContextOp => continue,
+                CountedNodeKind::Root => {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{session_id}/{}", node_id.0),
+                        "nonzero root",
+                    ));
                 }
-                attempts.extend(step.attempts.ok_or_else(invalid_turn)?);
+                CountedNodeKind::Step => {
+                    let invalid_turn = || {
+                        corrupt(
+                            "nodes",
+                            &format!("{session_id}/{}", node_id.0),
+                            "invalid usage path turn",
+                        )
+                    };
+                    if node.step_ordinal != Some(0) {
+                        return Err(invalid_turn());
+                    }
+                    let turn_id = node.turn_id.ok_or_else(invalid_turn)?;
+                    let start = node.turn_start.ok_or_else(invalid_turn)?;
+                    let mut attempts = node.attempts.ok_or_else(invalid_turn)?;
+                    let mut expected_ordinal = 1u32;
+                    while nodes.peek().is_some_and(|(_, next)| {
+                        matches!(next.kind, CountedNodeKind::Step)
+                            && next.turn_id == Some(turn_id)
+                            && next.step_ordinal != Some(0)
+                    }) {
+                        let (_, step) = nodes.next().expect("peeked step");
+                        if step.step_ordinal != Some(expected_ordinal) {
+                            return Err(invalid_turn());
+                        }
+                        expected_ordinal =
+                            expected_ordinal.checked_add(1).ok_or_else(invalid_turn)?;
+                        attempts.extend(step.attempts.ok_or_else(invalid_turn)?);
+                    }
+                    turns.push(TurnUsageRow {
+                        turn_id,
+                        ordinal: turns.len() as u64 + 1,
+                        provider: start.provider,
+                        model: start.model,
+                        usage: UsageSummary::from_attempts(
+                            attempts.iter().map(UsageAttempt::metering),
+                        ),
+                    });
+                }
             }
-            turns.push(TurnUsageRow {
-                turn_id: user.turn_id,
-                ordinal: turns.len() as u64 + 1,
-                provider,
-                model,
-                usage: UsageSummary::from_attempts(attempts.iter().map(UsageAttempt::metering)),
-            });
         }
         Ok(SessionUsage {
             session_id,
@@ -507,7 +688,7 @@ impl SessionRead {
             .ok_or_else(|| missing("session", id))
     }
 
-    /// 按 TurnId 索引找回该轮 UserMessage 节点位置，并校验所属 Turn。
+    /// 按 TurnId 索引找回该轮 `Step 0` 节点位置，并校验所属 Turn。
     pub fn turn_node(&self, id: TurnId) -> Result<Option<NodeRef>> {
         let Some(node_ref) = self.raw_turn_node(id)? else {
             return Ok(None);
@@ -522,6 +703,12 @@ impl SessionRead {
     pub fn turn_config(&self, session: SessionId, turn: TurnId) -> Result<FrozenTurnConfig> {
         self.local(session, Selection::Turn(turn))?
             .turn_config(session, turn)
+    }
+
+    /// 读取指定轮次随 `Step 0.turn_start.input_nodes` 绑定的全部上下文输入。
+    pub fn turn_inputs(&self, session: SessionId, turn: TurnId) -> Result<Vec<ContextInput>> {
+        self.local(session, Selection::Turn(turn))?
+            .turn_inputs(session, turn)
     }
 
     pub fn turn_input(
@@ -698,49 +885,155 @@ impl SessionRead {
     }
 
     pub fn log(&self, id: SessionId) -> Result<SessionLog> {
-        let mut r = self.local(id, Selection::Session)?;
-        let current_agent = r.current_agent(id)?;
-        let unclosed_turn = r.unclosed_turn(id);
-        let session = r
-            .sessions
-            .remove(&id)
+        let session = self
+            .find_session(id)?
             .ok_or_else(|| missing("session", id))?;
+        let current_agent = Some(self.session_settings(id)?.profile.agent_name);
         let table = self.tx.open_table(NODES).map_err(table_error)?;
-        let mut nodes = Vec::new();
+        let mut scanned: Vec<(NodeId, LogNode)> = Vec::new();
         for entry in table
             .range(node_key(id, NodeId(0)).as_slice()..=node_key(id, NodeId(u64::MAX)).as_slice())?
         {
-            let (key, _) = entry?;
+            let (key, value) = entry?;
             let (_, n) = decode_node_key(key.value())?;
-            let value = self.node(NodeRef {
-                session_id: id,
-                node: n,
-            })?;
-            let kind = match &value {
-                Node::Root => NodeKind::Root,
-                Node::UserMessage { .. } => NodeKind::UserMessage,
-                Node::Step { step_ordinal, .. } => NodeKind::Step {
-                    ordinal: *step_ordinal,
+            let key_str = format!("{id}/{}", n.0);
+            let bytes = attach_path(&self.path, payload("nodes", &key_str, value.value()))?;
+            let node: LogNode = serde_json::from_slice(bytes)
+                .map_err(|_| corrupt("nodes", &key_str, "invalid record encoding"))?;
+            let err = || corrupt("nodes", &key_str, "invalid log node header");
+            match node.kind {
+                CountedNodeKind::Root => {
+                    if n != NodeId(0)
+                        || node.parent.is_some()
+                        || node.turn_id.is_some()
+                        || node.step_ordinal.is_some()
+                        || node.turn_start.is_some()
+                        || node.progress.is_some()
+                        || node.attempts.is_some()
+                    {
+                        return Err(err());
+                    }
+                }
+                CountedNodeKind::Input | CountedNodeKind::ContextOp => {
+                    if n == NodeId(0)
+                        || node.parent.is_none_or(|p| p >= n)
+                        || node.turn_id.is_some()
+                        || node.step_ordinal.is_some()
+                        || node.turn_start.is_some()
+                        || node.progress.is_some()
+                        || node.attempts.is_some()
+                    {
+                        return Err(err());
+                    }
+                }
+                CountedNodeKind::Step => {
+                    let ordinal = node.step_ordinal.ok_or_else(err)?;
+                    if n == NodeId(0)
+                        || node.parent.is_none_or(|p| p >= n)
+                        || node.turn_id.is_none()
+                        || (ordinal == 0) != node.turn_start.is_some()
+                        || node.progress.is_none()
+                        || node.attempts.is_none()
+                    {
+                        return Err(err());
+                    }
+                }
+            }
+            scanned.push((n, node));
+        }
+        if scanned
+            .first()
+            .is_none_or(|(n, node)| *n != NodeId(0) || !matches!(node.kind, CountedNodeKind::Root))
+            || !scanned.iter().any(|(n, _)| *n == session.current)
+        {
+            return Err(corrupt(
+                "sessions",
+                &id.to_string(),
+                "session root or current node missing",
+            ));
+        }
+        let unclosed_turn = scanned.last().and_then(|(_, tip)| match tip.kind {
+            CountedNodeKind::Step if tip.progress.as_ref().is_some_and(|p| !p.is_closed()) => {
+                tip.turn_id
+            }
+            _ => None,
+        });
+
+        let mut nodes = Vec::with_capacity(scanned.len());
+        for (idx, (n, node)) in scanned.iter().enumerate() {
+            let kind = match node.kind {
+                CountedNodeKind::Root => NodeKind::Root,
+                CountedNodeKind::Input => NodeKind::Input,
+                CountedNodeKind::ContextOp => NodeKind::ContextOp,
+                CountedNodeKind::Step => NodeKind::Step {
+                    ordinal: node.step_ordinal.expect("已校验 Step 的 step_ordinal"),
                 },
             };
-            let turn_start = if let Node::UserMessage { turn_id, .. } = &value {
-                let detail = self.turn_detail(id, *turn_id)?;
+            let turn_start = if matches!(node.kind, CountedNodeKind::Step)
+                && node.step_ordinal == Some(0)
+            {
+                let turn_id = node.turn_id.expect("已校验 Step 0 的 turn_id");
+                let agent_name = node
+                    .turn_start
+                    .as_ref()
+                    .expect("已校验 Step 0 的 turn_start")
+                    .agent_name
+                    .clone();
+                let mut last_idx = idx;
+                let mut expected_ord = 1u32;
+                while let Some((_, next)) = scanned.get(last_idx + 1) {
+                    if matches!(next.kind, CountedNodeKind::Step) && next.turn_id == Some(turn_id) {
+                        if next.step_ordinal != Some(expected_ord) {
+                            return Err(corrupt(
+                                "nodes",
+                                &format!("{id}/{}", n.0),
+                                "invalid step ordinal sequence in turn",
+                            ));
+                        }
+                        last_idx += 1;
+                        expected_ord = expected_ord.checked_add(1).ok_or_else(|| {
+                            corrupt("nodes", &format!("{id}/{}", n.0), "step ordinal overflow")
+                        })?;
+                    } else {
+                        break;
+                    }
+                }
+                let (last_node_id, last_step) = &scanned[last_idx];
+                let progress = last_step
+                    .progress
+                    .as_ref()
+                    .expect("已校验 Step 的 progress");
+                let attempts = last_step
+                    .attempts
+                    .as_ref()
+                    .expect("已校验 Step 的 attempts");
+                let slots = if matches!(progress, StepProgress::Executing) {
+                    let projected: StepSlots = self.projected_node(id, *last_node_id)?;
+                    projected.slots
+                } else {
+                    Vec::new()
+                };
+                let summary = close::summary_from_progress(
+                    progress,
+                    attempts.last().map(|a| &a.progress),
+                    &slots,
+                )?;
                 Some(TurnLogSummary {
-                    turn_id: *turn_id,
-                    summary: detail.summary,
-                    agent_name: detail.agent_name,
+                    turn_id,
+                    summary,
+                    agent_name,
                 })
             } else {
                 None
             };
             nodes.push(LogRow {
                 node: NodeHeader {
-                    id: n,
-                    parent: value.parent(),
-                    turn_id: value.turn_id(),
+                    id: *n,
+                    parent: node.parent,
+                    turn_id: node.turn_id,
                     kind,
                 },
-                current: n == session.current,
+                current: *n == session.current,
                 turn_start,
             });
         }
@@ -757,7 +1050,50 @@ impl SessionRead {
             .turn_detail(session, turn)
     }
 
-    /// 同一读事务内取得会话头与当前路径最近的若干轮，包含尚未关闭的 Step。
+    /// 路径二：沿 `Root -> position` 归约有效模型上下文（全程不读取 `blobs` 表）。
+    pub fn effective_context(
+        &self,
+        session: SessionId,
+        position: NodeId,
+    ) -> Result<EffectiveContext> {
+        self.effective_context_with_pending(session, position, &[])
+    }
+
+    /// 路径二：沿 `Root -> position` 并在末尾追加待提交 `pending` 输入后归约有效模型上下文（全程不读取 `blobs` 表）。
+    pub fn effective_context_with_pending(
+        &self,
+        session: SessionId,
+        position: NodeId,
+        pending: &[ContextInput],
+    ) -> Result<EffectiveContext> {
+        self.find_session(session)?
+            .ok_or_else(|| missing("session", session))?;
+        let next_pending_id = if pending.is_empty() {
+            None
+        } else {
+            let table = self.tx.open_table(NODES).map_err(table_error)?;
+            let tip = table
+                .range(
+                    node_key(session, NodeId(0)).as_slice()
+                        ..=node_key(session, NodeId(u64::MAX)).as_slice(),
+                )?
+                .next_back()
+                .transpose()?
+                .map(|(k, _)| attach_path(&self.path, decode_node_key(k.value())))
+                .transpose()?
+                .map(|(_, node_id)| node_id)
+                .ok_or_else(|| corrupt("nodes", &format!("{session}/0"), "missing root node"))?;
+            Some(next_sequence(tip.0, "node").map(NodeId)?)
+        };
+        if self.find_node(session, position)?.is_none() {
+            return Err(missing("node", position.0));
+        }
+        resolve_path_with_loader(session, position, next_pending_id, pending, |node_id| {
+            self.find_node(session, node_id)
+        })
+    }
+
+    /// 路径一：同一读事务内取得会话头与当前路径最近的若干轮（含末尾未触发上下文块与未关闭 Step）。
     pub fn view(&self, session: SessionId, turns: u32) -> Result<SessionView> {
         positive_turns(turns)?;
         let record = self
@@ -772,7 +1108,7 @@ impl SessionRead {
         })
     }
 
-    /// before 必须是本会话的 UserMessage；读取只取它固定父链上的更早轮次。
+    /// 路径一：`before` 必须是本会话的轮次单元起点；读取只取其固定父链上的更早轮次单元。
     pub fn history(
         &self,
         session: SessionId,
@@ -782,10 +1118,17 @@ impl SessionRead {
         positive_turns(turns)?;
         self.find_session(session)?
             .ok_or_else(|| missing("session", session))?;
-        let Some(Node::UserMessage { parent, .. }) = self.find_node(session, before)? else {
-            return Err(invalid("before", "expected a user message in this session"));
+        let Some(node) = self.find_node(session, before)? else {
+            return Err(invalid("before", "分页起点节点不在当前会话中"));
         };
-        let (path, earlier_turns) = self.conversation_window(session, parent, turns)?;
+        let Some(parent_id) = node.parent() else {
+            return Err(invalid("before", "根节点不能作为分页起点"));
+        };
+        let parent = self.path_node(session, parent_id)?;
+        if !is_unit_start(&node, &parent) {
+            return Err(invalid("before", "before 必须是轮次单元起点节点"));
+        }
+        let (path, earlier_turns) = self.conversation_window(session, parent_id, turns)?;
         entries(session, path, earlier_turns)
     }
 
@@ -798,27 +1141,54 @@ impl SessionRead {
             .ok_or_else(|| missing("node", node.node.0))?;
         match &content {
             Node::Root => Err(invalid("node", "root has no conversation entry")),
-            Node::UserMessage { parent, .. } => {
-                let (_, earlier_turns) = self.conversation_window(node.session_id, *parent, 0)?;
-                Ok(ConversationEntry::UserMessage {
-                    node: node.node,
-                    content,
-                    ordinal: earlier_turns + 1,
-                })
-            }
-            Node::Step { turn_id, .. } => {
-                let user = self.turn_user_node(node.session_id, *turn_id)?;
-                if !matches!(
-                    self.path_node(node.session_id, user)?,
-                    Node::UserMessage { .. }
-                ) {
-                    return Err(corrupt(
-                        "nodes",
-                        &user.0.to_string(),
-                        "expected user message",
-                    ));
-                }
-                step_entry(node.session_id, node.node, content)
+            Node::Input { .. } => Ok(ConversationEntry::Input {
+                node: node.node,
+                content,
+            }),
+            Node::ContextOp { .. } => Ok(ConversationEntry::ContextOp {
+                node: node.node,
+                content,
+            }),
+            Node::Step {
+                parent,
+                turn_id,
+                step_ordinal,
+                ..
+            } => {
+                let start = self.turn_start_node(node.session_id, *turn_id)?;
+                let ordinal = if *step_ordinal == 0 {
+                    if start != node.node {
+                        return Err(corrupt(
+                            "nodes",
+                            &format!("{}/{}", node.session_id, node.node.0),
+                            "step 0 does not match turn index",
+                        ));
+                    }
+                    let (_, earlier_turns) =
+                        self.conversation_window(node.session_id, *parent, 0)?;
+                    Some(earlier_turns + 1)
+                } else {
+                    if start.0.checked_add(u64::from(*step_ordinal)) != Some(node.node.0) {
+                        return Err(corrupt(
+                            "nodes",
+                            &format!("{}/{}", node.session_id, node.node.0),
+                            "step does not match turn start offset",
+                        ));
+                    }
+                    let start_header: CountedNode = self.projected_node(node.session_id, start)?;
+                    if !matches!(start_header.kind, CountedNodeKind::Step)
+                        || start_header.turn_id != Some(*turn_id)
+                        || start_header.step_ordinal != Some(0)
+                    {
+                        return Err(corrupt(
+                            "nodes",
+                            &format!("{}/{}", node.session_id, start.0),
+                            "expected turn start step",
+                        ));
+                    }
+                    None
+                };
+                step_entry(node.session_id, node.node, content, ordinal)
             }
         }
     }
@@ -843,12 +1213,18 @@ impl SessionRead {
         })
     }
 
-    /// 经 TurnId 索引定位本会话的 UserMessage，索引缺失或归属不符时报损坏。
-    pub fn turn_user_node(&self, session: SessionId, turn: TurnId) -> Result<NodeId> {
+    /// 经 TurnId 索引定位本会话的 `Step 0`，索引缺失或归属不符时报损坏。
+    pub fn turn_start_node(&self, session: SessionId, turn: TurnId) -> Result<NodeId> {
         self.raw_turn_node(turn)?
             .filter(|node| node.session_id == session)
             .map(|node| node.node)
-            .ok_or_else(|| corrupt("turn_index", &turn.to_string(), "missing turn user node"))
+            .ok_or_else(|| {
+                corrupt(
+                    "turn_index",
+                    &turn.to_string(),
+                    "missing turn start step node",
+                )
+            })
     }
 
     /// 只读指定 Step 的尝试标签，供生成中文字的推送守卫使用。
@@ -859,33 +1235,48 @@ impl SessionRead {
         key: ModelAttemptKey,
     ) -> Result<bool> {
         let step: StepAttempts = self.projected_node(session, node)?;
-        if !matches!(step.kind, CountedNodeKind::Step) {
-            return Err(corrupt(
+        let err = || {
+            corrupt(
                 "nodes",
                 &format!("{session}/{}", node.0),
                 "expected step node",
-            ));
+            )
+        };
+        if !matches!(step.kind, CountedNodeKind::Step) {
+            return Err(err());
         }
-        Ok(step.turn_id == key.turn_id
-            && step.step_ordinal == key.model_step_ordinal
-            && step
-                .attempts
+        let turn_id = step.turn_id.ok_or_else(err)?;
+        let step_ordinal = step.step_ordinal.ok_or_else(err)?;
+        let attempts = step.attempts.ok_or_else(err)?;
+        Ok(turn_id == key.turn_id
+            && step_ordinal == key.model_step_ordinal
+            && attempts
                 .get(key.attempt_ordinal as usize)
                 .is_some_and(|attempt| matches!(attempt.progress.progress, AttemptStateKind::Sent)))
     }
 
-    /// 经 TurnId 索引只读取本轮 agent，不装载输入与冻结配置。
+    /// 经 TurnId 索引只读取本轮 `Step 0` 上的 agent，不装载输入、正文与冻结配置。
     pub fn turn_agent(&self, session: SessionId, turn: TurnId) -> Result<AgentName> {
-        let node = self.turn_user_node(session, turn)?;
-        let user: TurnAgent = self.projected_node(session, node)?;
-        if !matches!(user.kind, CountedNodeKind::UserMessage) || user.turn_id != turn {
+        let node = self.turn_start_node(session, turn)?;
+        let step: TurnAgent = self.projected_node(session, node)?;
+        if !matches!(step.kind, CountedNodeKind::Step)
+            || step.turn_id != Some(turn)
+            || step.step_ordinal != Some(0)
+        {
             return Err(corrupt(
                 "nodes",
                 &format!("{session}/{}", node.0),
-                "expected turn user message",
+                "expected turn start step",
             ));
         }
-        Ok(user.agent_name)
+        let start = step.turn_start.ok_or_else(|| {
+            corrupt(
+                "nodes",
+                &format!("{session}/{}", node.0),
+                "missing turn start metadata",
+            )
+        })?;
+        Ok(start.agent_name)
     }
 
     fn projected_node<T: serde::de::DeserializeOwned>(
@@ -909,30 +1300,154 @@ impl SessionRead {
         mut turns: u32,
     ) -> Result<(Vec<(NodeId, Node)>, u64)> {
         let mut path = Vec::new();
-        let mut earlier_turns = 0;
-        // 窗口之外只解码计数字段；经 TurnId 索引跳过同轮其余 Step。
-        while head != NodeId(0) {
-            if turns > 0 {
+        let mut earlier_turns = 0u64;
+
+        // 阶段 1：收集末尾尚未触发推理的连续 Input/ContextOp 尾块（不消耗 turns 预算）。
+        let mut first_step: Option<(NodeId, Node)> = None;
+        if turns > 0 {
+            while head != NodeId(0) {
                 let node = self.path_node(session, head)?;
-                let Some(parent) = node.parent() else { break };
-                if matches!(node, Node::UserMessage { .. }) {
-                    turns -= 1;
+                let Some(parent) = node.parent() else {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{session}/{}", head.0),
+                        "nonzero root",
+                    ));
+                };
+                if parent >= head {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{session}/{}", head.0),
+                        "invalid path parent",
+                    ));
                 }
-                path.push((head, node));
+                if matches!(node, Node::Input { .. } | Node::ContextOp { .. }) {
+                    path.push((head, node));
+                    head = parent;
+                } else {
+                    first_step = Some((head, node));
+                    break;
+                }
+            }
+        }
+
+        // 阶段 2：向回收集至多 turns 个「Step 0..=last_step + 紧邻 Step 0 之前的连续 Input/ContextOp 块」。
+        while turns > 0 && head != NodeId(0) {
+            // 沿本轮 Step 向回走到 Step 0。
+            loop {
+                let (node_id, node) = match first_step.take() {
+                    Some(peeked) => peeked,
+                    None => (head, self.path_node(session, head)?),
+                };
+                let Node::Step {
+                    parent,
+                    step_ordinal,
+                    ..
+                } = &node
+                else {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{session}/{}", node_id.0),
+                        "expected step node in turn unit",
+                    ));
+                };
+                let parent = *parent;
+                let is_step_zero = *step_ordinal == 0;
+                if parent >= node_id {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{session}/{}", node_id.0),
+                        "invalid path parent",
+                    ));
+                }
+                path.push((node_id, node));
                 head = parent;
-            } else {
-                let node: CountedNode = self.projected_node(session, head)?;
-                match node.kind {
-                    CountedNodeKind::UserMessage => {
-                        earlier_turns += 1;
-                        head = node.parent;
+                if is_step_zero {
+                    turns -= 1;
+                    break;
+                }
+                if head == NodeId(0) {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{session}/{}", node_id.0),
+                        "step has no step 0 ancestor",
+                    ));
+                }
+            }
+            // 用扁平头探查 Step 0 紧邻前置的连续 Input/ContextOp，避免在 turns == 0 时误解更早 Step 的正文。
+            while head != NodeId(0) {
+                let header: CountedNode = self.projected_node(session, head)?;
+                match header.kind {
+                    CountedNodeKind::Input | CountedNodeKind::ContextOp => {
+                        let node = self.path_node(session, head)?;
+                        let Some(parent) = node.parent() else {
+                            return Err(corrupt(
+                                "nodes",
+                                &format!("{session}/{}", head.0),
+                                "nonzero root",
+                            ));
+                        };
+                        if parent >= head {
+                            return Err(corrupt(
+                                "nodes",
+                                &format!("{session}/{}", head.0),
+                                "invalid path parent",
+                            ));
+                        }
+                        path.push((head, node));
+                        head = parent;
                     }
-                    CountedNodeKind::Step => {
-                        head = self.turn_user_node(session, node.turn_id)?;
+                    CountedNodeKind::Step => break,
+                    CountedNodeKind::Root => {
+                        return Err(corrupt(
+                            "nodes",
+                            &format!("{session}/{}", head.0),
+                            "nonzero root",
+                        ));
                     }
                 }
             }
         }
+
+        // 阶段 3：窗口之外只解码扁平计数字段；经 TurnId 索引跳过同轮中间 Step。
+        while head != NodeId(0) {
+            let header: CountedNode = self.projected_node(session, head)?;
+            let err = || {
+                corrupt(
+                    "nodes",
+                    &format!("{session}/{}", head.0),
+                    "invalid counted node header",
+                )
+            };
+            let parent = header.parent.ok_or_else(err)?;
+            if parent >= head {
+                return Err(err());
+            }
+            match header.kind {
+                CountedNodeKind::Root => return Err(err()),
+                CountedNodeKind::Input | CountedNodeKind::ContextOp => {
+                    if header.turn_id.is_some() || header.step_ordinal.is_some() {
+                        return Err(err());
+                    }
+                    head = parent;
+                }
+                CountedNodeKind::Step => {
+                    let turn_id = header.turn_id.ok_or_else(err)?;
+                    let step_ordinal = header.step_ordinal.ok_or_else(err)?;
+                    if step_ordinal == 0 {
+                        earlier_turns += 1;
+                        head = parent;
+                    } else {
+                        let start = self.turn_start_node(session, turn_id)?;
+                        if start >= head {
+                            return Err(err());
+                        }
+                        head = start;
+                    }
+                }
+            }
+        }
+
         path.reverse();
         Ok((path, earlier_turns))
     }

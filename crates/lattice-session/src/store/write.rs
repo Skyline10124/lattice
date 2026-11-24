@@ -4,11 +4,11 @@
 use super::local::Selection;
 use super::*;
 use lattice_conversation::{
-    BoundToolCall, InvocationId, MessagePart, MessageSemantic, ModelAttemptKey,
+    BoundToolCall, ImageRef, InvocationId, MessagePart, MessageSemantic, ModelAttemptKey,
     ModelMessageAddress, NativeMessage, ToolCallAddress,
 };
 use redb::ReadableTable;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 impl Records {
     pub(super) fn max_node(&self, s: SessionId) -> Option<NodeId> {
@@ -40,60 +40,90 @@ impl Records {
     }
 
     pub(super) fn turn_steps(&self, s: SessionId, t: TurnId) -> Result<Vec<(NodeId, Node)>> {
-        let user_ref = self
+        let start_ref = self
             .turn_index
             .get(&t)
             .filter(|r| r.session_id == s)
             .ok_or_else(|| missing("turn", t))?;
-        let start = user_ref.node.0.saturating_add(1);
         let mut steps = Vec::new();
-        for ((_, n), node) in self.nodes.range((s, NodeId(start))..=(s, NodeId(u64::MAX))) {
-            if matches!(node, Node::UserMessage { .. } | Node::Root) {
-                break;
+        for ((_, n), node) in self
+            .nodes
+            .range((s, start_ref.node)..=(s, NodeId(u64::MAX)))
+        {
+            match node {
+                Node::Step { turn_id, .. } if *turn_id == t => steps.push((*n, node.clone())),
+                _ => break,
             }
-            steps.push((*n, node.clone()));
         }
         Ok(steps)
     }
 
     pub(super) fn turn_config(&self, s: SessionId, t: TurnId) -> Result<FrozenTurnConfig> {
-        let user_ref = self
+        let start_ref = self
             .turn_index
             .get(&t)
             .filter(|r| r.session_id == s)
             .ok_or_else(|| missing("turn", t))?;
-        let Some(Node::UserMessage {
-            agent_name,
-            model,
-            provider,
-            effort,
-            limits,
-            config_digest,
+        let Some(Node::Step {
+            step_ordinal: 0,
+            turn_start: Some(meta),
             ..
-        }) = self.nodes.get(&(s, user_ref.node))
+        }) = self.nodes.get(&(s, start_ref.node))
         else {
             return Err(corrupt(
                 "nodes",
-                &format!("{s}/{}", user_ref.node.0),
-                "missing turn user node",
+                &format!("{s}/{}", start_ref.node.0),
+                "missing turn start step node",
             ));
         };
-        let stored = self.configs.get(config_digest).ok_or_else(|| {
+        let stored = self.configs.get(&meta.config_digest).ok_or_else(|| {
             corrupt(
                 "configs",
-                &codec::config_key(config_digest),
+                &codec::config_key(&meta.config_digest),
                 "missing referenced config",
             )
         })?;
         Ok(FrozenTurnConfig {
-            agent_name: agent_name.clone(),
-            model: model.clone(),
-            provider: provider.clone(),
-            effort: *effort,
+            agent_name: meta.agent_name.clone(),
+            model: meta.model.clone(),
+            provider: meta.provider.clone(),
+            effort: meta.effort,
             system_prompt: stored.system_prompt.clone(),
             catalog: stored.catalog.clone(),
-            limits: *limits,
+            limits: meta.limits,
         })
+    }
+
+    pub(super) fn turn_inputs(&self, s: SessionId, t: TurnId) -> Result<Vec<ContextInput>> {
+        let start_ref = self
+            .turn_index
+            .get(&t)
+            .filter(|r| r.session_id == s)
+            .ok_or_else(|| missing("turn", t))?;
+        let Some(Node::Step {
+            step_ordinal: 0,
+            turn_start: Some(meta),
+            ..
+        }) = self.nodes.get(&(s, start_ref.node))
+        else {
+            return Err(corrupt(
+                "nodes",
+                &format!("{s}/{}", start_ref.node.0),
+                "missing turn start step node",
+            ));
+        };
+        let mut inputs = Vec::with_capacity(meta.input_nodes.len());
+        for &input_node in &meta.input_nodes {
+            let Some(Node::Input { input, .. }) = self.nodes.get(&(s, input_node)) else {
+                return Err(corrupt(
+                    "nodes",
+                    &format!("{s}/{}", input_node.0),
+                    "missing turn input node",
+                ));
+            };
+            inputs.push(input.clone());
+        }
+        Ok(inputs)
     }
 
     pub(super) fn turn_input(
@@ -101,26 +131,11 @@ impl Records {
         s: SessionId,
         t: TurnId,
     ) -> Result<Vec<MessagePart<BoundToolCall>>> {
-        let user_ref = self
-            .turn_index
-            .get(&t)
-            .filter(|r| r.session_id == s)
-            .ok_or_else(|| missing("turn", t))?;
-        let Some(Node::UserMessage { message, .. }) = self.nodes.get(&(s, user_ref.node)) else {
-            return Err(corrupt(
-                "nodes",
-                &format!("{s}/{}", user_ref.node.0),
-                "missing turn user node",
-            ));
-        };
-        if message.parts.is_empty() {
-            return Err(corrupt(
-                "nodes",
-                &format!("{s}/{}", user_ref.node.0),
-                "invalid user message parts",
-            ));
+        let mut parts = Vec::new();
+        for input in self.turn_inputs(s, t)? {
+            parts.extend(input.message().parts.iter().cloned());
         }
-        Ok(message.parts.clone())
+        Ok(parts)
     }
 
     fn active_step(&self, s: SessionId, t: TurnId) -> Result<(NodeId, FrozenTurnConfig, Node)> {
@@ -234,10 +249,15 @@ impl SessionStore {
         let disabled = self.execution_health()?;
         let mut tx = self.db.begin_write()?;
         tx.set_durability(redb::Durability::Immediate)?;
-        let (before, scope) =
+        let (before, mut scope) =
             codec::attach_path(&self.path, local::write(&tx, lock.session_id, selection))?;
         let mut after = before.clone();
         let value = f(&mut after, &tx)?;
+        for &(session_id, node_id) in after.nodes.keys() {
+            if session_id == scope.session && !before.nodes.contains_key(&(session_id, node_id)) {
+                scope.nodes.insert(node_id);
+            }
+        }
         validate::local(&after, &scope)?;
         if before == after {
             return Ok(value);
@@ -369,12 +389,261 @@ impl SessionStore {
         self.commit_write(disabled, tx, true)
     }
 
+    /// 纯投喂一条上下文输入（不开启 Turn）。
+    pub fn feed_input(&self, lock: &SessionExecutionLock, req: FeedInput) -> Result<NodeId> {
+        self.check_lock(lock, req.session_id)?;
+        let path = self.path.clone();
+        self.write(lock, Selection::Session, |r, tx| {
+            let s = req.session_id;
+            let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
+            check_binding(session, &req.project_path)?;
+            let parent = session.current;
+            resolve_path_in_tx(tx, &path, s, parent)?;
+            let node_id = r.next_node(s)?;
+            let (context_input, blobs) = req.input.into_context_input(req.channel);
+            write_blobs(tx, &blobs)?;
+            r.nodes.insert(
+                (s, node_id),
+                Node::Input {
+                    parent,
+                    accepted_at: req.accepted_at,
+                    input: context_input,
+                },
+            );
+            let session = r.sessions.get_mut(&s).expect("session exists");
+            session.current = node_id;
+            session.updated_at = req.accepted_at;
+            Ok(node_id)
+        })
+    }
+
+    /// 显式追加一条批量上下文操作（不开启 Turn）。
+    pub fn apply_context_op(
+        &self,
+        lock: &SessionExecutionLock,
+        req: ApplyContextOp,
+    ) -> Result<NodeId> {
+        self.check_lock(lock, req.session_id)?;
+        let mut req_blob_meta = BTreeMap::new();
+        for (&digest, bytes) in &req.blobs {
+            let image = ImageRef::from_bytes(bytes)
+                .map_err(|err| invalid("blobs", &format!("图片载荷无效：{err}")))?;
+            if image.sha256 != digest {
+                return Err(invalid("blobs", "图片摘要与键不匹配"));
+            }
+            req_blob_meta.insert(
+                digest,
+                codec::BlobMeta {
+                    media_type: image.media_type,
+                    byte_length: image.byte_length,
+                },
+            );
+        }
+
+        let mut referenced_images = Vec::new();
+        let mut referenced_digests = BTreeSet::new();
+        for edit in req.op.edits() {
+            if let ContextEdit::ReplaceInput { message, .. } = edit {
+                for part in &message.as_message().parts {
+                    if let MessageSemantic::Image { image } = &part.semantic {
+                        referenced_images.push(*image);
+                        referenced_digests.insert(image.sha256);
+                    }
+                }
+            }
+        }
+        if req_blob_meta
+            .keys()
+            .any(|digest| !referenced_digests.contains(digest))
+        {
+            return Err(invalid(
+                "blobs",
+                "请求携带了未被 ReplaceInput 引用的多余图片",
+            ));
+        }
+
+        let path = self.path.clone();
+        self.write(lock, Selection::Session, |r, tx| {
+            let s = req.session_id;
+            let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
+            check_binding(session, &req.project_path)?;
+            if !referenced_images.is_empty() {
+                let blobs_table = tx.open_table(codec::BLOBS).map_err(codec::table_error)?;
+                for image in &referenced_images {
+                    if let Some(meta) = req_blob_meta.get(&image.sha256) {
+                        if meta.media_type != image.media_type
+                            || meta.byte_length != image.byte_length
+                        {
+                            return Err(invalid(
+                                "op",
+                                "ReplaceInput 图片元数据与随附图片字节不一致",
+                            ));
+                        }
+                    } else {
+                        let key = codec::blob_key(&image.sha256);
+                        let guard = blobs_table.get(key.as_str())?.ok_or_else(|| {
+                            invalid("blobs", "ReplaceInput 引用的图片在会话库与请求中均不存在")
+                        })?;
+                        let raw = codec::attach_path(
+                            &path,
+                            codec::payload("blobs", &key, guard.value()),
+                        )?;
+                        let stored = ImageRef::from_bytes(raw).map_err(|err| {
+                            corrupt("blobs", &key, &format!("图片载荷无效：{err}"))
+                        })?;
+                        if stored.sha256 != image.sha256 {
+                            return Err(corrupt("blobs", &key, "图片摘要与键不匹配"));
+                        }
+                        if stored.media_type != image.media_type
+                            || stored.byte_length != image.byte_length
+                        {
+                            return Err(invalid(
+                                "op",
+                                "ReplaceInput 引用的图片元数据与已存图片不一致",
+                            ));
+                        }
+                    }
+                }
+            }
+            let parent = session.current;
+            let effective = resolve_path_in_tx(tx, &path, s, parent)?;
+            effective.validate_op(&req.op)?;
+            write_blobs(tx, &req.blobs)?;
+            let node_id = r.next_node(s)?;
+            r.nodes.insert(
+                (s, node_id),
+                Node::ContextOp {
+                    parent,
+                    accepted_at: req.accepted_at,
+                    op: req.op,
+                },
+            );
+            let session = r.sessions.get_mut(&s).expect("session exists");
+            session.current = node_id;
+            session.updated_at = req.accepted_at;
+            Ok(node_id)
+        })
+    }
+
+    /// 独立触发一轮模型推理（不追加 `Node::Input`，要求当前路径有效模型上下文非空）。
+    pub fn trigger_turn(
+        &self,
+        lock: &SessionExecutionLock,
+        req: TriggerTurn,
+    ) -> Result<AcceptedTurn> {
+        self.check_lock(lock, req.session_id)?;
+        let path = self.path.clone();
+        self.write(lock, Selection::Accept(req.turn_id), |r, tx| {
+            if let Some(&node_ref) = r.turn_index.get(&req.turn_id) {
+                let s = node_ref.session_id;
+                let existing_session = r
+                    .sessions
+                    .get(&s)
+                    .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
+                let Some(Node::Step {
+                    step_ordinal: 0,
+                    turn_start: Some(meta),
+                    ..
+                }) = r.nodes.get(&(s, node_ref.node))
+                else {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{s}/{}", node_ref.node.0),
+                        "missing turn start step node",
+                    ));
+                };
+                if s != req.session_id
+                    || existing_session.project_path != req.project_path
+                    || meta.trigger_channel != req.trigger_channel
+                    || !meta.input_nodes.is_empty()
+                {
+                    return Err(StoreError::Conflict {
+                        turn_id: req.turn_id,
+                    });
+                }
+                return Ok(AcceptedTurn::Existing(r.turn_detail(s, req.turn_id)?));
+            }
+            validate::config(&req.config)?;
+            let s = req.session_id;
+            let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
+            check_binding(session, &req.project_path)?;
+            let current_settings = r.session_settings.get(&s).ok_or_else(|| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "missing session settings",
+                )
+            })?;
+            current_settings.validate().map_err(|_| {
+                corrupt(
+                    "session_settings",
+                    &s.to_string(),
+                    "invalid session settings",
+                )
+            })?;
+            if current_settings.version()? != req.settings_version {
+                return Err(StoreError::SettingsChanged { session_id: s });
+            }
+            let parent = session.current;
+            let effective = resolve_path_in_tx(tx, &path, s, parent)?;
+            if effective.project().is_empty() {
+                return Err(invalid(
+                    "context",
+                    "当前路径有效模型上下文为空，无法独立触发推理",
+                ));
+            }
+            let stored = req.config.stored();
+            let config_digest = stored
+                .digest()
+                .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
+            let step_node = r.next_node(s)?;
+            r.configs.entry(config_digest).or_insert(stored);
+            r.nodes.insert(
+                (s, step_node),
+                Node::Step {
+                    parent,
+                    turn_id: req.turn_id,
+                    step_ordinal: 0,
+                    turn_start: Some(TurnStartMeta {
+                        accepted_at: req.accepted_at,
+                        trigger_channel: req.trigger_channel,
+                        input_nodes: Vec::new(),
+                        agent_name: req.config.agent_name,
+                        model: req.config.model,
+                        provider: req.config.provider,
+                        effort: req.config.effort,
+                        limits: req.config.limits,
+                        config_digest,
+                    }),
+                    progress: StepProgress::Reserved,
+                    attempts: Vec::new(),
+                    reply: None,
+                    slots: Vec::new(),
+                    updated_at: req.accepted_at,
+                },
+            );
+            r.turn_index.insert(
+                req.turn_id,
+                NodeRef {
+                    session_id: s,
+                    node: step_node,
+                },
+            );
+            let session = r.sessions.get_mut(&s).expect("session exists");
+            session.current = step_node;
+            session.updated_at = req.accepted_at;
+            Ok(AcceptedTurn::Accepted(r.turn_detail(s, req.turn_id)?))
+        })
+    }
+
     pub fn accept_turn(
         &self,
         lock: &SessionExecutionLock,
         input: AcceptTurn,
     ) -> Result<AcceptedTurn> {
         self.check_lock(lock, input.session_id)?;
+        validate_turn_input_batch(&input.inputs)?;
+        let path = self.path.clone();
         self.write(lock, Selection::Accept(input.turn_id), |r, tx| {
             if let Some(&node_ref) = r.turn_index.get(&input.turn_id) {
                 let s = node_ref.session_id;
@@ -382,10 +651,31 @@ impl SessionStore {
                     .sessions
                     .get(&s)
                     .ok_or_else(|| corrupt("sessions", &s.to_string(), "missing turn session"))?;
-                let existing_input = r.turn_input(s, input.turn_id)?;
+                let Some(Node::Step {
+                    step_ordinal: 0,
+                    turn_start: Some(meta),
+                    ..
+                }) = r.nodes.get(&(s, node_ref.node))
+                else {
+                    return Err(corrupt(
+                        "nodes",
+                        &format!("{s}/{}", node_ref.node.0),
+                        "missing turn start step node",
+                    ));
+                };
+                let existing_inputs = r.turn_inputs(s, input.turn_id)?;
+                let inputs_match = existing_inputs.len() == input.inputs.len()
+                    && existing_inputs.iter().zip(&input.inputs).all(
+                        |(existing, (channel, req_input))| {
+                            existing.channel() == channel
+                                && existing.message().parts == req_input.message().parts
+                        },
+                    );
                 if s != input.session_id
-                    || existing_input != input.input.message().parts
                     || existing_session.project_path != input.project_path
+                    || meta.trigger_channel != input.trigger_channel
+                    || meta.input_nodes.is_empty()
+                    || !inputs_match
                 {
                     return Err(StoreError::Conflict {
                         turn_id: input.turn_id,
@@ -414,59 +704,64 @@ impl SessionStore {
             if current_settings.version()? != input.settings_version {
                 return Err(StoreError::SettingsChanged { session_id: s });
             }
-            let parent = session.current;
-            let user_node = r.next_node(s)?;
-            let step_node = next_sequence(user_node.0, "node").map(NodeId)?;
+            let mut parent = session.current;
+            resolve_path_in_tx(tx, &path, s, parent)?;
             let stored = input.config.stored();
             let config_digest = stored
                 .digest()
                 .map_err(|_| invalid("config", "cannot digest frozen configuration"))?;
-            let (message, blobs) = input.input.into_parts();
-            if !blobs.is_empty() {
-                let mut table = tx.open_table(codec::BLOBS).map_err(codec::table_error)?;
-                for (digest, bytes) in &blobs {
-                    let key = codec::blob_key(digest);
-                    let missing = table.get(key.as_str())?.is_none();
-                    if missing {
-                        let encoded = codec::encode_blob(bytes);
-                        table.insert(key.as_str(), encoded.as_slice())?;
-                    }
+            let mut next_id = r.next_node(s)?;
+            let mut input_nodes = Vec::with_capacity(input.inputs.len());
+            let mut all_blobs = BTreeMap::new();
+            for (channel, turn_input) in input.inputs {
+                let (context_input, blobs) = turn_input.into_context_input(channel);
+                for (digest, bytes) in blobs {
+                    all_blobs.entry(digest).or_insert(bytes);
                 }
+                r.nodes.insert(
+                    (s, next_id),
+                    Node::Input {
+                        parent,
+                        accepted_at: input.accepted_at,
+                        input: context_input,
+                    },
+                );
+                input_nodes.push(next_id);
+                parent = next_id;
+                next_id = next_sequence(next_id.0, "node").map(NodeId)?;
             }
+            let step_node = next_id;
+            write_blobs(tx, &all_blobs)?;
             r.configs.entry(config_digest).or_insert(stored);
             r.nodes.insert(
-                (s, user_node),
-                Node::UserMessage {
+                (s, step_node),
+                Node::Step {
                     parent,
                     turn_id: input.turn_id,
-                    accepted_at: input.accepted_at,
-                    agent_name: input.config.agent_name,
-                    model: input.config.model,
-                    provider: input.config.provider,
-                    effort: input.config.effort,
-                    limits: input.config.limits,
-                    config_digest,
-                    message,
+                    step_ordinal: 0,
+                    turn_start: Some(TurnStartMeta {
+                        accepted_at: input.accepted_at,
+                        trigger_channel: input.trigger_channel,
+                        input_nodes,
+                        agent_name: input.config.agent_name,
+                        model: input.config.model,
+                        provider: input.config.provider,
+                        effort: input.config.effort,
+                        limits: input.config.limits,
+                        config_digest,
+                    }),
+                    progress: StepProgress::Reserved,
+                    attempts: Vec::new(),
+                    reply: None,
+                    slots: Vec::new(),
+                    updated_at: input.accepted_at,
                 },
             );
             r.turn_index.insert(
                 input.turn_id,
                 NodeRef {
                     session_id: s,
-                    node: user_node,
-                },
-            );
-            r.nodes.insert(
-                (s, step_node),
-                Node::Step {
-                    parent: user_node,
-                    turn_id: input.turn_id,
-                    step_ordinal: 0,
-                    progress: StepProgress::Reserved,
-                    attempts: Vec::new(),
-                    reply: None,
-                    slots: Vec::new(),
-                    updated_at: input.accepted_at,
+                    node: step_node,
                 },
             );
             let session = r.sessions.get_mut(&s).expect("session exists");
@@ -922,6 +1217,7 @@ impl SessionStore {
                         parent: node_id,
                         turn_id: key.turn_id,
                         step_ordinal: key.ordinal + 1,
+                        turn_start: None,
                         progress: match next_stop {
                             Some(cause) => StepProgress::Closed {
                                 end: StepEnd::Stop { cause },
@@ -1015,4 +1311,35 @@ fn check_binding(session: &SessionRecord, project_path: &ProjectPath) -> Result<
             session_id: session.session_id,
         })
     }
+}
+
+fn write_blobs(tx: &redb::WriteTransaction, blobs: &BTreeMap<[u8; 32], Vec<u8>>) -> Result<()> {
+    if blobs.is_empty() {
+        return Ok(());
+    }
+    let mut table = tx.open_table(codec::BLOBS).map_err(codec::table_error)?;
+    for (digest, bytes) in blobs {
+        let key = codec::blob_key(digest);
+        if table.get(key.as_str())?.is_none() {
+            let encoded = codec::encode_blob(bytes);
+            table.insert(key.as_str(), encoded.as_slice())?;
+        }
+    }
+    Ok(())
+}
+
+fn resolve_path_in_tx(
+    tx: &redb::WriteTransaction,
+    path: &std::path::Path,
+    session_id: SessionId,
+    position: NodeId,
+) -> Result<EffectiveContext> {
+    let table = tx.open_table(codec::NODES).map_err(codec::table_error)?;
+    read::resolve_path_with_loader(session_id, position, None, &[], |node_id| {
+        let key = format!("{session_id}/{}", node_id.0);
+        table
+            .get(codec::node_key(session_id, node_id).as_slice())?
+            .map(|value| codec::attach_path(path, codec::decode("nodes", &key, value.value())))
+            .transpose()
+    })
 }

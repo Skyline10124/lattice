@@ -15,6 +15,7 @@ use std::{fs, os::unix::fs::symlink, sync::Arc};
 
 mod attempts;
 mod blobs;
+mod context_v11;
 mod conversation_history;
 mod encoding;
 mod invocations;
@@ -96,13 +97,21 @@ fn config() -> FrozenTurnConfig {
     }
 }
 
+fn channel(name: &str) -> Channel {
+    Channel::parse(name).expect("构造测试 Channel")
+}
+
 fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
     let cfg = config();
     AcceptTurn {
         session_id: s,
         turn_id: t,
         project_path: project(1),
-        input: TurnInput::text("用户问题🌳".into()).unwrap(),
+        trigger_channel: channel("ipc"),
+        inputs: vec![(
+            channel("ipc"),
+            TurnInput::text("用户问题🌳".into()).unwrap(),
+        )],
         settings_version: SessionSettings::for_test(&cfg).version().unwrap(),
         config: cfg,
         accepted_at: now(),
@@ -307,8 +316,8 @@ fn entry_ordinals(entries: &[ConversationEntry]) -> Vec<u64> {
     entries
         .iter()
         .filter_map(|entry| match entry {
-            ConversationEntry::UserMessage { ordinal, .. } => Some(*ordinal),
-            ConversationEntry::Step { .. } => None,
+            ConversationEntry::Step { ordinal, .. } => *ordinal,
+            ConversationEntry::Input { .. } | ConversationEntry::ContextOp { .. } => None,
         })
         .collect()
 }

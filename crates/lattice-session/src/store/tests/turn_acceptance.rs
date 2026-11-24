@@ -33,19 +33,25 @@ fn acceptance_deduplicates_configs_and_preserves_abandoned_nodes() {
         AcceptedTurn::Existing(t) if t.session_id == sid(1)
     ));
     let lock2 = db.try_lock_session(sid(2)).unwrap();
-    for case in 0..3 {
+    for case in 0..4 {
         let mut conflicting = accept(sid(1), tid(1));
         match case {
-            0 => conflicting.input = TurnInput::text("用户问题🌳!".into()).unwrap(),
+            0 => {
+                conflicting.inputs = vec![(
+                    channel("ipc"),
+                    TurnInput::text("用户问题🌳!".into()).unwrap(),
+                )]
+            }
             1 => conflicting.project_path = project(2),
-            _ => conflicting.session_id = sid(2),
+            2 => conflicting.session_id = sid(2),
+            _ => conflicting.trigger_channel = channel("cli"),
         }
         assert!(
             matches!(
                 accept_prepared(&db, if case == 2 { &lock2 } else { &lock }, conflicting),
                 Err(StoreError::Conflict { .. })
             ),
-            "重放已有 TurnId 时输入、项目路径或会话 ID 不一致必须返回冲突（case={case}）"
+            "重放已有 TurnId 时输入、项目路径、会话 ID 或触发通道不一致必须返回冲突（case={case}）"
         );
     }
     let mut wrong_project = accept(sid(1), tid(99));
@@ -220,7 +226,10 @@ fn invalid_acceptance_and_lock_capabilities_leave_no_facts() {
         Err(StoreError::InvalidLockCapability)
     ));
     let mut a = accept(sid(1), tid(1));
-    a.input = TurnInput::text("x".repeat(lattice_conversation::MAX_USER_TEXT_BYTES)).unwrap();
+    a.inputs = vec![(
+        channel("ipc"),
+        TurnInput::text("x".repeat(lattice_conversation::MAX_USER_TEXT_BYTES)).unwrap(),
+    )];
     a.settings_version = base_version;
     db.accept_turn(&lock, a).unwrap();
     assert_eq!(

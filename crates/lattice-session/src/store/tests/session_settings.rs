@@ -85,11 +85,11 @@ fn timeout_bounds_preserve_frozen_limits_and_session_settings_on_reopen() {
         overwrite_records(&tx, &base);
         {
             let mut nodes = tx.open_table(NODES).unwrap();
-            let mut wire = serde_json::to_value(&base.nodes[&(sid(1), NodeId(1))]).unwrap();
-            wire["limits"]["timeout_secs"] = json!(invalid_timeout);
+            let mut wire = serde_json::to_value(&base.nodes[&(sid(1), NodeId(2))]).unwrap();
+            wire["turn_start"]["limits"]["timeout_secs"] = json!(invalid_timeout);
             nodes
                 .insert(
-                    node_key(sid(1), NodeId(1)).as_slice(),
+                    node_key(sid(1), NodeId(2)).as_slice(),
                     encode(&wire).unwrap().as_slice(),
                 )
                 .unwrap();

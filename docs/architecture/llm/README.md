@@ -47,7 +47,7 @@ provider 配置、凭据与模型元数据是用户级的全局状态，由后�
 | 后台（`lattice-server`） | `configure` 加载 profile 并经无凭据档位能力查询计算会话设置；提交时使用会话设置，经请求网关完成模型与凭据准备；执行中经请求网关发出模型请求；提供凭据、登录、模型候选与元数据刷新的命令和查询 |
 | 前端（CLI、TUI） | 发起会话配置与任务提交；凭据录入与登录只负责界面，经私有 IPC 交给后台 |
 
-调用方不接触 endpoint、key 与 features。网关每次请求按当前的内置表、`providers.toml`、元数据与凭据解析，不按 Turn 冻结；一轮固定的只有记在 UserMessage 节点上的 provider `id`、模型 `id` 与推理档位，见[会话合同](../session/acceptance.md#执行配置冻结)。地址固定与连接复用由网关内部按 Turn 维护，规则见[会话合同的模型 HTTP 传输](../session/concurrency.md#输入与传输限制)。
+调用方不接触 endpoint、key 与 features。网关每次请求按当前的内置表、`providers.toml`、元数据与凭据解析，不按 Turn 冻结；一轮固定的只有记在 `Step 0` 的 `turn_start` 元数据上的 provider `id`、模型 `id` 与推理档位，见[会话合同](../session/acceptance.md#执行配置冻结)。地址固定与连接复用由网关内部按 Turn 维护，规则见[会话合同的模型 HTTP 传输](../session/concurrency.md#输入与传输限制)。
 
 前端不读 provider 配置、元数据或凭据。后台按启动时的环境确定配置目录与 TLS 根证书，此后不随提交变化，见[会话合同的配置来源](../session/acceptance.md#配置来源与后台启动)。
 

@@ -391,18 +391,22 @@ fn sequence_exhaustion_aborts_transactions() {
         } else {
             u64::MAX
         });
-        let user_id = NodeId(tip.0 - 1);
+        let input_id = NodeId(tip.0 - 1);
         let tx = db.db.begin_write().unwrap();
         let mut r = load_write(&tx).unwrap();
-        let user = r.nodes.remove(&(sid(1), NodeId(1))).unwrap();
+        let input_node = r.nodes.remove(&(sid(1), NodeId(1))).unwrap();
         let mut step_node = r.nodes.remove(&(sid(1), NodeId(2))).unwrap();
-        let Node::Step { parent, .. } = &mut step_node else {
+        let Node::Step {
+            parent, turn_start, ..
+        } = &mut step_node
+        else {
             unreachable!()
         };
-        *parent = user_id;
-        r.nodes.insert((sid(1), user_id), user);
+        *parent = input_id;
+        turn_start.as_mut().unwrap().input_nodes = vec![input_id];
+        r.nodes.insert((sid(1), input_id), input_node);
         r.nodes.insert((sid(1), tip), step_node);
-        r.turn_index.get_mut(&tid(1)).unwrap().node = user_id;
+        r.turn_index.get_mut(&tid(1)).unwrap().node = tip;
         r.sessions.get_mut(&sid(1)).unwrap().current = tip;
         replace_all_for_test(&tx, &r).unwrap();
         tx.commit().unwrap();

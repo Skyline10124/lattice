@@ -39,6 +39,7 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
     store
         .create_session(&guard, project_path.clone(), settings, chrono::Utc::now())
         .unwrap();
+    let channel = Channel::parse("ipc").expect("解析默认提交通道");
     store
         .accept_turn(
             &guard,
@@ -46,7 +47,11 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
                 session_id: sid,
                 turn_id: tid,
                 project_path,
-                input: TurnInput::text("原始输入".into()).expect("构造测试输入"),
+                trigger_channel: channel.clone(),
+                inputs: vec![(
+                    channel,
+                    TurnInput::text("原始输入".into()).expect("构造测试输入"),
+                )],
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
@@ -58,10 +63,11 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
 #[tokio::test]
 async fn usage_identity_resolution_skips_conversation_and_configuration() {
     tokio::time::timeout(Duration::from_secs(10), async {
-        for (unrelated, field) in [
-            (false, "message"),
-            (false, "config_digest"),
-            (true, "message"),
+        for (unrelated, node, field) in [
+            (false, NodeId(1), "input"),
+            (false, NodeId(2), "reply"),
+            (false, NodeId(2), "config_digest"),
+            (true, NodeId(1), "input"),
         ] {
             let state = tempfile::tempdir().unwrap();
             let project = tempfile::tempdir().unwrap();
@@ -82,24 +88,27 @@ async fn usage_identity_resolution_skips_conversation_and_configuration() {
                 .edit_test_node(
                     NodeRef {
                         session_id: if unrelated { other } else { session_id() },
-                        node: NodeId(1),
+                        node,
                     },
                     |wire| {
-                        wire[field] = if field == "config_digest" {
-                            serde_json::json!("0".repeat(64))
+                        if field == "config_digest" {
+                            wire["turn_start"]["config_digest"] =
+                                serde_json::json!("0".repeat(64));
                         } else {
-                            serde_json::json!(false)
-                        };
+                            wire[field] = serde_json::json!(false);
+                        }
                     },
                 )
                 .unwrap();
             for input in [&id, &id[..8]] {
                 assert_eq!(
                     api.usage(input.to_owned()).await.unwrap_or_else(|error| {
-                        panic!("unrelated={unrelated} field={field} input={input}: {error}")
+                        panic!(
+                            "unrelated={unrelated} node={node:?} field={field} input={input}: {error}"
+                        )
                     }),
                     expected,
-                    "unrelated={unrelated} field={field} input={input}"
+                    "unrelated={unrelated} node={node:?} field={field} input={input}"
                 );
             }
         }
@@ -198,10 +207,10 @@ async fn lookup_and_watch_an_orphan_without_changing_its_facts() {
         })
     ));
     assert!(
-        matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::UserMessage { node: NodeId(1), ordinal: 1, .. }))
+        matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Input { node: NodeId(1), .. }))
     );
     assert!(
-        matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { node: NodeId(2), summary: Some(_), .. }))
+        matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { node: NodeId(2), ordinal: Some(1), summary: Some(_), .. }))
     );
     assert!(
         client

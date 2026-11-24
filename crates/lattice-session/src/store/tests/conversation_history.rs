@@ -105,7 +105,7 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
         entry_ordinals(&[read
             .entry(NodeRef {
                 session_id: sid(1),
-                node: NodeId(8)
+                node: NodeId(9)
             })
             .unwrap()]),
         vec![2]
@@ -240,7 +240,7 @@ fn conversation_step_summary_moves_to_reserved_successor() {
         serde_json::to_value(&entry).unwrap(),
         json!({
             "kind": "step", "node": 2, "content": node_at(&db, 2), "step": expected.steps[0],
-            "retries": [], "summary": expected.summary,
+            "ordinal": 1, "retries": [], "summary": expected.summary,
         })
     );
     finish(&db, &lock, &calls.bindings[0], ok_reply());
@@ -316,15 +316,22 @@ fn conversation_step_summary_moves_to_reserved_successor() {
             ..
         }
     ));
-    let user = read
+    let input_entry = read
         .entry(NodeRef {
             node: NodeId(1),
             ..node
         })
         .unwrap();
     assert_eq!(
-        serde_json::to_value(&user).unwrap(),
-        json!({ "kind": "user_message", "node": 1, "content": node_at(&db, 1), "ordinal": 1 })
+        serde_json::to_value(&input_entry).unwrap(),
+        json!({ "kind": "input", "node": 1, "content": node_at(&db, 1) })
+    );
+    assert!(
+        serde_json::to_value(&last)
+            .unwrap()
+            .get("ordinal")
+            .is_none(),
+        "step_ordinal > 0 不应序列化 ordinal 字段"
     );
     for entry in read.view(sid(1), 1).unwrap().entries {
         assert_eq!(
@@ -411,11 +418,11 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
 
 #[test]
 fn conversation_step_entry_reads_only_its_turn() {
-    for damaged in [NodeId(2), NodeId(4)] {
+    for damaged in [NodeId(4), NodeId(5)] {
         let (_d, _l, db, _lock) = conversation_tree();
         let node = NodeRef {
             session_id: sid(1),
-            node: NodeId(7),
+            node: NodeId(3),
         };
         let expected = db.begin_read().unwrap().entry(node).unwrap();
         let tx = db.db.begin_write().unwrap();
@@ -430,7 +437,7 @@ fn conversation_step_entry_reads_only_its_turn() {
         assert_eq!(read.entry(node).unwrap(), expected);
         assert!(
             read.entry(NodeRef {
-                node: NodeId(3),
+                node: NodeId(6),
                 ..node
             })
             .is_ok()
@@ -440,17 +447,53 @@ fn conversation_step_entry_reads_only_its_turn() {
 
 #[test]
 fn conversation_windows_skip_steps_outside_the_requested_turns() {
-    let (_d, _l, db, _lock) = conversation_tree();
+    let (_d, _l, db) = store();
+    let (lock, calls0) = running(&db, sid(1), tid(1), 1, 1);
+    finish(&db, &lock, &calls0.bindings[0], ok_reply());
+    db.close_step(
+        &lock,
+        CloseStep::Continue {
+            key: step(tid(1), 0),
+        },
+        now(),
+    )
+    .unwrap();
+    db.start_request(&lock, key(tid(1), 1, 0), origin(), now())
+        .unwrap();
+    let calls1 = db
+        .register_calls(&lock, reply(key(tid(1), 1, 0), 1), &[iid(2)], now())
+        .unwrap();
+    finish(&db, &lock, &calls1.bindings[0], ok_reply());
+    db.close_step(
+        &lock,
+        CloseStep::Continue {
+            key: step(tid(1), 1),
+        },
+        now(),
+    )
+    .unwrap();
+    db.start_request(&lock, key(tid(1), 2, 0), origin(), now())
+        .unwrap();
+    db.close_step(&lock, CloseStep::Finish(reply(key(tid(1), 2, 0), 0)), now())
+        .unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(2))).unwrap();
+    db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
+        .unwrap();
+    db.close_step(&lock, CloseStep::Finish(reply(key(tid(2), 0, 0), 0)), now())
+        .unwrap();
+    accept_prepared(&db, &lock, accept(sid(1), tid(3))).unwrap();
+    // 树：Input(1) -> Step0(2) -> Step1(3) -> Step2(4) -> Input(5) -> Step0(6) -> Input(7) -> Step0(8)
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 1).unwrap();
-    let history = read.history(sid(1), NodeId(6), 1).unwrap();
+    let history = read.history(sid(1), NodeId(7), 1).unwrap();
     drop(read);
+    // 损坏 Turn 1 中间步 Step 1 (NodeId(3))；窗口外计数从 Step 2 (NodeId(4)) 直跳 Step 0 (NodeId(2))，不读 NodeId(3)。
     let tx = db.db.begin_write().unwrap();
     {
         let mut nodes = tx.open_table(NODES).unwrap();
         nodes
             .insert(
-                node_key(sid(1), NodeId(2)).as_slice(),
+                node_key(sid(1), NodeId(3)).as_slice(),
                 b"invalid".as_slice(),
             )
             .unwrap();
@@ -458,12 +501,12 @@ fn conversation_windows_skip_steps_outside_the_requested_turns() {
     tx.commit().unwrap();
     let read = db.begin_read().unwrap();
     assert_eq!(read.view(sid(1), 1).unwrap(), view);
-    assert_eq!(read.history(sid(1), NodeId(6), 1).unwrap(), history);
+    assert_eq!(read.history(sid(1), NodeId(7), 1).unwrap(), history);
     assert_eq!(
         entry_ordinals(&[read
             .entry(NodeRef {
                 session_id: sid(1),
-                node: NodeId(6)
+                node: NodeId(8)
             })
             .unwrap()]),
         vec![3]
@@ -478,7 +521,9 @@ fn conversation_windows_count_older_turns_without_decoding_content() {
         (NodeId(3), "attempts"),
         (NodeId(3), "slots"),
         (NodeId(3), "unexpected"),
-        (NodeId(1), "message"),
+        (NodeId(2), "reply"),
+        (NodeId(2), "turn_start"),
+        (NodeId(1), "input"),
         (NodeId(1), "unexpected"),
     ] {
         let (_d, _l, db, _lock) = conversation_tree();
@@ -507,7 +552,7 @@ fn conversation_windows_count_older_turns_without_decoding_content() {
             entry_ordinals(&[read
                 .entry(NodeRef {
                     session_id: sid(1),
-                    node: NodeId(6),
+                    node: NodeId(7),
                 })
                 .unwrap()]),
             vec![3]
@@ -521,8 +566,13 @@ fn conversation_windows_count_older_turns_without_decoding_content() {
 
 #[test]
 fn conversation_counts_reject_damaged_headers() {
-    for damaged in [NodeId(1), NodeId(3)] {
-        for field in ["kind", "parent", "turn_id"] {
+    let cases: &[(NodeId, &[&str])] = &[
+        (NodeId(1), &["kind", "parent"]),
+        (NodeId(2), &["kind", "parent", "turn_id", "step_ordinal"]),
+        (NodeId(3), &["kind", "parent", "turn_id", "step_ordinal"]),
+    ];
+    for &(damaged, fields) in cases {
+        for &field in fields {
             for remove in [false, true] {
                 let (_d, _l, db, _lock) = conversation_tree();
                 let tx = db.db.begin_write().unwrap();
@@ -550,13 +600,14 @@ fn conversation_counts_reject_damaged_headers() {
                     read.history(sid(1), NodeId(6), 1).map(|_| ()),
                     read.entry(NodeRef {
                         session_id: sid(1),
-                        node: NodeId(6),
+                        node: NodeId(7),
                     })
                     .map(|_| ()),
                 ] {
                     assert!(
-                        matches!(result, Err(StoreError::Corruption { table, key, .. })
-                        if table == "nodes" && key == format!("{}/{}", sid(1), damaged.0))
+                        matches!(result, Err(StoreError::Corruption { ref table, ref key, .. })
+                        if table == "nodes" && key == &format!("{}/{}", sid(1), damaged.0)),
+                        "damaged={damaged:?} field={field} remove={remove} result={result:?}"
                     );
                 }
             }

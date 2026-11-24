@@ -71,9 +71,9 @@ fn session_queries_and_rewind_preserve_the_tree_across_restart() {
         assert!(text.contains("current=4"));
         for node in [
             "  0 root",
-            "    1 user",
+            "    1 input",
             "      2 step 0",
-            "    3 user",
+            "    3 input",
             "    * 4 step 0",
         ] {
             assert!(

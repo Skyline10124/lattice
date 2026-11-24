@@ -15,13 +15,12 @@ status: active
 接受事务写入以下事实：
 
 - 若规范化后的输入包含图片，先在同一写事务中按 SHA-256 摘要去重写入 `blobs` 表中尚无的原始图片字节；表中已有同一摘要时跳过写入。
-- UserMessage 节点，父节点为 Session 当前位置（草稿会话的第一条 UserMessage 为 `1`、父节点为根节点 `0`），保存规范化后的有序文本与图片引用片段。
-- UserMessage 节点同时记下 `turn_id`、接受时间、agent 名、模型、provider、推理档位、执行限制和配置摘要。系统提示与工具目录按摘要写入配置表，表中已有同一摘要时直接复用。项目绑定取自 Session 记录，不另存。
-- TurnId 索引：TurnId 指向这个 UserMessage 节点。
-- 预留的第 0 步，父节点为 UserMessage：没有尝试和回复，停在 `Reserved`。
-- Session 记录的当前位置指向预留的 Step，并更新 `updated_at`（写入时再核对一次项目绑定与设置版本）。
+- 按序追加本轮的 `Node::Input` 节点（每条含触发渠道、接受时间与规范化后的有序文本/图片引用片段，首个节点的父节点为 Session 当前位置，后续节点依次接在前一输入节点之后；草稿会话的首条 `Input` 为 `1`、父节点为根节点 `0`）。
+- 预留第 0 步（`Node::Step`，`step_ordinal = 0`，停在 `Reserved`），父节点为本轮最后一条 `Input`（无前置输入触发时父节点为 Session 当前位置），其 `turn_start`（`TurnStartMeta`）记下接受时间、agent 名、模型、provider、推理档位、执行限制、配置摘要、触发渠道（`trigger_channel`）与本轮认领的前置输入节点列表（`input_nodes`）。系统提示与工具目录按摘要写入配置表，表中已有同一摘要时直接复用。项目绑定取自 Session 记录，不另存。
+- TurnId 索引：TurnId 指向这个 `Step 0` 节点。
+- Session 记录的当前位置指向预留的 `Step 0`，并更新 `updated_at`（写入时再核对一次项目绑定与设置版本）。
 
-同一 `TurnId` 已存在时，不写入 `blobs` 或节点，按会话身份、项目绑定与规范化后的完整保序片段（文本和图片的顺序、出现次数及 `ImageRef` 摘要）比较：三项完全一致时返回已接受轮次，任一项不符则返回 `Conflict`。
+同一 `TurnId` 已存在时，不写入 `blobs` 或节点，按会话身份、项目绑定、触发渠道与 `turn_start.input_nodes` 对应输入节点的规范化完整保序片段（数量、渠道、文本和图片的顺序、出现次数及 `ImageRef` 摘要）比较：完全一致时返回已接受轮次，任一项不符则返回 `Conflict`。
 
 这个事务提交是请求接受的持久边界。用户消息为 User 角色的有序文本与图片片段，大小与规范化规则见[对话数据与模型投影](conversation.md#用户图片与单轮输入规范化)和[输入与传输限制](concurrency.md#输入与传输限制)。
 
@@ -42,17 +41,17 @@ status: active
 - **工具目录。** 接受事务前由注入的 `ToolExecutor::open_turn(session_id, workspace)` 打开本轮 `TurnTools`，把给出的 `ToolSpec` 列表转换为 `ToolCatalogSnapshot` 冻结进配置表；生产后台默认注入空目录的 `NoTools`，冻结目录为空，发给模型的请求不带工具定义（见 [ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#2-工具执行收窄为-toolexecutor)）。
 - **TLS 根证书。** 后台启动时载入，见[配置来源与后台启动](#配置来源与后台启动)。
 
-`FrozenTurnConfig` 是协调层在接受时构造的非秘密执行事实，供执行、结果投影、`log` 显示使用：agent 名、模型、provider、推理档位和执行限制记在 UserMessage 节点上，其余按内容摘要写入配置表。
+`FrozenTurnConfig` 是协调层在接受时构造的非秘密执行事实，供执行、结果投影、`log` 显示使用：agent 名、模型、provider、推理档位和执行限制记在 `Step 0` 的 `turn_start` 元数据中，其余按内容摘要写入配置表。
 
 | 字段类别 | 来源 | 冻结时点 | 接收/持有者 | 是否持久化 | 用途 |
 | --- | --- | --- | --- | --- | --- |
 | 会话设置 | `configure` 解析并写入的 `SessionSettings` | `configure` 时保存，接受事务前读取 | 会话库、执行核心 | 是，在会话设置表中 | 提供下一轮的 agent 快照、系统提示、模型与推理档位 |
 | 凭据 | `auth.json` | 不冻结；请求网关每次请求时取得，SIWC 的 access token 按需刷新，见[刷新](../llm/credentials.md#刷新) | 请求网关，只在内存中 | 否 | 认证 provider 请求 |
 | TLS 根证书 | 后台启动时载入的内容 | 后台启动时 | 请求网关与 provider 连接 | 否 | 验证 TLS 连接 |
-| `FrozenTurnConfig.agent_name/model/provider/effort` | 会话设置与 `GatewayTurn::prepare` 核验结果 | 接受事务前 | TurnCoordinator、UserMessage 节点及投影 | 是 | 标明此次执行身份、模型与推理档位 |
+| `FrozenTurnConfig.agent_name/model/provider/effort` | 会话设置与 `GatewayTurn::prepare` 核验结果 | 接受事务前 | TurnCoordinator、`Step 0` 的 `turn_start` 及投影 | 是 | 标明此次执行身份、模型与推理档位 |
 | `FrozenTurnConfig.system_prompt` | 会话设置中的 `system_prompt` | 同上 | 模型请求、配置表 | 是 | 固定本 Turn 的系统指令 |
 | `FrozenTurnConfig.catalog` | `ToolExecutor::open_turn` 给出的本轮 `ToolSpec` 列表（生产默认 `NoTools` 为空目录） | 同上 | 模型投影、调用登记验证、配置表 | 是 | 保存按工具名排序的 entries 及摘要；entry 含名称、不透明工具身份 `tool_identity`、描述、规范输入 schema（[ADR 0009](../../adr/0009-remove-legacy-lancet-tool-executor.md#4-会话库升版与存储收敛)）。模型请求使用同一份目录，`NoTools` 下不发送工具定义；回复含目录外工具名时按 `InvalidBatch` 整批拒绝 |
-| `FrozenTurnConfig.limits` | 会话设置中 `profile` 的超时、重试次数及代码定义的步骤上限 | 同上 | 执行核心、UserMessage 节点 | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
+| `FrozenTurnConfig.limits` | 会话设置中 `profile` 的超时、重试次数及代码定义的步骤上限 | 同上 | 执行核心、`Step 0` 的 `turn_start` | 秒数与计数持久化，单调时钟 deadline 不持久化 | 限制后续 provider/Tool 启动，并解释尝试预算 |
 
 持久冻结事实的类型由 `lattice-session` 维护，接受接线见[接受接线](../../../crates/lattice-server/src/turn/live.rs)。目录保存中立契约，provider wire 投影由 LLM 层按请求生成。
 

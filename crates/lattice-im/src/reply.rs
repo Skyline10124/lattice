@@ -688,7 +688,8 @@ mod tests {
             detail: TurnDetail {
                 turn_id: new_turn_id(),
                 session_id: new_session_id(),
-                user_node: NodeId(1),
+                start_node: NodeId(2),
+                input_nodes: vec![NodeId(1)],
                 agent_name: AgentName::parse("test").unwrap(),
                 accepted_at: Utc::now(),
                 ended_at: Utc::now(),
@@ -761,7 +762,8 @@ mod tests {
                 detail: TurnDetail {
                     turn_id: new_turn_id(),
                     session_id: new_session_id(),
-                    user_node: NodeId(1),
+                    start_node: NodeId(2),
+                    input_nodes: vec![NodeId(1)],
                     agent_name: AgentName::parse("test").unwrap(),
                     accepted_at: Utc::now(),
                     ended_at: Utc::now(),

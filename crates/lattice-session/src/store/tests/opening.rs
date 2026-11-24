@@ -162,7 +162,7 @@ fn schema_and_legacy_rejection_matrix() {
             assert!(!layout.lattice_root().join("lattice.redb").exists());
         }
     }
-    for case in 0..11 {
+    for case in 0..12 {
         let (_d, layout, db) = store();
         drop(db);
         let raw = redb::Database::open(layout.lattice_root().join("lattice.redb")).unwrap();
@@ -194,7 +194,7 @@ fn schema_and_legacy_rejection_matrix() {
             3 => {
                 tx.delete_table(CONFIGS).unwrap();
             }
-            4 | 5 | 7 | 8 | 9 | 10 => {
+            4 | 5 | 7 | 8 | 9 | 10 | 11 => {
                 let mut meta = tx.open_table(META).unwrap();
                 // 固定旧版元信息，独立于当前编码器核对严格打开。
                 let old_version = match case {
@@ -203,7 +203,8 @@ fn schema_and_legacy_rejection_matrix() {
                     7 => 6_u32,
                     8 => 7_u32,
                     9 => 8_u32,
-                    _ => 9_u32,
+                    10 => 9_u32,
+                    _ => 10_u32,
                 };
                 for (key, value) in [
                     ("store_kind", "\"lattice-session\"".to_owned()),
@@ -226,14 +227,15 @@ fn schema_and_legacy_rejection_matrix() {
         let error = SessionStore::open(&layout)
             .err()
             .unwrap_or_else(|| panic!("case {case}"));
-        if matches!(case, 4 | 5 | 7 | 8 | 9 | 10) {
+        if matches!(case, 4 | 5 | 7 | 8 | 9 | 10 | 11) {
             let expected = match case {
                 4 => 3,
                 5 => 4,
                 7 => 6,
                 8 => 7,
                 9 => 8,
-                _ => 9,
+                10 => 9,
+                _ => 10,
             };
             let path = layout.lattice_root().join("lattice.redb");
             assert!(error.to_string().contains(&path.display().to_string()));

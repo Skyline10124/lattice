@@ -134,9 +134,9 @@ pub(super) fn usage<'a>(attempts: impl IntoIterator<Item = &'a AttemptRecord>) -
     )
 }
 
-pub(super) fn outcome(
+pub(super) fn outcome_from_progress(
     progress: &StepProgress,
-    attempts: &[AttemptRecord],
+    last_attempt: Option<&AttemptProgress>,
     slots: &[InvocationSlot],
 ) -> Result<(TurnOutcome, Option<Notice>)> {
     let end = resolve_step(progress, slots)?;
@@ -148,10 +148,11 @@ pub(super) fn outcome(
         }
     };
     let text = match cause {
-        StopCause::ProviderError { .. } => attempts
-            .last()
-            .map(resolve_attempt)
-            .and_then(|(_, diagnostic)| diagnostic.provider_error)
+        StopCause::ProviderError { .. } => last_attempt
+            .and_then(|attempt| match attempt {
+                AttemptProgress::Sent => None,
+                AttemptProgress::Ended { diagnostic, .. } => diagnostic.provider_error.clone(),
+            })
             .ok_or_else(|| corrupt("nodes", "diagnostic", "missing final provider diagnostic"))?,
         StopCause::Cancelled => "cancelled by caller".into(),
         StopCause::Deadline => "turn deadline exceeded".into(),
@@ -180,7 +181,15 @@ pub(super) fn summary(
     attempts: &[AttemptRecord],
     slots: &[InvocationSlot],
 ) -> Result<TurnSummary> {
-    let (outcome, notice) = outcome(progress, attempts, slots)?;
+    summary_from_progress(progress, attempts.last().map(|a| &a.progress), slots)
+}
+
+pub(super) fn summary_from_progress(
+    progress: &StepProgress,
+    last_attempt: Option<&AttemptProgress>,
+    slots: &[InvocationSlot],
+) -> Result<TurnSummary> {
+    let (outcome, notice) = outcome_from_progress(progress, last_attempt, slots)?;
     Ok(TurnSummary {
         outcome: match outcome {
             TurnOutcome::Completed => PublicTurnOutcome::Completed,

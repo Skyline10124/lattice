@@ -49,18 +49,25 @@ const FRAME: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
-    /// 一轮的开头，不占行：UserMessage 条目，或本客户端尚未被条目取代的提交。
-    /// `node` 与 `ordinal` 随条目到达；`agent` 是这一轮回答的 agent。
+    /// 一条用户输入或本客户端尚未被条目取代的提交，不占行。
+    /// `turn_id`、`ordinal` 与 `agent` 在关联到某一轮（本地提交、接受回执或 `Step 0`）时填入；
+    /// 独立输入时 `turn_id` 与 `ordinal` 为空。
     UserTurn {
-        turn_id: TurnId,
+        turn_id: Option<TurnId>,
         node: Option<NodeId>,
         ordinal: Option<std::num::NonZeroUsize>,
         agent: String,
+    },
+    /// 上下文操作条目的占位锚点，不占视觉行。
+    ContextOp {
+        node: NodeId,
     },
     /// Step 条目的开头，不占行。
     Step {
         node: NodeId,
         key: StepKey,
+        ordinal: Option<std::num::NonZeroUsize>,
+        agent: Option<String>,
     },
     User(String),
     CommentedUser(crate::comment::Message),
@@ -175,6 +182,10 @@ pub(crate) struct App {
     pending_head: Option<SessionHead>,
     /// 正在显示的条目，按 NodeId 维护；块序列中的段由它们生成。
     entries: BTreeMap<NodeId, ConversationEntry>,
+    /// 已认领为某轮输入的 `NodeId -> TurnId` 映射（来自 `TurnView.input_nodes` 或 `Step 0` 的 `turn_start.input_nodes`）。
+    input_turn: HashMap<NodeId, TurnId>,
+    /// 各轮的序号与回答 agent（来自 `Step 0` 或接受回执），供对应 `Input` 与 `Step` 块渲染标题线。
+    turn_meta: HashMap<TurnId, (Option<std::num::NonZeroUsize>, String)>,
     /// 生成中的文字，按所属 Step 节点。
     texts: HashMap<NodeId, Generating>,
     /// 已经结束的轮；由未结束变为结束的那一刻，结局才是新到的消息。
@@ -257,6 +268,8 @@ impl App {
             head: None,
             pending_head: None,
             entries: BTreeMap::new(),
+            input_turn: HashMap::new(),
+            turn_meta: HashMap::new(),
             texts: HashMap::new(),
             ended: HashSet::new(),
             view_starting: false,
@@ -763,10 +776,17 @@ impl App {
                 {
                     self.submitted = None;
                 }
+                self.turn_meta
+                    .entry(turn_id)
+                    .or_insert_with(|| (None, turn.agent_name.as_str().to_owned()));
+                for &input_node in &turn.input_nodes {
+                    self.input_turn.insert(input_node, turn_id);
+                }
                 // 已确认的会话头到达这一轮之前，仍按正在运行处理。
                 if !self.head_reached(turn_id) {
                     self.awaiting_head = Some(turn_id);
                 }
+                self.reconcile_turn_inputs(turn_id, &turn.input_nodes);
                 self.mark_accepted(turn_id, &turn.agent_name);
                 // 直接收到的接受由助手标题线表达，不另写接受行。
                 if receipt.recovered {
@@ -816,10 +836,13 @@ impl App {
         }
     }
 
-    /// 本客户端提交的 USER 块，尚未被同一 TurnId 的 UserMessage 条目取代。
+    /// 本客户端提交的 USER 块，尚未被对应 Input 条目取代。
     fn pending_start(&self, turn_id: TurnId) -> Option<usize> {
         self.blocks.entries.iter().position(|entry| {
-            matches!(entry.block, Block::UserTurn { turn_id: id, node: None, .. } if id == turn_id)
+            matches!(
+                entry.block,
+                Block::UserTurn { turn_id: Some(id), node: None, .. } if id == turn_id
+            )
         })
     }
 
@@ -901,7 +924,9 @@ impl App {
         while index < self.blocks.len() {
             let range = self.blocks.group(index);
             let discard = match &self.blocks.entries[index].block {
-                Block::UserTurn { node: Some(_), .. } | Block::Step { .. } => true,
+                Block::UserTurn { node: Some(_), .. }
+                | Block::ContextOp { .. }
+                | Block::Step { .. } => true,
                 Block::UserTurn { node: None, .. } => self.blocks.entries[range.clone()]
                     .iter()
                     .any(|entry| matches!(entry.block, Block::AssistantStart)),
@@ -923,8 +948,8 @@ impl App {
     /// 本轮从替换后的条目重算；会话头当前位置未到齐时不把已装入的小计当作完整值。
     fn refresh_status_fields(&mut self) {
         let latest = self.entries.values().rev().find_map(|entry| match entry {
-            ConversationEntry::UserMessage {
-                content: Node::UserMessage { turn_id, .. },
+            ConversationEntry::Step {
+                content: Node::Step { turn_id, .. },
                 ..
             } => Some(*turn_id),
             _ => None,
@@ -1139,7 +1164,7 @@ impl App {
         self.own_turn = Some(id);
         self.submitted = Some((id, message));
         self.blocks.push(Block::UserTurn {
-            turn_id: id,
+            turn_id: Some(id),
             node: None,
             ordinal: None,
             agent: self.current_agent(),
@@ -1242,6 +1267,8 @@ impl App {
         // 路径替换立即丢弃此前的条目；新视图等首个初始条目到达再替换，重连失败时内容保留。
         let starts = std::mem::take(&mut self.view_starting) || head.path_replaced;
         if head.path_replaced {
+            self.input_turn.clear();
+            self.turn_meta.clear();
             self.replace_entries();
             self.awaiting_head = None;
         } else if starts {
@@ -1282,9 +1309,9 @@ impl App {
         }
     }
 
-    /// 已确认的会话头到达了这一轮：指向它，或当前路径上已有它的 UserMessage（位置已经越过它）。
+    /// 已确认的会话头到达了这一轮：指向它，或当前路径上已有它的 Step（位置已经越过它）。
     /// 每批推送先给会话头，再按路径顺序给到当前位置为止的条目，所以确认时这一轮的
-    /// UserMessage 若在本批中，已经到达。
+    /// Step 若在本批中，已经到达。
     fn head_reached(&self, turn: TurnId) -> bool {
         self.pending_head.is_none()
             && (self
@@ -1292,7 +1319,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|head| head.turn_id == Some(turn))
                 || self.entries.values().any(|entry| {
-                    matches!(entry, ConversationEntry::UserMessage { .. })
+                    matches!(entry, ConversationEntry::Step { .. })
                         && entry_turn(entry) == Some(turn)
                 }))
     }
@@ -1306,34 +1333,99 @@ impl App {
         self.orphan_warned = None;
     }
 
-    /// 同一 NodeId 原位替换；本客户端提交的 USER 块由同一 TurnId 的 UserMessage 条目取代；
+    fn input_turn_meta(&self, turn: TurnId) -> crate::session::InputTurnMeta<'_> {
+        let (ordinal, agent) = self
+            .turn_meta
+            .get(&turn)
+            .map_or((None, ""), |(ordinal, agent)| (*ordinal, agent.as_str()));
+        crate::session::InputTurnMeta {
+            turn_id: turn,
+            ordinal,
+            agent,
+        }
+    }
+
+    /// 当接受回执或 `Step 0` 公布某轮的 `input_nodes` 时，将已到达的 `Input` 条目原位绑定到该轮
+    /// （优先取代本客户端提交时生成的暂存 USER 块以保持块身份与相对位置，否则原位更新元数据）。
+    fn reconcile_turn_inputs(&mut self, turn_id: TurnId, input_nodes: &[NodeId]) {
+        for &input_node in input_nodes {
+            if !self.entries.contains_key(&input_node) {
+                continue;
+            }
+            if self.pending_start(turn_id).is_some() {
+                if let Some(existing) = self.blocks.node_start(input_node) {
+                    let range = self.blocks.group(existing);
+                    self.blocks.replace(range, Vec::new());
+                }
+                if let Some(pending) = self.pending_start(turn_id) {
+                    let blocks = crate::session::entry_blocks(
+                        &self.entries[&input_node],
+                        false,
+                        None,
+                        Some(self.input_turn_meta(turn_id)),
+                    );
+                    self.blocks.replace(self.blocks.group(pending), blocks);
+                    continue;
+                }
+            }
+            self.render_node(input_node);
+        }
+    }
+
+    /// 同一 NodeId 原位替换；本客户端提交的 USER 块由对应的 Input 条目取代；
     /// 其余新条目接在末尾。
     fn apply_entry(&mut self, entry: ConversationEntry) {
         let node = entry.node();
-        let Some(turn) = entry_turn(&entry) else {
-            return;
-        };
         if self.replace_pending {
             self.replace_entries();
         }
-        let user_message = matches!(entry, ConversationEntry::UserMessage { .. });
-        // 视图中出现这次提交的 UserMessage，同样说明已被接受；回执可能更晚到或者丢失。
-        // 它只证明已接受，忙状态仍保留到会话头确认。
-        if user_message {
-            self.resolve_unknown(turn);
-        }
-        if user_message && self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
-            self.submitted = None;
-            if !self.head_reached(turn) {
-                self.awaiting_head = Some(turn);
+        let mut step0_claimed: Option<(TurnId, Vec<NodeId>)> = None;
+        if let ConversationEntry::Step {
+            content:
+                Node::Step {
+                    turn_id,
+                    step_ordinal: 0,
+                    turn_start: Some(meta),
+                    ..
+                },
+            ordinal,
+            ..
+        } = &entry
+        {
+            let turn = *turn_id;
+            let ord = (*ordinal)
+                .and_then(|n| usize::try_from(n).ok())
+                .and_then(std::num::NonZeroUsize::new);
+            self.turn_meta
+                .insert(turn, (ord, meta.agent_name.as_str().to_owned()));
+            for &input_node in &meta.input_nodes {
+                self.input_turn.insert(input_node, turn);
             }
+            // 视图中出现这次提交的 Step 0，同样说明已被接受；回执可能更晚到或者丢失。
+            // 它只证明已接受，忙状态仍保留到会话头确认。
+            self.resolve_unknown(turn);
+            if self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
+                self.submitted = None;
+                if !self.head_reached(turn) {
+                    self.awaiting_head = Some(turn);
+                }
+            }
+            step0_claimed = Some((turn, meta.input_nodes.clone()));
         }
+        let turn = entry_turn(&entry);
+        let input_meta_turn = match &entry {
+            ConversationEntry::Input { .. } => self.input_turn.get(&node).copied(),
+            _ => None,
+        };
         let known_retries: HashSet<u32> = match self.entries.insert(node, entry) {
             Some(ConversationEntry::Step { retries, .. }) => {
                 retries.iter().map(|retry| retry.attempt).collect()
             }
             _ => HashSet::new(),
         };
+        if let Some((claimed_turn, input_nodes)) = step0_claimed {
+            self.reconcile_turn_inputs(claimed_turn, &input_nodes);
+        }
         if self
             .texts
             .get(&node)
@@ -1341,15 +1433,17 @@ impl App {
         {
             self.texts.remove(&node);
         }
+        let input_meta = input_meta_turn.map(|t| self.input_turn_meta(t));
         let blocks = crate::session::entry_blocks(
             &self.entries[&node],
-            self.ended.contains(&turn),
+            turn.is_some_and(|t| self.ended.contains(&t)),
             self.texts.get(&node),
+            input_meta,
         );
         let start = self
             .blocks
             .node_start(node)
-            .or_else(|| self.pending_start(turn).filter(|_| user_message));
+            .or_else(|| input_meta_turn.and_then(|t| self.pending_start(t)));
         let range = match start {
             Some(start) => self.blocks.replace(self.blocks.group(start), blocks),
             None => {
@@ -1416,7 +1510,15 @@ impl App {
             return;
         };
         let ended = entry_turn(entry).is_some_and(|turn| self.ended.contains(&turn));
-        let blocks = crate::session::entry_blocks(entry, ended, self.texts.get(&node));
+        let input_meta = match entry {
+            ConversationEntry::Input { .. } => self
+                .input_turn
+                .get(&node)
+                .copied()
+                .map(|turn| self.input_turn_meta(turn)),
+            _ => None,
+        };
+        let blocks = crate::session::entry_blocks(entry, ended, self.texts.get(&node), input_meta);
         if let Some(start) = self.blocks.node_start(node) {
             self.blocks.replace(self.blocks.group(start), blocks);
         }
@@ -1487,22 +1589,28 @@ impl App {
         self.blocks.node_start(node)
     }
 
-    /// 视图翻到对话记录顶部而第 1 轮尚未装入时，以已装入的最早一轮的 UserMessage 为 `before`
+    /// 视图翻到对话记录顶部而第 1 轮尚未装入时，以已装入的最早条目节点为 `before`
     /// 取更早的轮。失败后不自动重查，等下一次翻到顶部。
     fn request_older_at_top(&mut self) {
         if self.viewport.scroll() != 0 || self.older_pending {
             return;
         }
         let session_id = self.session_id;
-        let Some((before, ordinal)) = self.entries.iter().find_map(|(node, entry)| match entry {
-            ConversationEntry::UserMessage { ordinal, .. } => Some((*node, *ordinal)),
-            ConversationEntry::Step { .. } => None,
+        let Some(ordinal) = self.entries.values().find_map(|entry| match entry {
+            ConversationEntry::Step {
+                ordinal: Some(ordinal),
+                ..
+            } => Some(*ordinal),
+            _ => None,
         }) else {
             return;
         };
         if ordinal <= 1 {
             return;
         }
+        let Some((&before, _)) = self.entries.first_key_value() else {
+            return;
+        };
         self.older_pending = true;
         self.older_request = Some(OlderRequest {
             session_id,
@@ -1549,25 +1657,57 @@ impl App {
         let top = (scroll..visible.min(transcript.owners.len()))
             .find(|row| !fixed.contains(&transcript.owners[*row].id))
             .and_then(|row| Some((row, block_rows_from_end(&transcript, row)?)));
+        // 预先登记本批历史中所有 Step 0 的轮次元数据与输入归属，使前置 Input 渲染时即可带出序号与 agent。
+        for entry in &history.entries {
+            if let ConversationEntry::Step {
+                content:
+                    Node::Step {
+                        turn_id,
+                        step_ordinal: 0,
+                        turn_start: Some(meta),
+                        ..
+                    },
+                ordinal,
+                ..
+            } = entry
+            {
+                let ord = (*ordinal)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .and_then(std::num::NonZeroUsize::new);
+                self.turn_meta
+                    .insert(*turn_id, (ord, meta.agent_name.as_str().to_owned()));
+                for &input_node in &meta.input_nodes {
+                    self.input_turn.insert(input_node, *turn_id);
+                }
+                self.resolve_unknown(*turn_id);
+            }
+        }
         for entry in history.entries {
             let node = entry.node();
-            let Some(turn) = entry_turn(&entry) else {
-                continue;
-            };
-            if matches!(entry, ConversationEntry::UserMessage { .. }) {
-                self.resolve_unknown(turn);
-            }
             if self.entries.contains_key(&node) {
                 continue;
             }
+            let turn = entry_turn(&entry);
             self.entries.insert(node, entry);
             // 更早的轮都已结束：当前位置所属的那一轮总在已装入的部分里。不按会话头判定，
             // 新会话头待确认时也一样；它们的提示与结局不是新消息，直接进对话记录。
-            let ended = self.last_summary(turn).is_some();
-            if ended {
-                self.ended.insert(turn);
-            }
-            let blocks = crate::session::entry_blocks(&self.entries[&node], ended, None);
+            let ended = turn.is_some_and(|t| {
+                let ended = self.last_summary(t).is_some();
+                if ended {
+                    self.ended.insert(t);
+                }
+                ended
+            });
+            let input_meta = match &self.entries[&node] {
+                ConversationEntry::Input { .. } => self
+                    .input_turn
+                    .get(&node)
+                    .copied()
+                    .map(|t| self.input_turn_meta(t)),
+                _ => None,
+            };
+            let blocks =
+                crate::session::entry_blocks(&self.entries[&node], ended, None, input_meta);
             at = self.blocks.replace(at..at, blocks).end;
         }
         // 浏览光标由 prepare_transcript 按所在块重新定位并保持屏幕行；焦点在 Dock 时移动视图。
@@ -1695,8 +1835,8 @@ fn block_rows_from_end(transcript: &Transcript, row: usize) -> Option<(BlockId, 
 
 fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
     match entry {
-        ConversationEntry::UserMessage { content, .. }
-        | ConversationEntry::Step { content, .. } => content.turn_id(),
+        ConversationEntry::Input { .. } | ConversationEntry::ContextOp { .. } => None,
+        ConversationEntry::Step { content, .. } => content.turn_id(),
     }
 }
 
@@ -2565,6 +2705,7 @@ mod tests {
                     [
                         user(2 * n - 1, turn(n), n, &format!("prompt-{n}")),
                         step(2 * n, turn(n), 0)
+                            .turn_ordinal(n)
                             .text(&format!("answer-{n}"))
                             .finished()
                             .entry(),

@@ -126,41 +126,45 @@ pub(crate) fn superseded(entry: &ConversationEntry, generating: &Generating) -> 
     }
 }
 
+/// 已关联到某一轮的用户输入所需的展示元数据。
+pub(crate) struct InputTurnMeta<'a> {
+    pub(crate) turn_id: lattice_local::TurnId,
+    pub(crate) ordinal: Option<std::num::NonZeroUsize>,
+    pub(crate) agent: &'a str,
+}
+
 /// 一个条目的显示块。`ended` 表示条目所在的一轮已经结束：未到 Terminal 的槽位改按会话库给出的
 /// 结论显示，最后一步带出结局；`generating` 只在它的尝试尚未 Ended 时显示在这一步的位置。
 pub(crate) fn entry_blocks(
     entry: &ConversationEntry,
     ended: bool,
     generating: Option<&Generating>,
+    input_meta: Option<InputTurnMeta<'_>>,
 ) -> Vec<Block> {
     let mut blocks = BlockList::default();
     match entry {
-        ConversationEntry::UserMessage {
-            node,
-            content,
-            ordinal,
-        } => {
-            if let Node::UserMessage {
-                turn_id,
-                agent_name,
-                message,
-                ..
-            } = content
-            {
+        ConversationEntry::Input { node, content } => {
+            if let Node::Input { input, .. } = content {
+                let (turn_id, ordinal, agent) = match input_meta {
+                    Some(meta) => (Some(meta.turn_id), meta.ordinal, meta.agent.to_owned()),
+                    None => (None, None, String::new()),
+                };
                 blocks.push(Block::UserTurn {
-                    turn_id: *turn_id,
+                    turn_id,
                     node: Some(*node),
-                    ordinal: usize::try_from(*ordinal)
-                        .ok()
-                        .and_then(std::num::NonZeroUsize::new),
-                    agent: agent_name.as_str().to_owned(),
+                    ordinal,
+                    agent,
                 });
-                append_messages(&mut blocks, vec![message.clone()]);
+                append_messages(&mut blocks, vec![input.message().clone()]);
             }
+        }
+        ConversationEntry::ContextOp { node, .. } => {
+            blocks.push(Block::ContextOp { node: *node });
         }
         ConversationEntry::Step {
             node,
             content,
+            ordinal,
             retries,
             summary,
             ..
@@ -168,6 +172,7 @@ pub(crate) fn entry_blocks(
             let Node::Step {
                 turn_id,
                 step_ordinal,
+                turn_start,
                 slots,
                 ..
             } = content
@@ -180,6 +185,12 @@ pub(crate) fn entry_blocks(
                     turn_id: *turn_id,
                     ordinal: *step_ordinal,
                 },
+                ordinal: (*ordinal)
+                    .and_then(|n| usize::try_from(n).ok())
+                    .and_then(std::num::NonZeroUsize::new),
+                agent: turn_start
+                    .as_ref()
+                    .map(|meta| meta.agent_name.as_str().to_owned()),
             });
             // 重试提示排在这一步的回复之前，与它们发生的先后一致。
             for retry in retries {
@@ -435,35 +446,20 @@ mod tests {
     use super::*;
     use serde_json::{Value, json};
 
-    fn user_entry_from_parts(
-        node: u64,
-        turn_n: u64,
-        ordinal: u64,
-        parts: Value,
-    ) -> ConversationEntry {
-        let turn_id =
-            lattice_local::TurnId::parse(&format!("44444444-4444-4444-8444-{turn_n:012}")).unwrap();
+    fn input_entry_from_parts(node: u64, parts: Value) -> ConversationEntry {
         serde_json::from_value(json!({
-            "kind": "user_message",
+            "kind": "input",
             "node": node,
-            "ordinal": ordinal,
             "content": {
-                "kind": "user_message",
+                "kind": "input",
                 "parent": node.saturating_sub(1),
-                "turn_id": turn_id,
                 "accepted_at": "2026-01-01T00:00:00Z",
-                "agent_name": "coder",
-                "model": "model-a",
-                "provider": "openai",
-                "limits": {
-                    "timeout_secs": 300,
-                    "max_model_steps": 32,
-                    "max_model_attempts": 3
-                },
-                "config_digest": "0".repeat(64),
-                "message": {
-                    "role": "user",
-                    "parts": parts
+                "input": {
+                    "channel": "ipc",
+                    "message": {
+                        "role": "user",
+                        "parts": parts
+                    }
                 }
             }
         }))
@@ -499,9 +495,7 @@ mod tests {
 
     #[test]
     fn interleaved_text_and_image_user_message_renders_single_user_block_in_order() {
-        let entry = user_entry_from_parts(
-            1,
-            1,
+        let entry = input_entry_from_parts(
             1,
             json!([
                 text_part_json("请看报错截图"),
@@ -509,11 +503,11 @@ mod tests {
                 text_part_json("定位原因")
             ]),
         );
-        let blocks = entry_blocks(&entry, true, None);
+        let blocks = entry_blocks(&entry, true, None, None);
         assert_eq!(
             blocks.len(),
             2,
-            "UserMessage 条目应只生成一个标题块和一个 USER 正文块"
+            "Input 条目应只生成一个标题块和一个 USER 正文块"
         );
         assert!(
             matches!(blocks[0], Block::UserTurn { .. }),
@@ -528,17 +522,15 @@ mod tests {
             "图文交错消息应按顺序拼入单个 USER 块并在无空白交界处补单个空格"
         );
 
-        let with_existing_whitespace = user_entry_from_parts(
+        let with_existing_whitespace = input_entry_from_parts(
             3,
-            2,
-            2,
             json!([
                 text_part_json("第一行\n"),
                 image_part_json('2', "jpeg", 1023),
                 text_part_json("\n第二行")
             ]),
         );
-        let ws_blocks = entry_blocks(&with_existing_whitespace, true, None);
+        let ws_blocks = entry_blocks(&with_existing_whitespace, true, None, None);
         assert_eq!(ws_blocks.len(), 2);
         assert_eq!(
             ws_blocks[1],
@@ -549,16 +541,14 @@ mod tests {
             "相邻文本在交界处已有空白时不应重复插入空格"
         );
 
-        let with_nbsp = user_entry_from_parts(
+        let with_nbsp = input_entry_from_parts(
             5,
-            3,
-            3,
             json!([
                 text_part_json("前文\u{00a0}"),
                 image_part_json('8', "png", 1024)
             ]),
         );
-        let nbsp_blocks = entry_blocks(&with_nbsp, true, None);
+        let nbsp_blocks = entry_blocks(&with_nbsp, true, None, None);
         assert_eq!(
             nbsp_blocks[1],
             Block::User(
@@ -571,9 +561,8 @@ mod tests {
 
     #[test]
     fn pure_image_user_message_renders_without_leading_or_trailing_spaces() {
-        let single_image =
-            user_entry_from_parts(1, 1, 1, json!([image_part_json('3', "webp", 1536)]));
-        let single_blocks = entry_blocks(&single_image, true, None);
+        let single_image = input_entry_from_parts(1, json!([image_part_json('3', "webp", 1536)]));
+        let single_blocks = entry_blocks(&single_image, true, None, None);
         assert_eq!(single_blocks.len(), 2);
         assert_eq!(
             single_blocks[1],
@@ -583,16 +572,14 @@ mod tests {
             "单张纯图片消息开头与结尾不应有多余空格"
         );
 
-        let two_images = user_entry_from_parts(
+        let two_images = input_entry_from_parts(
             3,
-            2,
-            2,
             json!([
                 image_part_json('4', "png", 1024),
                 image_part_json('5', "jpeg", 3_932_160)
             ]),
         );
-        let two_blocks = entry_blocks(&two_images, true, None);
+        let two_blocks = entry_blocks(&two_images, true, None, None);
         assert_eq!(two_blocks.len(), 2);
         assert_eq!(
             two_blocks[1],
@@ -606,27 +593,23 @@ mod tests {
 
     #[test]
     fn separate_user_messages_restart_image_ordinals_from_one() {
-        let first = user_entry_from_parts(
-            1,
-            1,
+        let first = input_entry_from_parts(
             1,
             json!([
                 image_part_json('4', "png", 1024),
                 image_part_json('6', "gif", 512)
             ]),
         );
-        let second = user_entry_from_parts(
+        let second = input_entry_from_parts(
             3,
-            2,
-            2,
             json!([
                 text_part_json("再来一张"),
                 image_part_json('7', "jpeg", 4096)
             ]),
         );
 
-        let first_blocks = entry_blocks(&first, true, None);
-        let second_blocks = entry_blocks(&second, true, None);
+        let first_blocks = entry_blocks(&first, true, None, None);
+        let second_blocks = entry_blocks(&second, true, None, None);
         assert_eq!(
             first_blocks[1],
             Block::User(
@@ -647,8 +630,8 @@ mod tests {
 
     #[test]
     fn plain_text_user_message_rendering_is_unchanged() {
-        let plain = user_entry_from_parts(1, 1, 1, json!([text_part_json("  保持原样\n第二行  ")]));
-        let blocks = entry_blocks(&plain, true, None);
+        let plain = input_entry_from_parts(1, json!([text_part_json("  保持原样\n第二行  ")]));
+        let blocks = entry_blocks(&plain, true, None, None);
         assert_eq!(blocks.len(), 2);
         assert_eq!(
             blocks[1],

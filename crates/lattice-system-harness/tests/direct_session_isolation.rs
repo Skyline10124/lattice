@@ -99,9 +99,18 @@ fn direct_session_tree_rewind_and_context_isolation() {
                 .map(|m| m["content"].as_str().unwrap())
                 .collect::<Vec<_>>()
         };
+        let wrap =
+            |text: &str| format!("<lattice-context channel=\"ipc\">\n{text}\n</lattice-context>");
         require(
-            messages(4) == ["a1", "answer", "a3 fork"]
-                && messages(5) == ["b1", "answer", "b2", "answer", "b3"],
+            messages(4) == [wrap("a1"), "answer".to_owned(), wrap("a3 fork")]
+                && messages(5)
+                    == [
+                        wrap("b1"),
+                        "answer".to_owned(),
+                        wrap("b2"),
+                        "answer".to_owned(),
+                        wrap("b3"),
+                    ],
             "发往 provider 的上下文应各自沿用本会话从根到当前位点的路径",
         )?;
         evidence.record_command("会话 A 分叉发送", &a3.command);

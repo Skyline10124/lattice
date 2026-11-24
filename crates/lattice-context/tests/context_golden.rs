@@ -7,10 +7,10 @@ use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use lattice_context::{
-    Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
-    ContextText, EffectiveEntrySummary, EmptyContextOpError, InvalidUserMessageError,
-    MAX_CHANNEL_BYTES, NodeStatus, NormalizedUserMessage, OperatedNode, PathNodeKind, PathRecord,
-    TextBoundError, ToolResultOutcome, ToolResultText, resolve,
+    Channel, ChannelError, ContextCursor, ContextEdit, ContextError, ContextInput,
+    ContextInspection, ContextOp, ContextText, EffectiveEntrySummary, EmptyContextOpError,
+    InvalidUserMessageError, MAX_CHANNEL_BYTES, NodeStatus, NormalizedUserMessage, OperatedNode,
+    PathNodeKind, PathRecord, TextBoundError, ToolResultOutcome, ToolResultText, resolve,
 };
 use lattice_conversation::{
     BoundToolCall, ConversationItem, ImageMediaType, ImageRef, IndeterminateCause, InvocationId,
@@ -2549,5 +2549,1065 @@ fn project_escapes_crlf_and_trailing_cr_close_tags_preserving_line_endings() {
             )),
         ],
         "CRLF 与末尾 CR 闭合标记均须前置反斜杠转义且严格保留原始换行序列"
+    );
+}
+
+// ============================================================================
+// 7. ContextCursor 增量推进、回滚、原子零污染与多分叉树等价性黄金测试
+// ============================================================================
+
+#[test]
+fn context_cursor_covers_all_seven_edits_atomic_rollback_and_empty_projection_tracking() {
+    let img_a = img(0x11, 512);
+    let img_b = img(0x22, 1024);
+
+    let input_1 =
+        ContextInput::new(ch("tui"), vec![text_sem("首条提问"), image_sem(img_a)]).unwrap();
+    let input_2 = ContextInput::new(ch("screenshot"), vec![image_sem(img_b)]).unwrap();
+
+    let call_1 = bound_call(inv(INV_1), "read_file", 0, json!({"path": "a.rs"}));
+    let call_2 = bound_call(inv(INV_2), "write_file", 1, json!({"path": "b.rs"}));
+    let step_3 = step_with_parts(
+        Some(sample_origin()),
+        vec![
+            reasoning_part("步骤三推理", Some("sig-3")),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_1 }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_2 }),
+            text_part("步骤三说明"),
+        ],
+        vec![
+            json_result(inv(INV_1), "read_file", json!("原始结果")),
+            StoredToolResult {
+                invocation_id: inv(INV_2),
+                name: "write_file".to_owned(),
+                payload: ResultPayload::Failed(ToolError {
+                    code: "permission_denied".to_owned(),
+                    message: "无权写入".to_owned(),
+                }),
+            },
+        ],
+    );
+
+    // 仅含推理与单次工具调用的 Step：移出该调用后伴随清洗剥离推理，整条变为 SkippedEmpty。
+    let call_3 = bound_call(inv(INV_3), "stat_file", 0, json!({"path": "c.rs"}));
+    let step_4 = step_with_parts(
+        Some(sample_origin()),
+        vec![
+            reasoning_part("仅推理与单调用", Some("sig-4")),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_3 }),
+        ],
+        vec![json_result(inv(INV_3), "stat_file", json!({"ok": true}))],
+    );
+
+    // 仅含推理的 Step：StripReasoning 后立即变为 SkippedEmpty。
+    let step_5_reasoning_only = step_with_parts(
+        Some(sample_origin()),
+        vec![reasoning_part("纯推理步骤", Some("sig-5"))],
+        vec![],
+    );
+    let step_6 = step_with_parts(None, vec![text_part("最终结论")], vec![]);
+
+    fn assert_matches_prefix(cursor: &ContextCursor, prefix: &[PathRecord<'_>], label: &str) {
+        let actual = cursor.clone().into_effective();
+        let expected = resolve(prefix).expect("合法前缀应归约成功");
+        assert_eq!(actual, expected, "{label}：游标状态必须与 resolve 完全一致");
+        assert_eq!(
+            actual.inspect(),
+            expected.inspect(),
+            "{label}：inspect 结果必须完全一致"
+        );
+        assert_eq!(
+            actual.project(),
+            expected.project(),
+            "{label}：project 结果必须完全一致"
+        );
+        assert_eq!(
+            cursor.has_projected_items(),
+            !expected.project().is_empty(),
+            "{label}：has_projected_items 必须与 !project().is_empty() 严格等价"
+        );
+    }
+
+    fn push_step<'a>(
+        cursor: &mut ContextCursor,
+        prefix: &mut Vec<PathRecord<'a>>,
+        undos: &mut Vec<lattice_context::ContextUndo>,
+        record: PathRecord<'a>,
+        label: &str,
+    ) {
+        let undo = cursor.advance(record.clone()).expect("合法推进应成功");
+        prefix.push(record);
+        undos.push(undo);
+        assert_matches_prefix(cursor, prefix, label);
+    }
+
+    let mut cursor = ContextCursor::new();
+    let mut prefix: Vec<PathRecord<'_>> = Vec::new();
+    let mut undos = Vec::new();
+    assert!(!cursor.has_projected_items(), "空游标不应有投影条目");
+    assert_matches_prefix(&cursor, &prefix, "空游标");
+
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &input_1,
+        },
+        "推进 Input(1)",
+    );
+    assert!(cursor.has_projected_items());
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Input {
+            id: NodeId(2),
+            input: &input_2,
+        },
+        "推进纯图 Input(2)",
+    );
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Step {
+            id: NodeId(3),
+            content: step_3,
+        },
+        "推进 Step(3)",
+    );
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Step {
+            id: NodeId(4),
+            content: step_4,
+        },
+        "推进 Step(4)",
+    );
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Step {
+            id: NodeId(5),
+            content: step_5_reasoning_only,
+        },
+        "推进纯推理 Step(5)",
+    );
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Step {
+            id: NodeId(6),
+            content: step_6,
+        },
+        "推进 Step(6)",
+    );
+
+    // 1) 原子零污染测试 A：同一 ContextOp 先两次修改同一条目 Input(1)，第 3 步失败后状态必须原样恢复。
+    let before_fail_a = cursor.clone().into_effective();
+    let failing_same_node_op = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_image(NodeId(1), img_a, None).unwrap(),
+            ContextEdit::omit_node(NodeId(1)),
+            ContextEdit::replace_input(NodeId(1), vec![text_sem("已移出后不得替换")]).unwrap(),
+        ],
+    )
+    .unwrap();
+    let err_a = cursor
+        .advance(PathRecord::Op {
+            id: NodeId(7),
+            op: &failing_same_node_op,
+        })
+        .expect_err("同条目先移出后替换必须报错");
+    assert_eq!(
+        err_a,
+        ContextError::NodeAlreadyOmitted { node: NodeId(1) },
+        "同条目先移出后替换应返回 NodeAlreadyOmitted"
+    );
+    assert_eq!(
+        cursor.clone().into_effective(),
+        before_fail_a,
+        "多编辑 Op 中途失败时游标状态必须零污染"
+    );
+    assert_matches_prefix(&cursor, &prefix, "同条目 Op 失败回滚后");
+
+    // 2) 原子零污染测试 B：同一 ContextOp 把全部有效条目清空使 projected_count 归零后在末步失败。
+    let before_fail_b = cursor.clone().into_effective();
+    let failing_drain_all_op = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::omit_node(NodeId(1)),
+            ContextEdit::replace_image(NodeId(2), img_b, None).unwrap(),
+            ContextEdit::omit_node(NodeId(3)),
+            ContextEdit::omit_invocation(inv(INV_3)),
+            ContextEdit::strip_reasoning(NodeId(5)),
+            ContextEdit::omit_node(NodeId(6)),
+            ContextEdit::omit_node(NodeId(999)),
+        ],
+    )
+    .unwrap();
+    let err_b = cursor
+        .advance(PathRecord::Op {
+            id: NodeId(7),
+            op: &failing_drain_all_op,
+        })
+        .expect_err("清空全部条目后引用未知节点必须报错");
+    assert_eq!(
+        err_b,
+        ContextError::UnknownNode { node: NodeId(999) },
+        "清空全部条目后引用未知节点应返回 UnknownNode"
+    );
+    assert!(
+        cursor.has_projected_items(),
+        "原子回滚后 projected_count 必须恢复非零"
+    );
+    assert_eq!(
+        cursor.clone().into_effective(),
+        before_fail_b,
+        "清空全部条目后失败必须逐项逆序零污染回滚"
+    );
+    assert_matches_prefix(&cursor, &prefix, "全清空 Op 失败回滚后");
+
+    // 3) 合法推进覆盖全部 7 种 ContextEdit 变体（复用失败 Op 未登记的 NodeId(7) 顺带证实未泄漏 node_kinds）。
+    let op_all_seven = ContextOp::new(
+        ch("tui"),
+        vec![
+            ContextEdit::replace_image(NodeId(1), img_a, Some("[图片已压缩]".to_owned())).unwrap(),
+            ContextEdit::replace_input(NodeId(1), vec![text_sem("精简后的首条输入")]).unwrap(),
+            ContextEdit::replace_image(NodeId(2), img_b, None).unwrap(),
+            ContextEdit::replace_tool_result(inv(INV_1), "精简工具返回").unwrap(),
+            ContextEdit::omit_invocation(inv(INV_2)),
+            ContextEdit::strip_reasoning(NodeId(3)),
+            ContextEdit::omit_invocation(inv(INV_3)),
+            ContextEdit::strip_reasoning(NodeId(5)),
+            ContextEdit::replace_step(NodeId(6), "精简结论").unwrap(),
+        ],
+    )
+    .unwrap();
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Op {
+            id: NodeId(7),
+            op: &op_all_seven,
+        },
+        "推进覆盖全 7 类编辑的 Op(7)",
+    );
+    assert!(
+        cursor.has_projected_items(),
+        "尚余 Input(1)/Step(3)/Step(6)"
+    );
+
+    // 4) 通过 OmitNode 移出剩余全部有效条目，核验 has_projected_items 变为 false。
+    let op_empty_all = ContextOp::new(
+        ch("tui"),
+        vec![
+            ContextEdit::omit_node(NodeId(1)),
+            ContextEdit::omit_node(NodeId(3)),
+            ContextEdit::omit_node(NodeId(6)),
+        ],
+    )
+    .unwrap();
+    push_step(
+        &mut cursor,
+        &mut prefix,
+        &mut undos,
+        PathRecord::Op {
+            id: NodeId(8),
+            op: &op_empty_all,
+        },
+        "推进清空剩余条目的 Op(8)",
+    );
+    assert!(
+        !cursor.has_projected_items(),
+        "全部条目被 OmitNode / ReplaceImage(None) / StripReasoning / OmitInvocation 清空后应为 false"
+    );
+
+    // 5) 严格逆序回滚全部推进并逐层核验与 resolve 完全等价。
+    while let Some(undo) = undos.pop() {
+        cursor.rollback(undo);
+        prefix.pop();
+        assert_matches_prefix(
+            &cursor,
+            &prefix,
+            &format!("回滚至前缀长度 {}", prefix.len()),
+        );
+    }
+    assert!(!cursor.has_projected_items(), "全部回滚至根后必须为空");
+}
+
+#[test]
+fn context_cursor_matches_resolve_at_every_node_in_multi_branch_tree() {
+    let img_a = img(0x33, 256);
+    let input_root =
+        ContextInput::new(ch("tui"), vec![text_sem("共享前缀输入"), image_sem(img_a)]).unwrap();
+    let call_shared = bound_call(inv(INV_1), "search", 0, json!({"q": "abc"}));
+    let step_shared = step_with_parts(
+        Some(sample_origin()),
+        vec![
+            reasoning_part("共享前缀推理", Some("sig-shared")),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_shared }),
+            text_part("共享前缀回复"),
+        ],
+        vec![json_result(inv(INV_1), "search", json!(["hit"]))],
+    );
+
+    // 分叉 A：编辑共享前缀后继续新增 Step 与子分叉
+    let op_branch_a = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_image(NodeId(1), img_a, None).unwrap(),
+            ContextEdit::replace_tool_result(inv(INV_1), "分支A摘要").unwrap(),
+        ],
+    )
+    .unwrap();
+    let input_a1 = ContextInput::new(ch("cli"), vec![text_sem("分支A1输入")]).unwrap();
+    let op_branch_a2 = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::omit_node(NodeId(1)),
+            ContextEdit::omit_node(NodeId(2)),
+        ],
+    )
+    .unwrap();
+
+    // 分叉 B：对同一共享前缀施加互斥编辑（StripReasoning + ReplaceStep），与分支 A 隔离
+    let op_branch_b = ContextOp::new(
+        ch("tui"),
+        vec![
+            ContextEdit::strip_reasoning(NodeId(2)),
+            ContextEdit::replace_step(NodeId(2), "分支B精简步").unwrap(),
+        ],
+    )
+    .unwrap();
+    let call_b = bound_call(inv(INV_2), "fetch", 0, json!({"id": 2}));
+    let step_branch_b = step_with_parts(
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+            call: call_b,
+        })],
+        vec![json_result(inv(INV_2), "fetch", json!("body"))],
+    );
+    let op_branch_b_leaf =
+        ContextOp::new(ch("tui"), vec![ContextEdit::omit_invocation(inv(INV_2))]).unwrap();
+
+    // 分叉 C：重用分支 B 已经用过的 INV_2（不同分支上合法，验证 rollback 已正确清理 invocation_owner）
+    let step_branch_c = step_with_parts(
+        None,
+        vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+            call: bound_call(inv(INV_2), "fetch", 0, json!({"id": 3})),
+        })],
+        vec![json_result(inv(INV_2), "fetch", json!("branch-c"))],
+    );
+
+    enum TreeNode<'a> {
+        Record {
+            record: PathRecord<'a>,
+            children: Vec<TreeNode<'a>>,
+        },
+    }
+
+    let tree = TreeNode::Record {
+        record: PathRecord::Input {
+            id: NodeId(1),
+            input: &input_root,
+        },
+        children: vec![TreeNode::Record {
+            record: PathRecord::Step {
+                id: NodeId(2),
+                content: step_shared,
+            },
+            children: vec![
+                TreeNode::Record {
+                    record: PathRecord::Op {
+                        id: NodeId(3),
+                        op: &op_branch_a,
+                    },
+                    children: vec![
+                        TreeNode::Record {
+                            record: PathRecord::Input {
+                                id: NodeId(4),
+                                input: &input_a1,
+                            },
+                            children: vec![],
+                        },
+                        TreeNode::Record {
+                            record: PathRecord::Op {
+                                id: NodeId(5),
+                                op: &op_branch_a2,
+                            },
+                            children: vec![],
+                        },
+                    ],
+                },
+                TreeNode::Record {
+                    record: PathRecord::Op {
+                        id: NodeId(6),
+                        op: &op_branch_b,
+                    },
+                    children: vec![TreeNode::Record {
+                        record: PathRecord::Step {
+                            id: NodeId(7),
+                            content: step_branch_b,
+                        },
+                        children: vec![TreeNode::Record {
+                            record: PathRecord::Op {
+                                id: NodeId(8),
+                                op: &op_branch_b_leaf,
+                            },
+                            children: vec![],
+                        }],
+                    }],
+                },
+                TreeNode::Record {
+                    record: PathRecord::Step {
+                        id: NodeId(9),
+                        content: step_branch_c,
+                    },
+                    children: vec![],
+                },
+            ],
+        }],
+    };
+
+    enum Action<'a> {
+        Enter(&'a TreeNode<'a>),
+        Exit(lattice_context::ContextUndo),
+    }
+
+    let mut cursor = ContextCursor::new();
+    let mut prefix: Vec<PathRecord<'_>> = Vec::new();
+    let mut visited = 0usize;
+    let mut stack = vec![Action::Enter(&tree)];
+
+    while let Some(action) = stack.pop() {
+        match action {
+            Action::Enter(TreeNode::Record { record, children }) => {
+                let undo = cursor
+                    .advance(record.clone())
+                    .expect("多分叉树中所有合法分支推进均应成功");
+                prefix.push(record.clone());
+                visited += 1;
+
+                let actual = cursor.clone().into_effective();
+                let expected = resolve(&prefix).expect("根路径独立 resolve 应成功");
+                assert_eq!(
+                    actual, expected,
+                    "第 {visited} 个访问节点归约结果必须与 resolve 一致"
+                );
+                assert_eq!(actual.inspect(), expected.inspect());
+                assert_eq!(actual.project(), expected.project());
+                assert_eq!(
+                    cursor.has_projected_items(),
+                    !expected.project().is_empty(),
+                    "第 {visited} 个访问节点 has_projected_items 必须与投影非空等价"
+                );
+
+                stack.push(Action::Exit(undo));
+                for child in children.iter().rev() {
+                    stack.push(Action::Enter(child));
+                }
+            }
+            Action::Exit(undo) => {
+                cursor.rollback(undo);
+                prefix.pop();
+                let actual = cursor.clone().into_effective();
+                let expected = resolve(&prefix).expect("回退后父前缀 resolve 应成功");
+                assert_eq!(actual, expected, "回滚后状态必须与父节点 resolve 完全一致");
+                assert_eq!(cursor.has_projected_items(), !expected.project().is_empty());
+            }
+        }
+    }
+
+    assert_eq!(visited, 9, "应精确遍历全部 9 个树节点");
+    assert!(
+        !cursor.has_projected_items(),
+        "遍历结束后游标必须完全回到根空态"
+    );
+}
+
+#[test]
+fn large_step_64_tool_result_batch_edit_and_failure_rollback_across_all_three_paths() {
+    fn numbered_inv(idx: usize) -> InvocationId {
+        InvocationId::parse(&format!("00000000-0000-4000-8000-{:012x}", idx + 1))
+            .expect("构造测试 InvocationId")
+    }
+
+    fn build_large_step(last_not_executed: bool) -> StepContent {
+        const TWO_MIB: usize = 2 * 1024 * 1024;
+        let large_text = "x".repeat(TWO_MIB);
+        let mut parts = Vec::with_capacity(66);
+        parts.push(reasoning_part("大步推理", Some("large-step-reasoning-sig")));
+        parts.push(MessagePart {
+            semantic: text_sem(&large_text),
+            replay_state: Some(OpaqueProviderState::new("large-text-sig").unwrap()),
+        });
+
+        let mut results = Vec::with_capacity(64);
+        for i in 0..64usize {
+            let invocation = numbered_inv(i);
+            let name = format!("tool_{i}");
+            parts.push(MessagePart {
+                semantic: MessageSemantic::ToolCall {
+                    call: bound_call(invocation, &name, (i + 2) as u32, json!({ "idx": i })),
+                },
+                replay_state: Some(OpaqueProviderState::new(format!("call-sig-{i}")).unwrap()),
+            });
+
+            if last_not_executed && i == 63 {
+                results.push(StoredToolResult {
+                    invocation_id: invocation,
+                    name,
+                    payload: ResultPayload::NotExecuted,
+                });
+            } else if i % 2 == 0 {
+                results.push(json_result(
+                    invocation,
+                    &name,
+                    json!(format!("原始成功输出-{i}-{}", "a".repeat(2048))),
+                ));
+            } else {
+                results.push(StoredToolResult {
+                    invocation_id: invocation,
+                    name,
+                    payload: ResultPayload::Failed(ToolError {
+                        code: format!("err_code_{i}"),
+                        message: format!("原始失败详情-{i}-{}", "e".repeat(2048)),
+                    }),
+                });
+            }
+        }
+
+        step_with_parts(Some(sample_origin()), parts, results)
+    }
+
+    // 未触碰的前置大节点，用于验证 validate_op 的按需 CoW 不复制未编辑历史。
+    let prefix_input =
+        ContextInput::new(ch("tui"), vec![text_sem(&"p".repeat(256 * 1024))]).unwrap();
+    let untouched_step = step_with_parts(None, vec![text_part(&"u".repeat(512 * 1024))], vec![]);
+    let large_step = build_large_step(false);
+
+    let batch_op = ContextOp::new(
+        ch("cli"),
+        (0..64usize)
+            .map(|i| {
+                ContextEdit::replace_tool_result(numbered_inv(i), format!("精简结果-{i}")).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+
+    let base_path = [
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        },
+        PathRecord::Step {
+            id: NodeId(2),
+            content: untouched_step.clone(),
+        },
+        PathRecord::Step {
+            id: NodeId(3),
+            content: large_step.clone(),
+        },
+    ];
+    let full_path = [
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        },
+        PathRecord::Step {
+            id: NodeId(2),
+            content: untouched_step.clone(),
+        },
+        PathRecord::Step {
+            id: NodeId(3),
+            content: large_step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(4),
+            op: &batch_op,
+        },
+    ];
+
+    // 1) 三条路径（validate_op / resolve / ContextCursor::advance + rollback）成功语义完全一致。
+    let base_ctx = resolve(&base_path).expect("大步基线路径归约应成功");
+    base_ctx
+        .validate_op(&batch_op)
+        .expect("64 条 ReplaceToolResult 批量编辑必须通过 validate_op");
+
+    let resolved = resolve(&full_path).expect("64 条 ReplaceToolResult 批量归约应成功");
+    let projected = resolved.project();
+    assert_eq!(projected.len(), 3);
+    match &projected[2] {
+        ConversationItem::Step(step_content) => {
+            assert_eq!(
+                step_content.assistant, large_step.assistant,
+                "ReplaceToolResult 不得改动 2 MiB 助手消息、provider_origin、推理或任何 replay_state"
+            );
+            assert_eq!(step_content.results.len(), 64);
+            for (i, item) in step_content.results.iter().enumerate() {
+                assert_eq!(item.invocation_id, numbered_inv(i));
+                let expected_text = format!("精简结果-{i}");
+                if i % 2 == 0 {
+                    let expected_value = Value::String(expected_text);
+                    let expected_bytes = canonical_json(&expected_value);
+                    assert_eq!(
+                        item.payload,
+                        ResultPayload::Succeeded(SuccessContent::Json {
+                            value: expected_value,
+                            digest: tool_content_digest(&expected_bytes),
+                            byte_length: expected_bytes.len() as u64,
+                        })
+                    );
+                } else {
+                    assert_eq!(
+                        item.payload,
+                        ResultPayload::Failed(ToolError {
+                            code: format!("err_code_{i}"),
+                            message: expected_text,
+                        })
+                    );
+                }
+            }
+        }
+        other => panic!("期望投影为 Step，实际为 {other:?}"),
+    }
+
+    let mut cursor = ContextCursor::new();
+    let u1 = cursor
+        .advance(PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        })
+        .unwrap();
+    let u2 = cursor
+        .advance(PathRecord::Step {
+            id: NodeId(2),
+            content: untouched_step.clone(),
+        })
+        .unwrap();
+    let u3 = cursor
+        .advance(PathRecord::Step {
+            id: NodeId(3),
+            content: large_step.clone(),
+        })
+        .unwrap();
+    let before_op = cursor.clone().into_effective();
+    assert_eq!(before_op, base_ctx);
+
+    let u4 = cursor
+        .advance(PathRecord::Op {
+            id: NodeId(4),
+            op: &batch_op,
+        })
+        .expect("ContextCursor 推进 64 条批量 ReplaceToolResult 应成功");
+    let after_op = cursor.clone().into_effective();
+    assert_eq!(after_op, resolved);
+    assert_eq!(after_op.inspect(), resolved.inspect());
+    assert_eq!(after_op.project(), projected);
+    assert!(cursor.has_projected_items());
+
+    // 同一 Step 上连续多条 OmitInvocation 的推进与逆序回滚亦须精确恢复原始结果序列与索引。
+    let omit_pair_op = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::omit_invocation(numbered_inv(0)),
+            ContextEdit::omit_invocation(numbered_inv(1)),
+            ContextEdit::omit_invocation(numbered_inv(63)),
+        ],
+    )
+    .unwrap();
+    let u5 = cursor
+        .advance(PathRecord::Op {
+            id: NodeId(5),
+            op: &omit_pair_op,
+        })
+        .expect("连续多条 OmitInvocation 推进应成功");
+    assert_eq!(
+        cursor.clone().into_effective().project().len(),
+        3,
+        "仍保留剩余 61 次工具调用与正文"
+    );
+    cursor.rollback(u5);
+    assert_eq!(
+        cursor.clone().into_effective(),
+        after_op,
+        "连续多条 OmitInvocation 回滚后必须逐字节恢复到 Op(4) 后状态"
+    );
+
+    cursor.rollback(u4);
+    assert_eq!(
+        cursor.clone().into_effective(),
+        before_op,
+        "64 条批量 ReplaceToolResult 回滚后必须逐字段恢复为推进前状态"
+    );
+    cursor.rollback(u3);
+    cursor.rollback(u2);
+    cursor.rollback(u1);
+    assert!(!cursor.has_projected_items());
+
+    // 2) 第 64 条编辑触发 ToolResultNotReplaceable（NotExecuted）：三条路径错误一致且前 63 步原子无损回滚。
+    let step_with_not_exec = build_large_step(true);
+    let expected_err = ContextError::ToolResultNotReplaceable {
+        invocation: numbered_inv(63),
+        outcome: ToolResultOutcome::NotExecuted,
+    };
+    let bad_base = resolve(&[
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        },
+        PathRecord::Step {
+            id: NodeId(3),
+            content: step_with_not_exec.clone(),
+        },
+    ])
+    .expect("含 NotExecuted 槽位的大步基线应归约成功");
+    let bad_base_snapshot = bad_base.clone();
+    assert_eq!(
+        bad_base.validate_op(&batch_op),
+        Err(expected_err.clone()),
+        "validate_op 在第 64 条 NotExecuted 处必须报错"
+    );
+    assert_eq!(
+        bad_base, bad_base_snapshot,
+        "validate_op 失败后原 EffectiveContext 不得变化"
+    );
+    assert_eq!(
+        resolve(&[
+            PathRecord::Input {
+                id: NodeId(1),
+                input: &prefix_input,
+            },
+            PathRecord::Step {
+                id: NodeId(3),
+                content: step_with_not_exec.clone(),
+            },
+            PathRecord::Op {
+                id: NodeId(4),
+                op: &batch_op,
+            },
+        ]),
+        Err(expected_err.clone()),
+        "resolve 在第 64 条 NotExecuted 处必须返回相同错误"
+    );
+
+    let mut fail_cursor = ContextCursor::new();
+    fail_cursor
+        .advance(PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        })
+        .unwrap();
+    fail_cursor
+        .advance(PathRecord::Step {
+            id: NodeId(3),
+            content: step_with_not_exec,
+        })
+        .unwrap();
+    let before_fail = fail_cursor.clone().into_effective();
+    let cursor_err = fail_cursor
+        .advance(PathRecord::Op {
+            id: NodeId(4),
+            op: &batch_op,
+        })
+        .expect_err("第 64 条 NotExecuted 必须导致 ContextCursor::advance 报错");
+    assert_eq!(cursor_err, expected_err);
+    assert_eq!(
+        fail_cursor.clone().into_effective(),
+        before_fail,
+        "第 64 条失败时前 63 条 ReplaceToolResult 必须原子回滚、零污染"
+    );
+
+    // 3) 第 64 条编辑引用未知 InvocationId：三条路径同样返回 UnknownInvocation 且原子回滚。
+    let unknown_inv = numbered_inv(999);
+    let mut unknown_edits: Vec<ContextEdit> = (0..63usize)
+        .map(|i| ContextEdit::replace_tool_result(numbered_inv(i), format!("临时-{i}")).unwrap())
+        .collect();
+    unknown_edits.push(ContextEdit::replace_tool_result(unknown_inv, "无效").unwrap());
+    let unknown_op = ContextOp::new(ch("cli"), unknown_edits).unwrap();
+    let expected_unknown = ContextError::UnknownInvocation {
+        invocation: unknown_inv,
+    };
+    assert_eq!(
+        bad_base.validate_op(&unknown_op),
+        Err(expected_unknown.clone())
+    );
+    let cursor_unknown_err = fail_cursor
+        .advance(PathRecord::Op {
+            id: NodeId(4),
+            op: &unknown_op,
+        })
+        .expect_err("第 64 条未知调用必须报错");
+    assert_eq!(cursor_unknown_err, expected_unknown);
+    assert_eq!(
+        fail_cursor.clone().into_effective(),
+        before_fail,
+        "未知调用报错时前 63 步修改同样必须原子零污染回滚"
+    );
+
+    // 4) 单个 ContextOp 批量包含全部 64 条 OmitInvocation：三条路径一致且回滚逐字段无损恢复。
+    let omit_all_64_op = ContextOp::new(
+        ch("cli"),
+        (0..64usize)
+            .map(|i| ContextEdit::omit_invocation(numbered_inv(i)))
+            .collect(),
+    )
+    .unwrap();
+    base_ctx
+        .validate_op(&omit_all_64_op)
+        .expect("64 条批量 OmitInvocation 必须通过 validate_op");
+    let resolved_omit_64 = resolve(&[
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        },
+        PathRecord::Step {
+            id: NodeId(2),
+            content: untouched_step.clone(),
+        },
+        PathRecord::Step {
+            id: NodeId(3),
+            content: large_step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(4),
+            op: &omit_all_64_op,
+        },
+    ])
+    .expect("64 条批量 OmitInvocation 归约应成功");
+    match &resolved_omit_64.project()[2] {
+        ConversationItem::Step(step_content) => {
+            assert!(
+                step_content.assistant.provider_origin.is_none(),
+                "OmitInvocation 清洗后必须清除 provider_origin"
+            );
+            assert!(
+                step_content.results.is_empty(),
+                "全部 64 个工具结果必须成对移出"
+            );
+            assert_eq!(
+                step_content.assistant.parts,
+                vec![text_part(&"x".repeat(2 * 1024 * 1024))],
+                "必须保留 2 MiB 正文并剥离全部推理、工具调用与 replay_state"
+            );
+        }
+        other => panic!("期望投影为 Step，实际为 {other:?}"),
+    }
+
+    let mut omit_cursor = ContextCursor::new();
+    omit_cursor
+        .advance(PathRecord::Input {
+            id: NodeId(1),
+            input: &prefix_input,
+        })
+        .unwrap();
+    omit_cursor
+        .advance(PathRecord::Step {
+            id: NodeId(2),
+            content: untouched_step.clone(),
+        })
+        .unwrap();
+    omit_cursor
+        .advance(PathRecord::Step {
+            id: NodeId(3),
+            content: large_step.clone(),
+        })
+        .unwrap();
+    let before_omit_64 = omit_cursor.clone().into_effective();
+    let u_omit_64 = omit_cursor
+        .advance(PathRecord::Op {
+            id: NodeId(4),
+            op: &omit_all_64_op,
+        })
+        .expect("ContextCursor 推进 64 条批量 OmitInvocation 应成功");
+    assert_eq!(omit_cursor.clone().into_effective(), resolved_omit_64);
+    assert_eq!(
+        omit_cursor.clone().into_effective().inspect(),
+        resolved_omit_64.inspect()
+    );
+    assert_eq!(
+        omit_cursor.clone().into_effective().project(),
+        resolved_omit_64.project()
+    );
+    omit_cursor.rollback(u_omit_64);
+    assert_eq!(
+        omit_cursor.clone().into_effective(),
+        before_omit_64,
+        "64 条批量 OmitInvocation 回滚后必须完整恢复原 2 MiB 助手消息、provider_origin、replay_state 与 64 个结果"
+    );
+
+    // 5) 单 ContextOp 前 63 条合法 OmitInvocation、第 64 条重复 OmitInvocation(0) 触发失败：
+    //    三条路径错误一致且 ContextCursor 前 63 步原子无损回滚。
+    let mut omit_63_then_dup: Vec<ContextEdit> = (0..63usize)
+        .map(|i| ContextEdit::omit_invocation(numbered_inv(i)))
+        .collect();
+    omit_63_then_dup.push(ContextEdit::omit_invocation(numbered_inv(0)));
+    let omit_dup_op = ContextOp::new(ch("cli"), omit_63_then_dup).unwrap();
+    let expected_dup_err = ContextError::InvocationAlreadyOmitted {
+        invocation: numbered_inv(0),
+    };
+    assert_eq!(
+        base_ctx.validate_op(&omit_dup_op),
+        Err(expected_dup_err.clone()),
+        "validate_op 在第 64 条重复 OmitInvocation 处必须报错"
+    );
+    assert_eq!(
+        resolve(&[
+            PathRecord::Input {
+                id: NodeId(1),
+                input: &prefix_input,
+            },
+            PathRecord::Step {
+                id: NodeId(2),
+                content: untouched_step.clone(),
+            },
+            PathRecord::Step {
+                id: NodeId(3),
+                content: large_step.clone(),
+            },
+            PathRecord::Op {
+                id: NodeId(4),
+                op: &omit_dup_op,
+            },
+        ]),
+        Err(expected_dup_err.clone()),
+        "resolve 在第 64 条重复 OmitInvocation 处必须返回相同错误"
+    );
+    let omit_dup_err = omit_cursor
+        .advance(PathRecord::Op {
+            id: NodeId(4),
+            op: &omit_dup_op,
+        })
+        .expect_err("ContextCursor 在第 64 条重复 OmitInvocation 处必须报错");
+    assert_eq!(omit_dup_err, expected_dup_err);
+    assert_eq!(
+        omit_cursor.clone().into_effective(),
+        before_omit_64,
+        "第 64 条重复 OmitInvocation 失败后前 63 步修改必须原子零污染回滚"
+    );
+
+    // 6) 单 ContextOp 对含大文本 + 8 张图的 Input 连续执行 8 条 ReplaceImage（含第 8 条故意失败回滚）。
+    let eight_imgs: Vec<ImageRef> = (0..8u8).map(|i| img(0x40 + i, 1024)).collect();
+    let mut multi_img_parts = vec![text_sem(&"m".repeat(512 * 1024))];
+    for &image in &eight_imgs {
+        multi_img_parts.push(image_sem(image));
+    }
+    let large_input = ContextInput::new(ch("tui"), multi_img_parts).unwrap();
+    let replace_8_op = ContextOp::new(
+        ch("cli"),
+        eight_imgs
+            .iter()
+            .enumerate()
+            .map(|(i, &image)| {
+                let replacement = if i % 2 == 0 {
+                    Some(format!("[图{i}]"))
+                } else {
+                    None
+                };
+                ContextEdit::replace_image(NodeId(1), image, replacement).unwrap()
+            })
+            .collect(),
+    )
+    .unwrap();
+
+    let img_base = resolve(&[PathRecord::Input {
+        id: NodeId(1),
+        input: &large_input,
+    }])
+    .unwrap();
+    img_base
+        .validate_op(&replace_8_op)
+        .expect("8 条连续 ReplaceImage 必须通过 validate_op");
+    let resolved_8 = resolve(&[
+        PathRecord::Input {
+            id: NodeId(1),
+            input: &large_input,
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &replace_8_op,
+        },
+    ])
+    .expect("8 条连续 ReplaceImage 归约应成功");
+    assert!(
+        resolved_8.inspect().images.is_empty(),
+        "全部 8 张图替换/移出后不应残留图片引用"
+    );
+
+    let mut img_cursor = ContextCursor::new();
+    img_cursor
+        .advance(PathRecord::Input {
+            id: NodeId(1),
+            input: &large_input,
+        })
+        .unwrap();
+    let before_img_8 = img_cursor.clone().into_effective();
+    let u_img_8 = img_cursor
+        .advance(PathRecord::Op {
+            id: NodeId(2),
+            op: &replace_8_op,
+        })
+        .expect("ContextCursor 推进 8 条连续 ReplaceImage 应成功");
+    assert_eq!(img_cursor.clone().into_effective(), resolved_8);
+    assert_eq!(
+        img_cursor.clone().into_effective().project(),
+        resolved_8.project()
+    );
+    img_cursor.rollback(u_img_8);
+    assert_eq!(
+        img_cursor.clone().into_effective(),
+        before_img_8,
+        "8 条连续 ReplaceImage 回滚后必须逐字节恢复大文本与全部 8 张图"
+    );
+
+    // 前 7 条合法 ReplaceImage、第 8 条重复引用已移除的首图触发 ImageNotFound：三路径一致且原子无损回滚。
+    let mut replace_7_then_fail: Vec<ContextEdit> = eight_imgs[..7]
+        .iter()
+        .map(|&image| ContextEdit::replace_image(NodeId(1), image, None).unwrap())
+        .collect();
+    replace_7_then_fail.push(ContextEdit::replace_image(NodeId(1), eight_imgs[0], None).unwrap());
+    let fail_img_op = ContextOp::new(ch("cli"), replace_7_then_fail).unwrap();
+    let expected_img_err = ContextError::ImageNotFound {
+        node: NodeId(1),
+        image: eight_imgs[0],
+    };
+    assert_eq!(
+        img_base.validate_op(&fail_img_op),
+        Err(expected_img_err.clone())
+    );
+    assert_eq!(
+        resolve(&[
+            PathRecord::Input {
+                id: NodeId(1),
+                input: &large_input,
+            },
+            PathRecord::Op {
+                id: NodeId(2),
+                op: &fail_img_op,
+            },
+        ]),
+        Err(expected_img_err.clone())
+    );
+    let img_cursor_err = img_cursor
+        .advance(PathRecord::Op {
+            id: NodeId(2),
+            op: &fail_img_op,
+        })
+        .expect_err("第 8 条引用已移除图片必须报错");
+    assert_eq!(img_cursor_err, expected_img_err);
+    assert_eq!(
+        img_cursor.clone().into_effective(),
+        before_img_8,
+        "第 8 条 ReplaceImage 失败后前 7 步修改必须原子零污染回滚"
     );
 }

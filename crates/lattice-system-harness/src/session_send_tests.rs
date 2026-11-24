@@ -18,23 +18,65 @@ fn summary(outcome: &str, progress: &Value) -> Value {
     };
     json!({"outcome":outcome,"notice":notice,"progress":progress})
 }
-fn user(node: u64, ordinal: u64) -> Value {
-    json!({"type":"entry","kind":"user_message","node":node,"ordinal":ordinal,"content":{"kind":"user_message","parent":node - 1,
-        "turn_id":"t","accepted_at":"2026-10-16T00:00:00Z","agent_name":"reader","model":"m","provider":"p",
-        "limits":{},"config_digest":"00","message":{"role":"user","parts":[{"semantic":{"text":{"text":"hi"}},"replay_state":null}]}}})
+fn input_entry(node: u64) -> Value {
+    json!({
+        "type": "entry",
+        "kind": "input",
+        "node": node,
+        "content": {
+            "kind": "input",
+            "parent": node - 1,
+            "accepted_at": "2026-10-16T00:00:00Z",
+            "input": {
+                "channel": "ipc",
+                "message": {"role": "user", "parts": [{"semantic": {"text": {"text": "hi"}}, "replay_state": null}]}
+            }
+        }
+    })
 }
-/// `Step` 条目；`summary` 为 `None` 时不带该字段。
+fn context_op_entry(node: u64, target: u64) -> Value {
+    json!({
+        "type": "entry",
+        "kind": "context_op",
+        "node": node,
+        "content": {
+            "kind": "context_op",
+            "parent": node - 1,
+            "accepted_at": "2026-10-16T00:00:00Z",
+            "op": {
+                "channel": "ipc",
+                "edits": [{"kind": "omit_node", "node": target}]
+            }
+        }
+    })
+}
+/// `Step` 条目；`summary` 为 `None` 时不带该字段。`step_ordinal == 0` 时附带顶层 `ordinal` 与 `turn_start`。
 fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply: &str) -> Value {
     let end = match &progress["end"] {
         Value::Null => json!({"end":"stop","cause":{"cause":"process_exit"}}),
         end => end.clone(),
     };
+    let turn_start = (ordinal == 0).then(|| {
+        json!({
+            "accepted_at": "2026-10-16T00:00:00Z",
+            "agent_name": "reader",
+            "model": "m",
+            "provider": "p",
+            "limits": {},
+            "config_digest": "00",
+            "trigger_channel": "ipc",
+            "input_nodes": if node > 1 { vec![node - 1] } else { Vec::new() }
+        })
+    });
     let mut entry = json!({"type":"entry","kind":"step","node":node,"retries":[],
-        "content":{"kind":"step","parent":node - 1,"turn_id":"t","step_ordinal":ordinal,"progress":progress,
+        "content":{"kind":"step","parent":node - 1,"turn_id":"t","step_ordinal":ordinal,"turn_start":turn_start,"progress":progress,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z",
             "reply":{"role":"assistant","provider_origin":{"protocol":"chat-completions","provider_id":"primary"},"parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
         "step":{"node":node,"key":{"turn_id":"t","ordinal":ordinal},"progress":progress,"end":end,
             "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z"}});
+    if ordinal == 0 {
+        entry["ordinal"] = json!(1);
+    }
     if reply.is_empty() {
         entry["content"]["reply"] = Value::Null;
     } else {
@@ -62,7 +104,7 @@ fn sending() -> Value {
 }
 fn accepted() -> Value {
     json!({"type":"submit","stage":"receipt","turn_id":"t","result":"accepted","recovered":false,
-        "turn":{"session_id":"s","turn_id":"t","user_node":1}})
+        "turn":{"session_id":"s","turn_id":"t","start_node":2,"input_nodes":[1]}})
 }
 fn rejected(kind: &str, conflict: Option<&str>) -> Value {
     json!({"type":"submit","stage":"receipt","turn_id":"t","result":"rejected","recovered":false,
@@ -166,7 +208,7 @@ fn errors_during_submission_fail_even_when_the_error_kind_is_usage() {
 #[test]
 fn exit_code_follows_the_latest_value_of_the_last_step() {
     let requesting = json!({"progress":"requesting"});
-    let accepted_turn = vec![sending(), accepted(), head(true), user(1, 1)];
+    let accepted_turn = vec![sending(), accepted(), head(true), input_entry(1)];
     let with = |tail: Vec<Value>| [accepted_turn.clone(), tail].concat();
     let done = step(
         2,
@@ -341,20 +383,64 @@ fn summaries_are_checked_and_only_the_last_step_carries_one() {
     let mut detached = step(2, 0, finish(), Some(summary("completed", &finish())), "");
     detached["step"]["node"] = json!(9);
     bad.push(detached);
-    let mut numbered = step(2, 0, continued, None, "");
-    numbered["ordinal"] = json!(1);
-    bad.push(numbered);
-    let mut zero = user(1, 1);
-    zero["ordinal"] = json!(0);
-    bad.push(zero);
+    let mut numbered_step1 = step(3, 1, finish(), Some(summary("completed", &finish())), "");
+    numbered_step1["ordinal"] = json!(1);
+    bad.push(numbered_step1);
+    let mut unnumbered_step0 = step(2, 0, continued.clone(), None, "");
+    unnumbered_step0.as_object_mut().unwrap().remove("ordinal");
+    bad.push(unnumbered_step0);
+    let mut zero_ordinal_step0 = step(2, 0, continued.clone(), None, "");
+    zero_ordinal_step0["ordinal"] = json!(0);
+    bad.push(zero_ordinal_step0);
+    let mut missing_turn_start = step(2, 0, continued.clone(), None, "");
+    missing_turn_start["content"]["turn_start"] = Value::Null;
+    bad.push(missing_turn_start);
+    let mut unexpected_turn_start = step(3, 1, finish(), Some(summary("completed", &finish())), "");
+    unexpected_turn_start["content"]["turn_start"] =
+        step(2, 0, continued, None, "")["content"]["turn_start"].clone();
+    bad.push(unexpected_turn_start);
+    let mut input_with_ordinal = input_entry(1);
+    input_with_ordinal["ordinal"] = json!(1);
+    bad.push(input_with_ordinal);
+    let mut empty_op = context_op_entry(1, 0);
+    empty_op["content"]["op"]["edits"] = json!([]);
+    bad.push(empty_op);
     let mut mislabeled = step(2, 0, finish(), Some(summary("completed", &finish())), "");
-    mislabeled["kind"] = json!("user_message");
+    mislabeled["kind"] = json!("input");
     bad.push(mislabeled);
     for value in bad {
-        let parsed = parse(&[sending(), accepted(), head(true), user(1, 1), value.clone()]);
+        let parsed = parse(&[
+            sending(),
+            accepted(),
+            head(true),
+            input_entry(1),
+            value.clone(),
+        ]);
         assert_eq!(parsed.malformed_lines.len(), 1, "不应接受畸形记录 {value}");
         assert_ne!(derive_send_exit_code(&parsed.records).as_i32(), 0);
     }
+
+    // 合法的 context_op 条目与无 turn_id 的非根位置会话头（如停在 Input/ContextOp 节点）应正常解析。
+    let parsed_op = parse_record(&context_op_entry(2, 1)).expect("合法 context_op 应成功解析");
+    assert!(matches!(
+        parsed_op,
+        SendRecord::Entry(ref entry)
+            if entry.turn_id.is_none()
+                && matches!(&entry.content, EntryContent::ContextOp { channel } if channel == "ipc")
+    ));
+    let mut input_pos_head = head(false);
+    input_pos_head["position"] = json!(1);
+    input_pos_head["turn_id"] = Value::Null;
+    assert!(
+        parse_record(&input_pos_head).is_ok(),
+        "停在 Input/ContextOp 位置且无执行者时允许 turn_id 为 null"
+    );
+    let mut owner_without_turn = input_pos_head.clone();
+    owner_without_turn["owner"] = json!(true);
+    assert!(
+        parse_record(&owner_without_turn).is_err(),
+        "存在执行者时会话头必须携带 turn_id"
+    );
 }
 
 #[test]

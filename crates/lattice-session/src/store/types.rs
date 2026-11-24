@@ -17,7 +17,14 @@ pub use super::config::{
     MAX_TURN_TIMEOUT_SECS, StoredTurnConfig, ToolCatalogEntry, ToolCatalogSnapshot,
     TurnExecutionLimits,
 };
+pub use lattice_context::{
+    Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
+    ContextText, EffectiveContext, EffectiveEntrySummary, EmptyContextOpError,
+    InvalidUserMessageError, MAX_CHANNEL_BYTES, NodeStatus, NormalizedUserMessage, OperatedNode,
+    PathNodeKind, PathRecord, TextBoundError, ToolResultText,
+};
 pub use lattice_conversation::MAX_TOOL_CONTENT_BYTES;
+pub type ConfigDigest = [u8; 32];
 pub type Timestamp = chrono::DateTime<chrono::Utc>;
 pub type Result<T> = std::result::Result<T, StoreError>;
 pub const MAX_PROVIDER_ERROR_CHARS: usize = 2048;
@@ -40,27 +47,45 @@ pub struct NodeRef {
     pub node: NodeId,
 }
 
+/// 挂载在每轮 `Step 0` 上的轮次冻结元数据（ADR 0014 第 5 节）。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TurnStartMeta {
+    pub accepted_at: Timestamp,
+    pub trigger_channel: Channel,
+    pub input_nodes: Vec<NodeId>,
+    pub agent_name: AgentName,
+    pub model: ModelId,
+    pub provider: ProviderId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effort: Option<lattice_conversation::Effort>,
+    pub limits: TurnExecutionLimits,
+    #[serde(with = "hex_digest")]
+    pub config_digest: ConfigDigest,
+}
+
+// 保持公开枚举变体平铺结构与存储/协议合同一致，避免无谓装箱。
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Node {
     Root,
-    UserMessage {
+    Input {
         parent: NodeId,
-        turn_id: TurnId,
         accepted_at: Timestamp,
-        agent_name: AgentName,
-        model: ModelId,
-        provider: ProviderId,
-        effort: Option<lattice_conversation::Effort>,
-        limits: TurnExecutionLimits,
-        #[serde(with = "hex_digest")]
-        config_digest: [u8; 32],
-        message: NativeMessage<BoundToolCall>,
+        input: ContextInput,
+    },
+    ContextOp {
+        parent: NodeId,
+        accepted_at: Timestamp,
+        op: ContextOp,
     },
     Step {
         parent: NodeId,
         turn_id: TurnId,
         step_ordinal: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        turn_start: Option<TurnStartMeta>,
         progress: StepProgress,
         attempts: Vec<AttemptRecord>,
         reply: Option<NativeMessage<BoundToolCall>>,
@@ -72,13 +97,15 @@ impl Node {
     pub fn parent(&self) -> Option<NodeId> {
         match self {
             Self::Root => None,
-            Self::UserMessage { parent, .. } | Self::Step { parent, .. } => Some(*parent),
+            Self::Input { parent, .. }
+            | Self::ContextOp { parent, .. }
+            | Self::Step { parent, .. } => Some(*parent),
         }
     }
     pub fn turn_id(&self) -> Option<TurnId> {
         match self {
-            Self::Root => None,
-            Self::UserMessage { turn_id, .. } | Self::Step { turn_id, .. } => Some(*turn_id),
+            Self::Step { turn_id, .. } => Some(*turn_id),
+            Self::Root | Self::Input { .. } | Self::ContextOp { .. } => None,
         }
     }
     /// 已有完整回复的 Step 给出结构化回复与各槽位由阶段决定的结果；无回复节点返回 None。
@@ -260,12 +287,70 @@ pub struct InvocationIndexEntry {
     pub address: ToolCallAddress,
 }
 
+/// 纯投喂一条上下文输入（不开启 Turn）。
+#[derive(Clone)]
+pub struct FeedInput {
+    pub session_id: SessionId,
+    pub project_path: ProjectPath,
+    pub channel: Channel,
+    pub input: super::TurnInput,
+    pub accepted_at: Timestamp,
+}
+
+/// 显式追加一条批量上下文操作（不开启 Turn）。
+#[derive(Clone)]
+pub struct ApplyContextOp {
+    pub session_id: SessionId,
+    pub project_path: ProjectPath,
+    pub op: ContextOp,
+    pub blobs: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
+    pub accepted_at: Timestamp,
+}
+
+impl ApplyContextOp {
+    /// 构造不携带新增图片的上下文操作请求。
+    pub fn new(
+        session_id: SessionId,
+        project_path: ProjectPath,
+        op: ContextOp,
+        accepted_at: Timestamp,
+    ) -> Self {
+        Self {
+            session_id,
+            project_path,
+            op,
+            blobs: std::collections::BTreeMap::new(),
+            accepted_at,
+        }
+    }
+
+    /// 附加本次操作中 `ReplaceInput` 引用的新增图片字节。
+    pub fn with_blobs(mut self, blobs: std::collections::BTreeMap<[u8; 32], Vec<u8>>) -> Self {
+        self.blobs = blobs;
+        self
+    }
+}
+
+/// 独立触发一轮模型推理（不追加 `Node::Input`，要求当前路径有效模型上下文非空）。
+#[derive(Clone)]
+pub struct TriggerTurn {
+    pub session_id: SessionId,
+    pub turn_id: TurnId,
+    pub project_path: ProjectPath,
+    pub trigger_channel: Channel,
+    pub config: FrozenTurnConfig,
+    pub accepted_at: Timestamp,
+    pub settings_version: super::SettingsVersion,
+}
+
+/// 原子投喂 `1..=N` 条上下文输入并触发一轮模型推理。
 #[derive(Clone)]
 pub struct AcceptTurn {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub project_path: ProjectPath,
-    pub input: super::TurnInput,
+    pub trigger_channel: Channel,
+    pub inputs: Vec<(Channel, super::TurnInput)>,
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
     pub settings_version: super::SettingsVersion,
@@ -389,7 +474,8 @@ pub struct NodeHeader {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NodeKind {
     Root,
-    UserMessage,
+    Input,
+    ContextOp,
     Step { ordinal: u32 },
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -437,7 +523,8 @@ pub struct TurnUsageRow {
 pub struct TurnDetail {
     pub turn_id: TurnId,
     pub session_id: SessionId,
-    pub user_node: NodeId,
+    pub start_node: NodeId,
+    pub input_nodes: Vec<NodeId>,
     pub agent_name: AgentName,
     pub accepted_at: Timestamp,
     pub ended_at: Timestamp,
@@ -498,27 +585,44 @@ pub struct SlotDetail {
     pub reason: Option<SlotReason>,
     pub material: MaterialSummary,
 }
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+// 保持对话条目变体直接承载节点与步骤视图，与 IPC/存储合同字段形状一致。
+#[allow(clippy::large_enum_variant)]
+#[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationEntry {
-    UserMessage {
+    Input {
         node: NodeId,
         content: Node,
-        ordinal: u64,
+    },
+    ContextOp {
+        node: NodeId,
+        content: Node,
     },
     Step {
         node: NodeId,
         content: Node,
         step: StepDetail,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ordinal: Option<u64>,
         retries: Vec<RetryNotice>,
-        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<TurnSummary>,
     },
 }
 impl ConversationEntry {
     pub fn node(&self) -> NodeId {
         match self {
-            Self::UserMessage { node, .. } | Self::Step { node, .. } => *node,
+            Self::Input { node, .. } | Self::ContextOp { node, .. } | Self::Step { node, .. } => {
+                *node
+            }
+        }
+    }
+
+    pub fn content(&self) -> &Node {
+        match self {
+            Self::Input { content, .. }
+            | Self::ContextOp { content, .. }
+            | Self::Step { content, .. } => content,
         }
     }
 }
@@ -574,10 +678,14 @@ pub enum MaterialSummary {
 
 redacted_debug!(
     Node,
+    ConversationEntry,
     Notice,
     SlotProgress,
     AttemptDiagnostic,
     InvocationTerminal,
+    FeedInput,
+    ApplyContextOp,
+    TriggerTurn,
     AcceptTurn,
     CompleteReply,
     RegisteredCalls,
@@ -612,6 +720,8 @@ pub enum StoreError {
     },
     #[error("invalid input {field}: {detail}")]
     InvalidInput { field: &'static str, detail: String },
+    #[error("上下文操作无效：{0}")]
+    Context(#[from] lattice_context::ContextError),
     #[error("{kind} not found: {id}")]
     NotFound { kind: &'static str, id: String },
     #[error("request identity conflict: {turn_id}")]

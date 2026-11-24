@@ -23,7 +23,7 @@ pub use close::{
     resolve_slot, resolve_step, retry_notices, step_stop_cause, stops_batch,
 };
 use codec::Records;
-pub use input::{TurnInput, TurnInputPart};
+pub use input::{TurnInput, TurnInputPart, validate_turn_input_batch};
 use lattice_conversation::{SessionId, TurnId};
 use lattice_store::{FlockGuard, StateLayout};
 pub use open::detect_legacy_stores;

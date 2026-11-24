@@ -96,8 +96,9 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         let steps: Vec<_> = entries.iter().filter_map(|entry| entry.step()).collect();
         require(
             entries.len() == 3
-                && entries[0].user_ordinal() == Some(1)
+                && entries[0].is_input()
                 && steps.len() == 2
+                && steps[0].turn_ordinal == Some(1)
                 && steps[0].progress
                     == lattice_system_harness::StepProgress::Closed(StepEnd::Continue)
                 && steps[0].summary.is_none()
@@ -107,7 +108,7 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
                     .summary
                     .as_ref()
                     .is_some_and(|summary| summary.outcome.as_str() == "completed"),
-            format!("应依次包含用户条目、继续执行的步骤与带结局摘要的末步：{entries:?}"),
+            format!("应依次包含输入条目、继续执行的步骤与带结局摘要的末步：{entries:?}"),
         )?;
         require(
             detail.is_clean_exit(0)

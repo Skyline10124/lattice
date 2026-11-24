@@ -11,6 +11,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 futures = { workspace = true }
 lattice-agent = { workspace = true }
+lattice-context = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-ipc = { workspace = true }
 lattice-llm = { workspace = true }

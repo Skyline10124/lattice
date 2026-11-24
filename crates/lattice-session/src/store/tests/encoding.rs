@@ -28,7 +28,7 @@ fn structured_result_wire() {
 }
 
 #[test]
-fn domain_types_v10_wire() {
+fn domain_types_v11_wire() {
     let settings_wire = json!({
         "profile": {
             "agent_name": "coder",
@@ -49,43 +49,67 @@ fn domain_types_v10_wire() {
     let settings: SessionSettings = serde_json::from_value(settings_wire.clone()).unwrap();
     assert_eq!(serde_json::to_value(&settings).unwrap(), settings_wire);
     let encoded_settings = encode(&settings).unwrap();
-    assert_eq!(&encoded_settings[..4], &10_u32.to_be_bytes());
+    assert_eq!(&encoded_settings[..4], &11_u32.to_be_bytes());
     assert_eq!(
         decode_session_settings("s1", &encoded_settings).unwrap(),
         settings
     );
 
-    let user_wire = json!({
-        "kind": "user_message",
+    let input_wire = json!({
+        "kind": "input",
         "parent": 0,
-        "turn_id": "00000000-0000-4000-8000-000000000001",
         "accepted_at": "2026-09-27T00:00:00Z",
-        "agent_name": "coder",
-        "model": "org/gpt-5",
-        "provider": "openai",
-        "effort": "medium",
-        "limits": {
-            "timeout_secs": 300,
-            "max_model_steps": 32,
-            "max_model_attempts": 4
-        },
-        "config_digest": "cd".repeat(32),
-        "message": {
-            "role": "user",
-            "provider_origin": null,
-            "parts": [
-                {
-                    "semantic": { "text": { "text": "hello" } },
-                    "replay_state": null
-                }
-            ]
+        "input": {
+            "channel": "tui",
+            "message": {
+                "role": "user",
+                "provider_origin": null,
+                "parts": [
+                    {
+                        "semantic": { "text": { "text": "hello" } },
+                        "replay_state": null
+                    }
+                ]
+            }
         }
     });
-    let user: Node = serde_json::from_value(user_wire.clone()).unwrap();
-    assert_eq!(serde_json::to_value(&user).unwrap(), user_wire);
-    let encoded_user = encode(&user).unwrap();
-    assert_eq!(&encoded_user[..4], &10_u32.to_be_bytes());
-    assert!(decode::<Node>("nodes", "n1", &encoded_user).unwrap() == user);
+    let input_node: Node = serde_json::from_value(input_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&input_node).unwrap(), input_wire);
+    let encoded_input = encode(&input_node).unwrap();
+    assert_eq!(&encoded_input[..4], &11_u32.to_be_bytes());
+    assert!(decode::<Node>("nodes", "n1", &encoded_input).unwrap() == input_node);
+
+    let step0_wire = json!({
+        "kind": "step",
+        "parent": 1,
+        "turn_id": "00000000-0000-4000-8000-000000000001",
+        "step_ordinal": 0,
+        "turn_start": {
+            "accepted_at": "2026-09-27T00:00:00Z",
+            "trigger_channel": "tui",
+            "input_nodes": [1],
+            "agent_name": "coder",
+            "model": "org/gpt-5",
+            "provider": "openai",
+            "effort": "medium",
+            "limits": {
+                "timeout_secs": 300,
+                "max_model_steps": 32,
+                "max_model_attempts": 4
+            },
+            "config_digest": "cd".repeat(32)
+        },
+        "progress": { "progress": "reserved" },
+        "attempts": [],
+        "reply": null,
+        "slots": [],
+        "updated_at": "2026-09-27T00:00:00Z"
+    });
+    let step0: Node = serde_json::from_value(step0_wire.clone()).unwrap();
+    assert_eq!(serde_json::to_value(&step0).unwrap(), step0_wire);
+    let encoded_step0 = encode(&step0).unwrap();
+    assert_eq!(&encoded_step0[..4], &11_u32.to_be_bytes());
+    assert!(decode::<Node>("nodes", "n2", &encoded_step0).unwrap() == step0);
 }
 
 #[test]
@@ -157,7 +181,7 @@ fn keys_versions_and_encoding() {
         let meta = read.tx.open_table(META).unwrap();
         assert_eq!(
             meta.get("store_format_version").unwrap().unwrap().value(),
-            b"\x00\x00\x00\x0a10"
+            b"\x00\x00\x00\x0b11"
         );
     }
     let (_lock, _calls) = running(&db, sid(1), tid(1), 1, 1);

@@ -180,7 +180,7 @@ pub(crate) async fn run_coordinator_saga(
         }
         let history = coordinator
             .io
-            .read(move |read| request::history(read, session))
+            .read(move |read| request::step_history(read, session, turn_id, ordinal))
             .await?;
         let mut attempt = 0;
         let mut delay = live.retry.initial_delay_ms().min(live.retry.max_delay_ms());

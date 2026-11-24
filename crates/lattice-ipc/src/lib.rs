@@ -17,6 +17,10 @@ pub use auth::{
     ProviderAuthStatus, RevocationStatus, require_chatgpt,
 };
 pub use drain_timeout::{DrainTimeout, parse_drain_timeout};
+pub use lattice_context::{
+    Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextOp, ContextText,
+    EffectiveContext, NormalizedUserMessage, ToolResultText,
+};
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
     InvocationId, MAX_IMAGE_BYTES, MAX_USER_IMAGE_TOTAL_BYTES, MAX_USER_IMAGES_PER_TURN,
@@ -32,7 +36,7 @@ pub use lattice_session::{
         AttemptProgress, ConversationEntry, MaterialSummary, Node, NodeId, NodeKind, NodeRef,
         Notice, NoticeLevel, Page, PublicTurnOutcome, RetryNotice, SessionLog, SessionRecord,
         SessionUsage, SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail, StepEnd,
-        StepKey, StepProgress, TurnDetail, TurnSummary, TurnUsageRow, UsageSummary,
+        StepKey, StepProgress, TurnDetail, TurnStartMeta, TurnSummary, TurnUsageRow, UsageSummary,
     },
 };
 pub use models::{

@@ -34,17 +34,20 @@ flowchart LR
     SERVER --> PROFILE["lattice-profile"]
     SERVER --> AGENT["lattice-agent"]
     SERVER --> SESSION["lattice-session"]
+    SERVER --> CTX["lattice-context"]
     SERVER --> CONV
     LLM --> STORE
     LLM --> NET
     IPC --> SESSION
+    IPC --> CTX
     IPC --> CONV
-    CTX["lattice-context"] --> CONV
+    SESSION --> CTX
+    CTX --> CONV
 ```
 
 | Crate | 持有的状态与类型 | 执行的规则 | 对外接口 |
 | --- | --- | --- | --- |
-| [`lattice-ipc`](../../crates/lattice-ipc/src/lib.rs) | 本地 IPC 请求/响应/登录帧（`Request`、`Response`、`LoginAction`、`LoginResponse`，含 IM 凭据与重载消息；提交载荷含 `UserInputPart` 与 `TurnRequest<I>`，图片为标准 base64）、`LocalError` 与冲突/恢复诊断、模型查询与模型/凭据展示类型（含带后台 `diagnostic` 字段的 `ProviderAuthStatus`）、IM 与后台组件状态类型（`ImMountResult`、`ImAuthSetReply`、`ImAuthRemoveReply`、`ImCredentialStatus`、`ImPlatformAuthStatus`、`ImAuthStatus`、`ComponentState`、`ComponentStatus`）、`AuthKey`、共用的非上线排空时长 `DrainTimeout`、`PROTOCOL_VERSION`（当前为 `66`）及 `wire_shape.json` 基线 | 16 MiB 单帧魔数校验与分片拼回（版本不兼容时在持有连接期间经 `SO_PEERCRED` 附带对端进程号）、零载荷提交帧计长（`ipc::encoded_submit_len`，输入为读取图片字节前的 `PlannedTurnRequest`）、响应帧敏感缓冲清零、基于 `rustix` 的本进程有效 UID 读取与 Unix socket 对端 UID/PID 核验、本地目录所有者与权限核验（`ipc::check_dir`）、`--drain-timeout` 时长解析（`parse_drain_timeout`）、SIWC 登录 provider 参数校验（`require_chatgpt`）及线上形状逐字节快照比对 | 根模块显式重导出的协议类型（含 `UserInputPart`、`TurnRequest`、`PlannedTurnRequest`）、展示类型、`DrainTimeout`、`parse_drain_timeout`、`require_chatgpt` 与领域只读值类型（含图片与输入模态原语 `ImageMediaType`、`ImageRef`、`InputModality`，以及用户侧图文上限常量 `MAX_IMAGE_BYTES`、`MAX_USER_IMAGES_PER_TURN`、`MAX_USER_IMAGE_TOTAL_BYTES`、`MAX_USER_TEXT_BYTES`；`auth`、`drain_timeout`、`models`、`types` 为私有模块，其他 crate 用不到的条目保持私有），以及唯一公开子模块 `ipc` 的帧读写、`encoded_submit_len`、`MAX_FRAME`、目录权限与 UID/对端核验入口（`PROTOCOL_VERSION`、`MAGIC`、`magic_for_version` 与 `read` 仅在 `test` 或 `test-utils` 下导出） |
+| [`lattice-ipc`](../../crates/lattice-ipc/src/lib.rs) | 本地 IPC 请求/响应/登录帧（`Request`、`Response`、`LoginAction`、`LoginResponse`，含 IM 凭据与重载消息；提交载荷含 `UserInputPart` 与 `TurnRequest<I>`，图片为标准 base64）、`LocalError` 与冲突/恢复诊断、模型查询与模型/凭据展示类型（含带后台 `diagnostic` 字段的 `ProviderAuthStatus`）、IM 与后台组件状态类型（`ImMountResult`、`ImAuthSetReply`、`ImAuthRemoveReply`、`ImCredentialStatus`、`ImPlatformAuthStatus`、`ImAuthStatus`、`ComponentState`、`ComponentStatus`）、`AuthKey`、共用的非上线排空时长 `DrainTimeout`、`PROTOCOL_VERSION`（当前为 `67`）及 `wire_shape.json` 基线 | 16 MiB 单帧魔数校验与分片拼回（版本不兼容时在持有连接期间经 `SO_PEERCRED` 附带对端进程号）、零载荷提交帧计长（`ipc::encoded_submit_len`，输入为读取图片字节前的 `PlannedTurnRequest`）、响应帧敏感缓冲清零、基于 `rustix` 的本进程有效 UID 读取与 Unix socket 对端 UID/PID 核验、本地目录所有者与权限核验（`ipc::check_dir`）、`--drain-timeout` 时长解析（`parse_drain_timeout`）、SIWC 登录 provider 参数校验（`require_chatgpt`）及线上形状逐字节快照比对 | 根模块显式重导出的协议类型（含 `UserInputPart`、`TurnRequest`、`PlannedTurnRequest`）、展示类型、`DrainTimeout`、`parse_drain_timeout`、`require_chatgpt` 与领域只读值类型（含图片与输入模态原语 `ImageMediaType`、`ImageRef`、`InputModality`，以及用户侧图文上限常量 `MAX_IMAGE_BYTES`、`MAX_USER_IMAGES_PER_TURN`、`MAX_USER_IMAGE_TOTAL_BYTES`、`MAX_USER_TEXT_BYTES`；`auth`、`drain_timeout`、`models`、`types` 为私有模块，其他 crate 用不到的条目保持私有），以及唯一公开子模块 `ipc` 的帧读写、`encoded_submit_len`、`MAX_FRAME`、目录权限与 UID/对端核验入口（`PROTOCOL_VERSION`、`MAGIC`、`magic_for_version` 与 `read` 仅在 `test` 或 `test-utils` 下导出） |
 | [`lattice-local`](../../crates/lattice-local/src/lib.rs) | 客户端句柄（`LocalClient`、`LocalWatch`、`LocalTurn`）、不可序列化的客户端结果（`DetachReport`、`ConfigureOutcome`）、登录客户端句柄与授权链接包装（`LocalAuthLogin`、`AuthLoginEvent`、`SensitiveLoginUrl`）、退场等待句柄 `Departure`（测试与 `test-utils` 导出）及观察空闲阈值 `STREAM_IDLE_TIMEOUT_SECS` | 客户端 Unix socket 寻址与连接已运行的本地后台（未运行时返回中文 `not_running` 错误，不自动拉起后台）、请求（含 `im_auth_set`、`im_auth_remove`、`im_auth_status`、`im_reload`）与观察流驱动、客户端观察 idle 判定、提交/取消回执交接与 `detach` 退出收尾、`stop` 回执后的 socket 撤下与 `owner.lock` 释放等待（`Departure`）、同连接 SIWC 登录事件流读取与 Drop 清零中止、`SessionId` / `TurnId` 生成、图片字节与文件读取、粘贴探测核验与重读核对（`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`）、提交前本地预检（`check_turn_plan`）、面向人阅读的图片标记格式化（`format_image_marker`），以及基于 stderr 与 `NO_COLOR` 的日志初始化（`init_logging`） | 根模块扁平显式重导出门面（内部模块全部私有：对外提供 `LocalClient`、`LocalTurn`、`LocalAuthLogin`、`SensitiveLoginUrl`、`check_turn_plan`、`format_image_marker`、`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的公开协议（含 `PlannedTurnRequest`）、组件/IM 回执、排空时长、对话与图片/输入模态原语（含 `MAX_IMAGE_BYTES`）、`PrivateDirectory`、`StateLayout` 类型；其他 crate 用不到的自有条目不公开，仅供测试复用的 `LocalWatch`、`Departure`、`test_support` 及底层客户端/重连方法收窄在 `test` 或 `test-utils` 下；前端经 `LocalTurn` 观察会话） |
 | [`lattice-server`](../../crates/lattice-server/src/lib.rs) | 本地后台实例锁与监听端点（`InstanceLock`、`Instance`、`SocketEndpoint`）、`Backend` 与 `Owner` 运行态、进程内可选组件托管器与注册类型（`ComponentManager`、`ComponentRegistration`、`ComponentBuildOutcome`、`PreparedComponent`、`ComponentStop`、`ComponentRemountHandle`、`ScopedComponentFuture`）、进程内服务门面与只读轮次观察句柄（`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`）、IM 平台凭据文件存储（`ImAuthStore`、`ImToken`、`ImPlatformCredentialState`、`ImAuthError`）、`ServeExit` / `DrainOutcome` / `HostLifecycle`、内部会话门面 `SessionApi`、`TurnCoordinator` 及 `ToolExecutor` 接缝 | 基于 `rustix::fs::flock` 的实例锁持有与残留 socket 核验、连接存活非阻塞 `PEEK` 探测、IPC 与进程内共用的 `Service` 操作分发及启动期根证书只读暴露（`Service::tls_roots_der`）、托管组件就绪后异步初始挂载/合并重新挂载/旧实例保留回退/组件作用域 panic 载荷抑制与故障隔离及停机第 3 步严格 10 秒上限收尾（[`local/components.rs`](../../crates/lattice-server/src/local/components.rs)）、`<config_dir>/im/auth.json` 的 `PrivateDirectory` 权限核验与严格零泄露读写（[`im_auth.rs`](../../crates/lattice-server/src/im_auth.rs)）及 IM IPC 分发、后台准入与独立 `Owner` 监督、就绪与停机开始时的宿主生命周期回调及状态感知停机通知、信号与 IPC `stop` 共用的有界停机顺序、会话与 Turn 协调、工作区规范路径解析与项目绑定核对（[`root.rs`](../../crates/lattice-server/src/root.rs)）、`ApiError` 到 `LocalError` 的映射（[`local/error.rs`](../../crates/lattice-server/src/local/error.rs)）、`lattice-llm` 类型与 IPC 展示类型的逐字段转换及后台供应商可用性诊断填充（[`local/presentation.rs`](../../crates/lattice-server/src/local/presentation.rs)） | 内部模块全部私有；生产公开面由根模块导出后台宿主入口、组件注册与 panic 作用域接口、进程内 `Service` 接口与 `im_auth` 凭据存储接口，测试专用导出按条件单独列出 |
 | [`lattice-im`](../../crates/lattice-im/src/lib.rs) | 只读挂载构造结果 `ImBuildOutcome`、已就绪网关实例 `PreparedImGateway`、平台前缀身份键（`SenderKey`、`ChatKey`、`InboundId`）、相册收集状态机 `AlbumCollector`、私有台账 `Ledger`（v2，含 `Merged` 相位）、连续确认游标 `OffsetTracker`、活跃草稿登记与单对话节流表、无长度门槛脱敏器 `ImRedactor` 及唯一的测试替身接口 `TelegramIo` | 只读检查 `im/config.toml` 与 `ImAuthStore`、维护 `<state-root>/lattice/im/ledger` v2 相位（整组原子登记 `Registered` 与 `Merged`）与窗口清理、启动期遗留 `Registered` 同对话准入屏障与并行恢复、Telegram 私聊白名单与文本/单图/`media_group_id` 多图相册接入及六项内置命令处理、固定公网地址与后台启动期根证书的 HTTPS 长轮询/受控 `getFile` 流式下载与魔数核验/消息发送、后台图片模态与请求体大小拒绝引导、单对话 1 秒草稿节流与 25 秒保活、草稿停止按钮取消、4096 字符三级切分及停止时的子任务排空（见[IM 网关](im.md)） | 内部子模块全部私有；根模块仅导出 `prepare_im_gateway`、`ImBuildOutcome`、`PreparedImGateway` 与 `ImGatewayError` 四项，仅供 `lattice-daemon` 消费 |
@@ -76,7 +79,7 @@ flowchart LR
 
 ## 依赖边界门禁
 
-[`xtask/src/crate_boundary.rs`](../../xtask/src/crate_boundary.rs) 同时执行八条内部直接依赖检查（`RULES`）、一条内部独占消费限制检查（`EXCLUSIVE_CONSUMER_RULES`）与三条普通依赖闭包检查（`CLOSURE_RULES`）；门禁在本地 `cargo xtask ci` 与 GitHub Actions（`ci.yml`、`full-gate.yml`）中一并运行，并以中文输出总结、分组标签与违规/异常诊断（包名、依赖段名、`target` 表达式、依赖改名与 Cargo 原始错误保持原文）。
+[`xtask/src/crate_boundary.rs`](../../xtask/src/crate_boundary.rs) 同时执行九条内部直接依赖检查（`RULES`）、一条内部独占消费限制检查（`EXCLUSIVE_CONSUMER_RULES`）与三条普通依赖闭包检查（`CLOSURE_RULES`）；门禁在本地 `cargo xtask ci` 与 GitHub Actions（`ci.yml`、`full-gate.yml`）中一并运行，并以中文输出总结、分组标签与违规/异常诊断（包名、依赖段名、`target` 表达式、依赖改名与 Cargo 原始错误保持原文）。
 
 ### 内部直接依赖规则
 
@@ -85,6 +88,7 @@ flowchart LR
 | 受检包 | 内部直接依赖规则 |
 | --- | --- |
 | `lattice-context` | 只允许依赖 `lattice-conversation` |
+| `lattice-session` | 只允许依赖 `lattice-context`、`lattice-conversation`、`lattice-store` |
 | `lattice-ipc` | 只允许依赖 `lattice-session`、`lattice-conversation`、`lattice-context`、`lattice-store` |
 | `lattice-tui` | 只允许依赖 `lattice-local` |
 | `lattice-local` | 只允许依赖 `lattice-ipc`、`lattice-conversation`、`lattice-context`、`lattice-store` |

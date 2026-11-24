@@ -22,7 +22,8 @@ status: active
 | 领域与网关 crate | `lattice-agent::ModelStepDriver` | 接收冻结请求和对话历史，驱动一次 provider 请求，向协调层返回类型化尝试结果，并发送非阻塞观察回调 |
 | 领域与网关 crate | `lattice-llm` | 请求网关：提供无凭据的模型档位能力查询（`model_supported_efforts`），统一判定可用性，`GatewayTurn::prepare` 完成提交准入与模型及档位复核，每次请求按 provider `id` 与模型 `id` 解析配置、取得凭据，完成 provider wire 请求、流事件适配和对话投影 |
 | 领域与网关 crate | `lattice-conversation` | 维护模型选择值（`ProviderId`、`ModelId`、`ModelRef`）、推理档位 `Effort`、有序消息、ToolCall typestate、调用结果与结构化 `ToolError`、内容摘要、尝试诊断和 usage 等纯数据 |
-| 领域与网关 crate | `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`ProjectPath`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录（含 `ProjectPath` 项目绑定）、会话树、会话设置（`SessionSettings` 与 `SettingsVersion`）、配置表、TurnId 索引与 InvocationId 索引；提供带类型的事务操作、由阶段给出结论与读取校验 |
+| 领域与网关 crate | `lattice-context` | 维护模型上下文编辑操作（`ContextOp` 与 7 类 `ContextEdit`）、渠道标签（`Channel`）、路径归约器（`resolve` → `EffectiveContext`）与 provider 中立投影（`EffectiveContext::project()`） |
+| 领域与网关 crate | `lattice-session` | 维护独立于存储机制的会话树领域类型（`model/`：`AgentName`、`ProjectPath`、`TurnTimeout`、`RetryPolicy`），并拥有全局会话库 `lattice.redb`：Session 记录（含 `ProjectPath` 项目绑定）、会话树（`Root`、`Input`、`ContextOp`、`Step`）、会话设置（`SessionSettings` 与 `SettingsVersion`）、配置表、图片字节表 `blobs`、TurnId 索引与 InvocationId 索引；提供事务写入原语、由阶段给出结论、全树严格校验，以及原始路径与归约上下文两条独立读路径 |
 
 公开入口按调用层级分为两类，后台内部实现不直接向外部调用方暴露（进程内 `Service` 与本地 IPC 在后台内部共用同一套准入、草稿清理、取消与查询实现）：
 
@@ -35,7 +36,7 @@ status: active
 | 解析会话身份：`resolve_session` | `LocalClient::resolve_session` | 完整 `SessionId` 或至少 4 个字符的前缀 | 精确身份优先，否则在同一读事务内按前缀做一次范围读取并返回匹配的 `SessionRecord`；空白或不足 4 个字符返回 BadRequest，无匹配返回 NotFound，多条匹配列出至多 5 个候选并返回 BadRequest |
 | 查看会话：`list`、`log` | `LocalClient::list_sessions`、`log` | 无，或 SessionId | `list` 列出全部会话（草稿会话照常出现在列表中），每行给出 SessionId、项目绑定 `ProjectPath`（`--json` 中为原始字节数组，人类可读输出为有损文本）、当前节点序号、节点数、更新时间，以及最后一轮未关闭时它的 TurnId 和后台是否正在执行它；`log` 先给出项目绑定（同上，`--json` 为原始字节数组，人类可读输出为有损文本）、当前位置、当前 agent 与未关闭的最后一轮，再以树形列出全部节点（含不在当前分叉上的节点），标出当前位置，并在每个 Turn 的首节点注明 TurnId 与 `TurnSummary` |
 | 观察会话：`watch` | `LocalTurn`（`LocalClient::observe`、`follow_turn`、`start_turn`；底层 `LocalClient::watch` 仅在 `test` 或 `test-utils` 下导出） | SessionId | 推送会话头、当前路径上最近几轮的对话条目、之后变化的条目与生成中的文字，见[观察与重连](recovery.md#观察与重连)；草稿会话与当前位置为根节点的会话同样可以观察（初始只有会话头），`configure` 成功后观察者收到新的会话头。会话不存在时返回 NotFound |
-| 查看会话头：`head` | `LocalClient::session_head` | SessionId | 返回与视图开头相同的会话头，完整字段为：`session_id`（会话身份）、`position`（当前节点序号）、`agent`（当前 agent，取自会话设置）、`model?`（会话设置中的模型 `id`）、`provider?`（会话设置中的 provider `id`）、`effort?`（会话设置中的推理档位）、`settings_version`（当前设置版本）、`turn_id?`（当前位置所属的那一轮；草稿会话与 `rewind` 回到根节点的会话均为空，因此不能用 `turn_id` 为空判断一个会话是不是草稿会话）、`owner`（`turn_id` 所示那一轮有没有 Owner）、`diagnostic?`（后台已知的执行诊断）、`path_replaced`（单次查询固定为 `false`；观察流中因 `rewind` 替换当前路径时为 `true`）。不读条目，不占观察许可；遇到同会话无 Turn 身份的操作在执行时等待其结束后读取。会话不存在时返回 NotFound |
+| 查看会话头：`head` | `LocalClient::session_head` | SessionId | 返回与视图开头相同的会话头，完整字段为：`session_id`（会话身份）、`position`（当前节点序号）、`agent`（当前 agent，取自会话设置）、`model?`（会话设置中的模型 `id`）、`provider?`（会话设置中的 provider `id`）、`effort?`（会话设置中的推理档位）、`settings_version`（当前设置版本）、`turn_id?`（当前位置所属的那一轮；停在根节点、`Input` 或 `ContextOp` 节点时为空，因此不能用 `turn_id` 为空判断一个会话是不是草稿会话）、`owner`（`turn_id` 所示那一轮有没有 Owner）、`diagnostic?`（后台已知的执行诊断）、`path_replaced`（单次查询固定为 `false`；观察流中因 `rewind` 替换当前路径时为 `true`）。不读条目，不占观察许可；遇到同会话无 Turn 身份的操作在执行时等待其结束后读取。会话不存在时返回 NotFound |
 | 查看一个 Turn：`turn` | `LocalClient::turn`、`wait_for_turn` | TurnId | 返回这一轮的 `TurnSummary` 与全部 Step 节点；请求仍在准入时返回在途，没有这个请求时返回 NotFound。接受结果不明时用它找回 |
 | 提交：`submit` | `LocalClient::start_turn`（返回 `LocalTurn`） | 已有会话的 SessionId、TurnId、保序输入片段 `parts`（文本片段与图片片段，图片在 IPC 中为标准 base64）、工作区路径 `workspace`（IPC 中为原始字节数组，要求同 `configure`），以及可选的 `expected_settings` | 后台分两段检查。登记准入时，在准入锁内依次检查：TurnId 正被在途请求使用，返回 Conflict（`turn_id_used`）；后台正在停机，返回 Stopping；全局 Owner 总数已达上限 32，返回 Busy。登记之后依次检查：TurnId 已在 TurnId 索引中，返回 Conflict（`turn_id_used`）；`workspace` 不是存在的规范绝对路径，返回 BadRequest；会话不存在，返回 NotFound；项目绑定不一致，返回 Conflict（`binding_mismatch`）；同一会话已有 Owner，返回 Busy；按[输入与传输限制](concurrency.md#输入与传输限制)执行单轮规范化与上限核验（为空、文本超过 2 MiB、图片格式不受支持、单张或单轮图片超限），未通过返回 BadRequest；`SessionExecutionLock` 被占用，返回 Busy；给出了 `expected_settings` 且与当前设置版本不等，返回 Conflict（`settings_changed`）；最后检查网关配置、模型（含凭据）与本轮工具目录，再以与首步相同的构造检查首步完整请求的模型图片输入能力与 32 MiB 本地请求体预算（不支持图片按配置错误返回 BadRequest，超预算返回 BadRequest 并给出固定说明；预检不通过时不写会话树）。接受事务写入时再核对一次绑定与设置版本，成功后由 `LocalTurn` 交付接受回执与观察更新，见[请求接受](acceptance.md#请求接受)与[请求身份与找回](recovery.md#请求身份与找回) |
 | 查看用量：`usage` | `LocalClient::usage` | SessionId（支持精确身份或前缀） | 当前路径上逐轮的用量与费用估算，给出当前路径合计和全会话合计（含 rewind 丢掉的分支）；用量口径与费用规则见[模型接入合同](../llm/usage.md#用量缓存与费用) |
@@ -87,10 +88,10 @@ LocalTurn 交付提交与取消的回执。普通退出使用 `detach` 取得最
 
 ## 当前路径的用量查询
 
-`usage` 在一个读事务内固定 Session 的当前位置，沿父链到根，按 UserMessage 分组并按路径先后返回。退回轮中某个 Step 时，当前路径只累计该 Step 及其祖先中的尝试。每轮给出 `turn_id`、从 1 开始的路径轮次 `ordinal`、UserMessage 节点上的 `provider` 与 `model`，以及 `usage`；模型身份取自该轮节点。返回对象为 `{ session_id, position, turns, path_total, session_total }`，其中 `position` 是本次读取的位置，逐轮 `usage`、`path_total` 与 `session_total` 均按[尝试计量与完整性](steps.md#关闭-step-与-turn)派生。`path_total` 汇总当前路径；`session_total` 在同一读事务中汇总该会话全部节点的尝试，不沿父链，包含 rewind 后留存的分支，每个节点只计一次。
+`usage` 在一个读事务内固定 Session 的当前位置，沿父链到根，按 `Step 0` 分组并按路径先后返回。退回轮中某个 Step 时，当前路径只累计该 Step 及其祖先中的尝试。每轮给出 `turn_id`、从 1 开始的路径轮次 `ordinal`、`Step 0` 的 `turn_start` 中的 `provider` 与 `model`，以及 `usage`；模型身份取自该轮 `Step 0` 节点。返回对象为 `{ session_id, position, turns, path_total, session_total }`，其中 `position` 是本次读取的位置，逐轮 `usage`、`path_total` 与 `session_total` 均按[尝试计量与完整性](steps.md#关闭-step-与-turn)派生。`path_total` 汇总当前路径；`session_total` 在同一读事务中汇总该会话全部节点的尝试，不沿父链，包含 rewind 后留存的分支，每个节点只计一次。
 
-当前位置为根时，`turns` 为空、`path_total` 为空和，`session_total` 仍包含已有分支；路径止于 UserMessage 或 Reserved Step 时仍保留该轮，没有尝试的空和由 `attempts=0` 表达。Sent 与执行者消失后留下的尝试同样参与汇总。
+当前位置为根、`Input` 或 `ContextOp`（尚未到达该分支上任何 `Step 0`）时，仅汇总其祖先路径上已存在的轮次；若祖先路径无任何 `Step`，`turns` 为空、`path_total` 为空和，`session_total` 仍包含已有分支；路径止于 `Reserved` Step 0 时保留该轮，没有尝试的空和由 `attempts=0` 表达。Sent 与执行者消失后留下的尝试同样参与汇总。
 
-会话库严格打开并校验成功后，身份解析与用量读取只读取 Session 记录、身份键和会话节点的计量投影，不解码对话正文、冻结配置或连接材料。需要打开会话库时，仍按[存储合同](../storage.md#身份版本与打开)执行全库解码与校验。
+会话库严格打开并校验成功后，身份解析与用量读取只读取 Session 记录、身份键和会话节点的扁平轻量计量投影，零缓冲跳过 `input`、`op`、`reply`、`slots` 与 `config_digest` 等正文或配置载荷。需要打开会话库时，仍按[存储合同](../storage.md#身份版本与打开)执行全库解码与校验。
 
 `lattice session usage <SESSION_ID>` 的文本逐轮列出五项计数、尝试数与费用，末尾两行为“当前路径合计”和“全会话合计”，分别对应 JSON 的 `path_total` 与 `session_total`。逐轮明细只列当前路径，所以 `session_total` 可能大于逐轮之和。单项计数没有任何尝试报告时显示 `-`，已知零显示 `0`，溢出的小计附 `(overflow)`；金额格只按[费用估算](../llm/usage.md#费用估算)显示确切、估算或未知，不附 `(partial)`。全局 `--json` 输出上述一个结构化对象；读取成功退出 0，身份解析和错误分类沿用其他会话查询。

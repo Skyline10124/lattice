@@ -10,6 +10,7 @@ description = "LATTICE 本地 IPC 协议类型、分帧编解码与对端身份�
 [dependencies]
 base64 = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+lattice-context = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-session = { workspace = true }
 rustix = { workspace = true, features = ["net", "process"] }

@@ -755,13 +755,18 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 .create_session(&guard, project.clone(), settings, chrono::Utc::now())?;
         }
         let settings_version = api.store.begin_read()?.session_settings(sid)?.version()?;
+        let channel = crate::turn::execute::default_submit_channel();
         api.store.accept_turn(
             &guard,
             AcceptTurn {
                 session_id: sid,
                 turn_id: id,
                 project_path: project,
-                input: TurnInput::text("seed".into()).expect("构造测试输入"),
+                trigger_channel: channel.clone(),
+                inputs: vec![(
+                    channel,
+                    TurnInput::text("seed".into()).expect("构造测试输入"),
+                )],
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
@@ -811,9 +816,16 @@ async fn watch_starts_with_ten_turns_history_has_whole_earlier_turns_and_rewind_
     }
     assert!(matches!(
         current[0].as_ref(),
-        ConversationEntry::UserMessage {
-            ordinal: 3,
+        ConversationEntry::Input {
             node: NodeId(5),
+            ..
+        }
+    ));
+    assert!(matches!(
+        current[1].as_ref(),
+        ConversationEntry::Step {
+            node: NodeId(6),
+            ordinal: Some(3),
             ..
         }
     ));
@@ -822,7 +834,18 @@ async fn watch_starts_with_ten_turns_history_has_whole_earlier_turns_and_rewind_
     assert_eq!(earlier.entries.len(), 4);
     assert!(matches!(
         earlier.entries[0],
-        ConversationEntry::UserMessage { ordinal: 1, .. }
+        ConversationEntry::Input {
+            node: NodeId(1),
+            ..
+        }
+    ));
+    assert!(matches!(
+        earlier.entries[1],
+        ConversationEntry::Step {
+            node: NodeId(2),
+            ordinal: Some(1),
+            ..
+        }
     ));
     client
         .rewind(sid, NodeId(2), dir.path().into())
@@ -937,7 +960,8 @@ async fn slow_observer_reads_latest_entries_suffixes_and_attempt_boundaries() {
             session_id: sid,
             turn_id,
         },
-        user_node: NodeId(1),
+        input_nodes: vec![NodeId(1)],
+        start_node: NodeId(2),
     });
     let slow = sink.register();
     let fast = sink.register();
@@ -1201,7 +1225,8 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
             session_id: sid,
             turn_id: first,
         },
-        user_node: NodeId(1),
+        input_nodes: vec![NodeId(1)],
+        start_node: NodeId(2),
     });
     let (waiting, resume_watch) = arm(&backend.gates.watch_wait);
     let mut view = client.watch(sid).await.unwrap();
@@ -1222,7 +1247,8 @@ async fn retried_capture_keeps_final_updates_for_entries_outside_the_recent_wind
                 session_id: sid,
                 turn_id: id,
             },
-            user_node: NodeId(ordinal * 2 + 1),
+            input_nodes: vec![NodeId(ordinal * 2 + 1)],
+            start_node: NodeId(ordinal * 2 + 2),
         });
         close_seed(&backend, sid, id).await;
     }

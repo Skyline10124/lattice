@@ -130,6 +130,7 @@ mod tests {
         ])
         .expect("构造含图轮次输入");
 
+        let channel = super::super::execute::default_submit_channel();
         store
             .accept_turn(
                 &lock,
@@ -137,7 +138,8 @@ mod tests {
                     session_id,
                     turn_id,
                     project_path,
-                    input,
+                    trigger_channel: channel.clone(),
+                    inputs: vec![(channel, input)],
                     config,
                     accepted_at: chrono::Utc::now(),
                     settings_version,
