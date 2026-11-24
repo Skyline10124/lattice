@@ -9,8 +9,9 @@ use std::str::FromStr;
 use lattice_context::{
     Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
     ContextText, EffectiveEntrySummary, EmptyContextOpError, InvalidUserMessageError,
-    MAX_CHANNEL_BYTES, NodeStatus, NormalizedUserMessage, OperatedNode, PathNodeKind, PathRecord,
-    TextBoundError, ToolResultOutcome, ToolResultText, resolve,
+    MAX_CHANNEL_BYTES, MAX_TOOL_ERROR_MESSAGE_BYTES, NodeStatus, NormalizedUserMessage,
+    OperatedNode, PathNodeKind, PathRecord, TextBoundError, ToolResultOutcome, ToolResultText,
+    resolve,
 };
 use lattice_conversation::{
     BoundToolCall, ConversationItem, ImageMediaType, ImageRef, IndeterminateCause, InvocationId,
@@ -990,7 +991,7 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
         vec![],
     );
 
-    // Step 3 测试 OmitInvocation（成对删除 + 合并相邻 Reasoning）与 ReplaceToolResult（canonical_json + digest）
+    // Step 3 测试 OmitInvocation（成对删除）与 ReplaceToolResult（canonical_json + digest），并随清除 provider_origin 一并剥离无来源 Reasoning
     let tool_step = step_with_parts(
         Some(sample_origin()),
         vec![
@@ -1112,7 +1113,7 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
         })
     );
 
-    // Step 3：INV_1 成对移出，相邻 Reasoning 合并为 "思一思二"，INV_2 载荷替换为规范 JSON 字符串与摘要，provider_origin/replay_state 清零
+    // Step 3：INV_1 成对移出，INV_2 载荷替换为规范 JSON 字符串与摘要，provider_origin/replay_state 清零并同步剥离无来源 Reasoning
     let expected_val = Value::String("精简列表".to_owned());
     let expected_canonical = canonical_json(&expected_val);
     assert_eq!(
@@ -1121,10 +1122,9 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
             assistant: NativeMessage::new(
                 MessageRole::Assistant,
                 None,
-                vec![
-                    reasoning_part("思一思二", None),
-                    MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_2 }),
-                ],
+                vec![MessagePart::semantic_only(MessageSemantic::ToolCall {
+                    call: call_2,
+                })],
             ),
             results: vec![StoredToolResult {
                 invocation_id: inv(INV_2),
@@ -1136,6 +1136,33 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
                 }),
             }],
         })
+    );
+    assert_eq!(
+        inspection.entries,
+        vec![
+            EffectiveEntrySummary::Step {
+                node: NodeId(1),
+                text_bytes: "保留正文".len(),
+                reasoning_bytes: "保留推理".len(),
+                tool_call_count: 0,
+                tool_result_bytes: 0,
+            },
+            EffectiveEntrySummary::Step {
+                node: NodeId(2),
+                text_bytes: "甲乙".len(),
+                reasoning_bytes: 0,
+                tool_call_count: 0,
+                tool_result_bytes: 0,
+            },
+            EffectiveEntrySummary::Step {
+                node: NodeId(3),
+                text_bytes: 0,
+                reasoning_bytes: 0,
+                tool_call_count: 1,
+                tool_result_bytes: expected_canonical.len(),
+            },
+        ],
+        "未编辑 Step 1 保留 reasoning_bytes，经局部编辑的 Step 3 同步剥离无来源 Reasoning 后 reasoning_bytes 必须为 0"
     );
 
     // 补充验证：OmitInvocation 移出唯一工具调用导致 Step 清空（SkippedEmpty），随后 ReplaceStep 恢复为纯助手结论，以及 OmitInvocation 合并两侧 Text
@@ -1240,18 +1267,20 @@ fn resolve_step_local_edits_always_sanitize_signatures_and_preserve_unedited_ste
 }
 
 #[test]
-fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outcomes() {
+fn replace_tool_result_preserves_failed_outcome_enforces_error_limit_and_rejects_non_replaceable() {
     let inv_failed = inv("11111111-1111-4111-8111-111111111111");
     let inv_not_exec = inv("22222222-2222-4222-8222-222222222222");
     let inv_no_result = inv("33333333-3333-4333-8333-333333333333");
     let inv_cancelled = inv("44444444-4444-4444-8444-444444444444");
     let inv_reported = inv("55555555-5555-4555-8555-555555555555");
+    let inv_succeeded = inv("66666666-6666-4666-8666-666666666666");
 
     let call_failed = bound_call(inv_failed, "read_file", 0, json!({"path": "/secret"}));
     let call_not_exec = bound_call(inv_not_exec, "t_ne", 1, json!({}));
     let call_no_result = bound_call(inv_no_result, "t_nr", 2, json!({}));
     let call_cancelled = bound_call(inv_cancelled, "t_ca", 3, json!({}));
     let call_reported = bound_call(inv_reported, "t_rp", 4, json!({}));
+    let call_succeeded = bound_call(inv_succeeded, "t_ok", 5, json!({}));
 
     let step = step_with_parts(
         Some(sample_origin()),
@@ -1273,6 +1302,9 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
             }),
             MessagePart::semantic_only(MessageSemantic::ToolCall {
                 call: call_reported.clone(),
+            }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall {
+                call: call_succeeded.clone(),
             }),
         ],
         vec![
@@ -1304,6 +1336,7 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
                 name: "t_rp".to_owned(),
                 payload: ResultPayload::Indeterminate(IndeterminateCause::Reported),
             },
+            json_result(inv_succeeded, "t_ok", json!("ok")),
         ],
     );
 
@@ -1354,9 +1387,89 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
             "resolve 必须拒绝替换 {expected_outcome:?} 结局的工具结果"
         );
     }
+
+    // Failed 替换消息上限：恰好 4,096 字节通过且不截断；4,097 字节在 validate_op/resolve 中均拒绝且不污染原状态；
+    // 同一 4,097 字节文本作用于 Succeeded 目标照常通过
+    let exact_failed_text = "e".repeat(MAX_TOOL_ERROR_MESSAGE_BYTES);
+    let over_failed_text = "e".repeat(MAX_TOOL_ERROR_MESSAGE_BYTES + 1);
+
+    let op_over_failed = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_tool_result(inv_succeeded, over_failed_text.clone()).unwrap(),
+            ContextEdit::replace_tool_result(inv_failed, over_failed_text.clone()).unwrap(),
+        ],
+    )
+    .unwrap();
+    let expected_over_err = ContextError::ToolErrorTextTooLarge {
+        invocation: inv_failed,
+        limit: MAX_TOOL_ERROR_MESSAGE_BYTES,
+        actual: MAX_TOOL_ERROR_MESSAGE_BYTES + 1,
+    };
+    assert_eq!(
+        base.validate_op(&op_over_failed),
+        Err(expected_over_err.clone()),
+        "validate_op 必须拒绝超过 4,096 字节的 Failed 替换消息"
+    );
+    assert_eq!(
+        resolve(&[
+            PathRecord::Step {
+                id: NodeId(1),
+                content: step.clone(),
+            },
+            PathRecord::Op {
+                id: NodeId(2),
+                op: &op_over_failed,
+            },
+        ]),
+        Err(expected_over_err),
+        "resolve 必须拒绝超过 4,096 字节的 Failed 替换消息"
+    );
     assert_eq!(
         base, base_before,
         "validate_op 拒绝后不得污染原 EffectiveContext"
+    );
+
+    let op_boundary = ContextOp::new(
+        ch("cli"),
+        vec![
+            ContextEdit::replace_tool_result(inv_failed, exact_failed_text.clone()).unwrap(),
+            ContextEdit::replace_tool_result(inv_succeeded, over_failed_text.clone()).unwrap(),
+        ],
+    )
+    .unwrap();
+    let ctx_boundary = resolve(&[
+        PathRecord::Step {
+            id: NodeId(1),
+            content: step.clone(),
+        },
+        PathRecord::Op {
+            id: NodeId(2),
+            op: &op_boundary,
+        },
+    ])
+    .expect("Failed 恰好 4,096 字节与 Succeeded 4,097 字节均应通过");
+    let ConversationItem::Step(ref step_boundary) = ctx_boundary.project()[0] else {
+        panic!("首项应为 Step");
+    };
+    assert_eq!(
+        step_boundary.results[0].payload,
+        ResultPayload::Failed(ToolError {
+            code: "permission_denied".to_owned(),
+            message: exact_failed_text,
+        }),
+        "恰好 4,096 字节的 Failed 替换消息应原样保留且不截断"
+    );
+    let expected_ok_val = Value::String(over_failed_text);
+    let expected_ok_canonical = canonical_json(&expected_ok_val);
+    assert_eq!(
+        step_boundary.results[5].payload,
+        ResultPayload::Succeeded(SuccessContent::Json {
+            value: expected_ok_val,
+            digest: tool_content_digest(&expected_ok_canonical),
+            byte_length: expected_ok_canonical.len() as u64,
+        }),
+        "同一 4,097 字节文本作用于 Succeeded 目标应按 65,536 规范 JSON 上限通过"
     );
 
     // Failed 结局允许替换：保留 Failed 与原 code，仅更新 message，并走统一清洗；支持再次替换与后续 OmitInvocation
@@ -1413,14 +1526,15 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
         + canonical_json(&json!({"outcome": "not_executed"})).len()
         + canonical_json(&json!({"outcome": "indeterminate", "cause": "no_result"})).len()
         + canonical_json(&json!({"outcome": "indeterminate", "cause": "cancelled"})).len()
-        + canonical_json(&json!({"outcome": "indeterminate", "cause": "reported"})).len();
+        + canonical_json(&json!({"outcome": "indeterminate", "cause": "reported"})).len()
+        + canonical_json(&json!("ok")).len();
     assert_eq!(
         ctx_failed_1.inspect().entries,
         vec![EffectiveEntrySummary::Step {
             node: NodeId(1),
             text_bytes: 0,
             reasoning_bytes: 0,
-            tool_call_count: 5,
+            tool_call_count: 6,
             tool_result_bytes: expected_tool_bytes,
         }],
         "替换后的 Failed 结果在 inspect() 中必须按 Failed 规则计长"
@@ -1484,7 +1598,7 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
     };
     assert_eq!(
         step_after_omit.results.len(),
-        4,
+        5,
         "OmitInvocation 应成对移出该 Failed 调用与结果"
     );
     assert!(
@@ -1496,9 +1610,10 @@ fn replace_tool_result_preserves_failed_outcome_and_rejects_non_replaceable_outc
 }
 
 #[test]
-fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
+fn step_local_edit_strips_all_unanchored_reasoning_and_skips_empty_steps() {
     let call_1 = bound_call(inv(INV_1), "read_file", 1, json!({"path": "a.rs"}));
-    let call_2 = bound_call(inv(INV_2), "list_dir", 3, json!({"path": "."}));
+    let call_2 = bound_call(inv(INV_2), "list_dir", 1, json!({"path": "."}));
+    let call_3 = bound_call(inv(INV_3), "stat_file", 4, json!({"path": "b.rs"}));
 
     // Step 1：仅含 Anthropic redacted_thinking（空 Reasoning + replay_state）与唯一 ToolCall
     let redacted_only_step = step_with_parts(
@@ -1513,7 +1628,20 @@ fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
         vec![json_result(inv(INV_1), "read_file", json!("ok"))],
     );
 
-    // Step 2：混合非空文本、空 redacted_thinking 与 ToolCall
+    // Step 2：仅含普通非空 thinking（Reasoning）与唯一 ToolCall
+    let thinking_only_step = step_with_parts(
+        Some(ReplayOrigin {
+            protocol: Protocol::Messages,
+            provider_id: ProviderId::parse("anthropic").unwrap(),
+        }),
+        vec![
+            reasoning_part("普通思考过程", Some("think-sig-1")),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_2 }),
+        ],
+        vec![json_result(inv(INV_2), "list_dir", json!([]))],
+    );
+
+    // Step 3：非空 Reasoning 与空 redacted_thinking 夹在两段 Text 中间，外加 ToolCall
     let mixed_step = step_with_parts(
         Some(ReplayOrigin {
             protocol: Protocol::Messages,
@@ -1521,11 +1649,12 @@ fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
         }),
         vec![
             text_part("前半"),
+            reasoning_part("中间思考", Some("think-sig-2")),
             reasoning_part("", Some("redacted:opaque-block-2")),
             text_part("后半"),
-            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_2 }),
+            MessagePart::semantic_only(MessageSemantic::ToolCall { call: call_3 }),
         ],
-        vec![json_result(inv(INV_2), "list_dir", json!([]))],
+        vec![json_result(inv(INV_3), "stat_file", json!({"size": 1}))],
     );
 
     let op = ContextOp::new(
@@ -1533,6 +1662,7 @@ fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
         vec![
             ContextEdit::omit_invocation(inv(INV_1)),
             ContextEdit::omit_invocation(inv(INV_2)),
+            ContextEdit::omit_invocation(inv(INV_3)),
         ],
     )
     .unwrap();
@@ -1544,10 +1674,14 @@ fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
         },
         PathRecord::Step {
             id: NodeId(2),
+            content: thinking_only_step,
+        },
+        PathRecord::Step {
+            id: NodeId(3),
             content: mixed_step,
         },
         PathRecord::Op {
-            id: NodeId(3),
+            id: NodeId(4),
             op: &op,
         },
     ])
@@ -1563,21 +1697,25 @@ fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
             },
             OperatedNode {
                 node: NodeId(2),
+                status: NodeStatus::SkippedEmpty,
+            },
+            OperatedNode {
+                node: NodeId(3),
                 status: NodeStatus::Modified,
             },
         ],
-        "仅剩空 redacted_thinking 的 Step 剥离签名后必须丢弃空 Reasoning 并标为 SkippedEmpty"
+        "移出唯一调用后仅剩空 redacted_thinking 或普通非空 thinking 的 Step 均必须进入 SkippedEmpty"
     );
     assert_eq!(
         inspection.entries,
         vec![EffectiveEntrySummary::Step {
-            node: NodeId(2),
+            node: NodeId(3),
             text_bytes: "前半后半".len(),
             reasoning_bytes: 0,
             tool_call_count: 0,
             tool_result_bytes: 0,
         }],
-        "Step 1 清空后不得出现在 inspect().entries 中"
+        "Step 1/2 清空后均不得出现在 inspect().entries 中，Step 3 剥离无来源 Reasoning 后 reasoning_bytes 必须为 0"
     );
     assert_eq!(
         ctx.project(),
@@ -1589,7 +1727,7 @@ fn step_local_edit_drops_empty_redacted_reasoning_and_skips_empty_step() {
             ),
             results: vec![],
         })],
-        "Step 1 应跳过；Step 2 应丢弃空 Reasoning 并将两侧非空文本合并"
+        "Step 1/2 应跳过；Step 3 应剥离全部无来源 Reasoning 并将两侧 Text 合并"
     );
 }
 

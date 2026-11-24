@@ -180,7 +180,8 @@ impl<'de> Deserialize<'de> for ContextText {
     }
 }
 
-/// 供 `ReplaceToolResult` 使用的非空受限文本（按规范 JSON 编码字节计，上限 `MAX_TOOL_CONTENT_BYTES`）。
+/// 供 `ReplaceToolResult` 使用的非空受限文本（按规范 JSON 编码字节计，上限 `MAX_TOOL_CONTENT_BYTES`；
+/// 作用于 `Failed` 工具结果时在归约/校验阶段另受 `MAX_TOOL_ERROR_MESSAGE_BYTES` 原文上限约束）。
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize)]
 #[serde(transparent)]
 pub struct ToolResultText(String);
@@ -351,7 +352,8 @@ pub enum ContextEdit {
     ReplaceStep { node: NodeId, text: ContextText },
     /// 成对移出单次工具调用（`ToolCall` 片段与对应 `StoredToolResult` 同时移出，不留悬空调用）。
     OmitInvocation { invocation: InvocationId },
-    /// 仅替换单次工具调用的 `StoredToolResult` 文本载荷（保留原 `Succeeded`/`Failed` 结局与 `ToolCall` 配对；`NotExecuted` 与 `Indeterminate` 不可替换）。
+    /// 仅替换单次工具调用的 `StoredToolResult` 文本载荷（保留原 `Succeeded`/`Failed` 结局与 `ToolCall` 配对；
+    /// `Failed` 替换消息原文上限为 `MAX_TOOL_ERROR_MESSAGE_BYTES`，`NotExecuted` 与 `Indeterminate` 不可替换）。
     ReplaceToolResult {
         invocation: InvocationId,
         text: ToolResultText,

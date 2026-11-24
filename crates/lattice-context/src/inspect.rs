@@ -6,16 +6,14 @@
 use std::collections::BTreeMap;
 
 use lattice_conversation::{
-    ImageRef, MessageSemantic, NodeId, ResultPayload, StepContent, SuccessContent, canonical_json,
+    ImageRef, MAX_TOOL_ERROR_MESSAGE_BYTES, MessageSemantic, NodeId, ResultPayload, StepContent,
+    SuccessContent, canonical_json,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::channel::Channel;
 use crate::resolve::{EffectiveContext, EntryData, InputState, StepState};
-
-/// 与 `lattice-llm` 投影一致的失败载荷错误消息截断上限（UTF-8 字符边界内最大字节数）。
-const BOUNDED_ERROR_CONTENT_BYTES: usize = 4_096;
 
 /// 已被上下文编辑作用过的节点当前最终状态。
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -213,7 +211,7 @@ fn tool_result_payload_bytes(payload: &ResultPayload) -> usize {
             canonical_json(&value).len()
         }
         ResultPayload::Failed(error) => {
-            let mut end = error.message.len().min(BOUNDED_ERROR_CONTENT_BYTES);
+            let mut end = error.message.len().min(MAX_TOOL_ERROR_MESSAGE_BYTES);
             while !error.message.is_char_boundary(end) {
                 end -= 1;
             }

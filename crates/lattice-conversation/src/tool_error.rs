@@ -5,6 +5,9 @@
 
 use serde::{Deserialize, Serialize};
 
+/// 工具失败消息在 provider 投影中的最大 UTF-8 字节长度（4,096 字节）。
+pub const MAX_TOOL_ERROR_MESSAGE_BYTES: usize = 4_096;
+
 /// 工具执行器返回的结构化错误。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

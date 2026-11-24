@@ -7,9 +7,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt;
 
 use lattice_conversation::{
-    BoundToolCall, ImageRef, InvocationId, MessagePart, MessageRole, MessageSemantic,
-    NativeMessage, NodeId, ResultPayload, StepContent, SuccessContent, ToolResultOutcome,
-    canonical_json, tool_content_digest, validate_image_placement,
+    BoundToolCall, ImageRef, InvocationId, MAX_TOOL_ERROR_MESSAGE_BYTES, MessagePart, MessageRole,
+    MessageSemantic, NativeMessage, NodeId, ResultPayload, StepContent, SuccessContent,
+    ToolResultOutcome, canonical_json, tool_content_digest, validate_image_placement,
 };
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -87,6 +87,15 @@ pub enum ContextError {
     ToolResultNotReplaceable {
         invocation: InvocationId,
         outcome: ToolResultOutcome,
+    },
+    /// 失败工具结果的替换消息字节长度超过协议投影上限（4,096 字节）。
+    #[error(
+        "失败工具调用 InvocationId({invocation}) 的替换消息为 {actual} 字节，不能超过 {limit} 字节"
+    )]
+    ToolErrorTextTooLarge {
+        invocation: InvocationId,
+        limit: usize,
+        actual: usize,
     },
     /// 目标 `Input` 当前有效片段中不含指定的图片引用。
     #[error("Input 节点 NodeId({}) 当前有效片段中不包含目标图片", .node.0)]
@@ -406,10 +415,6 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
             }
             let entry = entry_mut(state, *node);
             let (content, _) = active_step_mut(entry, *node)?;
-            content
-                .assistant
-                .parts
-                .retain(|part| !matches!(part.semantic, MessageSemantic::Reasoning { .. }));
             let status = sanitize_step_after_local_edit(content);
             entry.status = Some(status);
             Ok(())
@@ -465,6 +470,14 @@ fn apply_edit(state: &mut ResolveState, edit: &ContextEdit) -> Result<(), Contex
                     });
                 }
                 ResultPayload::Failed(err) => {
+                    let actual = text.as_str().len();
+                    if actual > MAX_TOOL_ERROR_MESSAGE_BYTES {
+                        return Err(ContextError::ToolErrorTextTooLarge {
+                            invocation: *invocation,
+                            limit: MAX_TOOL_ERROR_MESSAGE_BYTES,
+                            actual,
+                        });
+                    }
                     err.message = text.as_str().to_owned();
                 }
                 ResultPayload::NotExecuted | ResultPayload::Indeterminate(_) => {
@@ -543,7 +556,7 @@ fn push_merged_user_text(out: &mut Vec<MessagePart<BoundToolCall>>, text: &str) 
 }
 
 /// 统一 `Step` 局部编辑清洗路径：清除 `provider_origin` 与逐片段 `replay_state`、
-/// 剔除无签名的空 `Text` 与空 `Reasoning` 片段、合并相邻同类 `Text` 与 `Reasoning` 并判定最终状态。
+/// 剥离无来源的 `Reasoning` 与空 `Text` 片段、合并相邻 `Text` 并判定最终状态。
 fn sanitize_step_after_local_edit(content: &mut StepContent) -> NodeStatus {
     content.assistant.provider_origin = None;
 
@@ -566,22 +579,9 @@ fn sanitize_step_after_local_edit(content: &mut StepContent) -> NodeStatus {
                     cleaned.push(MessagePart::semantic_only(MessageSemantic::Text { text }));
                 }
             }
-            MessageSemantic::Reasoning { text } => {
-                if text.is_empty() {
-                    continue;
-                }
-                if let Some(MessagePart {
-                    semantic: MessageSemantic::Reasoning { text: prev },
-                    ..
-                }) = cleaned.last_mut()
-                {
-                    prev.push_str(&text);
-                } else {
-                    cleaned.push(MessagePart::semantic_only(MessageSemantic::Reasoning {
-                        text,
-                    }));
-                }
-            }
+            // `provider_origin` 已清除，下游跨来源投影会丢弃全部 `Reasoning`，
+            // 此处同步剥离以避免仅剩推理的 Step 产出空助手消息或虚报 `reasoning_bytes`。
+            MessageSemantic::Reasoning { .. } => continue,
             other => {
                 cleaned.push(MessagePart::semantic_only(other));
             }
