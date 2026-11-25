@@ -23,14 +23,10 @@ fn input_entry(node: u64) -> Value {
         "type": "entry",
         "kind": "input",
         "node": node,
-        "content": {
-            "kind": "input",
-            "parent": node - 1,
-            "accepted_at": "2026-10-16T00:00:00Z",
-            "input": {
-                "channel": "ipc",
-                "message": {"role": "user", "parts": [{"semantic": {"text": {"text": "hi"}}, "replay_state": null}]}
-            }
+        "accepted_at": "2026-10-16T00:00:00Z",
+        "input": {
+            "channel": "cli",
+            "message": {"role": "user", "parts": [{"semantic": {"text": {"text": "hi"}}, "replay_state": null}]}
         }
     })
 }
@@ -39,53 +35,56 @@ fn context_op_entry(node: u64, target: u64) -> Value {
         "type": "entry",
         "kind": "context_op",
         "node": node,
-        "content": {
-            "kind": "context_op",
-            "parent": node - 1,
-            "accepted_at": "2026-10-16T00:00:00Z",
-            "op": {
-                "channel": "ipc",
-                "edits": [{"kind": "omit_node", "node": target}]
-            }
+        "accepted_at": "2026-10-16T00:00:00Z",
+        "op": {
+            "channel": "cli",
+            "edits": [{"kind": "omit_node", "node": target}]
         }
     })
 }
-/// `Step` 条目；`summary` 为 `None` 时不带该字段。`step_ordinal == 0` 时附带顶层 `ordinal` 与 `turn_start`。
+/// 扁平 `Step` 条目；`summary` 为 `None` 时不带该字段，`ordinal == 0` 时顶层附带 `agent_name`。
 fn step(node: u64, ordinal: u64, progress: Value, summary: Option<Value>, reply: &str) -> Value {
     let end = match &progress["end"] {
         Value::Null => json!({"end":"stop","cause":{"cause":"process_exit"}}),
         end => end.clone(),
     };
-    let turn_start = (ordinal == 0).then(|| {
-        json!({
-            "accepted_at": "2026-10-16T00:00:00Z",
-            "agent_name": "reader",
-            "model": "m",
-            "provider": "p",
-            "limits": {},
-            "config_digest": "00",
-            "trigger_channel": "ipc",
-            "input_nodes": if node > 1 { vec![node - 1] } else { Vec::new() }
-        })
+    let mut entry = json!({
+        "type": "entry",
+        "kind": "step",
+        "node": node,
+        "step": {
+            "node": node,
+            "key": {"turn_id": "t", "ordinal": ordinal},
+            "progress": progress,
+            "end": end,
+            "attempts": [],
+            "slots": [],
+            "updated_at": "2026-10-16T00:00:01Z"
+        },
+        "retries": []
     });
-    let mut entry = json!({"type":"entry","kind":"step","node":node,"retries":[],
-        "content":{"kind":"step","parent":node - 1,"turn_id":"t","step_ordinal":ordinal,"turn_start":turn_start,"progress":progress,
-            "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z",
-            "reply":{"role":"assistant","provider_origin":{"protocol":"chat-completions","provider_id":"primary"},"parts":[{"semantic":{"text":{"text":reply}},"replay_state":null}]}},
-        "step":{"node":node,"key":{"turn_id":"t","ordinal":ordinal},"progress":progress,"end":end,
-            "attempts":[],"slots":[],"updated_at":"2026-10-16T00:00:01Z"}});
     if ordinal == 0 {
-        entry["ordinal"] = json!(1);
+        entry["agent_name"] = json!("reader");
     }
-    if reply.is_empty() {
-        entry["content"]["reply"] = Value::Null;
-    } else {
-        let attempt = json!({"origin":{"protocol":"chat-completions","provider_id":"primary"}, "usage":null,"usage_kind":"partial","cost":null,
-            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null}, "retry_delay_ms":null});
-        entry["content"]["attempts"] = json!([attempt]);
-        entry["step"]["attempts"] = json!([{"attempt":0,"origin":{"protocol":"chat-completions","provider_id":"primary"},"usage":null,"usage_kind":"partial","cost":null,
-            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
-            "end":{"end":"completed","step":{"turn_id":"t","model_step_ordinal":ordinal}},"retry_delay_ms":null}]);
+    if !reply.is_empty() {
+        entry["reply"] = json!({
+            "assistant": {
+                "role": "assistant",
+                "provider_origin": {"protocol": "chat-completions", "provider_id": "primary"},
+                "parts": [{"semantic": {"text": {"text": reply}}, "replay_state": null}]
+            },
+            "results": []
+        });
+        entry["step"]["attempts"] = json!([{
+            "attempt": 0,
+            "origin": {"protocol": "chat-completions", "provider_id": "primary"},
+            "usage": null,
+            "usage_kind": "partial",
+            "cost": null,
+            "progress": {"progress": "ended", "end": {"end": "completed"}, "diagnostic": null},
+            "end": {"end": "completed", "step": {"turn_id": "t", "model_step_ordinal": ordinal}},
+            "retry_delay_ms": null
+        }]);
     }
     if let Some(summary) = summary {
         entry["summary"] = summary;
@@ -383,27 +382,26 @@ fn summaries_are_checked_and_only_the_last_step_carries_one() {
     let mut detached = step(2, 0, finish(), Some(summary("completed", &finish())), "");
     detached["step"]["node"] = json!(9);
     bad.push(detached);
-    let mut numbered_step1 = step(3, 1, finish(), Some(summary("completed", &finish())), "");
-    numbered_step1["ordinal"] = json!(1);
-    bad.push(numbered_step1);
-    let mut unnumbered_step0 = step(2, 0, continued.clone(), None, "");
-    unnumbered_step0.as_object_mut().unwrap().remove("ordinal");
-    bad.push(unnumbered_step0);
-    let mut zero_ordinal_step0 = step(2, 0, continued.clone(), None, "");
-    zero_ordinal_step0["ordinal"] = json!(0);
-    bad.push(zero_ordinal_step0);
-    let mut missing_turn_start = step(2, 0, continued.clone(), None, "");
-    missing_turn_start["content"]["turn_start"] = Value::Null;
-    bad.push(missing_turn_start);
-    let mut unexpected_turn_start = step(3, 1, finish(), Some(summary("completed", &finish())), "");
-    unexpected_turn_start["content"]["turn_start"] =
-        step(2, 0, continued, None, "")["content"]["turn_start"].clone();
-    bad.push(unexpected_turn_start);
+    let mut legacy_ordinal = step(3, 1, finish(), Some(summary("completed", &finish())), "");
+    legacy_ordinal["ordinal"] = json!(1);
+    bad.push(legacy_ordinal);
+    let mut legacy_content = step(2, 0, continued.clone(), None, "");
+    legacy_content["content"] = json!({"kind": "step"});
+    bad.push(legacy_content);
+    let mut missing_agent_name = step(2, 0, continued.clone(), None, "");
+    missing_agent_name
+        .as_object_mut()
+        .unwrap()
+        .remove("agent_name");
+    bad.push(missing_agent_name);
+    let mut unexpected_agent_name = step(3, 1, finish(), Some(summary("completed", &finish())), "");
+    unexpected_agent_name["agent_name"] = json!("reader");
+    bad.push(unexpected_agent_name);
     let mut input_with_ordinal = input_entry(1);
     input_with_ordinal["ordinal"] = json!(1);
     bad.push(input_with_ordinal);
     let mut empty_op = context_op_entry(1, 0);
-    empty_op["content"]["op"]["edits"] = json!([]);
+    empty_op["op"]["edits"] = json!([]);
     bad.push(empty_op);
     let mut mislabeled = step(2, 0, finish(), Some(summary("completed", &finish())), "");
     mislabeled["kind"] = json!("input");
@@ -426,7 +424,7 @@ fn summaries_are_checked_and_only_the_last_step_carries_one() {
         parsed_op,
         SendRecord::Entry(ref entry)
             if entry.turn_id.is_none()
-                && matches!(&entry.content, EntryContent::ContextOp { channel } if channel == "ipc")
+                && matches!(&entry.content, EntryContent::ContextOp { channel } if channel == "cli")
     ));
     let mut input_pos_head = head(false);
     input_pos_head["position"] = json!(1);
@@ -652,22 +650,18 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         "",
     );
     let stopped = json!({"progress":"ended","end":{"end":"stopped","cause":{"cause":"process_exit"}},"diagnostic":null});
-    without_reply["content"]["attempts"] = base["content"]["attempts"].clone();
     without_reply["step"]["attempts"] = base["step"]["attempts"].clone();
-    without_reply["content"]["attempts"][0]["progress"] = stopped.clone();
     without_reply["step"]["attempts"][0]["progress"] = stopped;
     without_reply["step"]["attempts"][0]["end"] =
         json!({"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null});
     assert!(parse_record(&without_reply).is_ok());
     for (origin, error) in &invalid_origins {
         let mut invalid = without_reply.clone();
-        invalid["content"]["attempts"][0]["origin"] = origin.clone();
         invalid["step"]["attempts"][0]["origin"] = origin.clone();
         assert_eq!(parse_record(&invalid).unwrap_err(), *error, "{origin}");
 
         let mut invalid = base.clone();
-        invalid["content"]["reply"]["provider_origin"] = origin.clone();
-        invalid["content"]["attempts"][0]["origin"] = origin.clone();
+        invalid["reply"]["assistant"]["provider_origin"] = origin.clone();
         invalid["step"]["attempts"][0]["origin"] = origin.clone();
         assert_eq!(parse_record(&invalid).unwrap_err(), *error, "{origin}");
     }
@@ -676,7 +670,7 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         json!({"protocol":"anthropic-messages","provider_id":"primary"}),
     ] {
         let mut invalid = base.clone();
-        invalid["content"]["reply"]["provider_origin"] = origin;
+        invalid["reply"]["assistant"]["provider_origin"] = origin;
         assert_eq!(
             parse_record(&invalid).unwrap_err(),
             "回复来源与已完成尝试不一致"
@@ -686,19 +680,17 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         json!({"progress":"sent"}),
         without_reply["step"]["attempts"][0]["progress"].clone(),
     ] {
-        for location in ["content", "step"] {
-            let mut invalid = base.clone();
-            invalid[location]["attempts"][0]["progress"] = progress.clone();
-            if location == "step" && progress["progress"] == "ended" {
-                invalid["step"]["attempts"][0]["end"] =
-                    without_reply["step"]["attempts"][0]["end"].clone();
-            }
-            assert_eq!(
-                parse_record(&invalid).unwrap_err(),
-                "携带回复时必须存在已完成的尝试",
-                "{location}: {progress}"
-            );
+        let mut invalid = base.clone();
+        invalid["step"]["attempts"][0]["progress"] = progress.clone();
+        if progress["progress"] == "ended" {
+            invalid["step"]["attempts"][0]["end"] =
+                without_reply["step"]["attempts"][0]["end"].clone();
         }
+        assert_eq!(
+            parse_record(&invalid).unwrap_err(),
+            "携带回复时必须存在已完成的尝试",
+            "step: {progress}"
+        );
     }
     let parsed = |value: &Value| parse_record(value).unwrap();
     // 记录去掉 `type` 后就是历史查询给出的同一个 `Entry`。
@@ -721,7 +713,7 @@ fn view_state_keeps_written_facts_and_allows_repeated_values() {
         ("/step/slots/0/outcome", json!("failed")),
         ("/step/slots/1/progress/state", json!("registered")),
         (
-            "/content/reply/parts/0/semantic/text/text",
+            "/reply/assistant/parts/0/semantic/text/text",
             json!("rewritten"),
         ),
     ] {
@@ -877,6 +869,7 @@ fn configure_records_head_settings_version_and_settings_changed_conflict_parse()
                     owner: false,
                     diagnostic: None,
                     path_replaced: false,
+                    has_older: None,
                 }),
                 adjustment: Some(EffortAdjustment {
                     from: Some("high".into()),
@@ -884,6 +877,27 @@ fn configure_records_head_settings_version_and_settings_changed_conflict_parse()
                 }),
             },
         })
+    );
+
+    let mut head_with_older = draft_head.clone();
+    head_with_older["type"] = json!("head");
+    head_with_older["has_older"] = json!(true);
+    assert!(matches!(
+        parse_record(&head_with_older).expect("解析带 has_older 的会话头"),
+        SendRecord::Head(ref parsed) if parsed.has_older == Some(true)
+    ));
+
+    let position_changed = parse(&[sending(), rejected("conflict", Some("position_changed"))]);
+    assert!(
+        position_changed.malformed_lines.is_empty(),
+        "position_changed 应是合法冲突原因：{:?}",
+        position_changed.malformed_lines
+    );
+    assert_eq!(
+        position_changed
+            .rejection()
+            .and_then(|e| e.conflict.as_deref()),
+        Some("position_changed")
     );
 
     let cfg_rejected = json!({

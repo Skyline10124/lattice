@@ -66,7 +66,7 @@ _Avoid_: Turn 记录, TurnCommit, commit OID
 _Avoid_: TurnCoordinator, durable Turn, execution owner
 
 **TurnId**:
-客户端在提交前生成的请求身份。`submit` 只接受未用过的 TurnId，已被使用即返回 Conflict；接受结果不明时按它查询找回。
+客户端在提交或独立触发前生成的请求身份。`submit` 与 `trigger` 只接受未用过的 TurnId，已被使用即返回 Conflict；接受结果不明时按它查询找回。
 见[请求身份与找回](../architecture/session/recovery.md#请求身份与找回)。
 _Avoid_: NodeId, provider call ID, InvocationId
 
@@ -121,7 +121,7 @@ _Avoid_: 内联 base64 节点, 路径引用, 扩展名格式
 _Avoid_: snapshot, event window, subscription cursor, Gap
 
 **对话条目**:
-视图与历史查询交付的会话内容单位，一个条目对应一个非根节点（`Input`、`ContextOp` 或 `Step`），以 NodeId 标识，同一节点的新值整条替换旧值。`Step 0` 条目带轮次序号与 `turn_start` 元数据，Step 条目带结论与重试提示，本轮最后一步的条目另带 `TurnSummary`。
+视图与历史查询交付的扁平会话内容单位（`ConversationEntry`），一个条目对应一个非根节点（`Input`、`ContextOp` 或 `Step`），以 NodeId 标识，同一节点的新值整条替换旧值。`Step` 条目带步骤详情、完整回复投影与重试提示，仅 `Step 0` 顶层携带 `agent_name`（不再携带路径轮次序号或物理 `turn_start` 元数据），本轮最后一步的条目另带 `TurnSummary`。
 见[观察与重连](../architecture/session/recovery.md#观察与重连)。
 _Avoid_: TurnEvent, HistoryEntry, per-call item
 

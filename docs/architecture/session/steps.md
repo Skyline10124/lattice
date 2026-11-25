@@ -26,7 +26,7 @@ StepEnd = Continue | Finish | Stop { cause }
 
 | 事务 | 写入内容 | 之后的状态 |
 | --- | --- | --- |
-| 接受 | `blobs` 表中尚无的图片条目（按摘要去重）、本轮 `Input` 节点（若有）、配置表中尚无的配置、带 `turn_start` 元数据的预留第 0 步与 TurnId 索引 | Step `Reserved` |
+| 接受（`accept_turn` / `trigger_turn`） | `blobs` 表中尚无的图片条目（按摘要去重）、本轮 `Input` 节点（仅 `accept_turn`，`trigger_turn` 为空）、配置表中尚无的配置、带 `turn_start` 元数据的预留第 0 步与 TurnId 索引 | Step `Reserved` |
 | 开始请求 | Step 推进到 `Requesting`；新增一次尝试，`Sent` | 等待 provider |
 | 尝试停止 | 该尝试推进到 `Ended`，带实际终态与诊断；安排重试时同一事务写入等待时长，不再重试时同一事务关闭 Step | 重试或关闭 |
 | 登记调用 | 该尝试推进到 `Ended`，终态为 `Completed`；写入完整回复；每个调用一个槽位，`Registered`；写入 InvocationId 索引；Step 推进到 `Executing` | `Executing` |

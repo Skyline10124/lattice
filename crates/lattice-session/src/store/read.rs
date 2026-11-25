@@ -21,7 +21,6 @@ enum CountedNodeKind {
 #[derive(serde::Deserialize)]
 struct CountedNode {
     kind: CountedNodeKind,
-    parent: Option<NodeId>,
     turn_id: Option<TurnId>,
     step_ordinal: Option<u32>,
 }
@@ -274,13 +273,10 @@ fn positive_turns(turns: u32) -> Result<()> {
     }
 }
 
-fn step_entry(
-    session: SessionId,
-    node: NodeId,
-    content: Node,
-    ordinal: Option<u64>,
-) -> Result<ConversationEntry> {
+fn step_entry(session: SessionId, node: NodeId, content: Node) -> Result<ConversationEntry> {
     let Node::Step {
+        step_ordinal,
+        turn_start,
         progress,
         attempts,
         slots,
@@ -288,6 +284,18 @@ fn step_entry(
     } = &content
     else {
         return Err(corrupt("nodes", &node.0.to_string(), "expected step node"));
+    };
+    let agent_name = if *step_ordinal == 0 {
+        let meta = turn_start.as_ref().ok_or_else(|| {
+            corrupt(
+                "nodes",
+                &format!("{session}/{}", node.0),
+                "missing turn start metadata",
+            )
+        })?;
+        Some(meta.agent_name.clone())
+    } else {
+        None
     };
     let summary = if matches!(
         progress,
@@ -300,12 +308,13 @@ fn step_entry(
         Some(close::summary(progress, attempts, slots)?)
     };
     let step = detail(session, node, &content)?;
+    let reply = content.step_content();
     let retries = content.retry_notices()?;
     Ok(ConversationEntry::Step {
         node,
-        content,
         step,
-        ordinal,
+        agent_name,
+        reply,
         retries,
         summary,
     })
@@ -322,28 +331,30 @@ fn is_unit_start(node: &Node, parent: &Node) -> bool {
     ) && matches!(parent, Node::Root | Node::Step { .. })
 }
 
-fn entries(
-    session: SessionId,
-    path: Vec<(NodeId, Node)>,
-    mut ordinal: u64,
-) -> Result<Vec<ConversationEntry>> {
+fn entries(session: SessionId, path: Vec<(NodeId, Node)>) -> Result<Vec<ConversationEntry>> {
     let mut entries = Vec::new();
     for (node, content) in path {
-        match &content {
-            Node::Input { .. } => {
-                entries.push(ConversationEntry::Input { node, content });
+        match content {
+            Node::Input {
+                accepted_at, input, ..
+            } => {
+                entries.push(ConversationEntry::Input {
+                    node,
+                    accepted_at,
+                    input,
+                });
             }
-            Node::ContextOp { .. } => {
-                entries.push(ConversationEntry::ContextOp { node, content });
+            Node::ContextOp {
+                accepted_at, op, ..
+            } => {
+                entries.push(ConversationEntry::ContextOp {
+                    node,
+                    accepted_at,
+                    op,
+                });
             }
-            Node::Step { step_ordinal, .. } => {
-                let turn_ordinal = if *step_ordinal == 0 {
-                    ordinal += 1;
-                    Some(ordinal)
-                } else {
-                    None
-                };
-                entries.push(step_entry(session, node, content, turn_ordinal)?);
+            Node::Step { .. } => {
+                entries.push(step_entry(session, node, content)?);
             }
             Node::Root => {}
         }
@@ -627,7 +638,7 @@ impl SessionRead {
                     }
                     turns.push(TurnUsageRow {
                         turn_id,
-                        ordinal: turns.len() as u64 + 1,
+                        start_node: node_id,
                         provider: start.provider,
                         model: start.model,
                         usage: UsageSummary::from_attempts(
@@ -1093,28 +1104,50 @@ impl SessionRead {
         })
     }
 
+    /// 路径二：检视指定位置（`None` 时取会话当前位置）的有效模型上下文客观统计（全程不读取 `blobs` 表）。
+    pub fn inspect_context(
+        &self,
+        session: SessionId,
+        position: Option<NodeId>,
+    ) -> Result<(NodeId, ContextInspection)> {
+        let record = self
+            .find_session(session)?
+            .ok_or_else(|| missing("session", session))?;
+        let pos = position.unwrap_or(record.current);
+        if self.find_node(session, pos)?.is_none() {
+            return Err(missing("node", pos.0));
+        }
+        let effective = resolve_path_with_loader(session, pos, None, &[], |node_id| {
+            self.find_node(session, node_id)
+        })?;
+        Ok((pos, effective.inspect()))
+    }
+
     /// 路径一：同一读事务内取得会话头与当前路径最近的若干轮（含末尾未触发上下文块与未关闭 Step）。
     pub fn view(&self, session: SessionId, turns: u32) -> Result<SessionView> {
         positive_turns(turns)?;
         let record = self
             .find_session(session)?
             .ok_or_else(|| missing("session", session))?;
-        let (path, earlier_turns) = self.conversation_window(session, record.current, turns)?;
-        let current_agent = Some(self.session_settings(session)?.profile.agent_name);
+        let (path, has_more) = self.conversation_window(session, record.current, turns)?;
+        let settings = self.session_settings(session)?;
+        let current_agent = Some(settings.profile.agent_name.clone());
         Ok(SessionView {
             session: record,
             current_agent,
-            entries: entries(session, path, earlier_turns)?,
+            settings,
+            entries: entries(session, path)?,
+            has_more,
         })
     }
 
-    /// 路径一：`before` 必须是本会话的轮次单元起点；读取只取其固定父链上的更早轮次单元。
+    /// 路径一：`before` 必须是本会话的轮次单元起点；读取只取其固定父链上的更早轮次单元与是否存在更早记录。
     pub fn history(
         &self,
         session: SessionId,
         before: NodeId,
         turns: u32,
-    ) -> Result<Vec<ConversationEntry>> {
+    ) -> Result<(Vec<ConversationEntry>, bool)> {
         positive_turns(turns)?;
         self.find_session(session)?
             .ok_or_else(|| missing("session", session))?;
@@ -1128,8 +1161,8 @@ impl SessionRead {
         if !is_unit_start(&node, &parent) {
             return Err(invalid("before", "before 必须是轮次单元起点节点"));
         }
-        let (path, earlier_turns) = self.conversation_window(session, parent_id, turns)?;
-        entries(session, path, earlier_turns)
+        let (path, has_more) = self.conversation_window(session, parent_id, turns)?;
+        Ok((entries(session, path)?, has_more))
     }
 
     /// 读取节点的最新完整条目，供观察者在节点变化后整条替换。
@@ -1139,24 +1172,29 @@ impl SessionRead {
         let content = self
             .find_node(node.session_id, node.node)?
             .ok_or_else(|| missing("node", node.node.0))?;
-        match &content {
+        match content {
             Node::Root => Err(invalid("node", "root has no conversation entry")),
-            Node::Input { .. } => Ok(ConversationEntry::Input {
+            Node::Input {
+                accepted_at, input, ..
+            } => Ok(ConversationEntry::Input {
                 node: node.node,
-                content,
+                accepted_at,
+                input,
             }),
-            Node::ContextOp { .. } => Ok(ConversationEntry::ContextOp {
+            Node::ContextOp {
+                accepted_at, op, ..
+            } => Ok(ConversationEntry::ContextOp {
                 node: node.node,
-                content,
+                accepted_at,
+                op,
             }),
             Node::Step {
-                parent,
                 turn_id,
                 step_ordinal,
                 ..
             } => {
-                let start = self.turn_start_node(node.session_id, *turn_id)?;
-                let ordinal = if *step_ordinal == 0 {
+                let start = self.turn_start_node(node.session_id, turn_id)?;
+                if step_ordinal == 0 {
                     if start != node.node {
                         return Err(corrupt(
                             "nodes",
@@ -1164,11 +1202,8 @@ impl SessionRead {
                             "step 0 does not match turn index",
                         ));
                     }
-                    let (_, earlier_turns) =
-                        self.conversation_window(node.session_id, *parent, 0)?;
-                    Some(earlier_turns + 1)
                 } else {
-                    if start.0.checked_add(u64::from(*step_ordinal)) != Some(node.node.0) {
+                    if start.0.checked_add(u64::from(step_ordinal)) != Some(node.node.0) {
                         return Err(corrupt(
                             "nodes",
                             &format!("{}/{}", node.session_id, node.node.0),
@@ -1177,7 +1212,7 @@ impl SessionRead {
                     }
                     let start_header: CountedNode = self.projected_node(node.session_id, start)?;
                     if !matches!(start_header.kind, CountedNodeKind::Step)
-                        || start_header.turn_id != Some(*turn_id)
+                        || start_header.turn_id != Some(turn_id)
                         || start_header.step_ordinal != Some(0)
                     {
                         return Err(corrupt(
@@ -1186,9 +1221,8 @@ impl SessionRead {
                             "expected turn start step",
                         ));
                     }
-                    None
-                };
-                step_entry(node.session_id, node.node, content, ordinal)
+                }
+                step_entry(node.session_id, node.node, content)
             }
         }
     }
@@ -1298,9 +1332,8 @@ impl SessionRead {
         session: SessionId,
         mut head: NodeId,
         mut turns: u32,
-    ) -> Result<(Vec<(NodeId, Node)>, u64)> {
+    ) -> Result<(Vec<(NodeId, Node)>, bool)> {
         let mut path = Vec::new();
-        let mut earlier_turns = 0u64;
 
         // 阶段 1：收集末尾尚未触发推理的连续 Input/ContextOp 尾块（不消耗 turns 预算）。
         let mut first_step: Option<(NodeId, Node)> = None;
@@ -1409,46 +1442,8 @@ impl SessionRead {
             }
         }
 
-        // 阶段 3：窗口之外只解码扁平计数字段；经 TurnId 索引跳过同轮中间 Step。
-        while head != NodeId(0) {
-            let header: CountedNode = self.projected_node(session, head)?;
-            let err = || {
-                corrupt(
-                    "nodes",
-                    &format!("{session}/{}", head.0),
-                    "invalid counted node header",
-                )
-            };
-            let parent = header.parent.ok_or_else(err)?;
-            if parent >= head {
-                return Err(err());
-            }
-            match header.kind {
-                CountedNodeKind::Root => return Err(err()),
-                CountedNodeKind::Input | CountedNodeKind::ContextOp => {
-                    if header.turn_id.is_some() || header.step_ordinal.is_some() {
-                        return Err(err());
-                    }
-                    head = parent;
-                }
-                CountedNodeKind::Step => {
-                    let turn_id = header.turn_id.ok_or_else(err)?;
-                    let step_ordinal = header.step_ordinal.ok_or_else(err)?;
-                    if step_ordinal == 0 {
-                        earlier_turns += 1;
-                        head = parent;
-                    } else {
-                        let start = self.turn_start_node(session, turn_id)?;
-                        if start >= head {
-                            return Err(err());
-                        }
-                        head = start;
-                    }
-                }
-            }
-        }
-
+        let has_more = head != NodeId(0);
         path.reverse();
-        Ok((path, earlier_turns))
+        Ok((path, has_more))
     }
 }

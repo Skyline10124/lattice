@@ -76,6 +76,7 @@ pub(super) fn head(position: u64, turn_id: Option<TurnId>, owner: bool) -> Sessi
         owner,
         diagnostic: None,
         path_replaced: false,
+        has_older: None,
     }
 }
 
@@ -122,14 +123,10 @@ pub(super) fn user(node: u64, _turn_id: TurnId, _ordinal: u64, text: &str) -> Co
     serde_json::from_value(json!({
         "kind": "input",
         "node": node,
-        "content": {
-            "kind": "input",
-            "parent": node.saturating_sub(1),
-            "accepted_at": AT,
-            "input": {
-                "channel": "ipc",
-                "message": {"role": "user", "parts": [{"semantic": {"text": {"text": text}}}]}
-            }
+        "accepted_at": AT,
+        "input": {
+            "channel": "tui",
+            "message": {"role": "user", "parts": [{"semantic": {"text": {"text": text}}}]}
         }
     }))
     .unwrap()
@@ -139,14 +136,10 @@ pub(super) fn context_op(node: u64, target: u64) -> ConversationEntry {
     serde_json::from_value(json!({
         "kind": "context_op",
         "node": node,
-        "content": {
-            "kind": "context_op",
-            "parent": node.saturating_sub(1),
-            "accepted_at": AT,
-            "op": {
-                "channel": "ipc",
-                "edits": [{"kind": "omit_node", "node": target}]
-            }
+        "accepted_at": AT,
+        "op": {
+            "channel": "tui",
+            "edits": [{"kind": "omit_node", "node": target}]
         }
     }))
     .unwrap()
@@ -181,32 +174,25 @@ pub(super) struct StepEntry {
     node: u64,
     turn_id: TurnId,
     ordinal: u32,
-    turn_ordinal: u64,
-    input_nodes: Vec<u64>,
     progress: Value,
     parts: Option<Vec<Value>>,
     attempts: Vec<Value>,
     slots: Vec<Value>,
+    results: Vec<Value>,
     retries: Vec<Value>,
     summary: Option<Value>,
 }
 
 pub(super) fn step(node: u64, turn_id: TurnId, ordinal: u32) -> StepEntry {
-    let input_nodes = if ordinal == 0 && node > 1 {
-        vec![node - 1]
-    } else {
-        Vec::new()
-    };
     StepEntry {
         node,
         turn_id,
         ordinal,
-        turn_ordinal: 1,
-        input_nodes,
         progress: json!({"progress":"requesting"}),
         parts: None,
         attempts: Vec::new(),
         slots: Vec::new(),
+        results: Vec::new(),
         retries: Vec::new(),
         summary: Some(summary("failed", json!({"progress":"requesting"}))),
     }
@@ -222,12 +208,11 @@ fn summary(outcome: &str, progress: Value) -> Value {
 }
 
 fn diagnostic() -> Value {
-    json!({"provider_error":"HTTP 429","invalid_batch":null})
+    json!("HTTP 429")
 }
 
 impl StepEntry {
-    pub(super) fn turn_ordinal(mut self, ordinal: u64) -> Self {
-        self.turn_ordinal = ordinal;
+    pub(super) fn turn_ordinal(self, _ordinal: u64) -> Self {
         self
     }
     pub(super) fn text(self, text: &str) -> Self {
@@ -268,29 +253,47 @@ impl StepEntry {
         self
     }
     pub(super) fn sent(mut self) -> Self {
-        self.attempts.push(
-            json!({"origin":{"protocol":"chat-completions","provider_id":"openai"},
-                "usage":null,"usage_kind":"partial","cost":null,"progress":{"progress":"sent"},"retry_delay_ms":null}),
-        );
+        let attempt = self.attempts.len();
+        self.attempts.push(json!({
+            "attempt": attempt,
+            "origin": {"protocol":"chat-completions","provider_id":"openai"},
+            "usage": null,
+            "usage_kind": "partial",
+            "cost": null,
+            "progress": {"progress":"sent"},
+            "end": {"end":"stopped","cause":{"cause":"process_exit"},"diagnostic":null},
+            "retry_delay_ms": null
+        }));
         self
     }
     /// 一次失败并安排了重试的尝试，带后端给出的重试提示。
     pub(super) fn retried(mut self, level: &str, text: &str) -> Self {
         let attempt = self.attempts.len();
         self.attempts.push(json!({
-            "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage":null,"usage_kind":"partial","cost":null,"retry_delay_ms":100,
-            "progress":{"progress":"ended","end":{"end":"stopped","cause":{"cause":"provider_error","retryable":true}},"diagnostic":diagnostic()}
+            "attempt": attempt,
+            "origin": {"protocol":"chat-completions","provider_id":"openai"},
+            "usage": null,
+            "usage_kind": "partial",
+            "cost": null,
+            "retry_delay_ms": 100,
+            "progress": {"progress":"ended","end":{"end":"stopped","cause":{"cause":"provider_error","retryable":true}},"diagnostic":diagnostic()},
+            "end": {"end":"stopped","cause":{"cause":"provider_error","retryable":true},"diagnostic":diagnostic()}
         }));
         self.retries
             .push(json!({"attempt":attempt,"delay_ms":100,"notice":{"level":level,"text":text}}));
         self
     }
     pub(super) fn completed_attempt(mut self, context_tokens: u64) -> Self {
+        let attempt = self.attempts.len();
         self.attempts.push(json!({
-            "origin":{"protocol":"chat-completions","provider_id":"openai"},
-            "usage_kind":"partial","cost":null,"usage":{"input":context_tokens,"output":0,"cache_read":null,"cache_write":null,"reasoning":null},"retry_delay_ms":null,
-            "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":diagnostic()}
+            "attempt": attempt,
+            "origin": {"protocol":"chat-completions","provider_id":"openai"},
+            "usage_kind": "partial",
+            "cost": null,
+            "usage": {"input":context_tokens,"output":0,"cache_read":null,"cache_write":null,"reasoning":null},
+            "retry_delay_ms": null,
+            "progress": {"progress":"ended","end":{"end":"completed"},"diagnostic":diagnostic()},
+            "end": {"end":"completed","step":{"session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal}}
         }));
         self
     }
@@ -311,27 +314,87 @@ impl StepEntry {
     /// 回复末尾加一个工具调用；`terminal` 时槽位已有成功结果，否则停在 Started。
     pub(super) fn tool(self, n: u32, terminal: bool) -> Self {
         let id = invocation(n);
-        let progress = if terminal {
-            json!({"progress":"terminal","result":{
-                "invocation_id":id,"name":"observe__workspace",
-                "payload":{"outcome":"succeeded","payload":{"kind":"json","value":null,
-                    "digest":"4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2","byte_length":4}}
-            }})
+        let (slot_progress, outcome, reason, material, result_payload) = if terminal {
+            let material = json!({
+                "kind": "available",
+                "digest": "4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2",
+                "byte_length": 4
+            });
+            (
+                json!({
+                    "state": "terminal",
+                    "outcome": "succeeded",
+                    "reason": null,
+                    "material": material
+                }),
+                "succeeded",
+                Value::Null,
+                material,
+                json!({
+                    "outcome": "succeeded",
+                    "payload": {
+                        "kind": "json",
+                        "value": null,
+                        "digest": "4514e821d251d896aaed09c92f07abacecb5683e0714471682fa6beaca071aa2",
+                        "byte_length": 4
+                    }
+                }),
+            )
         } else {
-            json!({"progress":"started"})
+            (
+                json!({"state": "started"}),
+                "indeterminate",
+                json!({"kind": "indeterminate", "value": "no_result"}),
+                json!({"kind": "no_content"}),
+                json!({"outcome": "indeterminate", "payload": "no_result"}),
+            )
         };
-        self.push_tool_slot(n, id, progress)
+        self.push_tool_slot(
+            n,
+            id,
+            slot_progress,
+            outcome,
+            reason,
+            material,
+            result_payload,
+        )
     }
     /// 回复末尾加一个以 `ToolError` 终结的失败工具调用。
     pub(super) fn failed_tool(self, n: u32, code: &str, message: &str) -> Self {
         let id = invocation(n);
-        let progress = json!({"progress":"terminal","result":{
-            "invocation_id":id,"name":"observe__workspace",
-            "payload":{"outcome":"failed","payload":{"code":code,"message":message}}
-        }});
-        self.push_tool_slot(n, id, progress)
+        let reason = json!({"kind": "failed", "value": {"code": code}});
+        let material = json!({"kind": "no_content"});
+        let slot_progress = json!({
+            "state": "terminal",
+            "outcome": "failed",
+            "reason": reason,
+            "material": material
+        });
+        let result_payload = json!({
+            "outcome": "failed",
+            "payload": {"code": code, "message": message}
+        });
+        self.push_tool_slot(
+            n,
+            id,
+            slot_progress,
+            "failed",
+            reason,
+            material,
+            result_payload,
+        )
     }
-    fn push_tool_slot(mut self, n: u32, id: String, progress: Value) -> Self {
+    #[allow(clippy::too_many_arguments)]
+    fn push_tool_slot(
+        mut self,
+        n: u32,
+        id: String,
+        progress: Value,
+        outcome: &str,
+        reason: Value,
+        material: Value,
+        result_payload: Value,
+    ) -> Self {
         let parts = self.parts.get_or_insert_with(Vec::new);
         let part = parts.len();
         parts.push(json!({"semantic":{"tool_call":{"call":{
@@ -340,10 +403,25 @@ impl StepEntry {
             "address":{"message":{"session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal},"part_ordinal":part}
         }}}}));
         self.slots.push(json!({
-            "binding":{"invocation_id":id,"identity":{
-                "session_id":SESSION,"turn_id":self.turn_id,"model_step_ordinal":self.ordinal,"part_ordinal":part,
-                "method":"observe__workspace","tool_identity":"observe__workspace","arguments_digest":DIGEST}},
-            "progress":progress
+            "invocation_id": id,
+            "binding": {
+                "session_id": SESSION,
+                "turn_id": self.turn_id,
+                "model_step_ordinal": self.ordinal,
+                "part_ordinal": part,
+                "method": "observe__workspace",
+                "tool_identity": "observe__workspace",
+                "arguments_digest": DIGEST
+            },
+            "progress": progress,
+            "outcome": outcome,
+            "reason": reason,
+            "material": material
+        }));
+        self.results.push(json!({
+            "invocation_id": id,
+            "name": "observe__workspace",
+            "payload": result_payload
         }));
         self
     }
@@ -352,42 +430,32 @@ impl StepEntry {
             Some(end) => end.clone(),
             None => json!({"end":"stop","cause":{"cause":"process_exit"}}),
         };
-        let reply = self
-            .parts
-            .map(|parts| json!({"role":"assistant","origin":"open_ai_compatible","parts":parts}));
-        let turn_start = (self.ordinal == 0).then(|| {
+        let reply = self.parts.map(|parts| {
             json!({
-                "accepted_at": AT,
-                "agent_name": "unused",
-                "model": "model-a",
-                "provider": "openai",
-                "limits": {
-                    "timeout_secs": 300,
-                    "max_model_steps": 32,
-                    "max_model_attempts": 3
+                "assistant": {
+                    "role": "assistant",
+                    "provider_origin": {"protocol":"chat-completions","provider_id":"openai"},
+                    "parts": parts
                 },
-                "config_digest": "0".repeat(64),
-                "trigger_channel": "ipc",
-                "input_nodes": self.input_nodes,
+                "results": self.results
             })
         });
         let mut value = json!({
             "kind": "step",
             "node": self.node,
-            "content": {
-                "kind":"step","parent":self.node.saturating_sub(1),"turn_id":self.turn_id,
-                "step_ordinal":self.ordinal,"turn_start":turn_start,"progress":self.progress,"attempts":self.attempts,
-                "reply":reply,"slots":self.slots,"updated_at":AT
-            },
             "step": {
-                "node":self.node,"key":{"turn_id":self.turn_id,"ordinal":self.ordinal},
-                "progress":self.progress,"end":end,"attempts":[],"slots":[],"updated_at":AT
+                "node": self.node,
+                "key": {"turn_id": self.turn_id, "ordinal": self.ordinal},
+                "progress": self.progress,
+                "end": end,
+                "attempts": self.attempts,
+                "slots": self.slots,
+                "updated_at": AT
             },
+            "agent_name": (self.ordinal == 0).then_some("unused"),
+            "reply": reply,
             "retries": self.retries,
         });
-        if self.ordinal == 0 {
-            value["ordinal"] = json!(self.turn_ordinal);
-        }
         if let Some(summary) = self.summary {
             value["summary"] = summary;
         }

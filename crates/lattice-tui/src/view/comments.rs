@@ -30,7 +30,7 @@ impl Transcript {
             let row = self.owners.iter().position(|o| o.id == marker.comment)?;
             return self.cursor(row, 0).map(CommentNavigation::Jump);
         }
-        // 草稿使用普通 BlockId，Enter 仍是编辑，即使被拒 USER 的标记指向它。
+        // 草稿使用普通 BlockId，Enter 仍是编辑。
         if matches!(cursor.block.id, BlockId::Comment { .. })
             && let Some(marker) = self
                 .markers

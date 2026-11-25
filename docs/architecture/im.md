@@ -138,9 +138,9 @@ sequenceDiagram
     IM->>TG: TelegramIo.acknowledge(&all_inbound_ids)
     alt 首次绑定或绑定草稿会话已不存在
         IM->>SV: configure(New(session_id), workspace, agent)
-        IM->>SV: submit(session_id, turn_id, workspace, parts, expected_settings=None)
+        IM->>SV: submit(session_id, turn_id, workspace, trigger_channel="im", inputs, expected_settings=None, expected_position=None)
     else 已有绑定会话
-        IM->>SV: submit(session_id, turn_id, workspace, parts, expected_settings=None)
+        IM->>SV: submit(session_id, turn_id, workspace, trigger_channel="im", inputs, expected_settings=None, expected_position=None)
     end
     SV-->>IM: Ok(InProcessTurn)
     IM->>LG: 原子更新首条为 Accepted

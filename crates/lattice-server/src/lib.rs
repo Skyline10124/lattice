@@ -42,5 +42,5 @@ pub use session::{ApiError, SessionApi};
 #[cfg(any(test, feature = "test-utils"))]
 pub use turn::{
     RunTurnRequest, ToolExecutor, ToolOutcome, ToolSpec, TurnAcceptance, TurnCompletion,
-    TurnExecution, TurnTools, start_turn,
+    TurnExecution, TurnPayload, TurnTools, start_turn,
 };

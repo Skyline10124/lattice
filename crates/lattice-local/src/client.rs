@@ -6,12 +6,13 @@
 use std::time::Duration;
 
 use lattice_ipc::{
-    Acceptance, AuthKey, AuthRemoval, AuthStatus, ConfigureReply, ConfigureRequest, DaemonStatus,
-    HISTORY_TURNS, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus, ImMountResult, LocalError,
-    LocalErrorKind, LocalHistory, ModelCandidateQuery, ModelCandidates, NodeId, RecoveryCause,
-    Request, Response, Result, RevocationStatus, SessionHead, SessionId, SessionListRow,
-    SessionLog, SessionRecord, SessionUsage, TurnDetail, TurnId, TurnLookup, TurnRequest,
-    ViewUpdate, ipc, require_chatgpt,
+    Acceptance, AuthKey, AuthRemoval, AuthStatus, ConfigureReply, ConfigureRequest, ContextOpReply,
+    ContextOpRequest, DaemonStatus, FeedReply, FeedRequest, HISTORY_TURNS, ImAuthRemoveReply,
+    ImAuthSetReply, ImAuthStatus, ImMountResult, InspectReply, LocalError, LocalErrorKind,
+    LocalHistory, ModelCandidateQuery, ModelCandidates, NodeId, RecoveryCause, Request, Response,
+    Result, RevocationStatus, SessionHead, SessionId, SessionListRow, SessionLog, SessionRecord,
+    SessionUsage, TriggerRequest, TurnDetail, TurnId, TurnLookup, TurnRequest, ViewUpdate, ipc,
+    require_chatgpt,
 };
 use lattice_store::StateLayout;
 use tokio::net::UnixStream;
@@ -409,12 +410,64 @@ impl LocalClient {
         }
     }
 
+    /// 仅向会话追加一条用户输入而不触发轮次。
+    pub async fn feed(&self, request: FeedRequest) -> Result<FeedReply> {
+        match self.call(Request::Feed { request }).await? {
+            Response::Feed(reply) => Ok(reply),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 向会话追加一条批量上下文编辑操作。
+    pub async fn context_op(&self, request: ContextOpRequest) -> Result<ContextOpReply> {
+        match self.call(Request::ContextOp { request }).await? {
+            Response::ContextOp(reply) => Ok(reply),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 在不新增用户输入的前提下触发新轮次。
+    pub async fn trigger(&self, request: TriggerRequest) -> Result<Acceptance> {
+        match self.call(Request::Trigger { request }).await? {
+            Response::Acceptance(value) => Ok(value),
+            _ => Err(protocol()),
+        }
+    }
+
+    /// 只读检视会话在当前位置或指定节点的有效模型上下文统计。
+    pub async fn inspect(
+        &self,
+        session_id: SessionId,
+        position: Option<NodeId>,
+    ) -> Result<InspectReply> {
+        match self
+            .call(Request::Inspect {
+                session_id,
+                position,
+            })
+            .await?
+        {
+            Response::Inspect(reply) => Ok(reply),
+            _ => Err(protocol()),
+        }
+    }
+
     pub(crate) async fn submit_once(&self, request: TurnRequest) -> SubmissionReply {
+        self.send_acceptance_request(Request::Submit { request })
+            .await
+    }
+
+    pub(crate) async fn trigger_once(&self, request: TriggerRequest) -> SubmissionReply {
+        self.send_acceptance_request(Request::Trigger { request })
+            .await
+    }
+
+    async fn send_acceptance_request(&self, request: Request) -> SubmissionReply {
         let mut stream = match endpoint::connect(self.layout.clone()).await {
             Ok(stream) => stream,
             Err(error) => return SubmissionReply::Rejected(error),
         };
-        if let Err(error) = ipc::write_request(&mut stream, &Request::Submit { request }).await {
+        if let Err(error) = ipc::write_request(&mut stream, &request).await {
             return SubmissionReply::Disconnected(error);
         }
         match ipc::ResponseReader::default().read(&mut stream).await {
@@ -551,6 +604,7 @@ mod tests {
                 owner: false,
                 diagnostic: None,
                 path_replaced: false,
+                has_older: None,
             }));
             let json = serde_json::to_string(&response).unwrap();
             let payload = serde_json::to_vec(&serde_json::json!({

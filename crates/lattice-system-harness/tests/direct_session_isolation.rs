@@ -100,7 +100,7 @@ fn direct_session_tree_rewind_and_context_isolation() {
                 .collect::<Vec<_>>()
         };
         let wrap =
-            |text: &str| format!("<lattice-context channel=\"ipc\">\n{text}\n</lattice-context>");
+            |text: &str| format!("<lattice-context channel=\"cli\">\n{text}\n</lattice-context>");
         require(
             messages(4) == [wrap("a1"), "answer".to_owned(), wrap("a3 fork")]
                 && messages(5)

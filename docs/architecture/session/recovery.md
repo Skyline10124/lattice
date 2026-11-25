@@ -8,18 +8,19 @@ status: active
 
 ## 请求身份与找回
 
-客户端在提交前生成 TurnId，向已存在的会话 `SessionId` 发起 `submit`（携带保序输入片段 `parts`、规范工作区与可选的 `expected_settings`）。新会话先通过 `configure(New)` 显式创建；`submit` 遇到不存在的会话 ID 时返回 NotFound，不会创建新会话。新 TurnId 表示独立请求，即使文本相同。
+客户端在提交或独立触发前生成 TurnId，向已存在的会话 `SessionId` 发起 `submit`（携带 `trigger_channel`、`1..=N` 条带渠道输入 `inputs`、规范工作区与可选的 `expected_settings` / `expected_position`）或 `trigger`（携带 `trigger_channel`、规范工作区与可选基线，不写入新输入）。新会话先通过 `configure(New)` 显式创建；`submit` / `trigger` 遇到不存在的会话 ID 时返回 NotFound，不会创建新会话。新 TurnId 表示独立请求，即使文本相同。
 
-`submit` 只接受新请求。后台按严格解析校验身份的形状，不合格的在 IPC 解码时拒绝，下表列出提交时可能遇到的事实以及后台与前端的动作，后台检查的顺序见[实现模块与公开操作](operations.md#实现模块与公开操作)；Conflict 带上原因码（全系统共四种：`turn_id_used`、`session_exists`、`binding_mismatch`、`settings_changed`，其中 `session_exists` 只由 `configure(New)` 返回），前端据此区分：
+`submit` 与 `trigger` 只接受新请求，服务端准入层在检查工作区、会话存在性与同会话 `Busy` 之前即核对 `TurnId` 索引，已存在时立即返回 Conflict(`turn_id_used`)，重发不承担找回职责。下表列出提交/触发时可能遇到的事实以及后台与前端的动作，四类写操作（`submit`、`trigger`、`feed`、`context_op`）统一错误优先级见[实现模块与公开操作](operations.md#实现模块与公开操作)；Conflict 带上原因码（全系统共五种：`turn_id_used`、`session_exists`、`binding_mismatch`、`settings_changed`、`position_changed`，其中 `session_exists` 只由 `configure(New)` 返回），前端据此区分：
 
 | 提交时找到的事实 | 后台与前端动作 |
 | --- | --- |
 | TurnId 正在被另一个在途请求使用，或已在 TurnId 索引中 | 返回 Conflict：`turn_id_used` |
 | 会话库尚未初始化，或会话 `S` 不存在 | 返回 NotFound |
 | 会话 `S` 的 `project_path` 与请求工作区不一致 | 返回 Conflict：`binding_mismatch` |
-| 全局 Owner 已满 32、同会话已有 Owner，或 `SessionExecutionLock` 被占用 | 非阻塞返回 Busy；前端保留未提交输入，由用户稍后发送 |
+| 全局 Owner 已满 32、同会话已有 Owner，或 `SessionExecutionLock` 被占用 | 非阻塞返回 Busy（同会话活跃 Owner 检查严格优先于输入格式与基线冲突检查）；前端保留未提交输入，由用户稍后发送 |
 | 请求给出了 `expected_settings`，且与当前会话设置的 `SettingsVersion` 不等 | 返回 Conflict：`settings_changed`；前端保留未提交输入并以最新会话头为准，由用户核对当前设置后再发送 |
-| Session 最后一轮未关闭，且没有 Owner | 旧 Turn 停在已写入的进度，不需要处理；直接接受本次新输入，见[执行者消失后的 Turn](#执行者消失后的-turn) |
+| 请求给出了 `expected_position`，且与当前会话位置 `session.current` 不等 | 返回 Conflict：`position_changed`；前端保留未提交输入并刷新最新视图与位点后再决定是否重试 |
+| Session 最后一轮未关闭，且没有 Owner | 旧 Turn 停在已写入的进度，不需要处理；直接接受本次新输入或触发，见[执行者消失后的 Turn](#执行者消失后的-turn) |
 | 以上都不是 | 从当前会话设置冻结本轮配置，在接受事务中追加本轮节点并返回接受回执 |
 
 “接受结果未知”有三种来源：提交连接在回执到达前断开；后台报告接受事务的 `commit` 结果不明；接受事务已提交，后台却没能给出接受回执（读回这一轮失败，或转交回执时出错）。后两种由后台立即回复结果不明，不等这一轮执行完（IPC 提交在线上返回 `Acceptance::ConfirmationUnknown`，进程内 `Service::submit` 返回携带 `RecoveryNeed { turn: Some(TurnRef { session_id, turn_id }), cause }` 的 `LocalError`，其中提交或读回不明为 `CommitFailed`、回执通道断开为 `WorkerFailed`）。这时调用方（前端 `LocalTurn` 或进程内调用方）按 TurnId 查询这一轮（`turn`），结果是三种之一：
@@ -56,11 +57,11 @@ status: active
 3. **之后的变化**：变化的条目整条重推。当前位置沿路径前进时，只推新条目与会话头；当前位置移到别处（`rewind`）时，会话头标明路径已替换，随后给出新路径上最近 10 轮，前端丢弃此前的条目。
 4. **生成中的文字**：当前尝试正在生成的正文与 reasoning，见下文。
 
-**对话条目。** 一个条目对应一个非根节点（`Input`、`ContextOp` 或 `Step`），以 NodeId 标识；视图与历史查询给出同一种条目，同一节点的新值整条替换旧值。
+**对话条目。** 一个条目对应一个非根节点（`Input`、`ContextOp` 或 `Step`），以扁平 `ConversationEntry` 结构经 IPC 与历史查询交付（不再包裹物理存储类型 `Node`），以 NodeId 标识；视图与历史查询给出同一种条目，同一节点的新值整条替换旧值。
 
-- `Input` 条目承载原始用户输入节点内容（`channel`、接受时间与规范化消息片段），本身不带 `turn_id` 或轮次序号。
-- `ContextOp` 条目承载原始上下文操作节点内容（`channel`、接受时间与编辑列表），不带 `turn_id` 或轮次序号。
-- `Step` 条目带会话库从它得出的读取投影：各尝试（含用量与保存的费用估算）、槽位与这一步的结论（见[预留、progress 与结论](README.md#预留progress-与结论)），以及安排过重试的尝试的重试提示。`Step 0` 另带本轮的轮次序号 `ordinal`（它的祖先中 `Step 0` 的个数加一，读取时计算、不存入节点），以及节点内的 `turn_start` 元数据（agent 名、模型、provider、推理档位、执行限制、配置摘要、触发渠道与 `input_nodes`）；`step_ordinal > 0` 不带 `ordinal` 与 `turn_start`。这一步不以 `Continue` 关闭时就是本轮最后一步，条目另带这一轮的 `TurnSummary`。前面的步骤以 `Continue` 关闭后保持不变，结局只随最后一步给出；以 `Continue` 关闭并预留下一步的事务改了两个节点，两个条目都会推送。
+- `Input { node, accepted_at, input }` 条目承载用户输入事件（`channel`、接受时间与规范化消息片段），不带 `turn_id`。
+- `ContextOp { node, accepted_at, op }` 条目承载只追加上下文操作（`channel`、接受时间与编辑列表），不带 `turn_id`。
+- `Step { node, step, agent_name?, reply?, retries, summary? }` 条目带会话库从节点得出的读取投影：`step: StepDetail`（各尝试含用量与保存的费用估算、槽位 `SlotDetail` 与这一步的结论，见[预留、progress 与结论](README.md#预留progress-与结论)）、完整回复及槽位结果投影 `reply: Option<StepContent>`，以及安排过重试的尝试的重试提示 `retries`。仅当 `step.key.ordinal == 0` 时顶层携带 `agent_name: Some(...)`（`ordinal > 0` 为 `None`），不再携带路径轮次 `ordinal` 或物理 `turn_start` 元数据。这一步不以 `Continue` 关闭时就是本轮最后一步，条目另带这一轮的 `TurnSummary`。前面的步骤以 `Continue` 关闭后保持不变，结局只随最后一步给出；以 `Continue` 关闭并预留下一步的事务改了两个节点，两个条目都会推送。
 
 **生成中的文字。** 每个正在执行的 Turn 在 Owner 的内存中保留当前尝试的段列表：当前模型尝试已发出的正文与 reasoning delta，按到达顺序记为 `(类型, 文字)` 段，相邻同类合并。新尝试开始时清空，完整回复写入 Step 节点后交由节点承载，Turn 关闭后释放。视图把它作为生成中的文字推送，标明所属节点与尝试序号；后台记录已发给每个观察者的位置，只发后面的部分。条目显示该尝试已 `Ended` 时，这些文字由条目接替：尝试完成时节点带有同一份完整回复，尝试停止时半截文字作废。前端保留已显示的临时文字，直到对应 Step 条目的回复实际装入显示，再原位替换。
 
@@ -77,7 +78,7 @@ status: active
 
 **后台重启。** 段列表与观察者的推送状态随进程消失，未关闭的 Turn 停在已写入的进度。客户端重连后重新开始 `watch`：会话头说明没有 Owner，条目说明它停在哪个阶段和结局。丢失的只有当时正在生成的半截文字，它本就不保存。
 
-**读取更早的对话。** 历史查询 `history { session_id, before, turns }` 取节点 `before` 之前的若干轮：后台沿 `before` 的父链往回收集节点，数满 `turns` 个 `Step 0` 后继续纳入紧邻该轮之前、尚未属于更早轮次的连续 `Input` / `ContextOp` 节点，停在更早一轮最后一步之后（或根节点之后）。页边界落在完整轮次单元之前，不切开节点。“完整”指所选父链上这一轮的内容：退回到一轮中途的 Step 再追加时，新分支上那一轮只有退回点之前的部分，分页保持它完整而不切开。没有游标：路径上已关闭的节点保持不变，一个节点之前的路径就是它的父链，当前位置改变后同一请求仍然有效。前端往上翻到已装入的最早内容时，以已装入的最早条目节点为 `before` 继续取，默认每次取 10 轮（[`HISTORY_TURNS`](../../../crates/lattice-ipc/src/types.rs)），每次最多 100 轮（[`MAX_HISTORY_TURNS`](../../../crates/lattice-ipc/src/types.rs)）。
+**读取更早的对话。** 历史查询 `history { session_id, before, turns }` 取节点 `before` 之前的若干轮，返回 `LocalHistory { entries, has_more }`：后台沿 `before` 的父链往回收集节点，数满 `turns` 个 `Step 0` 后继续纳入紧邻该轮之前、尚未属于更早轮次的连续 `Input` / `ContextOp` 节点，停在更早一轮最后一步之后（或根节点之后）；停止位置尚未到达根节点 `0` 时 `has_more = true`，否则为 `false`（初始、重载或 `path_replaced` 的窗口会话头同样在 `has_older: Some(view.has_more)` 显式给出该边界，常规增量头为 `None`）。页边界落在完整轮次单元之前，不切开节点。“完整”指所选父链上这一轮的内容：退回到一轮中途的 Step 再追加时，新分支上那一轮只有退回点之前的部分，分页保持它完整而不切开。没有游标：路径上已关闭的节点保持不变，一个节点之前的路径就是它的父链，当前位置改变后同一请求仍然有效。前端往上翻到已装入的最早内容且 `has_older` 为真时，以已装入的最早条目节点为 `before` 继续取，默认每次取 10 轮（[`HISTORY_TURNS`](../../../crates/lattice-ipc/src/types.rs)），每次最多 100 轮（[`MAX_HISTORY_TURNS`](../../../crates/lattice-ipc/src/types.rs)）。
 
 CLI 的人类可读输出在一轮结束时打印一次结局摘要；`--json` 的记录见[实现模块与公开操作](operations.md#实现模块与公开操作)。CLI 按最终结局与执行诊断选择退出码；最终仍读不到内容或核验发现数据损坏时退出 1，不因已知 Completed 而忽略失败。工具按 InvocationId 配对显示，规则见 [TUI 对话记录与工具显示](../tui/transcript.md#对话记录与工具显示)。
 

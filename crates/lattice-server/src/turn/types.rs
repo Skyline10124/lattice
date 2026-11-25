@@ -5,17 +5,31 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use lattice_context::Channel;
 use lattice_conversation::SessionId;
-use lattice_session::store::{SettingsVersion, TurnDetail, TurnInput};
+use lattice_session::store::{NodeId, SettingsVersion, TurnDetail, TurnInput};
 #[cfg(test)]
 use lattice_session::store::{TurnSummary, UsageSummary};
+
+/// 本轮执行载荷：随带通道输入一起提交并触发，或基于既有有效上下文独立触发。
+#[derive(Clone)]
+pub enum TurnPayload {
+    Submit {
+        trigger_channel: Channel,
+        inputs: Vec<(Channel, TurnInput)>,
+    },
+    Trigger {
+        trigger_channel: Channel,
+    },
+}
 
 /// 执行核心的冻结输入；会话设置由会话库持有，请求配置与凭据由后台网关读取。
 #[derive(Clone)]
 pub struct RunTurnRequest {
-    pub input: TurnInput,
+    pub payload: TurnPayload,
     pub session_id: SessionId,
     pub expected_settings: Option<SettingsVersion>,
+    pub expected_position: Option<NodeId>,
     pub cancel_flag: Option<Arc<AtomicBool>>,
     /// 注入本轮工具执行器；未指定时使用默认生产实现（或 `test-fake-tools` 环境变量选择）。
     pub tools: Option<Arc<dyn super::tools::ToolExecutor>>,

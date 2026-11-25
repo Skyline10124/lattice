@@ -69,12 +69,6 @@ impl Drafts {
         self.drafts.len().saturating_add(usize::from(saved))
     }
 
-    pub(crate) fn pending_comment_id(&self, n: usize) -> Option<BlockId> {
-        self.drafts()
-            .find(|draft| draft.comment.n == n)
-            .map(|draft| draft.id)
-    }
-
     pub(crate) fn editor(&self, id: BlockId) -> Option<&InputBuffer> {
         self.editor
             .as_ref()
@@ -100,15 +94,20 @@ impl Drafts {
         true
     }
 
-    pub(crate) fn start_comment(&mut self, id: BlockId, anchor: Anchor, blocks: &BlockList) {
+    pub(crate) fn start_comment<'a>(
+        &mut self,
+        id: BlockId,
+        anchor: Anchor,
+        blocks: &BlockList,
+        in_flight: impl IntoIterator<Item = &'a Comment>,
+    ) {
         if self.is_editing() {
             return;
         }
         let sent = blocks
             .iter()
             .filter_map(|block| match block {
-                crate::app::Block::CommentedUser(message)
-                | crate::app::Block::RejectedUser(message) => Some(message.comments.iter()),
+                crate::app::Block::CommentedUser(message) => Some(message.comments.iter()),
                 _ => None,
             })
             .flatten();
@@ -116,6 +115,7 @@ impl Drafts {
             .drafts()
             .map(|draft| draft.comment.n)
             .chain(sent.map(|comment| comment.n))
+            .chain(in_flight.into_iter().map(|comment| comment.n))
             .max()
             .unwrap_or(0);
         let Some(n) = max.checked_add(1) else {

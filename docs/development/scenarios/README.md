@@ -36,7 +36,7 @@ status: active
 | [配置来源与运行时重读](harness/configuration-sources.md) | 后台按启动时的配置目录与 TLS 根读取配置，显式指定 agent 时刷新 profile 快照 |
 | [会话设置与草稿会话](harness/session-settings-and-drafts.md) | 选择经 `configure` 持久保存，草稿会话跨重启保留，`SettingsVersion`、项目绑定与档位调整生效 |
 | [IM 组件托管、自动重载与 CLI 凭据管理](harness/im-component-and-cli.md) | 守护进程启动准备 `0700` `im/`、`inotify` 配置热重载、旧配置回退、`im/` 重建恢复、`lattice im` 退出码与秘密零回显 |
-| [用户图片输入](harness/user-images.md) | CLI `--image` 经 IPC 67 提交保序图文，五种协议按合同投影并跨重启重放图片；本地预检拒绝不留草稿；跨轮超过 32 MiB 预算在接受前拒绝、`rewind` 后恢复；远端 `HTTP 413` 不重试并给出恢复提示 |
+| [用户图片输入](harness/user-images.md) | CLI `--image` 经 IPC 68 提交保序图文，五种协议按合同投影并跨重启重放图片；本地预检拒绝不留草稿；跨轮超过 32 MiB 预算在接受前拒绝、`rewind` 后恢复；远端 `HTTP 413` 不重试并给出恢复提示 |
 
 ## 手动操作
 

@@ -1088,11 +1088,8 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
         } else {
             assert_eq!(entry["summary"], turn["summary"]);
         }
-        let content = &entry["content"];
-        assert_eq!(content["step_ordinal"], ordinal);
-        assert_eq!(content["turn_id"], turn["turn_id"]);
-        assert_eq!(content["progress"], step["progress"]);
-        let calls: Vec<_> = content["reply"]["parts"]
+        assert_eq!(entry["kind"], "step");
+        let calls: Vec<_> = entry["reply"]["assistant"]["parts"]
             .as_array()
             .into_iter()
             .flatten()
@@ -1103,24 +1100,24 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
                     .map(|call| (part, call))
             })
             .collect();
-        let stored = content["slots"].as_array().unwrap();
+        let results = entry["reply"]["results"].as_array();
         let slots = step["slots"].as_array().unwrap();
-        assert_eq!(calls.len(), stored.len());
         assert_eq!(calls.len(), slots.len());
-        for (((part, call), raw), slot) in calls.iter().zip(stored).zip(slots) {
+        if let Some(results) = results {
+            assert_eq!(results.len(), slots.len());
+        }
+        for (index, ((part, call), slot)) in calls.iter().zip(slots).enumerate() {
             assert!(ids.insert(call["invocation_id"].as_str().unwrap()));
-            assert_eq!(call["invocation_id"], raw["binding"]["invocation_id"]);
             assert_eq!(call["invocation_id"], slot["invocation_id"]);
             assert_eq!(call["name"], slot["binding"]["method"]);
-            assert_eq!(raw["binding"]["identity"], slot["binding"]);
             assert_eq!(call["address"]["part_ordinal"], *part);
             assert_eq!(
                 call["address"]["message"],
                 json!({"session_id":turn["session_id"],"turn_id":turn["turn_id"],"model_step_ordinal":ordinal})
             );
-            assert_eq!(raw["progress"]["progress"], slot["progress"]["state"]);
-            if raw["progress"]["progress"] == "terminal" {
-                let result = &raw["progress"]["result"];
+            if slot["progress"]["state"] == "terminal"
+                && let Some(result) = results.and_then(|list| list.get(index))
+            {
                 assert_eq!(result["invocation_id"], call["invocation_id"]);
                 assert_eq!(result["name"], call["name"]);
                 assert_eq!(result["payload"]["outcome"], slot["outcome"]);
@@ -1130,7 +1127,7 @@ fn assert_paired_entries(entries: &[&Value], turn: &Value) {
     let actual_nodes: Vec<_> = entries
         .iter()
         .filter(|entry| {
-            entry["content"]["kind"] == "step" && entry["content"]["turn_id"] == turn["turn_id"]
+            entry["kind"] == "step" && entry["step"]["key"]["turn_id"] == turn["turn_id"]
         })
         .map(|entry| entry["node"].as_u64().unwrap())
         .collect();
@@ -2194,12 +2191,12 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
         observer.drain(Duration::from_millis(500));
         let finished: Vec<Value> = observer.view.raw_entries().into_iter().cloned().collect();
         assert_eq!(finished, paused);
-        // 前端、实时观察者与慢观察者最后持有的条目都与关闭后的条目逐字段相同。
+        // 单轮跟随前端持有的步骤条目与关闭后的步骤条目逐字段相同；实时观察者与慢观察者持有全部条目。
         assert!(
             sent.entries()
                 .iter()
                 .map(|entry| &entry.raw)
-                .eq(finished.iter())
+                .eq(finished.iter().filter(|entry| entry["kind"] == "step"))
         );
         live.until(deadline(&world, &spec), "收束后的全部条目", |view| {
             view.raw_entries().into_iter().eq(finished.iter())
@@ -2234,9 +2231,9 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
                 .contains("discarded partial")
         );
         assert!(
-            finished.iter().all(|entry| !entry["content"]["reply"]
-                .to_string()
-                .contains("discarded partial")),
+            finished
+                .iter()
+                .all(|entry| !entry["reply"].to_string().contains("discarded partial")),
             "中止尝试的半截文本绝不能成为对话正式回复"
         );
         assert_eq!(closed["steps"][0]["attempts"].as_array().unwrap().len(), 2);
@@ -2285,11 +2282,16 @@ fn slow_window_and_closed_snapshot_deliver_exact_history() {
             0,
         );
         let next = parse_send_stdout(&next.stdout, next.exit_code());
-        let next_user = &next.entries()[0];
-        assert!(next_user.is_input());
-        assert_eq!(next.entries()[1].turn_ordinal(), Some(2));
+        let lattice_system_harness::ReceiptResult::Accepted { input_nodes, .. } =
+            &next.receipt().unwrap().result
+        else {
+            panic!("预期收到 Accepted 回执");
+        };
+        let next_user_node = input_nodes[0];
+        assert_eq!(next.entries().len(), 1);
+        assert_eq!(next.entries()[0].step().unwrap().ordinal, 0);
         let reread =
-            support::history(&world, timeout(&world, &spec), sid, next_user.node, 1).unwrap();
+            support::history(&world, timeout(&world, &spec), sid, next_user_node, 1).unwrap();
         assert_eq!(reread, finished);
         evidence
             .record_json("history-reread", &json!(reread))
@@ -2741,8 +2743,8 @@ fn memory_only_cancel_crash_is_process_exit_and_next_send_runs_once() {
         assert_eq!(
             users,
             vec![
-                json!("<lattice-context channel=\"ipc\">\ncancel input\n</lattice-context>"),
-                json!("<lattice-context channel=\"ipc\">\nnew input\n</lattice-context>"),
+                json!("<lattice-context channel=\"cli\">\ncancel input\n</lattice-context>"),
+                json!("<lattice-context channel=\"cli\">\nnew input\n</lattice-context>"),
             ]
         );
         let tree = read_json(
@@ -3011,14 +3013,22 @@ fn accepted_session_settings_and_frozen_turn_reopen_before_receipt() {
             let view = watcher.initial();
             let input_node = if replacement { 3 } else { 1 };
             let start_node = input_node + 1;
-            assert_eq!(
-                view.entries[&start_node].raw["content"]["turn_start"]["model"],
-                "replacement"
+            assert_eq!(view.entries[&start_node].step().unwrap().ordinal, 0);
+            assert_eq!(view.entries[&start_node].turn_id.as_deref(), Some(OTHER));
+            let usage_snapshot = read_json(
+                &world,
+                &spec,
+                &mut evidence,
+                &["--json", "session", "usage", SESSION],
             );
-            assert_eq!(
-                view.entries[&start_node].raw["content"]["turn_start"]["effort"],
-                "off"
-            );
+            let other_usage = usage_snapshot["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["turn_id"] == OTHER)
+                .unwrap();
+            assert_eq!(other_usage["start_node"], start_node);
+            assert_eq!(other_usage["model"], "replacement");
             let accepted = turn_lookup(&world, timeout(&world, &spec), OTHER);
             assert_eq!(accepted["value"]["turn"]["start_node"], start_node);
             assert_eq!(

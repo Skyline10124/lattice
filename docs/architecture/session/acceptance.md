@@ -8,19 +8,19 @@ status: active
 
 ## 请求接受
 
-接受事务只作用于已有会话。执行核心持有 SessionExecutionLock 后核对请求身份、项目绑定、设置版本与输入，并验证用户消息、工具目录及执行限制；不创建 Session 记录，也不写会话设置。用户输入在进入接受事务前经 `TurnInput` 按[保序规范化规则](conversation.md#用户图片与单轮输入规范化)核验与规范化，规范化后为空或违反文本、图片上限时拒绝接受。
+接受事务只作用于已有会话，分为带 `1..=N` 条新输入的 `accept_turn`（对应 `submit`）与不写入新输入的 `trigger_turn`（对应独立 `trigger`）。执行核心持有 SessionExecutionLock 后核对请求身份、项目绑定、设置版本、可选位置基线 `expected_position` 与输入，并验证用户消息、工具目录及执行限制；不创建 Session 记录，也不写会话设置。带输入的提交在进入接受事务前经 `TurnInput` 按[保序规范化规则](conversation.md#用户图片与单轮输入规范化)核验与规范化，规范化后为空或违反跨批次文本、图片上限时拒绝接受；独立触发（`trigger`）在落库前检查当前路径归约后的有效模型上下文非空（为空时返回 `BadRequest`）。
 
-在冻结配置与本轮工具目录之后、进入接受事务之前，执行核心在持有 `SessionExecutionLock` 期间以与实际首步相同的构造拼装本轮首步完整请求，经 [`ResolvedRequest::check_request`](../../../crates/lattice-llm/src/gateway.rs) 检查模型图片输入能力与本地请求体预算：当前路径历史或本轮输入包含图片而目标模型明确不支持图片时，按配置错误拒绝；编码后的请求体超过 `32 MiB` 本地请求体预算时，返回 `BadRequest` 并给出固定说明（见[发送前检查与大小限制](../llm/protocols.md#发送前检查与大小限制)）。预检未通过时不调用接受事务，不写入会话树与 `blobs` 表。
+在冻结配置与本轮工具目录之后、进入接受事务之前，执行核心在持有 `SessionExecutionLock` 期间以与实际首步相同的构造拼装本轮首步完整请求，经 [`ResolvedRequest::check_request`](../../../crates/lattice-llm/src/gateway.rs) 检查模型图片输入能力与本地请求体预算：当前路径有效历史或本轮输入包含图片而目标模型明确不支持图片时，按配置错误拒绝；编码后的请求体超过 `32 MiB` 本地请求体预算时，返回 `BadRequest` 并给出固定说明（见[发送前检查与大小限制](../llm/protocols.md#发送前检查与大小限制)）。预检未通过时不调用接受事务，不写入会话树与 `blobs` 表。
 
 接受事务写入以下事实：
 
-- 若规范化后的输入包含图片，先在同一写事务中按 SHA-256 摘要去重写入 `blobs` 表中尚无的原始图片字节；表中已有同一摘要时跳过写入。
-- 按序追加本轮的 `Node::Input` 节点（每条含触发渠道、接受时间与规范化后的有序文本/图片引用片段，首个节点的父节点为 Session 当前位置，后续节点依次接在前一输入节点之后；草稿会话的首条 `Input` 为 `1`、父节点为根节点 `0`）。
-- 预留第 0 步（`Node::Step`，`step_ordinal = 0`，停在 `Reserved`），父节点为本轮最后一条 `Input`（无前置输入触发时父节点为 Session 当前位置），其 `turn_start`（`TurnStartMeta`）记下接受时间、agent 名、模型、provider、推理档位、执行限制、配置摘要、触发渠道（`trigger_channel`）与本轮认领的前置输入节点列表（`input_nodes`）。系统提示与工具目录按摘要写入配置表，表中已有同一摘要时直接复用。项目绑定取自 Session 记录，不另存。
+- 若规范化后的输入包含图片（仅 `accept_turn`），先在同一写事务中按 SHA-256 摘要去重写入 `blobs` 表中尚无的原始图片字节；表中已有同一摘要时跳过写入。
+- 按序追加本轮的 `Node::Input` 节点（仅 `accept_turn`，每条含来源渠道、接受时间与规范化后的有序文本/图片引用片段，首个节点的父节点为 Session 当前位置，后续节点依次接在前一输入节点之后；草稿会话的首条 `Input` 为 `1`、父节点为根节点 `0`）。
+- 预留第 0 步（`Node::Step`，`step_ordinal = 0`，停在 `Reserved`），父节点为本轮最后一条 `Input`（`trigger_turn` 无新输入时父节点为 Session 当前位置），其 `turn_start`（`TurnStartMeta`）记下接受时间、agent 名、模型、provider、推理档位、执行限制、配置摘要、触发渠道（`trigger_channel`）与本次写事务内随本轮一并写入的输入节点列表（`input_nodes`，`trigger_turn` 为空，不代表本轮独占的模型上下文）。系统提示与工具目录按摘要写入配置表，表中已有同一摘要时直接复用。项目绑定取自 Session 记录，不另存。
 - TurnId 索引：TurnId 指向这个 `Step 0` 节点。
-- Session 记录的当前位置指向预留的 `Step 0`，并更新 `updated_at`（写入时再核对一次项目绑定与设置版本）。
+- Session 记录的当前位置指向预留的 `Step 0`，并更新 `updated_at`（写入时再核对一次项目绑定、设置版本与 `expected_position`）。
 
-同一 `TurnId` 已存在时，不写入 `blobs` 或节点，按会话身份、项目绑定、触发渠道与 `turn_start.input_nodes` 对应输入节点的规范化完整保序片段（数量、渠道、文本和图片的顺序、出现次数及 `ImageRef` 摘要）比较：完全一致时返回已接受轮次，任一项不符则返回 `Conflict`。
+存储层幂等与服务端准入层的职责分离：在存储层（`accept_turn` 与 `trigger_turn`）写事务内，`TURN_INDEX` 幂等匹配位于 `settings_version` 与 `expected_position` 核对之前——若同一 `TurnId` 已存在且会话身份、项目绑定、触发渠道及 `turn_start.input_nodes` 对应输入节点的规范化完整保序片段（数量、渠道、文本和图片的顺序、出现次数及 `ImageRef` 摘要）完全一致，返回已接受轮次（`AcceptedTurn::Existing`，避免因该轮已前移 `session.current` 而误报位置冲突），任一项不符则返回 `StoreError::Conflict`；而在服务端准入层（`Backend::submit`、`Backend::trigger` 与 `execute_owned`），仍按 ADR 0008 §7 优先检查 `read.turn_node(turn_id).is_some()` 并立即返回 `Conflict(turn_id_used)`，客户端断连找回走按 `TurnId` 查询，不依赖重发请求。
 
 这个事务提交是请求接受的持久边界。用户消息为 User 角色的有序文本与图片片段，大小与规范化规则见[对话数据与模型投影](conversation.md#用户图片与单轮输入规范化)和[输入与传输限制](concurrency.md#输入与传输限制)。
 

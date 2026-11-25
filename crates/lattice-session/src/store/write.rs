@@ -397,6 +397,7 @@ impl SessionStore {
             let s = req.session_id;
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
             check_binding(session, &req.project_path)?;
+            check_position(session, req.expected_position)?;
             let parent = session.current;
             resolve_path_in_tx(tx, &path, s, parent)?;
             let node_id = r.next_node(s)?;
@@ -467,6 +468,7 @@ impl SessionStore {
             let s = req.session_id;
             let session = r.sessions.get(&s).ok_or_else(|| missing("session", s))?;
             check_binding(session, &req.project_path)?;
+            check_position(session, req.expected_position)?;
             if !referenced_images.is_empty() {
                 let blobs_table = tx.open_table(codec::BLOBS).map_err(codec::table_error)?;
                 for image in &referenced_images {
@@ -584,6 +586,7 @@ impl SessionStore {
             if current_settings.version()? != req.settings_version {
                 return Err(StoreError::SettingsChanged { session_id: s });
             }
+            check_position(session, req.expected_position)?;
             let parent = session.current;
             let effective = resolve_path_in_tx(tx, &path, s, parent)?;
             if effective.project().is_empty() {
@@ -704,6 +707,7 @@ impl SessionStore {
             if current_settings.version()? != input.settings_version {
                 return Err(StoreError::SettingsChanged { session_id: s });
             }
+            check_position(session, input.expected_position)?;
             let mut parent = session.current;
             resolve_path_in_tx(tx, &path, s, parent)?;
             let stored = input.config.stored();
@@ -1311,6 +1315,20 @@ fn check_binding(session: &SessionRecord, project_path: &ProjectPath) -> Result<
             session_id: session.session_id,
         })
     }
+}
+
+/// 核对写操作指定的上下文位置基线与会话当前位置一致（ADR 0014 第 6 节）。
+fn check_position(session: &SessionRecord, expected: Option<NodeId>) -> Result<()> {
+    if let Some(expected) = expected
+        && session.current != expected
+    {
+        return Err(StoreError::PositionChanged {
+            session_id: session.session_id,
+            expected,
+            actual: session.current,
+        });
+    }
+    Ok(())
 }
 
 fn write_blobs(tx: &redb::WriteTransaction, blobs: &BTreeMap<[u8; 32], Vec<u8>>) -> Result<()> {

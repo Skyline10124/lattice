@@ -89,13 +89,9 @@ fn entries_replace_by_node_in_place_and_new_ones_append() {
     assert!(!app.turn_usage.as_ref().unwrap().input.complete);
     assert_eq!(app.turn_usage.as_ref().unwrap().partial_attempts, 2);
     let mut cache_only = step(3, t, 1).completed_attempt(0).entry();
-    if let ConversationEntry::Step {
-        content: Node::Step { attempts, .. },
-        ..
-    } = &mut cache_only
-    {
+    if let ConversationEntry::Step { step, .. } = &mut cache_only {
         let usage = serde_json::from_value(serde_json::json!({"input":null,"cache_read":5,"cache_write":null,"output":null,"reasoning":null})).unwrap();
-        attempts[0].usage = usage;
+        step.attempts[0].usage = usage;
     }
     app.apply_view(entry_update(cache_only));
     assert_eq!(
@@ -118,16 +114,6 @@ fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
         )
         .finished()
         .entry();
-    // 条目的两份尝试投影都携带同一计量；本轮只消费节点中的一份。
-    let mut projected = serde_json::to_value(&current).unwrap();
-    projected["step"]["attempts"] = json!([{
-        "attempt":0,"origin":{"protocol":"chat-completions","provider_id":"openai"},
-        "usage":projected["content"]["attempts"][0]["usage"],"usage_kind":"complete","cost":{"usd":0.03,"exact":true},
-        "progress":{"progress":"ended","end":{"end":"completed"},"diagnostic":null},
-        "end":{"end":"completed","step":{"session_id":SESSION,"turn_id":turn(2),"model_step_ordinal":0}},
-        "retry_delay_ms":null
-    }]);
-    let current: ConversationEntry = serde_json::from_value(projected).unwrap();
     app.begin_view();
     app.apply_view(LocalUpdate::Head(head(4, Some(turn(2)), false)));
     app.apply_view(entry_update(user(3, turn(2), 2, "recent")));
@@ -158,6 +144,7 @@ fn metering_rebuilds_from_initial_entries_and_rewind_but_not_older_turns() {
         },
         Ok(LocalHistory {
             entries: vec![user(1, turn(1), 1, "older"), older.clone()],
+            has_more: false,
         }),
     );
     assert_eq!(app.turn_usage.as_ref(), Some(&original));
@@ -259,13 +246,17 @@ fn context_uses_the_latest_normalized_report_without_overflow_or_fallback() {
 }
 
 #[test]
-fn own_submission_user_block_is_replaced_by_its_user_message() {
+fn own_submission_shows_derived_wait_hint_until_entries_arrive_with_node_titles() {
     let mut app = test_app(true);
     open_view(&mut app, head(0, None, false), Vec::new());
     app.input.set_text("hello there");
     let req = app.submit().expect("空闲提交应返回请求");
+    assert_eq!(req.trigger_channel, Channel::parse("tui").unwrap());
+    assert_eq!(req.expected_position, None);
+    assert_eq!(req.inputs.len(), 1);
+    assert_eq!(req.inputs[0].channel, Channel::parse("tui").unwrap());
     assert!(
-        req.parts
+        req.inputs[0].parts
             == [UserInputPart::Text {
                 text: "hello there".into()
             }]
@@ -276,30 +267,66 @@ fn own_submission_user_block_is_replaced_by_its_user_message() {
     let (t, session) = app.submission_identity().unwrap();
     assert_eq!(req.turn_id, t);
     assert_eq!(session, sid());
-    let user_line = |app: &App| {
-        transcript(app)
-            .lines()
-            .find(|line| line.contains("── USER "))
-            .unwrap()
-            .to_owned()
-    };
-    assert!(!user_line(&app).contains('#'), "条目未到的一轮还没有序号");
-    let pending = block_id(&app, "hello there");
+    // A1：不插乐观 USER 块，仅从状态派生“正在提交请求…”并维持 owners 与 lines 一一对应。
+    let waiting = crate::view::render_transcript(&app, 80);
+    assert_eq!(waiting.lines.len(), waiting.owners.len());
+    assert!(
+        waiting
+            .owners
+            .iter()
+            .any(|pos| pos.id == BlockId::SubmissionWait),
+        "等待回执期间应存在 SubmissionWait 虚拟块"
+    );
+    let shown_wait = transcript(&app);
+    assert!(shown_wait.contains("正在提交请求…"), "{shown_wait}");
+    assert!(
+        !shown_wait.contains("── USER "),
+        "未落盘前不得渲染乐观 USER 块"
+    );
     app.push_status(status(NoticeLevel::Info, "after submit"));
     app.apply_submission(receipt(t, accepted(t)));
+    let synced_wait = crate::view::render_transcript(&app, 80);
+    assert_eq!(synced_wait.lines.len(), synced_wait.owners.len());
+    let shown_accepted = transcript(&app);
     assert!(
-        transcript(&app).contains("── unused "),
-        "接受即显示助手标题线"
+        shown_accepted.contains("请求已接受，等待对话同步…"),
+        "接受后条目未到时应显示等待对话同步提示：{shown_accepted}"
     );
     assert_eq!(app.phase, TurnPhase::Streaming, "会话头指向它之前仍在运行");
     app.apply_view(LocalUpdate::Head(head(2, Some(t), true)));
     app.apply_view(entry_update(user(1, t, 7, "hello there")));
+    assert!(
+        transcript(&app).contains("请求已接受，等待对话同步…"),
+        "仅收到 Input 而 Step 未到时仍应保留同步提示"
+    );
     app.apply_view(entry_update(step(2, t, 0).turn_ordinal(7).sent().entry()));
+    let final_t = crate::view::render_transcript(&app, 80);
+    assert_eq!(final_t.lines.len(), final_t.owners.len());
+    assert!(
+        !final_t
+            .owners
+            .iter()
+            .any(|pos| pos.id == BlockId::SubmissionWait),
+        "Step 0 到达后应自动消失等待提示"
+    );
     let shown = transcript(&app);
     assert_eq!(shown.matches("hello there").count(), 1, "{shown}");
-    assert_eq!(block_id(&app, "hello there"), pending, "原位取代");
-    assert!(row(&app, "hello there") < row(&app, "after submit"));
-    assert!(user_line(&app).ends_with("#7 ──"), "序号取自条目");
+    let user_line = shown
+        .lines()
+        .find(|line| line.contains("── USER "))
+        .expect("应渲染持久化 USER 标题线");
+    assert!(
+        user_line.ends_with("@1 ──"),
+        "USER 标题线应标注 @1：{user_line}"
+    );
+    let assistant_line = shown
+        .lines()
+        .find(|line| line.contains("── unused "))
+        .expect("应渲染助手标题线");
+    assert!(
+        assistant_line.ends_with("@2 ──"),
+        "助手标题线应标注 @2：{assistant_line}"
+    );
     assert_eq!(shown.matches("── unused ").count(), 1);
 }
 
@@ -376,7 +403,7 @@ fn a_new_view_rejudges_the_accepted_turn_it_was_waiting_for() {
 }
 
 #[test]
-fn steps_after_an_unaccepted_user_block_get_their_own_assistant_title() {
+fn rejected_submission_leaves_no_phantom_user_block_and_other_turn_uses_node_title() {
     let mut app = test_app(true);
     open_view(&mut app, head(2, Some(turn(1)), false), turns(1..=1));
     // 其他客户端的一轮已开始、会话头尚未确认时，本客户端照常提交，随后被拒。
@@ -399,13 +426,16 @@ fn steps_after_an_unaccepted_user_block_get_their_own_assistant_title() {
         },
     ));
     let shown = transcript(&app);
-    let lines: Vec<&str> = shown.lines().collect();
-    let titled = lines[row(&app, "mine")..row(&app, "other answer")]
-        .iter()
-        .any(|line| line.starts_with("── unused ") && line.ends_with("#2 ──"));
     assert!(
-        titled,
-        "接在未被接受的 USER 块之后的步骤另起助手标题线：{shown}"
+        !shown.contains("mine"),
+        "被拒提交不得残留幽灵用户块：{shown}"
+    );
+    assert_eq!(app.input.text(), "mine", "输入区应归还原输入");
+    assert!(
+        shown
+            .lines()
+            .any(|line| line.starts_with("── unused ") && line.ends_with("@4 ──")),
+        "其他客户端轮次的助手标题线应标注 @4：{shown}"
     );
 }
 
@@ -452,7 +482,7 @@ fn unknown_submission_is_dropped_once_the_result_is_definite() {
 }
 
 #[test]
-fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepted_user() {
+fn new_view_and_path_replacement_discard_entries_but_keep_statuses() {
     let mut app = test_app(true);
     let (a, b) = (turn(1), turn(2));
     open_view(&mut app, head(2, Some(a), false), turns(1..=1));
@@ -478,10 +508,12 @@ fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepte
     app.apply_view(text(4, 0, 0, &[("partial", false)]));
     let shown = transcript(&app);
     assert!(
-        !shown.contains("prompt-1") && !shown.contains("answer-1"),
+        !shown.contains("prompt-1")
+            && !shown.contains("answer-1")
+            && !shown.contains("rejected input"),
         "{shown}"
     );
-    for kept in ["kept status", "rejected input", "new prompt", "partial"] {
+    for kept in ["kept status", "new prompt", "partial"] {
         assert_eq!(shown.matches(kept).count(), 1, "{kept}: {shown}");
     }
     // 重新开始 watch：生成中的文字随旧条目丢弃，等新视图从头给出。
@@ -492,7 +524,7 @@ fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepte
     );
     let shown = transcript(&app);
     assert!(!shown.contains("partial"), "{shown}");
-    for kept in ["kept status", "rejected input", "new prompt"] {
+    for kept in ["kept status", "new prompt"] {
         assert_eq!(shown.matches(kept).count(), 1, "{kept}: {shown}");
     }
     assert!(row(&app, "kept status") < row(&app, "new prompt"));
@@ -502,14 +534,16 @@ fn new_view_and_path_replacement_discard_entries_but_keep_statuses_and_unaccepte
 fn scrolled_to_top(app: &mut App) -> OlderRequest {
     app.term_width = 80;
     app.term_height = 12;
-    open_view(app, head(8, Some(turn(4)), false), turns(3..=4));
+    let mut h = head(8, Some(turn(4)), false);
+    h.has_older = Some(true);
+    open_view(app, h, turns(3..=4));
     for _ in 0..20 {
         app.apply_action(KeyAction::ScrollPageUp);
         if let Some(request) = app.older_request.take() {
             return request;
         }
     }
-    panic!("翻到顶部而第 1 轮尚未装入时应查询更早的轮");
+    panic!("翻到顶部且 has_older 为真时应查询更早历史");
 }
 
 fn top_line(app: &mut App) -> String {
@@ -521,17 +555,14 @@ fn top_line(app: &mut App) -> String {
 fn older_turns_insert_before_the_earliest_turn_and_keep_the_view() {
     let mut app = test_app(true);
     let request = scrolled_to_top(&mut app);
-    assert_eq!(
-        request.before,
-        NodeId(5),
-        "以已装入的最早一轮的 UserMessage 为 before"
-    );
+    assert_eq!(request.before, NodeId(5), "以已装入的最早条目节点为 before");
     assert_eq!(request.session_id, sid());
     let top = top_line(&mut app);
     app.apply_older(
         request,
         Ok(LocalHistory {
             entries: turns(1..=2),
+            has_more: false,
         }),
     );
     assert_eq!(top_line(&mut app), top, "视图停在原来看到的内容上");
@@ -546,7 +577,19 @@ fn older_turns_insert_before_the_earliest_turn_and_keep_the_view() {
     for _ in 0..20 {
         app.apply_action(KeyAction::ScrollPageUp);
     }
-    assert_eq!(app.older_request, None, "第 1 轮已装入");
+    assert_eq!(app.older_request, None, "has_more 为假后不再查询更早历史");
+    // 会话中途非替换的增量会话头（has_older: Some(true) 或 None）不得覆盖已翻到底的 has_older = false。
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        has_older: Some(true),
+        ..head(8, Some(turn(4)), false)
+    }));
+    for _ in 0..5 {
+        app.apply_action(KeyAction::ScrollPageUp);
+    }
+    assert_eq!(
+        app.older_request, None,
+        "非替换重读不得将已翻到头的 has_older 改回 true"
+    );
 }
 
 #[test]
@@ -575,6 +618,7 @@ fn older_turns_keep_the_view_on_the_turns_below_the_banner_and_a_leading_status(
         request,
         Ok(LocalHistory {
             entries: turns(1..=2),
+            has_more: false,
         }),
     );
     // 原来看到的第 3 轮仍在屏幕上同一位置；横幅仍在对话记录最上方，翻到顶部才看得到。
@@ -609,6 +653,7 @@ fn older_turns_arriving_after_path_replacement_are_dropped() {
     let request = scrolled_to_top(&mut app);
     app.apply_view(LocalUpdate::Head(SessionHead {
         path_replaced: true,
+        has_older: Some(true),
         ..head(8, Some(turn(4)), false)
     }));
     for entry in turns(3..=4) {
@@ -618,6 +663,7 @@ fn older_turns_arriving_after_path_replacement_are_dropped() {
         request,
         Ok(LocalHistory {
             entries: turns(1..=2),
+            has_more: false,
         }),
     );
     assert!(!transcript(&app).contains("prompt-1"));
@@ -638,6 +684,7 @@ fn older_turns_arriving_while_a_new_head_is_pending_are_already_ended() {
         request,
         Ok(LocalHistory {
             entries: vec![user(1, turn(1), 1, "prompt-1"), step(2, turn(1), 0).entry()],
+            has_more: false,
         }),
     );
     // 会话头随当前位置的条目确认后，旧轮的结局仍不是新消息。
@@ -1595,8 +1642,10 @@ fn settings_changed_rejection_restores_input_and_shows_error() {
     open_view(&mut direct, head(0, None, false), Vec::new());
     direct.input.set_text("manual prompt");
     let direct_req = direct.submit().expect("空闲手动提交应返回请求");
+    assert_eq!(direct_req.trigger_channel, Channel::parse("tui").unwrap());
+    assert_eq!(direct_req.expected_position, None);
     assert!(
-        direct_req.parts
+        direct_req.inputs[0].parts
             == [UserInputPart::Text {
                 text: "manual prompt".into()
             }]
@@ -1625,14 +1674,16 @@ fn settings_changed_rejection_restores_input_and_shows_error() {
 }
 
 #[test]
-fn context_op_is_zero_line_anchor_and_standalone_input_renders_without_ordinal() {
+fn context_op_is_zero_line_anchor_and_titles_use_node_ids() {
     let mut app = test_app(true);
     app.term_width = 80;
     app.term_height = 12;
     // 路径前端存在未绑定轮次的 ContextOp（NodeId(4)）与第 3 轮（NodeId(5)/6），翻到顶部时应以最早条目 NodeId(4) 作为 before。
     let mut entries = vec![context_op(4, 1)];
     entries.extend(turns(3..=4));
-    open_view(&mut app, head(8, Some(turn(4)), false), entries);
+    let mut h = head(8, Some(turn(4)), false);
+    h.has_older = Some(true);
+    open_view(&mut app, h, entries);
     let rendered = transcript(&app);
     assert!(
         rendered.contains("prompt-3") && rendered.contains("answer-4"),
@@ -1657,7 +1708,7 @@ fn context_op_is_zero_line_anchor_and_standalone_input_renders_without_ordinal()
         "存在前置 ContextOp 时，before 必须取已装入的最早条目节点"
     );
 
-    // 独立 Input（尚未被任何 Step 0 认领）应渲染 USER 标题线但不带 #ordinal。
+    // 独立 Input（尚未被任何 Step 0 认领）应渲染 USER 标题线并标注自身 @1。
     let mut standalone = test_app(true);
     open_view(
         &mut standalone,
@@ -1670,18 +1721,18 @@ fn context_op_is_zero_line_anchor_and_standalone_input_renders_without_ordinal()
         .find(|line| line.contains("── USER "))
         .expect("独立 Input 应显示 USER 标题线");
     assert!(
-        !user_header.contains('#'),
-        "独立 Input 未归属任何轮次时不得显示 #ordinal：{user_header}"
+        user_header.ends_with("@1 ──"),
+        "独立 Input 标题线应以 @1 标注节点号：{user_header}"
     );
     assert!(shown.contains("standalone input"), "{shown}");
 
-    // 若 Input 在接受回执与 Step 0 之前到达，待 Step 0 认领后应原位取代本客户端暂存 USER 块并补全 #ordinal。
+    // 提交后等待提示派生显示，待真实 Input 与 Step 0 到达后自动清除并展示 @1 与 @2。
     let mut late = test_app(true);
     open_view(&mut late, head(0, None, false), Vec::new());
     late.input.set_text("late claim");
     let submit_req = late.submit().unwrap();
     let t = submit_req.turn_id;
-    let pending_id = block_id(&late, "late claim");
+    assert!(transcript(&late).contains("正在提交请求…"));
     late.push_status(status(NoticeLevel::Info, "after late submit"));
     late.apply_view(LocalUpdate::Head(head(2, Some(t), true)));
     late.apply_view(entry_update(user(1, t, 5, "late claim")));
@@ -1690,20 +1741,20 @@ fn context_op_is_zero_line_anchor_and_standalone_input_renders_without_ordinal()
     assert_eq!(
         shown.matches("late claim").count(),
         1,
-        "Step 0 认领后不得重复渲染用户输入：{shown}"
+        "Step 0 到达后不得重复渲染用户输入：{shown}"
     );
-    assert_eq!(
-        block_id(&late, "late claim"),
-        pending_id,
-        "Step 0 认领迟到关联的 Input 应原位保留原块身份"
-    );
-    assert!(
-        row(&late, "late claim") < row(&late, "after late submit"),
-        "原位取代后仍保持在提交后状态消息之前"
-    );
+    assert!(!shown.contains("正在提交请求…") && !shown.contains("等待对话同步"));
     let header = shown
         .lines()
         .find(|line| line.contains("── USER "))
         .unwrap();
-    assert!(header.ends_with("#5 ──"), "认领后应补全轮次序号：{header}");
+    assert!(header.ends_with("@1 ──"), "USER 标题线应标注 @1：{header}");
+    let assistant = shown
+        .lines()
+        .find(|line| line.contains("── unused "))
+        .unwrap();
+    assert!(
+        assistant.ends_with("@2 ──"),
+        "助手标题线应标注 @2：{assistant}"
+    );
 }

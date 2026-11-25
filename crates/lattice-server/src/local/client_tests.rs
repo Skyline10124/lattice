@@ -347,26 +347,7 @@ fn head(id: TurnId, owner: bool) -> SessionHead {
         owner,
         diagnostic: None,
         path_replaced: false,
-    }
-}
-fn step_turn_start(
-    input_nodes: Vec<NodeId>,
-    accepted_at: chrono::DateTime<chrono::Utc>,
-) -> lattice_session::store::TurnStartMeta {
-    lattice_session::store::TurnStartMeta {
-        accepted_at,
-        trigger_channel: lattice_context::Channel::parse("ipc").expect("解析测试通道名"),
-        input_nodes,
-        agent_name: AgentName::parse("local-test").unwrap(),
-        model: ModelId::parse("test").unwrap(),
-        provider: ProviderId::parse("openai-compatible").unwrap(),
-        effort: None,
-        limits: lattice_session::store::TurnExecutionLimits {
-            timeout_secs: lattice_session::TurnTimeout::default(),
-            max_model_steps: 32,
-            max_model_attempts: 2,
-        },
-        config_digest: [0; 32],
+        has_older: None,
     }
 }
 fn entry(id: TurnId, closed: bool) -> Box<ConversationEntry> {
@@ -383,20 +364,6 @@ fn entry(id: TurnId, closed: bool) -> Box<ConversationEntry> {
     };
     Box::new(ConversationEntry::Step {
         node: NodeId(2),
-        content: Node::Step {
-            parent: NodeId(1),
-            turn_id: id,
-            step_ordinal: 0,
-            turn_start: Some(step_turn_start(
-                vec![NodeId(1)],
-                detail(id, closed).accepted_at,
-            )),
-            progress: progress.clone(),
-            attempts: vec![],
-            reply: None,
-            slots: vec![],
-            updated_at: detail(id, closed).ended_at,
-        },
         step: StepDetail {
             node: NodeId(2),
             key,
@@ -412,21 +379,24 @@ fn entry(id: TurnId, closed: bool) -> Box<ConversationEntry> {
             slots: vec![],
             updated_at: detail(id, closed).ended_at,
         },
-        ordinal: Some(1),
+        agent_name: Some(AgentName::parse("local-test").unwrap()),
+        reply: None,
         retries: vec![],
         summary: Some(detail(id, closed).summary),
     })
 }
 fn request(peer: &Peer, id: TurnId) -> TurnRequest {
-    TurnRequest {
-        turn_id: id,
-        session: sid(),
-        workspace: peer._directory.path().into(),
-        parts: vec![UserInputPart::Text {
+    TurnRequest::single(
+        id,
+        sid(),
+        peer._directory.path().into(),
+        lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+        vec![UserInputPart::Text {
             text: "原始输入".into(),
         }],
-        expected_settings: None,
-    }
+        None,
+        None,
+    )
 }
 fn accepted(id: TurnId) -> Response {
     Response::Acceptance(Acceptance::Accepted {
@@ -656,23 +626,31 @@ async fn accepted_submission_ignores_backlogged_views_until_its_user_message() {
             cancel.reply(Response::Cancelled { owned: true }).await;
             cancel_status(&mut turn, CancelStatus::Taken).await;
 
-            let user = input_entry(
-                NodeId(3),
-                if root { NodeId(0) } else { NodeId(2) },
-                "测试输入",
-            );
+            let user = input_entry(NodeId(3), "测试输入");
             deliver(
                 &mut turn,
                 &mut view,
                 ViewUpdate::Entry { entry: user },
+                false,
+            )
+            .await;
+            let mut turn_step = entry(id, false);
+            if let ConversationEntry::Step { node, step, .. } = turn_step.as_mut() {
+                *node = NodeId(4);
+                step.node = NodeId(4);
+            }
+            deliver(
+                &mut turn,
+                &mut view,
+                ViewUpdate::Entry { entry: turn_step },
                 true,
             )
             .await;
-            // 本轮 Input 不能让此前积压的头重新成为结束证据；它之后的新头才有效。
+            // 本轮 Step 不能让此前积压的头重新成为结束证据；它之后的新头才有效。
             turn.cancel();
             let mut cancel = tokio::select! {
                 request = cancellation(&peer, id) => request,
-                update = turn.next() => panic!("本轮 Input 不能激活此前的旧头：{update:?}"),
+                update = turn.next() => panic!("本轮 Step 不能激活此前的旧头：{update:?}"),
             };
             cancel.reply(Response::Cancelled { owned: true }).await;
             cancel_status(&mut turn, CancelStatus::Taken).await;
@@ -958,7 +936,7 @@ async fn following_a_turn_filters_other_entries_and_preserves_head_and_text() {
     .await;
     assert!(matches!(next(&mut turn).await, LocalUpdate::Head(h) if h.owner));
     assert!(
-        matches!(next(&mut turn).await, LocalUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { content: Node::Step { turn_id, .. }, .. } if turn_id == id))
+        matches!(next(&mut turn).await, LocalUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { ref step, .. } if step.key.turn_id == id))
     );
     assert!(matches!(
         next(&mut turn).await,
@@ -1066,25 +1044,22 @@ async fn cancellation_timeout_keeps_error_and_identity_in_detach() {
     assert_eq!(report.cancel, Some(CancelStatus::Unknown));
     assert_eq!(report.cancel_error.unwrap().kind, LocalErrorKind::Transport);
 }
-fn input_entry(node: NodeId, parent: NodeId, text: &str) -> Box<ConversationEntry> {
+fn input_entry(node: NodeId, text: &str) -> Box<ConversationEntry> {
     Box::new(ConversationEntry::Input {
         node,
-        content: Node::Input {
-            parent,
-            accepted_at: "2026-10-17T00:00:00Z".parse().unwrap(),
-            input: lattice_context::ContextInput::new(
-                lattice_context::Channel::parse("ipc").expect("解析测试通道名"),
-                vec![lattice_conversation::MessageSemantic::Text { text: text.into() }],
-            )
-            .expect("构造测试 ContextInput"),
-        },
+        accepted_at: "2026-10-17T00:00:00Z".parse().unwrap(),
+        input: lattice_context::ContextInput::new(
+            lattice_context::Channel::parse("cli").expect("解析测试通道名"),
+            vec![lattice_conversation::MessageSemantic::Text { text: text.into() }],
+        )
+        .expect("构造测试 ContextInput"),
     })
 }
 fn user_entry(_id: TurnId) -> Box<ConversationEntry> {
-    input_entry(NodeId(1), NodeId(0), "原始输入")
+    input_entry(NodeId(1), "原始输入")
 }
 #[tokio::test]
-async fn following_an_already_closed_turn_delivers_its_step_after_the_user_message() {
+async fn following_an_already_closed_turn_delivers_only_its_step_and_filters_inputs() {
     let peer = Peer::new();
     let id = new_turn_id();
     let mut turn = peer.client.follow_turn(detail(id, true));
@@ -1101,16 +1076,12 @@ async fn following_an_already_closed_turn_delivers_its_step_after_the_user_messa
     assert!(matches!(next(&mut turn).await, LocalUpdate::Head(_)));
     assert!(matches!(
         next(&mut turn).await,
-        LocalUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Input { node: NodeId(1), .. })
-    ));
-    assert!(matches!(
-        next(&mut turn).await,
         LocalUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { node: NodeId(2), .. })
     ));
     assert!(within(turn.next()).await.is_none());
 }
 #[tokio::test]
-async fn buffered_inputs_before_receipt_flush_in_tree_order_before_step0() {
+async fn single_turn_following_filters_inputs_context_ops_and_other_turns() {
     let peer = Peer::new();
     let id = new_turn_id();
     let old = new_turn_id();
@@ -1122,7 +1093,6 @@ async fn buffered_inputs_before_receipt_flush_in_tree_order_before_step0() {
         }
     ));
     let (_submit_wire, _) = peer.request().await;
-    // 在回执到达前触发取消交接并打开 watch，使 watch 在 turn_inputs 未知时收到历史重放与本轮输入。
     turn.cancel();
     let mut cancel = cancellation(&peer, id).await;
     cancel.reply(Response::Cancelled { owned: false }).await;
@@ -1136,23 +1106,13 @@ async fn buffered_inputs_before_receipt_flush_in_tree_order_before_step0() {
     ));
 
     let mut view = watch(&peer).await;
-    // 先发一次旧分支重放 + path_replaced，核验切换路径会清理无关暂存输入。
-    let mut stale_head = head(old, false);
-    stale_head.position = NodeId(2);
-    view.reply(Response::View(ViewUpdate::Head(stale_head)))
-        .await;
-    view.reply(Response::View(ViewUpdate::Entry {
-        entry: input_entry(NodeId(99), NodeId(0), "旧分叉待清理输入"),
-    }))
-    .await;
     let mut active_head = head(id, true);
     active_head.position = NodeId(6);
     active_head.path_replaced = true;
     view.reply(Response::View(ViewUpdate::Head(active_head)))
         .await;
-    // 发送旧轮 Input(1) + Step0(2)、独立无关 Input(3)、本轮两条 Input(4, 5) 以及认领 [4, 5] 的本轮 Step0(6)。
     view.reply(Response::View(ViewUpdate::Entry {
-        entry: input_entry(NodeId(1), NodeId(0), "旧轮输入"),
+        entry: input_entry(NodeId(1), "旧轮输入"),
     }))
     .await;
     view.reply(Response::View(ViewUpdate::Entry {
@@ -1160,41 +1120,29 @@ async fn buffered_inputs_before_receipt_flush_in_tree_order_before_step0() {
     }))
     .await;
     view.reply(Response::View(ViewUpdate::Entry {
-        entry: input_entry(NodeId(3), NodeId(2), "独立无关输入"),
+        entry: Box::new(ConversationEntry::ContextOp {
+            node: NodeId(3),
+            accepted_at: "2026-10-17T00:00:00Z".parse().unwrap(),
+            op: lattice_context::ContextOp::new(
+                lattice_context::Channel::parse("cli").expect("测试通道名"),
+                vec![lattice_context::ContextEdit::omit_node(NodeId(1))],
+            )
+            .expect("构造测试 ContextOp"),
+        }),
     }))
     .await;
     view.reply(Response::View(ViewUpdate::Entry {
-        entry: input_entry(NodeId(4), NodeId(3), "本轮输入一"),
-    }))
-    .await;
-    view.reply(Response::View(ViewUpdate::Entry {
-        entry: input_entry(NodeId(5), NodeId(4), "本轮输入二"),
+        entry: input_entry(NodeId(4), "本轮输入"),
     }))
     .await;
     let mut target_step = entry(id, false);
-    if let ConversationEntry::Step {
-        node,
-        step,
-        ordinal,
-        content: Node::Step {
-            parent, turn_start, ..
-        },
-        ..
-    } = target_step.as_mut()
-    {
+    if let ConversationEntry::Step { node, step, .. } = target_step.as_mut() {
         *node = NodeId(6);
         step.node = NodeId(6);
-        *ordinal = Some(2);
-        *parent = NodeId(5);
-        *turn_start = Some(step_turn_start(
-            vec![NodeId(4), NodeId(5)],
-            detail(id, false).accepted_at,
-        ));
     }
     view.reply(Response::View(ViewUpdate::Entry { entry: target_step }))
         .await;
 
-    assert!(matches!(next(&mut turn).await, LocalUpdate::Head(_)));
     assert!(matches!(
         next(&mut turn).await,
         LocalUpdate::Head(SessionHead {
@@ -1202,21 +1150,11 @@ async fn buffered_inputs_before_receipt_flush_in_tree_order_before_step0() {
             ..
         })
     ));
-    let mut received_nodes = Vec::new();
-    for _ in 0..3 {
-        let LocalUpdate::Entry { entry } = next(&mut turn).await else {
-            panic!("预期按树路径顺序依次收到 Input(4) -> Input(5) -> Step0(6)");
-        };
-        received_nodes.push((
-            entry.node(),
-            matches!(*entry, ConversationEntry::Input { .. }),
-        ));
-    }
-    assert_eq!(
-        received_nodes,
-        vec![(NodeId(4), true), (NodeId(5), true), (NodeId(6), false),],
-        "Step 0 认领暂存输入时必须先按序冲刷匹配的 Input，再推入 Step 0 本身，并剔除无关输入"
-    );
+    let LocalUpdate::Entry { entry } = next(&mut turn).await else {
+        panic!("单轮跟随应直接交付目标轮次的 Step 条目");
+    };
+    assert_eq!(entry.node(), NodeId(6));
+    assert_eq!(entry.turn_id(), Some(id));
 }
 #[tokio::test]
 async fn owner_retirement_head_waits_for_the_latest_position_entry() {
@@ -1365,21 +1303,9 @@ async fn following_an_unclosed_orphan_away_from_current_position_keeps_its_resul
             .await;
         }
         let mut current_entry = entry(current, false);
-        if let ConversationEntry::Step {
-            node,
-            step,
-            content: Node::Step {
-                parent, turn_start, ..
-            },
-            ..
-        } = current_entry.as_mut()
-        {
+        if let ConversationEntry::Step { node, step, .. } = current_entry.as_mut() {
             *node = NodeId(4);
             step.node = NodeId(4);
-            *parent = NodeId(3);
-            if let Some(meta) = turn_start {
-                meta.input_nodes = vec![NodeId(3)];
-            }
         }
         view.reply(Response::View(ViewUpdate::Entry {
             entry: current_entry,
@@ -1390,9 +1316,10 @@ async fn following_an_unclosed_orphan_away_from_current_position_keeps_its_resul
             LocalUpdate::Head(SessionHead { owner: true, .. })
         ));
         if visible {
-            for _ in 0..2 {
-                assert!(matches!(next(&mut turn).await, LocalUpdate::Entry { .. }));
-            }
+            assert!(matches!(
+                next(&mut turn).await,
+                LocalUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { .. })
+            ));
         }
         assert!(
             within(turn.next()).await.is_none(),

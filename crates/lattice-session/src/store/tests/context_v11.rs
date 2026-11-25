@@ -45,6 +45,7 @@ fn feed_input_and_trigger_turn_and_idempotency() {
         config: config(),
         accepted_at: now(),
         settings_version: version,
+        expected_position: None,
     };
     let err = db
         .trigger_turn(&lock, empty_trigger.clone())
@@ -75,6 +76,7 @@ fn feed_input_and_trigger_turn_and_idempotency() {
                 ])
                 .unwrap(),
                 accepted_at: now(),
+                expected_position: Some(NodeId(0)),
             },
         )
         .expect("纯投喂图文输入");
@@ -85,6 +87,7 @@ fn feed_input_and_trigger_turn_and_idempotency() {
         let read = db.begin_read().unwrap();
         let view = read.view(sid(1), 10).unwrap();
         assert_eq!(entry_nodes(&view.entries), vec![1]);
+        assert!(!view.has_more);
         assert!(matches!(
             &view.entries[0],
             ConversationEntry::Input {
@@ -92,7 +95,8 @@ fn feed_input_and_trigger_turn_and_idempotency() {
                 ..
             }
         ));
-        assert!(read.history(sid(1), NodeId(1), 1).unwrap().is_empty());
+        let (older, has_more) = read.history(sid(1), NodeId(1), 1).unwrap();
+        assert!(older.is_empty() && !has_more);
         assert_eq!(read.blob_count().unwrap(), 1);
         let eff = read.effective_context(sid(1), NodeId(1)).unwrap();
         assert_eq!(eff.project().len(), 1);
@@ -114,9 +118,11 @@ fn feed_input_and_trigger_turn_and_idempotency() {
     assert_eq!(detail.steps.len(), 1);
     assert_eq!(detail.steps[0].node, NodeId(2));
 
-    // 4. 独立触发精确幂等与冲突核对。
+    // 4. 独立触发精确幂等与冲突核对（即使携带旧 expected_position 与旧设置版本，幂等匹配必须优先返回 Existing）。
+    let mut replay_with_old_pos = empty_trigger.clone();
+    replay_with_old_pos.expected_position = Some(NodeId(1));
     assert!(matches!(
-        db.trigger_turn(&lock, empty_trigger.clone()).unwrap(),
+        db.trigger_turn(&lock, replay_with_old_pos).unwrap(),
         AcceptedTurn::Existing(existing) if existing == detail
     ));
     let mut wrong_channel = empty_trigger.clone();
@@ -146,9 +152,9 @@ fn feed_input_and_trigger_turn_and_idempotency() {
     {
         let read = db.begin_read().unwrap();
         // NodeId(3) 是父节点为 Step 0 (NodeId(2)) 的独立触发 Step 0，是合法分页单元起点。
-        let older = read.history(sid(1), NodeId(3), 1).unwrap();
+        let (older, has_more) = read.history(sid(1), NodeId(3), 1).unwrap();
         assert_eq!(entry_nodes(&older), vec![1, 2]);
-        assert_eq!(entry_ordinals(&older), vec![1]);
+        assert!(!has_more);
         // NodeId(2) 的父节点是 Input (NodeId(1))，不能作为分页起点切碎前置输入。
         assert!(matches!(
             read.history(sid(1), NodeId(2), 1),
@@ -196,6 +202,7 @@ fn apply_context_op_covers_all_seven_variants_and_blob_guards() {
                 ])
                 .unwrap(),
                 accepted_at: now(),
+                expected_position: None,
             },
         )
         .unwrap();
@@ -210,6 +217,7 @@ fn apply_context_op_covers_all_seven_variants_and_blob_guards() {
                 channel: channel("tui/comment"),
                 input: TurnInput::text("待替换批注".into()).unwrap(),
                 accepted_at: now(),
+                expected_position: None,
             },
         )
         .unwrap();
@@ -411,9 +419,9 @@ fn apply_context_op_covers_all_seven_variants_and_blob_guards() {
             }
         ));
         // ContextOp(6) 的父节点是 Step1(5)，是末尾未触发块的起点，可作为 history 分页边界。
-        let before_op = read.history(sid(1), NodeId(6), 1).unwrap();
+        let (before_op, before_more) = read.history(sid(1), NodeId(6), 1).unwrap();
         assert_eq!(entry_nodes(&before_op), vec![1, 2, 3, 4, 5]);
-        assert_eq!(entry_ordinals(&before_op), vec![1]);
+        assert!(!before_more);
 
         // 路径二（Effective Model Context）：反映全部 7 项编辑结果。
         let eff = read.effective_context(sid(1), NodeId(6)).unwrap();
@@ -497,6 +505,7 @@ fn apply_context_op_covers_all_seven_variants_and_blob_guards() {
                 config: config(),
                 accepted_at: now(),
                 settings_version: version,
+                expected_position: None,
             },
         )
         .expect_err("全部节点被 Omit 后有效上下文为空，独立触发必须拒绝");
@@ -614,6 +623,7 @@ fn multi_input_accept_turn_batch_limits_and_idempotency() {
         config: config(),
         accepted_at: now(),
         settings_version: version,
+        expected_position: Some(NodeId(0)),
     };
     let AcceptedTurn::Accepted(detail) = db.accept_turn(&lock, req.clone()).unwrap() else {
         panic!("多输入 accept_turn 应返回 Accepted");
@@ -621,7 +631,7 @@ fn multi_input_accept_turn_batch_limits_and_idempotency() {
     assert_eq!(detail.input_nodes, vec![NodeId(1), NodeId(2)]);
     assert_eq!(detail.start_node, NodeId(3));
 
-    // 精确幂等重放成功；任一条通道或内容不一致均返回 Conflict。
+    // 精确幂等重放成功（即使原 expected_position 为提交前的 NodeId(0)，也须先命中幂等返回 Existing）；任一条通道或内容不一致均返回 Conflict。
     assert!(matches!(
         db.accept_turn(&lock, req.clone()).unwrap(),
         AcceptedTurn::Existing(existing) if existing == detail
@@ -645,8 +655,13 @@ fn multi_input_accept_turn_batch_limits_and_idempotency() {
     for entry in &entries {
         let dbg = format!("{entry:?}");
         assert_eq!(dbg, "ConversationEntry { … }");
-        let node_dbg = format!("{:?}", entry.content());
-        assert_eq!(node_dbg, "Node { … }");
+        let node = read
+            .node(NodeRef {
+                session_id: sid(1),
+                node: entry.node(),
+            })
+            .unwrap();
+        assert_eq!(format!("{node:?}"), "Node { … }");
     }
     drop(read);
     drop(lock);
@@ -669,6 +684,7 @@ fn open_rejects_corrupted_context_op_on_rewound_branch_and_empty_trigger_step0()
                 channel: channel("tui"),
                 input: TurnInput::text("分支 A 输入".into()).unwrap(),
                 accepted_at: now(),
+                expected_position: None,
             },
         )
         .unwrap();
@@ -723,6 +739,7 @@ fn open_rejects_corrupted_context_op_on_rewound_branch_and_empty_trigger_step0()
                 channel: channel("tui"),
                 input: TurnInput::text("前置输入".into()).unwrap(),
                 accepted_at: now(),
+                expected_position: None,
             },
         )
         .unwrap();
@@ -736,6 +753,7 @@ fn open_rejects_corrupted_context_op_on_rewound_branch_and_empty_trigger_step0()
                 config: config(),
                 accepted_at: now(),
                 settings_version: version,
+                expected_position: None,
             },
         )
         .unwrap();
@@ -797,6 +815,7 @@ fn accept_turn_rejects_empty_batch_before_idempotency_and_never_mutates_store() 
             channel: channel("cli"),
             input: TurnInput::text("先投喂再独立触发".into()).unwrap(),
             accepted_at: now(),
+            expected_position: None,
         },
     )
     .expect("前置投喂应成功");
@@ -809,6 +828,7 @@ fn accept_turn_rejects_empty_batch_before_idempotency_and_never_mutates_store() 
         config: config(),
         accepted_at: now(),
         settings_version: version,
+        expected_position: None,
     };
     let AcceptedTurn::Accepted(triggered_detail) = db
         .trigger_turn(&lock, trigger_req.clone())
@@ -899,6 +919,7 @@ fn open_validates_large_branched_tree_and_repeated_empty_triggers_linearly() {
                 channel: channel("cli"),
                 input: TurnInput::text("共享前缀首输入".into()).unwrap(),
                 accepted_at: now(),
+                expected_position: None,
             },
         )
         .unwrap();
@@ -912,6 +933,7 @@ fn open_validates_large_branched_tree_and_repeated_empty_triggers_linearly() {
                 config: config(),
                 accepted_at: now(),
                 settings_version: version,
+                expected_position: None,
             },
         )
         .unwrap();
@@ -1089,6 +1111,7 @@ fn open_validates_large_branched_tree_and_repeated_empty_triggers_linearly() {
                     channel: channel("tui"),
                     input: TurnInput::text("将被分叉移出的前置输入".into()).unwrap(),
                     accepted_at: now(),
+                    expected_position: None,
                 },
             )
             .unwrap();
@@ -1121,6 +1144,7 @@ fn open_validates_large_branched_tree_and_repeated_empty_triggers_linearly() {
                     config: config(),
                     accepted_at: now(),
                     settings_version: version,
+                    expected_position: None,
                 },
             )
             .unwrap()
@@ -1148,4 +1172,145 @@ fn open_validates_large_branched_tree_and_repeated_empty_triggers_linearly() {
                 if table == "nodes" && key == &format!("{}/3", sid(1))
         ));
     }
+}
+
+#[test]
+fn expected_position_guards_all_four_writes_and_inspect_context_reads_any_position() {
+    let (_dir, _layout, db) = store();
+    let lock = db.try_lock_session(sid(1)).unwrap();
+    let version = create_draft(&db, &lock);
+
+    // 1. 草稿会话检视默认与显式根节点均返回空统计，未知节点返回 NotFound。
+    {
+        let read = db.begin_read().unwrap();
+        let (pos, insp) = read.inspect_context(sid(1), None).unwrap();
+        assert_eq!(pos, NodeId(0));
+        assert!(insp.entries.is_empty());
+        assert_eq!(
+            read.inspect_context(sid(1), Some(NodeId(0))).unwrap().0,
+            NodeId(0)
+        );
+        assert!(matches!(
+            read.inspect_context(sid(1), Some(NodeId(99))),
+            Err(StoreError::NotFound { kind: "node", .. })
+        ));
+        assert!(matches!(
+            read.inspect_context(sid(99), None),
+            Err(StoreError::NotFound {
+                kind: "session",
+                ..
+            })
+        ));
+    }
+
+    // 2. 四类写操作在 expected_position 不匹配时均返回 PositionChanged 且不落库。
+    assert!(matches!(
+        db.feed_input(
+            &lock,
+            FeedInput {
+                session_id: sid(1),
+                project_path: project(1),
+                channel: channel("cli"),
+                input: TurnInput::text("错位投喂".into()).unwrap(),
+                accepted_at: now(),
+                expected_position: Some(NodeId(1)),
+            },
+        ),
+        Err(StoreError::PositionChanged {
+            expected: NodeId(1),
+            actual: NodeId(0),
+            ..
+        })
+    ));
+    let n1 = db
+        .feed_input(
+            &lock,
+            FeedInput {
+                session_id: sid(1),
+                project_path: project(1),
+                channel: channel("cli"),
+                input: TurnInput::text("首条投喂".into()).unwrap(),
+                accepted_at: now(),
+                expected_position: Some(NodeId(0)),
+            },
+        )
+        .unwrap();
+    assert_eq!(n1, NodeId(1));
+
+    assert!(matches!(
+        db.apply_context_op(
+            &lock,
+            ApplyContextOp::new(
+                sid(1),
+                project(1),
+                ContextOp::new(channel("cli"), vec![ContextEdit::omit_node(NodeId(1))]).unwrap(),
+                now(),
+            )
+            .with_expected_position(Some(NodeId(0))),
+        ),
+        Err(StoreError::PositionChanged {
+            expected: NodeId(0),
+            actual: NodeId(1),
+            ..
+        })
+    ));
+
+    assert!(matches!(
+        db.trigger_turn(
+            &lock,
+            TriggerTurn {
+                session_id: sid(1),
+                turn_id: tid(1),
+                project_path: project(1),
+                trigger_channel: channel("cli"),
+                config: config(),
+                accepted_at: now(),
+                settings_version: version,
+                expected_position: Some(NodeId(0)),
+            },
+        ),
+        Err(StoreError::PositionChanged {
+            expected: NodeId(0),
+            actual: NodeId(1),
+            ..
+        })
+    ));
+
+    let mut wrong_accept = accept(sid(1), tid(2));
+    wrong_accept.settings_version = version;
+    wrong_accept.expected_position = Some(NodeId(0));
+    assert!(matches!(
+        db.accept_turn(&lock, wrong_accept),
+        Err(StoreError::PositionChanged {
+            expected: NodeId(0),
+            actual: NodeId(1),
+            ..
+        })
+    ));
+
+    // 3. 正确 expected_position 写入 ContextOp 后，inspect_context 可分别检视当前节点与历史节点。
+    let n2 = db
+        .apply_context_op(
+            &lock,
+            ApplyContextOp::new(
+                sid(1),
+                project(1),
+                ContextOp::new(channel("cli"), vec![ContextEdit::omit_node(NodeId(1))]).unwrap(),
+                now(),
+            )
+            .with_expected_position(Some(NodeId(1))),
+        )
+        .unwrap();
+    assert_eq!(n2, NodeId(2));
+
+    let read = db.begin_read().unwrap();
+    let (cur_pos, cur_insp) = read.inspect_context(sid(1), None).unwrap();
+    assert_eq!(cur_pos, NodeId(2));
+    assert!(cur_insp.entries.is_empty());
+    assert_eq!(cur_insp.operated_nodes.len(), 1);
+
+    let (old_pos, old_insp) = read.inspect_context(sid(1), Some(NodeId(1))).unwrap();
+    assert_eq!(old_pos, NodeId(1));
+    assert_eq!(old_insp.entries.len(), 1);
+    assert!(old_insp.operated_nodes.is_empty());
 }

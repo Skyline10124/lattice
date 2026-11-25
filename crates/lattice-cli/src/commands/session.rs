@@ -358,12 +358,12 @@ fn render_usage(usage: &lattice_local::SessionUsage) -> String {
         "session {} position={}\n",
         usage.session_id, usage.position.0
     );
-    text.push_str("#\tTURN\tPROVIDER/MODEL\tATTEMPTS\tINPUT\tCACHE_READ\tCACHE_WRITE\tOUTPUT\tREASONING\tCOST USD\n");
+    text.push_str("NODE\tTURN\tPROVIDER/MODEL\tATTEMPTS\tINPUT\tCACHE_READ\tCACHE_WRITE\tOUTPUT\tREASONING\tCOST USD\n");
     for turn in &usage.turns {
         let _ = writeln!(
             text,
-            "{}\t{}\t{}/{}\t{}",
-            turn.ordinal,
+            "@{}\t{}\t{}/{}\t{}",
+            turn.start_node.0,
             turn.turn_id,
             turn.provider,
             summarize(turn.model.as_str(), 120),
@@ -719,5 +719,29 @@ mod session_cli {
             "fake-observe-v1"
         );
         assert!(encoded["steps"][0]["slots"][0].get("evidence").is_none());
+    }
+
+    #[test]
+    fn usage_table_renders_start_node_at_prefix() {
+        let usage: lattice_local::SessionUsage = serde_json::from_value(serde_json::json!({
+            "session_id": "11111111111141118111111111111111",
+            "position": 5,
+            "turns": [{
+                "turn_id": "10000000-0000-4000-8000-000000000001",
+                "start_node": 2,
+                "provider": "openai",
+                "model": "gpt-test",
+                "usage": lattice_local::UsageSummary::from_attempts([])
+            }],
+            "path_total": lattice_local::UsageSummary::from_attempts([]),
+            "session_total": lattice_local::UsageSummary::from_attempts([])
+        }))
+        .expect("解析 SessionUsage");
+        let text = render_usage(&usage);
+        assert!(text.contains("NODE\tTURN\tPROVIDER/MODEL"), "{text}");
+        assert!(
+            text.contains("@2\t10000000-0000-4000-8000-000000000001\topenai/gpt-test\t"),
+            "用量表首列应以 @<start_node> 标识轮次：{text}"
+        );
     }
 }

@@ -46,4 +46,4 @@ pub use tools::{ToolOutcome, ToolSpec, TurnTools};
 pub(crate) use types::TurnEvent;
 #[cfg(any(test, feature = "test-utils"))]
 pub use types::TurnExecution;
-pub use types::{RunTurnRequest, TurnAcceptance, TurnCompletion};
+pub use types::{RunTurnRequest, TurnAcceptance, TurnCompletion, TurnPayload};

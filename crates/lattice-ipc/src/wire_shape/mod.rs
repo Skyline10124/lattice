@@ -86,7 +86,7 @@ impl CaseBook {
 }
 
 #[test]
-fn local_ipc_wire_shape_matches_v67_baseline() {
+fn local_ipc_wire_shape_matches_v68_baseline() {
     let mut book = CaseBook::default();
     fixtures::register_all(&mut book);
     gate::check_or_update_snapshot(&book.into_cases());

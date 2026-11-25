@@ -2388,6 +2388,7 @@ dependencies = [
 name = "lattice-local"
 version = "0.1.0"
 dependencies = [
+ "lattice-context",
  "lattice-conversation",
  "lattice-ipc",
  "lattice-store",

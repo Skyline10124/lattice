@@ -5,6 +5,7 @@
 
 use std::path::PathBuf;
 
+use lattice_context::{Channel, ContextInspection, ContextOp};
 use lattice_conversation::{Effort, ImageRef, ModelId, ModelRef, ProviderId, SessionId, TurnId};
 use lattice_session::{
     AgentName,
@@ -32,6 +33,7 @@ pub enum RequestConflict {
     SessionExists,
     BindingMismatch,
     SettingsChanged,
+    PositionChanged,
 }
 
 impl std::fmt::Display for RequestConflict {
@@ -41,6 +43,7 @@ impl std::fmt::Display for RequestConflict {
             Self::SessionExists => "session already exists",
             Self::BindingMismatch => "session is bound to another workspace",
             Self::SettingsChanged => "session settings changed",
+            Self::PositionChanged => "session position changed",
         })
     }
 }
@@ -80,6 +83,7 @@ pub struct TurnView {
     pub session_id: SessionId,
     pub turn_id: TurnId,
     pub start_node: NodeId,
+    /// 仅表示同一次 `submit` 写事务内一并写入的输入节点（独立 `trigger` 为空），不代表该轮独占的模型上下文。
     pub input_nodes: Vec<NodeId>,
     pub agent_name: String,
     pub accepted_at: chrono::DateTime<chrono::Utc>,
@@ -124,6 +128,9 @@ pub struct SessionHead {
     pub owner: bool,
     pub diagnostic: Option<LocalError>,
     pub path_replaced: bool,
+    /// 仅窗口头（初始快照、重连重载、路径替换）显式给出窗口之前是否仍有更早历史；增量头与单次查询为 `None`。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub has_older: Option<bool>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -148,6 +155,7 @@ pub enum ViewUpdate {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct LocalHistory {
     pub entries: Vec<ConversationEntry>,
+    pub has_more: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -524,7 +532,67 @@ pub enum UserInputPart<I = Vec<u8>> {
     },
 }
 
+/// 单条带来源通道的用户输入；不实现正文 Debug，避免明文或原始图片字节泄露到日志。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "UserInputPart<I>: Serialize",
+        deserialize = "UserInputPart<I>: Deserialize<'de>",
+    )
+)]
+pub struct TurnInputItem<I = Vec<u8>> {
+    pub channel: Channel,
+    pub parts: Vec<UserInputPart<I>>,
+}
+
 /// 私有请求不实现正文 Debug；两种身份均在发送之前确定。
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "TurnInputItem<I>: Serialize",
+        deserialize = "TurnInputItem<I>: Deserialize<'de>",
+    )
+)]
+pub struct TurnRequest<I = Vec<u8>> {
+    pub turn_id: TurnId,
+    pub session: SessionId,
+    #[serde(with = "path_bytes")]
+    pub workspace: PathBuf,
+    pub trigger_channel: Channel,
+    pub inputs: Vec<TurnInputItem<I>>,
+    pub expected_settings: Option<SettingsVersion>,
+    pub expected_position: Option<NodeId>,
+}
+
+impl<I> TurnRequest<I> {
+    /// 构造单输入条目的轮次提交请求，触发通道与输入通道保持一致。
+    pub fn single(
+        turn_id: TurnId,
+        session: SessionId,
+        workspace: PathBuf,
+        channel: Channel,
+        parts: Vec<UserInputPart<I>>,
+        expected_settings: Option<SettingsVersion>,
+        expected_position: Option<NodeId>,
+    ) -> Self {
+        Self {
+            turn_id,
+            session,
+            workspace,
+            trigger_channel: channel.clone(),
+            inputs: vec![TurnInputItem { channel, parts }],
+            expected_settings,
+            expected_position,
+        }
+    }
+}
+
+/// 读取图片字节之前的待发请求，图片段只持 `ImageRef`，只用于 `ipc::encoded_submit_len` 计长。
+pub type PlannedTurnRequest = TurnRequest<ImageRef>;
+
+/// 仅向会话追加用户输入而不触发轮次的私有请求；不实现正文 Debug。
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(
     deny_unknown_fields,
@@ -533,17 +601,88 @@ pub enum UserInputPart<I = Vec<u8>> {
         deserialize = "UserInputPart<I>: Deserialize<'de>",
     )
 )]
-pub struct TurnRequest<I = Vec<u8>> {
+pub struct FeedRequest<I = Vec<u8>> {
+    pub session: SessionId,
+    #[serde(with = "path_bytes")]
+    pub workspace: PathBuf,
+    pub channel: Channel,
+    pub parts: Vec<UserInputPart<I>>,
+    pub expected_position: Option<NodeId>,
+}
+
+/// 读取图片字节之前的待发 `feed` 请求，只用于 `ipc::encoded_feed_len` 计长。
+pub type PlannedFeedRequest = FeedRequest<ImageRef>;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FeedReply {
+    pub session_id: SessionId,
+    pub node: NodeId,
+}
+
+/// 随 `ContextOpRequest` 附带的原始图片载荷；线上按标准 base64 编码，不实现 Debug。
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "I: image_field::Encode",
+        deserialize = "I: image_field::Decode",
+    )
+)]
+pub struct ContextImage<I = Vec<u8>> {
+    #[serde(with = "image_field")]
+    pub image: I,
+}
+
+/// 向会话追加上下文编辑操作的私有请求；可能携带替代正文或图片字节，不实现 Debug。
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+#[serde(
+    deny_unknown_fields,
+    bound(
+        serialize = "ContextImage<I>: Serialize",
+        deserialize = "ContextImage<I>: Deserialize<'de>",
+    )
+)]
+pub struct ContextOpRequest<I = Vec<u8>> {
+    pub session: SessionId,
+    #[serde(with = "path_bytes")]
+    pub workspace: PathBuf,
+    pub op: ContextOp,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ContextImage<I>>,
+    pub expected_position: Option<NodeId>,
+}
+
+/// 读取图片字节之前的待发 `context_op` 请求，只用于 `ipc::encoded_context_op_len` 计长。
+pub type PlannedContextOpRequest = ContextOpRequest<ImageRef>;
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ContextOpReply {
+    pub session_id: SessionId,
+    pub node: NodeId,
+}
+
+/// 在不新增用户输入的前提下触发新轮次的请求；两种身份均在发送之前确定。
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TriggerRequest {
     pub turn_id: TurnId,
     pub session: SessionId,
     #[serde(with = "path_bytes")]
     pub workspace: PathBuf,
-    pub parts: Vec<UserInputPart<I>>,
+    pub trigger_channel: Channel,
     pub expected_settings: Option<SettingsVersion>,
+    pub expected_position: Option<NodeId>,
 }
 
-/// 读取图片字节之前的待发请求，图片段只持 `ImageRef`，只用于 `ipc::encoded_submit_len` 计长。
-pub type PlannedTurnRequest = TurnRequest<ImageRef>;
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct InspectReply {
+    pub session_id: SessionId,
+    pub position: NodeId,
+    pub inspection: ContextInspection,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "acceptance", rename_all = "snake_case")]
@@ -697,6 +836,19 @@ pub enum Request {
     Submit {
         request: TurnRequest,
     },
+    Feed {
+        request: FeedRequest,
+    },
+    ContextOp {
+        request: ContextOpRequest,
+    },
+    Trigger {
+        request: TriggerRequest,
+    },
+    Inspect {
+        session_id: SessionId,
+        position: Option<NodeId>,
+    },
     Cancel {
         turn_id: TurnId,
     },
@@ -710,6 +862,22 @@ pub enum Request {
 #[serde(tag = "operation", rename_all = "snake_case")]
 pub(crate) enum PlannedSubmit<'a> {
     Submit { request: &'a PlannedTurnRequest },
+}
+
+/// 与 `Request::Feed` 同构的计长包装；与 `Request` 的一致性由计长精确性测试守卫。
+#[derive(Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub(crate) enum PlannedFeed<'a> {
+    Feed { request: &'a PlannedFeedRequest },
+}
+
+/// 与 `Request::ContextOp` 同构的计长包装；与 `Request` 的一致性由计长精确性测试守卫。
+#[derive(Serialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub(crate) enum PlannedContextOp<'a> {
+    ContextOp {
+        request: &'a PlannedContextOpRequest,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -736,6 +904,9 @@ pub enum Response {
     Rewind(SessionRecord),
     Configure(ConfigureReply),
     Acceptance(Acceptance),
+    Feed(FeedReply),
+    ContextOp(ContextOpReply),
+    Inspect(InspectReply),
     View(ViewUpdate),
     Cancelled { owned: bool },
     Error(LocalError),
@@ -804,22 +975,39 @@ mod tests {
                 "ConfigureRequest 必须拒绝未知字段"
             );
         }
-        for expected_settings in [None, Some(version)] {
+        let cli_channel = Channel::parse("cli").unwrap();
+        let tui_channel = Channel::parse("tui").unwrap();
+        for (expected_settings, expected_position) in
+            [(None, None), (Some(version), Some(NodeId(4)))]
+        {
             let png_bytes = b"\x89PNG\r\n\x1a\n".to_vec();
             let request = TurnRequest {
                 turn_id: tid,
                 session: sid,
                 workspace: non_utf8_ws.clone(),
-                parts: vec![
-                    UserInputPart::Text {
-                        text: "前文".into(),
+                trigger_channel: cli_channel.clone(),
+                inputs: vec![
+                    TurnInputItem {
+                        channel: cli_channel.clone(),
+                        parts: vec![
+                            UserInputPart::Text {
+                                text: "前文".into(),
+                            },
+                            UserInputPart::Image { image: png_bytes },
+                            UserInputPart::Text {
+                                text: "后文".into(),
+                            },
+                        ],
                     },
-                    UserInputPart::Image { image: png_bytes },
-                    UserInputPart::Text {
-                        text: "后文".into(),
+                    TurnInputItem {
+                        channel: tui_channel.clone(),
+                        parts: vec![UserInputPart::Text {
+                            text: "补充输入".into(),
+                        }],
                     },
                 ],
                 expected_settings,
+                expected_position,
             };
             let wire = serde_json::to_value(&request).unwrap();
             assert_eq!(
@@ -828,8 +1016,9 @@ mod tests {
                 "submit 请求的 workspace 线上表示应为原始字节数组"
             );
             assert_eq!(wire["session"], sid.to_string());
+            assert_eq!(wire["trigger_channel"], "cli");
             assert_eq!(
-                wire["parts"][1],
+                wire["inputs"][0]["parts"][1],
                 serde_json::json!({"kind": "image", "image": "iVBORw0KGgo="}),
                 "图片片段线上字段应为标准 base64 字符串"
             );
@@ -843,21 +1032,129 @@ mod tests {
                 submit
             );
             let mut bad_base64 = submit.clone();
-            bad_base64["request"]["parts"][1]["image"] = serde_json::json!("not-valid-base64!");
+            bad_base64["request"]["inputs"][0]["parts"][1]["image"] =
+                serde_json::json!("not-valid-base64!");
             assert!(
                 serde_json::from_value::<Request>(bad_base64).is_err(),
                 "非法 base64 图片字段必须被拒绝"
             );
             let mut extra_part = submit.clone();
-            extra_part["request"]["parts"][0]["extra"] = serde_json::json!(1);
+            extra_part["request"]["inputs"][0]["parts"][0]["extra"] = serde_json::json!(1);
             assert!(
                 serde_json::from_value::<Request>(extra_part).is_err(),
                 "UserInputPart 必须拒绝未知字段"
+            );
+            let mut extra_item = submit.clone();
+            extra_item["request"]["inputs"][0]["extra"] = serde_json::json!(1);
+            assert!(
+                serde_json::from_value::<Request>(extra_item).is_err(),
+                "TurnInputItem 必须拒绝未知字段"
             );
             let mut extra = submit;
             extra["configuration"] = serde_json::json!({"profile_toml":"untrusted"});
             assert!(serde_json::from_value::<Request>(extra).is_err());
         }
+        let feed_req = FeedRequest {
+            session: sid,
+            workspace: non_utf8_ws.clone(),
+            channel: cli_channel.clone(),
+            parts: vec![
+                UserInputPart::Text {
+                    text: "背景说明".into(),
+                },
+                UserInputPart::Image {
+                    image: b"\x89PNG\r\n\x1a\n".to_vec(),
+                },
+            ],
+            expected_position: Some(NodeId(2)),
+        };
+        let feed_wire = serde_json::to_value(Request::Feed {
+            request: feed_req.clone(),
+        })
+        .unwrap();
+        assert!(
+            matches!(serde_json::from_value::<Request>(feed_wire.clone()).unwrap(), Request::Feed { request } if request == feed_req),
+            "feed 请求往返解码后应保持一致"
+        );
+        let mut feed_extra = feed_wire;
+        feed_extra["request"]["extra"] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<Request>(feed_extra).is_err(),
+            "FeedRequest 必须拒绝未知字段"
+        );
+
+        let context_op_req = ContextOpRequest {
+            session: sid,
+            workspace: non_utf8_ws.clone(),
+            op: ContextOp::new(
+                tui_channel.clone(),
+                vec![lattice_context::ContextEdit::omit_node(NodeId(1))],
+            )
+            .unwrap(),
+            images: vec![ContextImage {
+                image: b"\x89PNG\r\n\x1a\n".to_vec(),
+            }],
+            expected_position: Some(NodeId(3)),
+        };
+        let context_op_wire = serde_json::to_value(Request::ContextOp {
+            request: context_op_req.clone(),
+        })
+        .unwrap();
+        assert!(
+            matches!(serde_json::from_value::<Request>(context_op_wire.clone()).unwrap(), Request::ContextOp { request } if request == context_op_req),
+            "context_op 请求往返解码后应保持一致"
+        );
+        let mut op_extra = context_op_wire;
+        op_extra["request"]["images"][0]["extra"] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<Request>(op_extra).is_err(),
+            "ContextImage 必须拒绝未知字段"
+        );
+
+        let trigger_req = TriggerRequest {
+            turn_id: tid,
+            session: sid,
+            workspace: non_utf8_ws.clone(),
+            trigger_channel: cli_channel,
+            expected_settings: Some(version),
+            expected_position: Some(NodeId(4)),
+        };
+        let trigger_wire = serde_json::to_value(Request::Trigger {
+            request: trigger_req.clone(),
+        })
+        .unwrap();
+        assert!(
+            matches!(serde_json::from_value::<Request>(trigger_wire.clone()).unwrap(), Request::Trigger { request } if request == trigger_req),
+            "trigger 请求往返解码后应保持一致"
+        );
+        let mut trigger_extra = trigger_wire;
+        trigger_extra["request"]["extra"] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<Request>(trigger_extra).is_err(),
+            "TriggerRequest 必须拒绝未知字段"
+        );
+
+        let inspect_wire = serde_json::to_value(Request::Inspect {
+            session_id: sid,
+            position: Some(NodeId(2)),
+        })
+        .unwrap();
+        assert!(
+            matches!(
+                serde_json::from_value::<Request>(inspect_wire.clone()).unwrap(),
+                Request::Inspect {
+                    session_id,
+                    position: Some(NodeId(2)),
+                } if session_id == sid
+            ),
+            "inspect 请求往返解码后应保持一致"
+        );
+        let mut inspect_extra = inspect_wire;
+        inspect_extra["extra"] = serde_json::json!(1);
+        assert!(
+            serde_json::from_value::<Request>(inspect_extra).is_err(),
+            "Inspect 请求必须拒绝未知字段"
+        );
         let rewind_wire = serde_json::to_value(Request::Rewind {
             session_id: sid,
             target: NodeId(0),
@@ -941,6 +1238,7 @@ mod tests {
             owner: false,
             diagnostic: None,
             path_replaced: false,
+            has_older: None,
         };
         assert_eq!(
             serde_json::to_value(Response::Head(head.clone())).unwrap(),
@@ -985,6 +1283,7 @@ mod tests {
                 "session is bound to another workspace",
             ),
             (RequestConflict::SettingsChanged, "session settings changed"),
+            (RequestConflict::PositionChanged, "session position changed"),
         ] {
             assert_eq!(reason.to_string(), text);
         }

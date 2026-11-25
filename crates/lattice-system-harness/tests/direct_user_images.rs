@@ -40,16 +40,22 @@ fn accepted(command: CommandOutcome) -> Result<SendExecution, AssertError> {
     Ok(execution)
 }
 
-/// 本轮用户输入条目的片段（含结构化图片引用）。
-fn user_message_parts(execution: &SendExecution) -> Result<Vec<Value>, AssertError> {
-    let entry = execution
-        .entries()
-        .into_iter()
+/// 经 `watch` 视图读取本轮用户输入条目的片段（含结构化图片引用）。
+fn user_message_parts(
+    world: &ScenarioWorld,
+    spec: &ScenarioSpec,
+    sid: &str,
+) -> Result<Vec<Value>, AssertError> {
+    let mut watcher = support::Watcher::open(world, spec.step_timeout(), sid);
+    let view = watcher.initial();
+    let entry = view
+        .entries
+        .values()
         .find(|entry| entry.is_input())
         .ok_or_else(|| AssertError::StdoutMissing {
-            expected: "逐行输出中缺少本轮用户输入条目".into(),
+            expected: "会话视图中缺少本轮用户输入条目".into(),
         })?;
-    entry.raw["content"]["input"]["message"]["parts"]
+    entry.raw["input"]["message"]["parts"]
         .as_array()
         .cloned()
         .ok_or_else(|| AssertError::StdoutMissing {
@@ -73,7 +79,7 @@ fn assert_image_part(part: &Value, media_type: &str, byte_length: u64) -> Result
 
 /// 五种协议里，本轮“文本 + PNG + JPEG”用户输入经模型上下文投影后的内容块（见 `docs/architecture/llm/protocols.md`）。
 fn expected_user_blocks(protocol: ProviderProtocol, text: &str) -> [Value; 4] {
-    let open = format!("<lattice-context channel=\"ipc\">\n{text}");
+    let open = format!("<lattice-context channel=\"cli\">\n{text}");
     let close = "</lattice-context>";
     match protocol {
         ProviderProtocol::ChatCompletions => [
@@ -206,7 +212,7 @@ fn user_images_replay_after_daemon_restart() {
             )
             .unwrap();
             let sid = first.accepted_session_id().unwrap().to_owned();
-            let parts = user_message_parts(&first).unwrap();
+            let parts = user_message_parts(&world, &spec, &sid).unwrap();
             require(
                 parts.len() == 3 && parts[0]["semantic"]["text"]["text"] == "请比较这两张图",
                 format!("首轮用户消息应为文本加两张图片：{parts:?}"),

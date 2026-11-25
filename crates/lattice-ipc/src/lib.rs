@@ -18,8 +18,9 @@ pub use auth::{
 };
 pub use drain_timeout::{DrainTimeout, parse_drain_timeout};
 pub use lattice_context::{
-    Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextOp, ContextText,
-    EffectiveContext, NormalizedUserMessage, ToolResultText,
+    Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
+    ContextText, EffectiveContext, EffectiveEntrySummary, NodeStatus, NormalizedUserMessage,
+    OperatedNode, PathNodeKind, ToolResultText,
 };
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
@@ -33,10 +34,11 @@ pub use lattice_session::{
     AgentName, AgentNameError, ProjectPath, RetryPolicy, RetryPolicyError, TurnTimeout,
     TurnTimeoutError,
     store::{
-        AttemptProgress, ConversationEntry, MaterialSummary, Node, NodeId, NodeKind, NodeRef,
-        Notice, NoticeLevel, Page, PublicTurnOutcome, RetryNotice, SessionLog, SessionRecord,
-        SessionUsage, SettingsVersion, SlotProgress, SlotReason, SlotState, StepDetail, StepEnd,
-        StepKey, StepProgress, TurnDetail, TurnStartMeta, TurnSummary, TurnUsageRow, UsageSummary,
+        AttemptDetail, AttemptEndDetail, AttemptProgressDetail, ConversationEntry, MaterialSummary,
+        NodeId, NodeKind, NodeRef, Notice, NoticeLevel, Page, PublicTurnOutcome, RetryNotice,
+        SessionLog, SessionRecord, SessionUsage, SettingsVersion, SlotDetail, SlotReason,
+        SlotState, StepDetail, StepEnd, StepKey, StepProgress, TurnDetail, TurnSummary,
+        TurnUsageRow, UsageSummary,
     },
 };
 pub use models::{
@@ -46,11 +48,13 @@ pub use models::{
 pub use types::{
     Acceptance, AuthLoggedOut, AuthRemoval, CancelStatus, ComponentState, ComponentStatus,
     ConfigureReply, ConfigureRequest, ConfigureResult, ConfigureSession, ConflictReason,
-    ConnectionStatus, DaemonStatus, EffortAdjustment, HISTORY_TURNS, ImAuthRemoveReply,
-    ImAuthSetReply, ImAuthStatus, ImCredentialStatus, ImMountResult, ImPlatformAuthStatus,
-    LocalError, LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, PlannedTurnRequest,
-    RecoveryCause, RecoveryNeed, Request, RequestConflict, Response, Result, SessionHead,
-    SessionListRow, StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate,
-    TextSegment, TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, UserInputPart, ViewUpdate,
+    ConnectionStatus, ContextImage, ContextOpReply, ContextOpRequest, DaemonStatus,
+    EffortAdjustment, FeedReply, FeedRequest, HISTORY_TURNS, ImAuthRemoveReply, ImAuthSetReply,
+    ImAuthStatus, ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, InspectReply,
+    LocalError, LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS,
+    PlannedContextOpRequest, PlannedFeedRequest, PlannedTurnRequest, RecoveryCause, RecoveryNeed,
+    Request, RequestConflict, Response, Result, SessionHead, SessionListRow, StoreDiagnostic,
+    SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment, TextUpdate, TriggerRequest,
+    TurnInputItem, TurnLookup, TurnRef, TurnRequest, TurnView, UserInputPart, ViewUpdate,
     WATCH_TURNS,
 };

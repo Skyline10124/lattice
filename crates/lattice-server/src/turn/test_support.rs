@@ -127,10 +127,18 @@ pub(super) fn setup_fixture(llm: Arc<dyn LlmClient>, enabled_tools: &[&str]) -> 
             chrono::Utc::now(),
         )
         .unwrap();
+    let cli = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
     let request = RunTurnRequest {
-        input: lattice_session::store::TurnInput::text("hello".into()).expect("构造测试输入"),
+        payload: TurnPayload::Submit {
+            trigger_channel: cli.clone(),
+            inputs: vec![(
+                cli,
+                lattice_session::store::TurnInput::text("hello".into()).expect("构造测试输入"),
+            )],
+        },
         session_id,
         expected_settings: None,
+        expected_position: None,
         cancel_flag: None,
         tools: Some(StaticTestTools::from_names(enabled_tools)),
         test_llm: Some((

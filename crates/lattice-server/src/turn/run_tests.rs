@@ -297,7 +297,11 @@ async fn run_turn_request_with_images_preserves_order_and_reads_blobs_via_sessio
     ])
     .expect("构造图文交错轮次输入");
     let expected_parts = input.message().parts.clone();
-    fixture.request.input = input;
+    let ch = Channel::parse("ipc").expect("测试通道名应合法");
+    fixture.request.payload = super::types::TurnPayload::Submit {
+        trigger_channel: ch.clone(),
+        inputs: vec![(ch, input)],
+    };
 
     let result = super::execute::run_turn(
         fixture.api.clone(),

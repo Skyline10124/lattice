@@ -934,6 +934,7 @@ mod tests {
                     owner: false,
                     diagnostic: None,
                     path_replaced: false,
+                    has_older: None,
                 },
                 initial_adjustment: None,
             },

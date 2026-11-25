@@ -181,6 +181,7 @@ pub(crate) fn describe_local_error(error: &LocalError, redactor: &ImRedactor) ->
             Some(ConflictReason::SessionExists) => "会话身份已存在".into(),
             Some(ConflictReason::BindingMismatch) => "会话绑定的工作区与当前配置不一致".into(),
             Some(ConflictReason::SettingsChanged) => "会话设置已变更，请重试".into(),
+            Some(ConflictReason::PositionChanged) => "会话位置已变化，请重试".into(),
             None => "请求存在冲突".into(),
         },
         LocalErrorKind::BadRequest => {

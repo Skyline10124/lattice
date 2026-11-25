@@ -22,7 +22,7 @@ status: active
 
 - 原分支的节点仍在 `log` 中，新节点以目标节点为父。
 - 每次读取的对话都是根到当时当前位置的路径：退回后、发送前止于目标节点；退回原 Turn 后恢复原对话；`rewind 0` 后为空。
-- 请求的对话部分等于发送前路径加上本次输入，经 `lattice-context` 归约与所选 provider 的规定投影（存活用户输入以 `<lattice-context channel="ipc">` 包裹）；系统提示与工具定义单独核对。改写第一条消息的请求只含新输入，新输入节点的父节点为 `0`。
+- 请求的对话部分等于发送前路径加上本次输入，经 `lattice-context` 归约与所选 provider 的规定投影（存活用户输入以 `<lattice-context channel="cli">` 包裹）；系统提示与工具定义单独核对。改写第一条消息的请求只含新输入，新输入节点的父节点为 `0`。
 - `rewind` 不改变会话设置，且退回到根节点 `0` 的会话保持已接受过轮次的状态（不属于[草稿会话](../../../architecture/session/concurrency.md#会话状态与草稿清理)）：未指定 `--agent` 的发送（包括当前位置为 `0` 时）使用会话设置中的 `agent`，而不是目标节点所属 Turn 的 `agent`；带 `--agent` 的发送先执行 `configure` 按该 `agent` 更新会话设置，再提交。
 - 原 Turn 的 `session turn` 仍给出它自己的结局与 Step 节点；工作区文件不变。
 - 进行中的 `rewind` 返回 Busy；不存在的序号被拒绝，当前位置不变。

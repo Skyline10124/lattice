@@ -159,6 +159,18 @@ impl CoordinatorStoreIo {
         self.write(move |store, lock| store.accept_turn(lock, input))
             .await
     }
+    pub(crate) async fn trigger(&self, req: TriggerTurn) -> Result<AcceptedTurn> {
+        self.write(move |store, lock| store.trigger_turn(lock, req))
+            .await
+    }
+    pub(crate) async fn feed_input(&self, req: FeedInput) -> Result<NodeId> {
+        self.write(move |store, lock| store.feed_input(lock, req))
+            .await
+    }
+    pub(crate) async fn apply_context_op(&self, req: ApplyContextOp) -> Result<NodeId> {
+        self.write(move |store, lock| store.apply_context_op(lock, req))
+            .await
+    }
     pub(crate) async fn start_request(
         &self,
         key: ModelAttemptKey,

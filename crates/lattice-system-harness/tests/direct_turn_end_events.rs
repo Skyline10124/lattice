@@ -39,13 +39,19 @@ fn reopened_entries_match(
     spec: &lattice_system_harness::ScenarioSpec,
     outcome: &lattice_system_harness::SendOutcome,
 ) -> Result<(), AssertError> {
-    let (sid, _, _) = outcome.closed_result().expect("轮次应已有收束结果");
+    let (sid, tid, _) = outcome.closed_result().expect("轮次应已有收束结果");
     let mut watcher = Watcher::open(world, spec.step_timeout(), sid);
     let reopened = watcher.initial();
+    let reopened_steps: Vec<&Value> = reopened
+        .entries
+        .values()
+        .filter(|entry| entry.turn_id.as_deref() == Some(tid))
+        .map(|entry| &entry.raw)
+        .collect();
     let live: Vec<&Value> = outcome.entries().iter().map(|entry| &entry.raw).collect();
     require(
-        reopened.raw_entries() == live,
-        "重开会话读到的条目（含重试提示）必须与实时流完全一致",
+        reopened.entries.values().any(|entry| entry.is_input()) && reopened_steps == live,
+        "重开会话读到的本轮步骤条目（含重试提示）必须与实时流完全一致，并包含前置输入条目",
     )
 }
 
@@ -95,20 +101,21 @@ fn direct_turn_end_events_completed_turn_delivers_terminal_event() {
         let entries = outcome.entries();
         let steps: Vec<_> = entries.iter().filter_map(|entry| entry.step()).collect();
         require(
-            entries.len() == 3
-                && entries[0].is_input()
+            entries.len() == 2
                 && steps.len() == 2
-                && steps[0].turn_ordinal == Some(1)
+                && steps[0].ordinal == 0
+                && steps[0].agent_name.as_deref() == Some("end-events")
                 && steps[0].progress
                     == lattice_system_harness::StepProgress::Closed(StepEnd::Continue)
                 && steps[0].summary.is_none()
                 && steps[0].slots.len() == 1
                 && steps[1].ordinal == 1
+                && steps[1].agent_name.is_none()
                 && steps[1]
                     .summary
                     .as_ref()
                     .is_some_and(|summary| summary.outcome.as_str() == "completed"),
-            format!("应依次包含输入条目、继续执行的步骤与带结局摘要的末步：{entries:?}"),
+            format!("单轮跟随应依次包含继续执行的步骤与带结局摘要的末步：{entries:?}"),
         )?;
         require(
             detail.is_clean_exit(0)

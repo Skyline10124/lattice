@@ -78,16 +78,13 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
             .is_some_and(|(sid, tid, _)| sid == session_id && tid == turn_id),
         "关闭结果必须归属本次提交的轮次",
     )?;
-    let Some(ReceiptResult::Accepted {
-        start_node,
-        input_nodes,
-        ..
-    }) = outcome.receipt().map(|receipt| &receipt.result)
+    let Some(ReceiptResult::Accepted { start_node, .. }) =
+        outcome.receipt().map(|receipt| &receipt.result)
     else {
         return require(false, "接受回执必须为 Accepted");
     };
-    let allowed_inputs: std::collections::BTreeSet<u64> = input_nodes.iter().copied().collect();
-    // 逐条看原始记录：每条 `step` 属于这一轮、每条 `input` 属于本轮认领输入集合，每条 `text` 的节点是这一轮的条目节点。
+    // 单轮跟随（`session send`）只放行归属当前轮次的 `Step` 条目，不输出 `Input` / `ContextOp`；
+    // 每条 `text` 的节点必须属于这一轮已接收到的步骤节点。
     let mut nodes = std::collections::BTreeSet::new();
     for record in &outcome.records {
         if let SendRecord::Entry(entry) = record {
@@ -99,10 +96,10 @@ pub(crate) fn assert_accepted_and_closed(outcome: &SendOutcome) -> Result<(), As
                     )?;
                 }
                 EntryContent::Input { .. } => {
-                    require(
-                        allowed_inputs.contains(&entry.node),
-                        format!("输入节点 {} 不属于本轮认领的输入集合", entry.node),
-                    )?;
+                    return require(
+                        false,
+                        format!("单轮跟随的 session send 不应输出输入节点 {}", entry.node),
+                    );
                 }
                 EntryContent::ContextOp { .. } => {
                     return require(
@@ -347,7 +344,7 @@ pub(crate) fn cli(world: &ScenarioWorld, spec: &ScenarioSpec, args: &[&str]) -> 
 }
 
 /// 与 `lattice_local::test_support::FRAME_MAGIC` 相同；测试框架不能依赖产品 crate，用同一版本号拼出帧魔数。
-const PROTOCOL_VERSION: u8 = 67;
+const PROTOCOL_VERSION: u8 = 68;
 const FRAME_MAGIC: &[u8; 8] = &[b'L', b'T', b'L', b'O', b'C', b'A', b'L', PROTOCOL_VERSION];
 
 /// 公开本地 IPC 的一条连接：请求写成一帧，回复按当前帧魔数重组为逻辑消息。
@@ -446,15 +443,99 @@ pub(crate) fn configure_request(
         "workspace":path_bytes(world.project_dir()),"agent":agent,"model":model,"effort":effort}})
 }
 
-/// 原始 `submit` 只针对已有 `session_id` 提交输入与可选的 `expected_settings`。
+/// 原始 `submit` 针对已有 `session_id` 提交 `1..=N` 条带渠道输入与可选基线。
 pub(crate) fn submit_request(
     world: &ScenarioWorld,
     turn_id: &str,
     session_id: &str,
     input: &str,
 ) -> Value {
-    json!({"operation":"submit","request":{"turn_id":turn_id,"session":session_id,
-        "workspace":path_bytes(world.project_dir()),"parts":[{"kind":"text","text":input}],"expected_settings":null}})
+    json!({
+        "operation": "submit",
+        "request": {
+            "turn_id": turn_id,
+            "session": session_id,
+            "workspace": path_bytes(world.project_dir()),
+            "trigger_channel": "cli",
+            "inputs": [{
+                "channel": "cli",
+                "parts": [{"kind": "text", "text": input}]
+            }],
+            "expected_settings": null,
+            "expected_position": null
+        }
+    })
+}
+
+/// 原始 `feed`：只追加一条用户消息节点，不触发模型轮次。
+pub(crate) fn feed_request(
+    world: &ScenarioWorld,
+    session_id: &str,
+    channel: &str,
+    input: &str,
+    expected_position: Option<u64>,
+) -> Value {
+    json!({
+        "operation": "feed",
+        "request": {
+            "session": session_id,
+            "workspace": path_bytes(world.project_dir()),
+            "channel": channel,
+            "parts": [{"kind": "text", "text": input}],
+            "expected_position": expected_position
+        }
+    })
+}
+
+/// 原始 `context_op`：追加一条上下文操作节点。
+pub(crate) fn context_op_request(
+    world: &ScenarioWorld,
+    session_id: &str,
+    op: Value,
+    images: Vec<Value>,
+    expected_position: Option<u64>,
+) -> Value {
+    json!({
+        "operation": "context_op",
+        "request": {
+            "session": session_id,
+            "workspace": path_bytes(world.project_dir()),
+            "op": op,
+            "images": images,
+            "expected_position": expected_position
+        }
+    })
+}
+
+/// 原始 `trigger`：不写入新输入，直接基于已有上下文触发模型轮次。
+pub(crate) fn trigger_request(
+    world: &ScenarioWorld,
+    turn_id: &str,
+    session_id: &str,
+    trigger_channel: &str,
+    expected_settings: Option<&str>,
+    expected_position: Option<u64>,
+) -> Value {
+    json!({
+        "operation": "trigger",
+        "request": {
+            "turn_id": turn_id,
+            "session": session_id,
+            "workspace": path_bytes(world.project_dir()),
+            "trigger_channel": trigger_channel,
+            "expected_settings": expected_settings,
+            "expected_position": expected_position
+        }
+    })
+}
+
+/// 原始 `inspect`：只读检查某位点上的有效上下文视图。
+pub(crate) fn inspect_request(session_id: &str, position: Option<u64>) -> Value {
+    json!({
+        "operation": "inspect",
+        "session_id": session_id,
+        "position": position
+    })
 }
 
 /// 按 `TurnId` 查询：已接受、在途，或 `not_found` 错误。
@@ -466,6 +547,30 @@ pub(crate) fn turn_lookup(world: &ScenarioWorld, timeout: Duration, turn_id: &st
     )
 }
 
+/// `history` 分页查询；成功时返回 `(entries, has_more)`，否则返回整条回复供场景断言错误。
+pub(crate) fn history_page(
+    world: &ScenarioWorld,
+    timeout: Duration,
+    session_id: &str,
+    before: u64,
+    turns: u32,
+) -> Result<(Vec<Value>, bool), Value> {
+    let response = ipc(
+        world,
+        timeout,
+        json!({"operation":"history","session_id":session_id,"before":before,"turns":turns}),
+    );
+    match (
+        response["value"]["entries"].as_array(),
+        response["value"]["has_more"].as_bool(),
+    ) {
+        (Some(entries), Some(has_more)) if response["response"] == "history" => {
+            Ok((entries.clone(), has_more))
+        }
+        _ => Err(response),
+    }
+}
+
 /// `history` 查询；成功时返回条目数组，否则返回整条回复供场景断言错误。
 pub(crate) fn history(
     world: &ScenarioWorld,
@@ -474,15 +579,7 @@ pub(crate) fn history(
     before: u64,
     turns: u32,
 ) -> Result<Vec<Value>, Value> {
-    let response = ipc(
-        world,
-        timeout,
-        json!({"operation":"history","session_id":session_id,"before":before,"turns":turns}),
-    );
-    match response["value"]["entries"].as_array() {
-        Some(entries) if response["response"] == "history" => Ok(entries.clone()),
-        _ => Err(response),
-    }
+    history_page(world, timeout, session_id, before, turns).map(|(entries, _)| entries)
 }
 
 /// 一个 `watch` 观察者：逐条读取 `view` 消息，维护它持有的视图并保留原始消息作证据。

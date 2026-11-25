@@ -78,7 +78,7 @@ fn comment_history_anchor_uses_original_part_and_only_closed_single_fragment() {
     assert_eq!(req.session, sid());
     assert_eq!(req.workspace, h.options.project_root);
     assert_eq!(req.expected_settings, Some(settings_version(0x11)));
-    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+    let [UserInputPart::Text { text: wire }] = &req.inputs[0].parts[..] else {
         panic!("提交请求应只含一段文本");
     };
     let message = crate::comment::Message::parse(wire).unwrap();
@@ -173,7 +173,7 @@ fn reject(app: &mut App, id: TurnId, how: usize) {
 }
 
 #[test]
-fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
+fn comment_manual_rejections_restore_draft_and_in_flight_comments_reserve_numbers() {
     for how in 0..4 {
         let mut h = comment_app();
         let app = &mut h.app;
@@ -184,18 +184,30 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         assert_eq!(req.session, sid());
         assert_eq!(req.workspace, h.options.project_root);
         assert_eq!(req.expected_settings, Some(settings_version(0x11)));
-        let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+        let [UserInputPart::Text { text: wire }] = &req.inputs[0].parts[..] else {
             panic!("提交请求应只含一段文本");
         };
         assert_eq!(crate::comment::Message::parse(wire).unwrap().text, "body");
         assert_eq!(app.history.prev(), Some("body"));
+        // 提交在途（无乐观块）期间新建评论草稿，编号必须避开在途的 #1。
+        save_comment(app, "in-flight second");
+        assert_eq!(
+            app.drafts.drafts().next().unwrap().comment().n,
+            2,
+            "在途提交携带的评论 #1 必须占用编号，避免被拒归还后撞号"
+        );
         let id = app.own_turn.unwrap();
         reject(app, id, how);
         assert_eq!(app.input.text(), "body", "{how}");
         let text = transcript(app);
-        assert_eq!(text.matches("[COMMENT 1]").count(), 1);
+        assert_eq!(
+            text.matches("[COMMENT 1]").count(),
+            0,
+            "A1 无乐观被拒 USER 块"
+        );
         assert_eq!(text.matches("rejected note").count(), 1, "{how}");
         assert!(text.contains("草稿 · #1"), "{how}: {text}");
+        assert!(text.contains("草稿 · #2"), "{how}: {text}");
         comment_browse(app, "rejected note");
         app.apply_action(KeyAction::Submit);
         assert!(app.drafts.is_editing(), "归还的草稿应仍可编辑");
@@ -204,9 +216,13 @@ fn comment_manual_rejections_keep_user_markers_and_restore_one_draft_copy() {
         app.apply_action(KeyAction::Delete);
         save_comment(app, "next note");
         assert_eq!(
-            app.drafts.drafts().next().unwrap().comment().n,
-            2,
-            "保留的被拒标记应继续占用原编号"
+            app.drafts
+                .drafts()
+                .map(|draft| draft.comment().n)
+                .max()
+                .unwrap(),
+            3,
+            "在途期间新建的 #2 仍在草稿中，后续评论应递增到 #3"
         );
     }
 }
@@ -282,7 +298,7 @@ fn comment_reload_attaches_or_falls_back() {
     assert_eq!(req.session, sid());
     assert_eq!(req.workspace, source.options.project_root);
     assert_eq!(req.expected_settings, Some(settings_version(0x11)));
-    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+    let [UserInputPart::Text { text: wire }] = &req.inputs[0].parts[..] else {
         panic!("提交请求应只含一段文本");
     };
     let original = crate::comment::Message::parse(wire).unwrap();
@@ -317,7 +333,7 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
     assert_eq!(req.session, sid());
     assert_eq!(req.workspace, source.options.project_root);
     assert_eq!(req.expected_settings, Some(settings_version(0x11)));
-    let [UserInputPart::Text { text: wire }] = &req.parts[..] else {
+    let [UserInputPart::Text { text: wire }] = &req.inputs[0].parts[..] else {
         panic!("提交请求应只含一段文本");
     };
     let target = crate::comment::Message::parse(wire).unwrap().comments[0]
@@ -329,9 +345,11 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
     app.term_width = 80;
     app.term_height = 12;
     let last = lattice_local::new_turn_id();
+    let mut h = head(8, Some(last), false);
+    h.has_older = Some(true);
     open_view(
         app,
-        head(8, Some(last), false),
+        h,
         vec![
             user(5, target, 3, "prompt-3"),
             step(6, target, 0)
@@ -378,6 +396,7 @@ fn older_turns_keep_the_view_inside_a_reply_with_inline_comments() {
         request,
         Ok(LocalHistory {
             entries: turns(1..=2),
+            has_more: false,
         }),
     );
     assert_eq!(top(app), before, "视图停在原来看到的那一行");
@@ -481,7 +500,7 @@ fn comment_numbering_continues_from_history_and_drafts() {
     save_comment(&mut source.app, "history note");
     source.app.focus = Focus::Dock;
     let source_req = source.app.submit().unwrap();
-    let [UserInputPart::Text { text: source_wire }] = &source_req.parts[..] else {
+    let [UserInputPart::Text { text: source_wire }] = &source_req.inputs[0].parts[..] else {
         panic!("提交请求应只含一段文本");
     };
     let mut message = crate::comment::Message::parse(source_wire).unwrap();
@@ -497,7 +516,7 @@ fn comment_numbering_continues_from_history_and_drafts() {
     assert_eq!(out_req.session, sid());
     assert_eq!(out_req.workspace, h.options.project_root);
     assert_eq!(out_req.expected_settings, Some(settings_version(0x11)));
-    let [UserInputPart::Text { text: out_wire }] = &out_req.parts[..] else {
+    let [UserInputPart::Text { text: out_wire }] = &out_req.inputs[0].parts[..] else {
         panic!("提交请求应只含一段文本");
     };
     let outgoing = crate::comment::Message::parse(out_wire).unwrap();
@@ -1236,7 +1255,7 @@ async fn unknown_acceptance_is_recovered_by_turn_query_and_the_view_takes_over()
             entry_reply(user(1, turn, 1, "prompt")),
             entry_reply(step(2, turn, 0).sent().entry()),
         ]);
-        let shown = remote.wait(|f| f.text.contains("#1 ──")).await;
+        let shown = remote.wait(|f| f.text.contains("@2 ──")).await;
         assert_eq!(shown.text.matches("prompt").count(), 1, "{}", shown.text);
         assert_eq!(shown.phase, TurnPhase::Streaming);
         remote.ctrl('c');
@@ -1380,7 +1399,7 @@ async fn cancel_after_acceptance_reaches_the_new_turn_despite_stale_heads() {
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let own = request_turn(requests(&seen, "submit").next().unwrap());
         remote
-            .wait(|f| f.text.matches("── unused ").count() == 2)
+            .wait(|f| f.text.contains("请求已接受，等待对话同步…"))
             .await;
         // 接受回执之后，视图里积压的上一轮会话头与当前位置条目才转给新提交的句柄。
         view_tx.push([
@@ -1495,6 +1514,7 @@ async fn paging_up_queries_turns_before_the_earliest_user_message() {
             "history",
             serde_json::to_value(LocalHistory {
                 entries: turns(1..=2),
+                has_more: false,
             })
             .unwrap(),
         )),
@@ -1504,7 +1524,9 @@ async fn paging_up_queries_turns_before_the_earliest_user_message() {
     let remote = h.remote.clone();
     let driver = async {
         let last = numbered_turn(4);
-        view_tx.push([head_reply(head(8, Some(last), false))]);
+        let mut initial = head(8, Some(last), false);
+        initial.has_older = Some(true);
+        view_tx.push([head_reply(initial)]);
         view_tx.push(turns(3..=4).into_iter().map(entry_reply));
         remote.wait(|f| f.text.contains("answer-4")).await;
         for _ in 0..10 {
@@ -1691,11 +1713,13 @@ async fn model_and_effort_panels_configure_session_and_submit_uses_configured_he
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let request = &requests(&seen, "submit").next().unwrap()["request"];
         assert_eq!(request["session"], json!(sid()));
+        assert_eq!(request["trigger_channel"], json!("tui"));
         assert_eq!(
-            request["parts"],
-            json!([{"kind":"text","text":"selected prompt"}])
+            request["inputs"],
+            json!([{"channel":"tui","parts":[{"kind":"text","text":"selected prompt"}]}])
         );
         assert_eq!(request["expected_settings"], json!(settings_version(0x33)));
+        assert!(request["expected_position"].is_null());
         assert!(request.get("model").is_none());
         assert!(request.get("effort").is_none());
         assert!(request.get("agent").is_none());
@@ -2073,11 +2097,13 @@ async fn configure_in_flight_blocks_submit_and_only_latest_generation_applies() 
             remote.line("after configure");
             let seen = peer.wait(|s| count(s, "submit") == 1).await;
             let submit = &requests(&seen, "submit").next().unwrap()["request"];
+            assert_eq!(submit["trigger_channel"], json!("tui"));
             assert_eq!(
-                submit["parts"],
-                json!([{"kind":"text","text":"after configure"}])
+                submit["inputs"],
+                json!([{"channel":"tui","parts":[{"kind":"text","text":"after configure"}]}])
             );
             assert_eq!(submit["expected_settings"], json!(settings_version(0x44)));
+            assert!(submit["expected_position"].is_null());
             remote.ctrl('c');
             remote.ctrl('c');
         };
@@ -2151,9 +2177,10 @@ async fn submit_before_first_watch_head_carries_startup_head_version() {
         let seen = peer.wait(|s| count(s, "submit") == 1).await;
         let submit_req = requests(&seen, "submit").next().unwrap();
         let accepted_turn = request_turn(submit_req);
+        assert_eq!(submit_req["request"]["trigger_channel"], json!("tui"));
         assert_eq!(
-            submit_req["request"]["parts"],
-            json!([{"kind":"text","text":"before first watch head"}])
+            submit_req["request"]["inputs"],
+            json!([{"channel":"tui","parts":[{"kind":"text","text":"before first watch head"}]}])
         );
         assert_eq!(
             submit_req["request"]["expected_settings"],
@@ -2390,11 +2417,12 @@ async fn idle_submit_preflight_failure_preserves_input_draft_and_never_sends() {
     );
     assert_eq!(h.app.history.prev(), None, "输入历史不应新增记录");
     assert!(
-        !h.app.blocks.iter().any(|b| matches!(
-            b,
-            Block::UserTurn { node: None, .. } | Block::CommentedUser(_) | Block::RejectedUser(_)
-        )),
-        "不应登记新的用户提交块"
+        !h.app
+            .blocks
+            .iter()
+            .any(|b| matches!(b, Block::CommentedUser(_)))
+            && h.app.submitted.is_none(),
+        "不应登记新的用户提交块或提交态"
     );
     assert!(
         h.app
@@ -2445,8 +2473,9 @@ async fn paste_interleaved_text_and_image_submits_exact_parts_in_order() {
         remote.press(KeyCode::Enter, KeyModifiers::NONE);
         let submitted_frame = remote
             .wait(|f| {
-                f.text
-                    .contains("前缀文字 [IMAGE\u{00a0}1\u{00a0}·\u{00a0}png\u{00a0}·\u{00a0}27\u{00a0}B] 后缀文字")
+                f.phase == TurnPhase::Streaming
+                    && (f.text.contains("正在提交请求…")
+                        || f.text.contains("请求已接受，等待对话同步…"))
             })
             .await;
         assert_eq!(submitted_frame.phase, TurnPhase::Streaming);
@@ -2467,17 +2496,21 @@ async fn paste_interleaved_text_and_image_submits_exact_parts_in_order() {
         .expect("假后台应收到一次提交")["request"];
     let decoded: TurnRequest =
         serde_json::from_value(submit_val.clone()).expect("反序列化提交请求");
-    assert_eq!(decoded.parts.len(), 3, "提交片段应保持三段交错顺序");
+    assert_eq!(decoded.trigger_channel, Channel::parse("tui").unwrap());
+    assert_eq!(decoded.expected_position, None);
+    assert_eq!(decoded.inputs.len(), 1);
+    let parts = &decoded.inputs[0].parts;
+    assert_eq!(parts.len(), 3, "提交片段应保持三段交错顺序");
     assert!(
-        matches!(&decoded.parts[0], UserInputPart::Text { text } if text == "前缀文字"),
+        matches!(&parts[0], UserInputPart::Text { text } if text == "前缀文字"),
         "首段应为前缀文字"
     );
     assert!(
-        matches!(&decoded.parts[1], UserInputPart::Image { image } if *image == png_bytes),
+        matches!(&parts[1], UserInputPart::Image { image } if *image == png_bytes),
         "中段应为与原文件完全一致的图片字节"
     );
     assert!(
-        matches!(&decoded.parts[2], UserInputPart::Text { text } if text == "后缀文字"),
+        matches!(&parts[2], UserInputPart::Text { text } if text == "后缀文字"),
         "末段应为后缀文字"
     );
     assert_eq!(
@@ -2729,8 +2762,10 @@ fn image_submission_rejection_restores_when_empty_and_distinguishes_pure_image_v
             .next_back()
             .expect("应生成拒绝或未接受状态消息");
         assert!(
-            status_msg.contains("Ctrl+↑") && !status_msg.contains("输入已保留"),
-            "图文消息被拒且有新草稿时应提示按 Ctrl+↑ 从历史找回文字：{status_msg}"
+            status_msg.contains("Ctrl+↑")
+                && status_msg.contains("随附图片未放回")
+                && !status_msg.contains("输入已保留"),
+            "图文消息被拒且有新草稿时应提示按 Ctrl+↑ 从历史找回文字且随附图片未放回：{status_msg}"
         );
         assert_eq!(
             app.history.prev(),
@@ -2854,7 +2889,7 @@ fn apply_clipboard_stages_image_in_private_tmp_submits_bytes_and_removes_dir_on_
         .apply_action(KeyAction::Submit)
         .expect("按 Enter 应返回提交请求");
     assert!(
-        req.parts == [UserInputPart::Image { image: png }],
+        req.inputs[0].parts == [UserInputPart::Image { image: png }],
         "提交请求应携带剪贴板图片的原始字节"
     );
 

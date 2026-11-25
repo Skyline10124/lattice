@@ -38,7 +38,7 @@ fn input() -> AcceptTurn {
         },
     };
     let settings = lattice_session::store::SessionSettings::for_test(&config);
-    let channel = super::super::execute::default_submit_channel();
+    let channel = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
     AcceptTurn {
         settings_version: settings.version().unwrap(),
         session_id: sid(),
@@ -51,6 +51,7 @@ fn input() -> AcceptTurn {
         )],
         accepted_at: chrono::Utc::now(),
         config,
+        expected_position: None,
     }
 }
 async fn seed_and_accept(io: &CoordinatorStoreIo, mut accepted: AcceptTurn) -> AcceptedTurn {
@@ -621,10 +622,18 @@ async fn first_acceptance_reopens_with_frozen_facts_and_used_turn_conflicts() {
             chrono::Utc::now(),
         )
         .unwrap();
+    let cli = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
     let request = RunTurnRequest {
-        input: TurnInput::text(" original \n".into()).expect("构造测试输入"),
+        payload: super::super::types::TurnPayload::Submit {
+            trigger_channel: cli.clone(),
+            inputs: vec![(
+                cli,
+                TurnInput::text(" original \n".into()).expect("构造测试输入"),
+            )],
+        },
         session_id,
         expected_settings: None,
+        expected_position: None,
         cancel_flag: None,
         tools: None,
         test_llm: Some((
@@ -1290,11 +1299,11 @@ mod fake_tools_tests {
             .unwrap()
             .view(detail.session_id, 10)
             .unwrap();
-        let ConversationEntry::Step { content, .. } = &view.entries[1] else {
+        let ConversationEntry::Step { reply, .. } = &view.entries[1] else {
             panic!("expected step entry")
         };
         assert_eq!(
-            content.step_content().unwrap().results[3].payload,
+            reply.as_ref().expect("步骤回复应存在").results[3].payload,
             ResultPayload::Failed(ToolError {
                 code: "simulated_error".into(),
                 message: "模拟失败".into(),

@@ -194,15 +194,17 @@ async fn configure_during_running_turn_returns_busy() {
         .expect("创建会话应成功");
 
     client
-        .submit(TurnRequest {
-            turn_id: new_turn_id(),
-            session: sid,
-            workspace: workspace.clone(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            new_turn_id(),
+            sid,
+            workspace.clone(),
+            lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "执行中".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .expect("提交应被接受");
     bounded(&mut provider.arrived).await.unwrap();
@@ -326,15 +328,17 @@ async fn configure_succeeds_without_credentials_while_submit_rejects_missing_cre
     );
 
     let rejection = client
-        .submit(TurnRequest {
-            turn_id: new_turn_id(),
-            session: sid,
+        .submit(TurnRequest::single(
+            new_turn_id(),
+            sid,
             workspace,
-            parts: vec![UserInputPart::Text {
+            lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "需要凭据".into(),
             }],
-            expected_settings: Some(reply.head.settings_version),
-        })
+            Some(reply.head.settings_version),
+            None,
+        ))
         .await
         .expect_err("缺少凭据时提交应在准入阶段被拒绝");
     assert_eq!(
@@ -384,16 +388,19 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
         .expect("更新会话模型应成功");
     assert_ne!(initial.head.settings_version, updated.head.settings_version);
 
+    let cli = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
     let stale_err = client
-        .submit(TurnRequest {
-            turn_id: new_turn_id(),
-            session: sid,
-            workspace: workspace.clone(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            new_turn_id(),
+            sid,
+            workspace.clone(),
+            cli.clone(),
+            vec![UserInputPart::Text {
                 text: "旧设置提交".into(),
             }],
-            expected_settings: Some(initial.head.settings_version),
-        })
+            Some(initial.head.settings_version),
+            None,
+        ))
         .await
         .expect_err("过期的 expected_settings 应被拒绝");
     assert_eq!(stale_err.kind, LocalErrorKind::Conflict);
@@ -405,30 +412,34 @@ async fn submit_with_mismatched_expected_settings_returns_settings_changed_disti
 
     let accepted_tid = new_turn_id();
     let accepted = client
-        .submit(TurnRequest {
-            turn_id: accepted_tid,
-            session: sid,
-            workspace: workspace.clone(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            accepted_tid,
+            sid,
+            workspace.clone(),
+            cli.clone(),
+            vec![UserInputPart::Text {
                 text: "新设置提交".into(),
             }],
-            expected_settings: Some(updated.head.settings_version),
-        })
+            Some(updated.head.settings_version),
+            None,
+        ))
         .await
         .expect("匹配的 expected_settings 应被接受");
     assert!(matches!(accepted, Acceptance::Accepted { .. }));
     idle(&backend).await;
 
     let reused_err = client
-        .submit(TurnRequest {
-            turn_id: accepted_tid,
-            session: sid,
+        .submit(TurnRequest::single(
+            accepted_tid,
+            sid,
             workspace,
-            parts: vec![UserInputPart::Text {
+            cli,
+            vec![UserInputPart::Text {
                 text: "重复 TurnId".into(),
             }],
-            expected_settings: Some(updated.head.settings_version),
-        })
+            Some(updated.head.settings_version),
+            None,
+        ))
         .await
         .expect_err("重复 TurnId 应被拒绝");
     assert_eq!(reused_err.kind, LocalErrorKind::Conflict);
@@ -469,15 +480,17 @@ async fn submit_with_empty_settings_model_returns_configuration_rejection() {
     assert_eq!(created.head.provider, None);
 
     let err = client
-        .submit(TurnRequest {
-            turn_id: new_turn_id(),
-            session: sid,
+        .submit(TurnRequest::single(
+            new_turn_id(),
+            sid,
             workspace,
-            parts: vec![UserInputPart::Text {
+            lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "尝试发送".into(),
             }],
-            expected_settings: Some(created.head.settings_version),
-        })
+            Some(created.head.settings_version),
+            None,
+        ))
         .await
         .expect_err("设置中的模型为空时提交应返回配置拒绝");
     assert_eq!(err.kind, LocalErrorKind::BadRequest);
@@ -787,15 +800,17 @@ async fn cleanup_drafts_skips_when_session_slot_or_execution_lock_is_busy() {
     let submit_workspace = workspace.clone();
     let submitting = tokio::spawn(async move {
         submit_client
-            .submit(TurnRequest {
-                turn_id: new_turn_id(),
-                session: slot_busy,
-                workspace: submit_workspace,
-                parts: vec![UserInputPart::Text {
+            .submit(TurnRequest::single(
+                new_turn_id(),
+                slot_busy,
+                submit_workspace,
+                lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+                vec![UserInputPart::Text {
                     text: "占住会话槽".into(),
                 }],
-                expected_settings: None,
-            })
+                None,
+                None,
+            ))
             .await
     });
     bounded(reg_entered).await.unwrap();
@@ -1012,15 +1027,17 @@ async fn cleanup_drafts_keeps_session_accepted_between_scan_and_delete() {
 
     // 扫描已把 candidate 列为候选，但在清理占位删除前先让它接受并完成一轮。
     let accepted = client
-        .submit(TurnRequest {
-            turn_id: new_turn_id(),
-            session: candidate,
+        .submit(TurnRequest::single(
+            new_turn_id(),
+            candidate,
             workspace,
-            parts: vec![UserInputPart::Text {
+            lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "扫描后接受首轮".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .expect("候选草稿在清理前提交首轮应被接受");
     assert!(matches!(accepted, Acceptance::Accepted { .. }));

@@ -223,15 +223,17 @@ fn configure_new(dir: &std::path::Path, sid: SessionId) -> ConfigureRequest {
     }
 }
 fn raw_request(dir: &std::path::Path, sid: SessionId) -> TurnRequest {
-    TurnRequest {
-        turn_id: new_turn_id(),
-        session: sid,
-        workspace: dir.into(),
-        parts: vec![UserInputPart::Text {
+    TurnRequest::single(
+        new_turn_id(),
+        sid,
+        dir.into(),
+        lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+        vec![UserInputPart::Text {
             text: "测试".into(),
         }],
-        expected_settings: None,
-    }
+        None,
+        None,
+    )
 }
 async fn create_request(client: &LocalClient, dir: &std::path::Path) -> TurnRequest {
     let sid = new_session_id();
@@ -755,7 +757,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 .create_session(&guard, project.clone(), settings, chrono::Utc::now())?;
         }
         let settings_version = api.store.begin_read()?.session_settings(sid)?.version()?;
-        let channel = crate::turn::execute::default_submit_channel();
+        let channel = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
         api.store.accept_turn(
             &guard,
             AcceptTurn {
@@ -770,6 +772,7 @@ async fn seed_round(backend: &Backend, sid: SessionId, fresh: bool) -> TurnId {
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
+                expected_position: None,
             },
         )?;
         Ok(())
@@ -804,6 +807,7 @@ async fn watch_starts_with_ten_turns_history_has_whole_earlier_turns_and_rewind_
             position: NodeId(24),
             path_replaced: false,
             owner: false,
+            has_older: Some(true),
             ..
         })
     ));
@@ -825,12 +829,13 @@ async fn watch_starts_with_ten_turns_history_has_whole_earlier_turns_and_rewind_
         current[1].as_ref(),
         ConversationEntry::Step {
             node: NodeId(6),
-            ordinal: Some(3),
+            agent_name: Some(_),
             ..
         }
     ));
     assert_eq!(current.last().unwrap().node(), NodeId(24));
     let earlier = client.history(sid, NodeId(5), 10).await.unwrap();
+    assert!(!earlier.has_more, "翻页到达根节点后 has_more 必须为 false");
     assert_eq!(earlier.entries.len(), 4);
     assert!(matches!(
         earlier.entries[0],
@@ -843,7 +848,7 @@ async fn watch_starts_with_ten_turns_history_has_whole_earlier_turns_and_rewind_
         earlier.entries[1],
         ConversationEntry::Step {
             node: NodeId(2),
-            ordinal: Some(1),
+            agent_name: Some(_),
             ..
         }
     ));
@@ -2001,7 +2006,7 @@ async fn invalid_request_is_rejected_before_claiming_session() {
     ] {
         config(dir.path(), "http://127.0.0.1:1/v1");
         let mut input = create_request(&client, dir.path()).await;
-        input.parts = bad_parts;
+        input.inputs[0].parts = bad_parts;
         let sid = input.session;
         let (entered, release) = arm(&backend.gates.registered);
         let submitting = {

@@ -122,13 +122,15 @@ pub(super) fn turn_request(
     sid: SessionId,
     input: &str,
 ) -> TurnRequest {
-    TurnRequest {
-        turn_id: new_turn_id(),
-        session: sid,
-        workspace: workspace.to_path_buf(),
-        parts: vec![UserInputPart::Text { text: input.into() }],
-        expected_settings: None,
-    }
+    TurnRequest::single(
+        new_turn_id(),
+        sid,
+        workspace.to_path_buf(),
+        lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法"),
+        vec![UserInputPart::Text { text: input.into() }],
+        None,
+        None,
+    )
 }
 
 async fn read_http_request(socket: &mut tokio::net::TcpStream) -> serde_json::Value {

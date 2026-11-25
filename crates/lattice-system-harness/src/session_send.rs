@@ -177,12 +177,8 @@ pub enum AttemptState {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StepEntry {
     pub ordinal: u64,
-    /// 仅 `Step 0` 携带轮次序号（从 1 起算）。
-    pub turn_ordinal: Option<u64>,
-    /// 仅 `Step 0` 携带轮次启动元数据中的 agent 名称。
+    /// 仅 `Step 0` 携带智能体名称。
     pub agent_name: Option<String>,
-    /// 仅 `Step 0` 携带本轮认领的前置输入节点列表。
-    pub input_nodes: Vec<u64>,
     pub progress: StepProgress,
     /// 回复的正文与推理片段，按原顺序且未合并；工具调用见 `slots`。
     pub reply: Vec<Segment>,
@@ -205,7 +201,6 @@ pub enum EntryContent {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
     pub node: u64,
-    pub parent: u64,
     /// 仅 `Step` 条目归属轮次，`Input` 与 `ContextOp` 为 `None`。
     pub turn_id: Option<String>,
     pub content: EntryContent,
@@ -221,9 +216,8 @@ impl Entry {
     pub fn is_input(&self) -> bool {
         matches!(self.content, EntryContent::Input { .. })
     }
-    /// `Step 0` 携带的轮次序号（从 1 起算）。
-    pub fn turn_ordinal(&self) -> Option<u64> {
-        self.step().and_then(|step| step.turn_ordinal)
+    pub fn is_context_op(&self) -> bool {
+        matches!(self.content, EntryContent::ContextOp { .. })
     }
 }
 
@@ -240,6 +234,7 @@ pub struct Head {
     pub owner: bool,
     pub diagnostic: Option<LocalError>,
     pub path_replaced: bool,
+    pub has_older: Option<bool>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -417,7 +412,11 @@ fn local_error(value: &Value) -> Result<LocalError, String> {
     if let Some(reason) = &conflict
         && !matches!(
             reason.as_str(),
-            "turn_id_used" | "session_exists" | "binding_mismatch" | "settings_changed"
+            "turn_id_used"
+                | "session_exists"
+                | "binding_mismatch"
+                | "settings_changed"
+                | "position_changed"
         )
     {
         return Err(format!("未知的冲突原因 `{reason}`"));
@@ -681,24 +680,25 @@ fn segment_list(value: &Value) -> Result<Vec<Segment>, String> {
         .collect()
 }
 
-/// 解析一个对话条目：视图、历史查询与 CLI `entry` 记录同形。
+/// 解析一个扁平对话条目：视图、历史查询与 CLI `entry` 记录同形。
 pub fn parse_entry(value: &Value) -> Result<Entry, String> {
-    let node = uint(value, "node")?;
-    let content = &value["content"];
-    let parent = uint(content, "parent")?;
-    let kind = string(value, "kind")?;
-    if kind != string(content, "kind")? {
-        return Err("条目外层 `kind` 与节点内容不一致".into());
+    if value.get("content").is_some() {
+        return Err("扁平对话条目不得携带 `content` 字段".into());
     }
+    if value.get("ordinal").is_some() {
+        return Err("扁平对话条目不得携带 `ordinal` 字段".into());
+    }
+    let node = uint(value, "node")?;
+    let kind = string(value, "kind")?;
     let (turn_id, parsed) = match kind {
         "input" => {
-            for field in ["ordinal", "step", "retries", "summary"] {
+            for field in ["step", "agent_name", "reply", "retries", "summary", "op"] {
                 if value.get(field).is_some() {
                     return Err(format!("输入条目不得携带 `{field}`"));
                 }
             }
-            string(content, "accepted_at")?;
-            let input = &content["input"];
+            string(value, "accepted_at")?;
+            let input = value.get("input").ok_or("输入条目必须携带 `input` 对象")?;
             let channel = string(input, "channel")?.to_owned();
             let text = message_segments(&input["message"], true)?
                 .into_iter()
@@ -708,13 +708,13 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
             (None, EntryContent::Input { channel, text })
         }
         "context_op" => {
-            for field in ["ordinal", "step", "retries", "summary"] {
+            for field in ["step", "agent_name", "reply", "retries", "summary", "input"] {
                 if value.get(field).is_some() {
                     return Err(format!("上下文操作条目不得携带 `{field}`"));
                 }
             }
-            string(content, "accepted_at")?;
-            let op = &content["op"];
+            string(value, "accepted_at")?;
+            let op = value.get("op").ok_or("上下文操作条目必须携带 `op` 对象")?;
             let channel = string(op, "channel")?.to_owned();
             if array(op, "edits")?.is_empty() {
                 return Err("上下文操作条目的 `edits` 不能为空".into());
@@ -722,83 +722,56 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
             (None, EntryContent::ContextOp { channel })
         }
         "step" => {
-            let turn_id = string(content, "turn_id")?.to_owned();
-            let ordinal = uint(content, "step_ordinal")?;
-            let turn_ordinal = match (ordinal == 0, value.get("ordinal")) {
-                (true, Some(raw)) => {
-                    let n = raw
-                        .as_u64()
-                        .ok_or_else(|| "`Step 0` 条目顶层 `ordinal` 必须为无符号整数".to_owned())?;
-                    if n == 0 {
-                        return Err("轮次序号必须从 1 起算".into());
-                    }
-                    Some(n)
+            for field in ["accepted_at", "input", "op"] {
+                if value.get(field).is_some() {
+                    return Err(format!("步骤条目不得携带 `{field}`"));
                 }
+            }
+            let detail = value.get("step").ok_or("步骤条目必须携带 `step` 对象")?;
+            let (attempts, slots) = step_detail(detail)?;
+            if uint(detail, "node")? != node {
+                return Err("步骤详情的节点号与条目不一致".into());
+            }
+            let turn_id = string(&detail["key"], "turn_id")?.to_owned();
+            let ordinal = uint(&detail["key"], "ordinal")?;
+            let progress = step_progress(&detail["progress"])?;
+            let agent_name = match (ordinal == 0, value.get("agent_name")) {
+                (true, Some(Value::String(name))) if !name.is_empty() => Some(name.clone()),
                 (false, None | Some(Value::Null)) => None,
-                (true, None) => return Err("`Step 0` 条目顶层必须携带 `ordinal`".into()),
-                (false, Some(_)) => return Err("非 `Step 0` 条目顶层不得携带 `ordinal`".into()),
+                (true, _) => return Err("`Step 0` 条目顶层必须携带非空 `agent_name`".into()),
+                (false, Some(_)) => return Err("非 `Step 0` 条目顶层不得携带 `agent_name`".into()),
             };
-            let (agent_name, input_nodes) = match (ordinal == 0, content.get("turn_start")) {
-                (true, Some(meta)) if meta.is_object() => {
-                    let agent_name = string(meta, "agent_name")?.to_owned();
-                    let input_nodes = array(meta, "input_nodes")?
-                        .iter()
-                        .map(|item| {
-                            item.as_u64().ok_or_else(|| {
-                                "`turn_start.input_nodes` 的元素必须为无符号整数".to_owned()
-                            })
-                        })
-                        .collect::<Result<Vec<_>, _>>()?;
-                    (Some(agent_name), input_nodes)
-                }
-                (false, None | Some(Value::Null)) => (None, Vec::new()),
-                (true, _) => return Err("`Step 0` 节点内容必须携带 `turn_start` 对象".into()),
-                (false, Some(_)) => return Err("非 `Step 0` 节点内容不得携带 `turn_start`".into()),
-            };
-            let progress = step_progress(&content["progress"])?;
-            let stored_attempts = array(content, "attempts")?.len();
-            let reply = match &content["reply"] {
-                Value::Null => Vec::new(),
-                reply => {
-                    let origin = &reply["provider_origin"];
+            let reply = match value.get("reply") {
+                None | Some(Value::Null) => Vec::new(),
+                Some(reply_content) => {
+                    let assistant = reply_content
+                        .get("assistant")
+                        .ok_or("步骤回复必须包含 `assistant` 对象")?;
+                    let _results = array(reply_content, "results")?;
+                    let origin = &assistant["provider_origin"];
                     validate_replay_origin(origin)?;
-                    let stored = array(content, "attempts")?
-                        .last()
-                        .ok_or("携带回复时必须存在已完成的尝试")?;
-                    let detailed = array(&value["step"], "attempts")?
+                    let detailed = array(detail, "attempts")?
                         .last()
                         .ok_or("携带回复时必须存在步骤尝试详情")?;
-                    for attempt in [stored, detailed] {
-                        if attempt["progress"]["progress"] != "ended"
-                            || attempt["progress"]["end"]["end"] != "completed"
-                        {
-                            return Err("携带回复时必须存在已完成的尝试".into());
-                        }
+                    if detailed["progress"]["progress"] != "ended"
+                        || detailed["progress"]["end"]["end"] != "completed"
+                    {
+                        return Err("携带回复时必须存在已完成的尝试".into());
                     }
-                    if origin != &stored["origin"] || origin != &detailed["origin"] {
+                    if origin != &detailed["origin"] {
                         return Err("回复来源与已完成尝试不一致".into());
                     }
-                    message_segments(reply, false)?
+                    message_segments(assistant, false)?
                 }
             };
-            let detail = &value["step"];
-            let (attempts, slots) = step_detail(detail)?;
-            if uint(detail, "node")? != node
-                || detail["key"]["turn_id"] != content["turn_id"]
-                || uint(&detail["key"], "ordinal")? != ordinal
-                || detail["progress"] != content["progress"]
-                || attempts.len() != stored_attempts
-            {
-                return Err("步骤详情与节点内容不一致".into());
-            }
             let retries = array(value, "retries")?
                 .iter()
                 .map(retry_notice)
                 .collect::<Result<_, _>>()?;
             let continued = progress == StepProgress::Closed(StepEnd::Continue);
             let summary = match value.get("summary") {
-                None if continued => None,
-                Some(raw) if !continued => {
+                None | Some(Value::Null) if continued => None,
+                Some(raw) if !continued && !raw.is_null() => {
                     let summary = summary(raw)?;
                     if summary.progress != progress {
                         return Err("轮次摘要进度与步骤进度不一致".into());
@@ -813,9 +786,7 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
                 Some(turn_id),
                 EntryContent::Step(Box::new(StepEntry {
                     ordinal,
-                    turn_ordinal,
                     agent_name,
-                    input_nodes,
                     progress,
                     reply,
                     attempts,
@@ -829,7 +800,6 @@ pub fn parse_entry(value: &Value) -> Result<Entry, String> {
     };
     Ok(Entry {
         node,
-        parent,
         turn_id,
         content: parsed,
         raw: value.clone(),
@@ -861,6 +831,11 @@ fn head(value: &Value) -> Result<Head, String> {
     {
         return Err("`settings_version` 必须为 64 位小写十六进制字符".into());
     }
+    let has_older = match value.get("has_older") {
+        None | Some(Value::Null) => None,
+        Some(Value::Bool(flag)) => Some(*flag),
+        Some(_) => return Err("字段 `has_older` 必须为布尔值或 null".into()),
+    };
     Ok(Head {
         session_id: string(value, "session_id")?.into(),
         position,
@@ -877,6 +852,7 @@ fn head(value: &Value) -> Result<Head, String> {
             None => return Err("必须存在 `diagnostic` 字段".into()),
         },
         path_replaced: boolean(value, "path_replaced")?,
+        has_older,
     })
 }
 fn submit(value: &Value) -> Result<Submit, String> {
@@ -1033,14 +1009,15 @@ fn continues(old: &Entry, new: &Entry) -> bool {
     };
     let (held, next) = (&old.raw["step"], &new.raw["step"]);
     !before.progress.is_closed()
-        && old.parent == new.parent
         && old.turn_id == new.turn_id
         && before.ordinal == after.ordinal
-        && before.turn_ordinal == after.turn_ordinal
-        && old.raw["content"]["turn_start"] == new.raw["content"]["turn_start"]
+        && before.agent_name == after.agent_name
         && after.progress.rank() >= before.progress.rank()
-        && (old.raw["content"]["reply"].is_null()
-            || old.raw["content"]["reply"] == new.raw["content"]["reply"])
+        && (old
+            .raw
+            .pointer("/reply/assistant")
+            .is_none_or(Value::is_null)
+            || old.raw.pointer("/reply/assistant") == new.raw.pointer("/reply/assistant"))
         && after.retries.starts_with(&before.retries)
         && before.attempts.len() <= after.attempts.len()
         && before.attempts.iter().enumerate().all(|(index, state)| {
@@ -1061,7 +1038,9 @@ fn continues(old: &Entry, new: &Entry) -> bool {
                     && was.method == now.method
                     && now.state >= was.state
                     && (was.state != SlotState::Terminal
-                        || held["slots"][index] == next["slots"][index])
+                        || (held["slots"][index] == next["slots"][index]
+                            && old.raw.pointer(&format!("/reply/results/{index}"))
+                                == new.raw.pointer(&format!("/reply/results/{index}"))))
             })
 }
 
@@ -1121,14 +1100,19 @@ impl ViewState {
     pub fn raw_entries(&self) -> Vec<&Value> {
         self.entries.values().map(|entry| &entry.raw).collect()
     }
-    /// 查找指定轮次序号对应的分页起点节点：优先取该轮 `Step 0` 认领的首个输入节点，
-    /// 独立触发无前置输入时取 `Step 0` 自身节点。
-    pub fn turn_start_node(&self, turn_ordinal: u64) -> Option<u64> {
-        self.entries.values().find_map(|entry| {
-            let step = entry.step()?;
-            (step.turn_ordinal == Some(turn_ordinal))
-                .then(|| step.input_nodes.first().copied().unwrap_or(entry.node))
-        })
+    /// 查找指定轮次在视图中对应的分页起点节点：优先取紧邻该轮 `Step 0` 之前的连续非步骤前置块首节点，
+    /// 独立触发无前置输入/上下文操作时取 `Step 0` 自身节点。
+    pub fn turn_unit_start(&self, turn_id: &str) -> Option<u64> {
+        let entries: Vec<&Entry> = self.entries.values().collect();
+        let step_index = entries.iter().position(|entry| {
+            entry.turn_id.as_deref() == Some(turn_id)
+                && entry.step().is_some_and(|step| step.ordinal == 0)
+        })?;
+        let mut start = step_index;
+        while start > 0 && entries[start - 1].step().is_none() {
+            start -= 1;
+        }
+        Some(entries[start].node)
     }
 }
 

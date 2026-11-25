@@ -15,9 +15,9 @@ use std::{
 
 use chrono::Utc;
 use lattice_ipc::{
-    ConfigureRequest, ConfigureSession, ConversationEntry, ImageRef, LocalErrorKind, LocalUpdate,
-    MAX_IMAGE_BYTES, MessageSemantic, Node, PublicTurnOutcome, SubmissionResult, SubmissionUpdate,
-    TurnRequest, UserInputPart,
+    Channel, ConfigureRequest, ConfigureSession, ConversationEntry, ImageRef, LocalErrorKind,
+    LocalUpdate, MAX_IMAGE_BYTES, MessageSemantic, PublicTurnOutcome, SubmissionResult,
+    SubmissionUpdate, TurnRequest, UserInputPart,
 };
 use lattice_local::LocalClient;
 use lattice_server::{
@@ -1354,15 +1354,17 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
     }
 
     let turn_reg_accepted = new_turn_id();
-    let submit_a = harness.service.submit(TurnRequest {
-        turn_id: turn_reg_accepted,
-        session: session_a,
-        workspace: harness.workspace.clone(),
-        parts: vec![UserInputPart::Text {
+    let submit_a = harness.service.submit(TurnRequest::single(
+        turn_reg_accepted,
+        session_a,
+        harness.workspace.clone(),
+        Channel::parse("im").expect("测试通道名应合法"),
+        vec![UserInputPart::Text {
             text: "遗留已接受但台账停在 Registered".into(),
         }],
-        expected_settings: None,
-    });
+        None,
+        None,
+    ));
     let model_a = async {
         let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
         let _ = read_http_request(&mut sock).await;
@@ -1373,15 +1375,17 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
     let _ = bounded(handle_a.outcome()).await.unwrap();
 
     let turn_accepted = new_turn_id();
-    let submit_b = harness.service.submit(TurnRequest {
-        turn_id: turn_accepted,
-        session: session_b,
-        workspace: harness.workspace.clone(),
-        parts: vec![UserInputPart::Text {
+    let submit_b = harness.service.submit(TurnRequest::single(
+        turn_accepted,
+        session_b,
+        harness.workspace.clone(),
+        Channel::parse("im").expect("测试通道名应合法"),
+        vec![UserInputPart::Text {
             text: "遗留 Accepted 待补发".into(),
         }],
-        expected_settings: None,
-    });
+        None,
+        None,
+    ));
     let model_b = async {
         let (mut sock, _) = bounded(harness.listener.accept()).await.unwrap();
         let _ = read_http_request(&mut sock).await;
@@ -1395,15 +1399,17 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
     let turn_hanging = new_turn_id();
     let hanging_handle = harness
         .service
-        .submit(TurnRequest {
-            turn_id: turn_hanging,
-            session: session_a,
-            workspace: harness.workspace.clone(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            turn_hanging,
+            session_a,
+            harness.workspace.clone(),
+            Channel::parse("im").expect("测试通道名应合法"),
+            vec![UserInputPart::Text {
                 text: "挂起中的长轮次".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .unwrap();
     drop(hanging_handle); // 丢弃观察句柄不取消后台执行
@@ -1425,15 +1431,17 @@ async fn recovers_all_ledger_phases_without_blocking_polling_and_orders_same_cha
     let ws_c = harness.workspace.clone();
     let inflight_submit_task = tokio::spawn(async move {
         svc_c
-            .submit(TurnRequest {
-                turn_id: turn_c_inflight,
-                session: session_c,
-                workspace: ws_c,
-                parts: vec![UserInputPart::Text {
+            .submit(TurnRequest::single(
+                turn_c_inflight,
+                session_c,
+                ws_c,
+                Channel::parse("im").expect("测试通道名应合法"),
+                vec![UserInputPart::Text {
                     text: "准入途中的遗留 Registered 轮次".into(),
                 }],
-                expected_settings: None,
-            })
+                None,
+                None,
+            ))
             .await
     });
     bounded(entered_c_accept)
@@ -1884,15 +1892,17 @@ async fn handles_busy_and_cancel_across_im_new_session_and_external_local_client
     // 外部 IPC LocalClient 在 bound_sid 上发起一轮并挂起
     let ipc_client = LocalClient::new(harness.layout.clone());
     let ipc_tid = new_turn_id();
-    let mut local_turn = ipc_client.start_turn(TurnRequest {
-        turn_id: ipc_tid,
-        session: bound_sid,
-        workspace: harness.workspace.clone(),
-        parts: vec![UserInputPart::Text {
+    let mut local_turn = ipc_client.start_turn(TurnRequest::single(
+        ipc_tid,
+        bound_sid,
+        harness.workspace.clone(),
+        Channel::parse("cli").expect("测试通道名应合法"),
+        vec![UserInputPart::Text {
             text: "来自 CLI/TUI 的并发请求".into(),
         }],
-        expected_settings: None,
-    });
+        None,
+        None,
+    ));
 
     let (mut sock_ipc, _) = bounded(harness.listener.accept()).await.unwrap();
     let _ = read_http_request(&mut sock_ipc).await;
@@ -3865,7 +3875,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"ipc\">"
+                "text": "<lattice-context channel=\"im\">"
             },
             {
                 "type": "image_url",
@@ -3921,7 +3931,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"ipc\">"
+                "text": "<lattice-context channel=\"im\">"
             },
             {
                 "type": "image_url",
@@ -3961,7 +3971,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"ipc\">"
+                "text": "<lattice-context channel=\"im\">"
             },
             {
                 "type": "image_url",
@@ -4027,7 +4037,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
             serde_json::json!([
                 {
                     "type": "text",
-                    "text": "<lattice-context channel=\"ipc\">"
+                    "text": "<lattice-context channel=\"im\">"
                 },
                 {
                     "type": "image_url",
@@ -4079,9 +4089,9 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
     assert_eq!(last_user7["role"], "user");
     assert!(
         last_user7["content"]
-            == "<lattice-context channel=\"ipc\">\n总结以上全部图片\n</lattice-context>"
+            == "<lattice-context channel=\"im\">\n总结以上全部图片\n</lattice-context>"
             || last_user7["content"]
-                == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"ipc\">\n总结以上全部图片\n</lattice-context>"}]),
+                == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"im\">\n总结以上全部图片\n</lattice-context>"}]),
         "第 7 轮末尾用户消息正文必须为包裹 channel 后的“总结以上全部图片”，实际: {}",
         last_user7["content"]
     );
@@ -4113,11 +4123,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         while msgs.len() < 7 {
             match observed.next().await {
                 Some(LocalUpdate::Entry { entry }) => {
-                    if let ConversationEntry::Input {
-                        content: Node::Input { input, .. },
-                        ..
-                    } = *entry
-                    {
+                    if let ConversationEntry::Input { input, .. } = *entry {
                         msgs.push(input.message().clone());
                     }
                 }
@@ -4920,7 +4926,7 @@ async fn merges_out_of_order_album_batches_after_600ms_and_acks_atomically_after
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"ipc\">"
+                "text": "<lattice-context channel=\"im\">"
             },
             {
                 "type": "image_url",
@@ -7306,7 +7312,7 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"ipc\">"
+                "text": "<lattice-context channel=\"im\">"
             },
             {
                 "type": "image_url",
@@ -7338,15 +7344,17 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
     // 2. 经真实 LocalClient（连接同一后台 IPC socket，等价于 `lattice session send --session <id>`）在同一会话上提交纯文本续发
     let ipc_client = LocalClient::new(harness.layout.clone());
     let cli_turn_id = new_turn_id();
-    let mut local_turn = ipc_client.start_turn(TurnRequest {
-        turn_id: cli_turn_id,
-        session: bound_sid,
-        workspace: harness.workspace.clone(),
-        parts: vec![UserInputPart::Text {
+    let mut local_turn = ipc_client.start_turn(TurnRequest::single(
+        cli_turn_id,
+        bound_sid,
+        harness.workspace.clone(),
+        Channel::parse("cli").expect("测试通道名应合法"),
+        vec![UserInputPart::Text {
             text: "终端 CLI 纯文本续发：请结合上一轮图片回答".into(),
         }],
-        expected_settings: None,
-    });
+        None,
+        None,
+    ));
 
     let model_round2 = async {
         let (mut sock2, _) = bounded(harness.listener.accept()).await.unwrap();
@@ -7372,9 +7380,9 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
         assert_eq!(last_user["role"], "user");
         assert!(
             last_user["content"]
-                == "<lattice-context channel=\"ipc\">\n终端 CLI 纯文本续发：请结合上一轮图片回答\n</lattice-context>"
+                == "<lattice-context channel=\"cli\">\n终端 CLI 纯文本续发：请结合上一轮图片回答\n</lattice-context>"
                 || last_user["content"]
-                    == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"ipc\">\n终端 CLI 纯文本续发：请结合上一轮图片回答\n</lattice-context>"}]),
+                    == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"cli\">\n终端 CLI 纯文本续发：请结合上一轮图片回答\n</lattice-context>"}]),
             "末尾用户消息应为 LocalClient 提交的纯文本续发内容，实际: {}",
             last_user["content"]
         );
@@ -7393,16 +7401,13 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
             if let LocalUpdate::Entry { entry } = upd
                 && let ConversationEntry::Step {
                     step,
-                    content:
-                        Node::Step {
-                            reply: Some(message),
-                            ..
-                        },
+                    reply: Some(content),
                     ..
                 } = *entry
                 && step.key.turn_id == cli_turn_id
             {
-                let text: String = message
+                let text: String = content
+                    .assistant
                     .parts
                     .iter()
                     .filter_map(|part| match &part.semantic {

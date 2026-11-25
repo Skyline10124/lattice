@@ -5,17 +5,21 @@
 
 use std::path::PathBuf;
 
-use lattice_conversation::{Effort, SessionId};
+use lattice_context::{ContextEdit, ContextOp};
+use lattice_conversation::{Effort, MessageSemantic, SessionId};
 use lattice_session::store::{NodeId, Page};
 
 use super::{
-    CaseBook, agent_coder, auth_key, model_gpt5, model_ref_gpt5,
+    CaseBook, agent_coder, auth_key,
+    conversation::image_ref_sample,
+    model_gpt5, model_ref_gpt5,
     models::{
         auth_status_full, model_candidates_full, provider_auth_status_full,
         provider_auth_status_signed_in,
     },
     non_utf8_workspace_path, provider_openai,
     session::{
+        channel_cli, channel_tui, context_inspection_full, context_inspection_minimal,
         sample_context_op_entry, scenario_cancelled, scenario_indeterminate_no_result,
         scenario_orphan_executing, scenario_orphan_requesting, scenario_orphan_reserved,
         scenario_retry_then_success, scenario_success_tool_then_finish, scenario_tool_failed,
@@ -27,11 +31,13 @@ use super::{
 use crate::{
     Acceptance, AuthCatalogOutcome, AuthLoggedOut, AuthLoginOutcome, AuthRemoval, ComponentState,
     ComponentStatus, ConfigureReply, ConfigureRequest, ConfigureSession, ConflictReason,
-    DaemonStatus, EffortAdjustment, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus,
-    ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, LocalError, LocalErrorKind,
-    LocalHistory, LoginAction, LoginResponse, ModelCandidateQuery, RecoveryCause, RecoveryNeed,
-    Request, Response, RevocationStatus, SessionHead, SessionListRow, StoreDiagnostic, TextSegment,
-    TextUpdate, TurnLookup, TurnRef, TurnRequest, TurnView, UserInputPart, ViewUpdate,
+    ContextImage, ContextOpReply, ContextOpRequest, DaemonStatus, EffortAdjustment, FeedReply,
+    FeedRequest, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus, ImCredentialStatus,
+    ImMountResult, ImPlatformAuthStatus, InspectReply, LocalError, LocalErrorKind, LocalHistory,
+    LoginAction, LoginResponse, ModelCandidateQuery, RecoveryCause, RecoveryNeed, Request,
+    Response, RevocationStatus, SessionHead, SessionListRow, StoreDiagnostic, TextSegment,
+    TextUpdate, TriggerRequest, TurnInputItem, TurnLookup, TurnRef, TurnRequest, TurnView,
+    UserInputPart, ViewUpdate,
 };
 
 fn daemon_status_sample() -> DaemonStatus {
@@ -146,6 +152,7 @@ fn session_head_full() -> SessionHead {
         owner: true,
         diagnostic: Some(local_error_recovery()),
         path_replaced: true,
+        has_older: Some(true),
     }
 }
 
@@ -162,6 +169,7 @@ fn session_head_minimal() -> SessionHead {
         owner: false,
         diagnostic: None,
         path_replaced: false,
+        has_older: None,
     }
 }
 
@@ -185,11 +193,9 @@ fn configure_request_minimal() -> ConfigureRequest {
     }
 }
 
-fn turn_request_full() -> TurnRequest {
-    TurnRequest {
-        turn_id: turn_id_1(),
-        session: session_id_primary(),
-        workspace: non_utf8_workspace_path(),
+fn turn_input_item_full() -> TurnInputItem {
+    TurnInputItem {
+        channel: channel_cli(),
         parts: vec![
             UserInputPart::Text {
                 text: "请结合这两张截图查看 Cargo.toml".to_owned(),
@@ -204,19 +210,133 @@ fn turn_request_full() -> TurnRequest {
                 image: b"\xff\xd8\xff\xe0".to_vec(),
             },
         ],
-        expected_settings: Some(settings_version_fixed()),
     }
 }
 
-fn turn_request_minimal() -> TurnRequest {
+fn turn_input_item_minimal() -> TurnInputItem {
+    TurnInputItem {
+        channel: channel_tui(),
+        parts: vec![UserInputPart::Text {
+            text: "请查看 Cargo.toml 的行数".to_owned(),
+        }],
+    }
+}
+
+fn turn_request_full() -> TurnRequest {
     TurnRequest {
         turn_id: turn_id_1(),
         session: session_id_primary(),
         workspace: non_utf8_workspace_path(),
-        parts: vec![UserInputPart::Text {
+        trigger_channel: channel_cli(),
+        inputs: vec![turn_input_item_full(), turn_input_item_minimal()],
+        expected_settings: Some(settings_version_fixed()),
+        expected_position: Some(NodeId(2)),
+    }
+}
+
+fn turn_request_minimal() -> TurnRequest {
+    TurnRequest::single(
+        turn_id_1(),
+        session_id_primary(),
+        non_utf8_workspace_path(),
+        channel_cli(),
+        vec![UserInputPart::Text {
             text: "请查看 Cargo.toml 的行数".to_owned(),
         }],
+        None,
+        None,
+    )
+}
+
+fn feed_request_full() -> FeedRequest {
+    FeedRequest {
+        session: session_id_primary(),
+        workspace: non_utf8_workspace_path(),
+        channel: channel_cli(),
+        parts: vec![
+            UserInputPart::Text {
+                text: "补充背景日志".to_owned(),
+            },
+            UserInputPart::Image {
+                image: b"\x89PNG\r\n\x1a\n".to_vec(),
+            },
+        ],
+        expected_position: Some(NodeId(3)),
+    }
+}
+
+fn feed_request_minimal() -> FeedRequest {
+    FeedRequest {
+        session: session_id_primary(),
+        workspace: non_utf8_workspace_path(),
+        channel: channel_tui(),
+        parts: vec![UserInputPart::Text {
+            text: "先记录一条观察结论".to_owned(),
+        }],
+        expected_position: None,
+    }
+}
+
+fn context_op_request_full() -> ContextOpRequest {
+    ContextOpRequest {
+        session: session_id_primary(),
+        workspace: non_utf8_workspace_path(),
+        op: ContextOp::new(
+            channel_tui(),
+            vec![
+                ContextEdit::omit_node(NodeId(1)),
+                ContextEdit::replace_input(
+                    NodeId(2),
+                    vec![
+                        MessageSemantic::Text {
+                            text: "替换后的输入".to_owned(),
+                        },
+                        MessageSemantic::Image {
+                            image: image_ref_sample(),
+                        },
+                    ],
+                )
+                .expect("固定 ReplaceInput 编辑应合法"),
+            ],
+        )
+        .expect("固定 ContextOp 应合法"),
+        images: vec![ContextImage {
+            image: b"\x89PNG\r\n\x1a\n".to_vec(),
+        }],
+        expected_position: Some(NodeId(4)),
+    }
+}
+
+fn context_op_request_minimal() -> ContextOpRequest {
+    ContextOpRequest {
+        session: session_id_primary(),
+        workspace: non_utf8_workspace_path(),
+        op: ContextOp::new(channel_cli(), vec![ContextEdit::omit_node(NodeId(1))])
+            .expect("固定 ContextOp 应合法"),
+        images: Vec::new(),
+        expected_position: None,
+    }
+}
+
+fn trigger_request_full() -> TriggerRequest {
+    TriggerRequest {
+        turn_id: turn_id_2(),
+        session: session_id_primary(),
+        workspace: non_utf8_workspace_path(),
+        trigger_channel: channel_cli(),
+        expected_settings: Some(settings_version_fixed()),
+        expected_position: Some(NodeId(5)),
+    }
+}
+
+fn trigger_request_minimal() -> TriggerRequest {
+    TriggerRequest {
+        turn_id: turn_id_2(),
+        session: session_id_primary(),
+        workspace: non_utf8_workspace_path(),
+        trigger_channel: channel_tui(),
         expected_settings: None,
+        expected_position: None,
     }
 }
 
@@ -374,6 +494,7 @@ pub(super) fn register(book: &mut CaseBook) {
             ("session_exists", ConflictReason::SessionExists => ConflictReason::SessionExists),
             ("binding_mismatch", ConflictReason::BindingMismatch => ConflictReason::BindingMismatch),
             ("settings_changed", ConflictReason::SettingsChanged => ConflictReason::SettingsChanged),
+            ("position_changed", ConflictReason::PositionChanged => ConflictReason::PositionChanged),
         }
     );
 
@@ -684,6 +805,31 @@ pub(super) fn register(book: &mut CaseBook) {
                 }
             ),
             (
+                "feed",
+                Request::Feed { .. } => Request::Feed {
+                    request: feed_request_full(),
+                }
+            ),
+            (
+                "context_op",
+                Request::ContextOp { .. } => Request::ContextOp {
+                    request: context_op_request_full(),
+                }
+            ),
+            (
+                "trigger",
+                Request::Trigger { .. } => Request::Trigger {
+                    request: trigger_request_full(),
+                }
+            ),
+            (
+                "inspect",
+                Request::Inspect { .. } => Request::Inspect {
+                    session_id: session_id_primary(),
+                    position: Some(NodeId(2)),
+                }
+            ),
+            (
                 "cancel",
                 Request::Cancel { .. } => Request::Cancel {
                     turn_id: turn_id_1(),
@@ -806,9 +952,29 @@ pub(super) fn register(book: &mut CaseBook) {
 
     let local_history_full = LocalHistory {
         entries: success.entries.clone(),
+        has_more: true,
     };
     let local_history_minimal = LocalHistory {
         entries: Vec::new(),
+        has_more: false,
+    };
+    let feed_reply_sample = FeedReply {
+        session_id: session_id_primary(),
+        node: NodeId(4),
+    };
+    let context_op_reply_sample = ContextOpReply {
+        session_id: session_id_primary(),
+        node: NodeId(5),
+    };
+    let inspect_reply_full = InspectReply {
+        session_id: session_id_primary(),
+        position: NodeId(2),
+        inspection: context_inspection_full(),
+    };
+    let inspect_reply_minimal = InspectReply {
+        session_id: session_id_primary(),
+        position: NodeId(0),
+        inspection: context_inspection_minimal(),
     };
 
     enum_fragments!(
@@ -857,6 +1023,9 @@ pub(super) fn register(book: &mut CaseBook) {
                     turn: TurnView::from(&orphan_reserved.turn_detail),
                 })
             ),
+            ("feed", Response::Feed(_) => Response::Feed(feed_reply_sample)),
+            ("context_op", Response::ContextOp(_) => Response::ContextOp(context_op_reply_sample)),
+            ("inspect", Response::Inspect(_) => Response::Inspect(inspect_reply_full.clone())),
             (
                 "view",
                 Response::View(_) => Response::View(ViewUpdate::Entry {
@@ -968,10 +1137,39 @@ pub(super) fn register(book: &mut CaseBook) {
         &configure_reply_minimal,
     );
     book.insert_struct_pair(
+        "turn_input_item",
+        &turn_input_item_full(),
+        &turn_input_item_minimal(),
+    );
+    book.insert_struct_pair(
         "turn_request",
         &turn_request_full(),
         &turn_request_minimal(),
     );
+    book.insert_struct_pair(
+        "feed_request",
+        &feed_request_full(),
+        &feed_request_minimal(),
+    );
+    book.insert("fragment/feed_reply/sample", &feed_reply_sample);
+    book.insert(
+        "fragment/context_image/sample",
+        &ContextImage {
+            image: b"\x89PNG\r\n\x1a\n".to_vec(),
+        },
+    );
+    book.insert_struct_pair(
+        "context_op_request",
+        &context_op_request_full(),
+        &context_op_request_minimal(),
+    );
+    book.insert("fragment/context_op_reply/sample", &context_op_reply_sample);
+    book.insert_struct_pair(
+        "trigger_request",
+        &trigger_request_full(),
+        &trigger_request_minimal(),
+    );
+    book.insert_struct_pair("inspect_reply", &inspect_reply_full, &inspect_reply_minimal);
 
     // 内部一致场景根帧：每个场景同时驱动 Turn、History、View、Log、Usage、Acceptance 等根帧。
     for (scenario_slug, built) in [
@@ -994,6 +1192,7 @@ pub(super) fn register(book: &mut CaseBook) {
             format!("frame/response/history/{scenario_slug}"),
             &Response::History(LocalHistory {
                 entries: built.entries.clone(),
+                has_more: false,
             }),
         );
         book.insert(

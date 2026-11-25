@@ -123,7 +123,8 @@ fn render_update(
         LocalUpdate::Entry { entry } => {
             if let ConversationEntry::Step {
                 node,
-                content,
+                step,
+                reply,
                 retries,
                 ..
             } = entry.as_ref()
@@ -141,19 +142,11 @@ fn render_update(
                         }
                     }
                 }
-                if let Node::Step {
-                    turn_id,
-                    progress,
-                    slots,
-                    ..
-                } = content
-                    && let Some(content) = content.step_content()
-                {
-                    let ended = progress.is_closed()
-                        || state
-                            .head
-                            .as_ref()
-                            .is_some_and(|head| !head.owner || head.turn_id != Some(*turn_id));
+                if let Some(content) = reply {
+                    let ended = step.progress.is_closed()
+                        || state.head.as_ref().is_some_and(|head| {
+                            !head.owner || head.turn_id != Some(step.key.turn_id)
+                        });
                     let final_text = content
                         .assistant
                         .parts
@@ -178,8 +171,8 @@ fn render_update(
                     }
                     printed.1 = final_text;
                     // 运行中的 Registered/Started 只是进度；推定结果只在执行结束后呈现。
-                    for (result, slot) in content.results.into_iter().zip(slots) {
-                        if (ended || matches!(slot.progress, SlotProgress::Terminal { .. }))
+                    for (result, slot) in content.results.iter().zip(&step.slots) {
+                        if (ended || matches!(slot.progress, SlotState::Terminal { .. }))
                             && state.results.insert(result.invocation_id)
                         {
                             writeln!(
@@ -350,13 +343,16 @@ pub(super) async fn run_session_prompt_with_io(
         planned_refs.push(image);
         plan_parts.push(UserInputPart::Image { image });
     }
-    let plan = PlannedTurnRequest {
-        turn_id: id,
-        session: session_id,
-        workspace: workspace.clone(),
-        parts: plan_parts,
-        expected_settings: None,
-    };
+    let channel = Channel::parse("cli").expect("固定通道名 cli 应合法");
+    let plan = PlannedTurnRequest::single(
+        id,
+        session_id,
+        workspace.clone(),
+        channel.clone(),
+        plan_parts,
+        None,
+        None,
+    );
     if let Err(error) = lattice_local::check_turn_plan(&plan) {
         return finish_submit_receipt(
             id,
@@ -441,13 +437,7 @@ pub(super) async fn run_session_prompt_with_io(
             }
         }
     }
-    let request = TurnRequest {
-        turn_id: id,
-        session: session_id,
-        workspace,
-        parts,
-        expected_settings: None,
-    };
+    let request = TurnRequest::single(id, session_id, workspace, channel, parts, None, None);
     let turn = api.start_turn(request);
     consume(turn, None, state, verbose, json, signal, out, err).await
 }

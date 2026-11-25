@@ -86,12 +86,19 @@ impl From<ApiError> for LocalError {
                         result.message = ConflictReason::SettingsChanged.to_string();
                         None
                     }
+                    StoreError::PositionChanged { .. } => {
+                        result.kind = Conflict;
+                        result.conflict = Some(ConflictReason::PositionChanged);
+                        result.message = ConflictReason::PositionChanged.to_string();
+                        None
+                    }
                     StoreError::Busy { .. } => {
                         result.kind = Busy;
                         None
                     }
                     StoreError::InvalidInput { .. } | StoreError::Context(_) => {
                         result.kind = BadRequest;
+                        result.message = "request or frozen configuration is invalid".into();
                         None
                     }
                     _ => None,
@@ -126,6 +133,18 @@ mod tests {
         );
         let turn_conflict = LocalError::from(ApiError::from(StoreError::Conflict { turn_id: tid }));
         assert_eq!(turn_conflict.conflict, Some(ConflictReason::TurnIdUsed));
+        let position_conflict = LocalError::from(ApiError::from(StoreError::PositionChanged {
+            session_id: sid,
+            expected: lattice_session::store::NodeId(1),
+            actual: lattice_session::store::NodeId(2),
+        }));
+        assert_eq!(position_conflict.kind, LocalErrorKind::Conflict);
+        assert_eq!(
+            position_conflict.conflict,
+            Some(ConflictReason::PositionChanged),
+            "StoreError::PositionChanged 必须独立映射为 ConflictReason::PositionChanged"
+        );
+        assert_eq!(position_conflict.message, "session position changed");
     }
 
     #[test]

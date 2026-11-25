@@ -3,8 +3,8 @@
 
 //! Session 由 create_session 显式创建；首轮接受、重开及同身份冲突保持冻结配置和原始输入。
 use lattice_llm::testing::ScriptEvent;
-use lattice_local::{AgentName, ConflictReason, StateLayout, new_session_id, new_turn_id};
-use lattice_server::{RunTurnRequest, SessionApi, TurnAcceptance, TurnCompletion};
+use lattice_local::{AgentName, Channel, ConflictReason, StateLayout, new_session_id, new_turn_id};
+use lattice_server::{RunTurnRequest, SessionApi, TurnAcceptance, TurnCompletion, TurnPayload};
 use lattice_session::store::{EffectiveProfile, PublicTurnOutcome, SessionSettings, SessionStore};
 use std::sync::Arc;
 
@@ -66,11 +66,19 @@ async fn first_acceptance_reopen_preserves_identity_without_observers_or_configu
             chrono::Utc::now(),
         )
         .unwrap();
+    let cli = Channel::parse("cli").expect("测试通道名 cli 应合法");
     let request = RunTurnRequest {
-        input: lattice_session::store::TurnInput::text(" original \n".into())
-            .expect("构造测试输入"),
+        payload: TurnPayload::Submit {
+            trigger_channel: cli.clone(),
+            inputs: vec![(
+                cli,
+                lattice_session::store::TurnInput::text(" original \n".into())
+                    .expect("构造测试输入"),
+            )],
+        },
         session_id,
         expected_settings: None,
+        expected_position: None,
         cancel_flag: None,
         tools: None,
         test_llm: Some((

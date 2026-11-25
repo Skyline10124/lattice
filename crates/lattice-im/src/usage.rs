@@ -150,21 +150,21 @@ mod tests {
             turns: vec![
                 TurnUsageRow {
                     turn_id: new_turn_id(),
-                    ordinal: 1,
+                    start_node: NodeId(2),
                     provider: p_openai.clone(),
                     model: m_gpt.clone(),
                     usage: dummy_row_usage.clone(),
                 },
                 TurnUsageRow {
                     turn_id: new_turn_id(),
-                    ordinal: 2,
+                    start_node: NodeId(4),
                     provider: p_anthropic,
                     model: m_claude,
                     usage: dummy_row_usage.clone(),
                 },
                 TurnUsageRow {
                     turn_id: new_turn_id(),
-                    ordinal: 3,
+                    start_node: NodeId(6),
                     provider: p_openai,
                     model: m_gpt,
                     usage: dummy_row_usage,

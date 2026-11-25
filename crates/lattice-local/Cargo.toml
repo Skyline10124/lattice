@@ -8,6 +8,7 @@ authors.workspace = true
 description = "LATTICE 本地前端客户端句柄、会话观察状态机与日志初始化"
 
 [dependencies]
+lattice-context = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-ipc = { workspace = true }
 lattice-store = { workspace = true }

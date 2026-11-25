@@ -17,11 +17,12 @@ use tokio::{
 use zeroize::{Zeroize, Zeroizing};
 
 use crate::types::{
-    LocalError, LocalErrorKind, PlannedSubmit, PlannedTurnRequest, Result, UserInputPart,
+    LocalError, LocalErrorKind, PlannedContextOp, PlannedContextOpRequest, PlannedFeed,
+    PlannedFeedRequest, PlannedSubmit, PlannedTurnRequest, Result, UserInputPart,
 };
 
 mod defs {
-    pub const PROTOCOL_VERSION: u8 = 67;
+    pub const PROTOCOL_VERSION: u8 = 68;
     pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
     /// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
     pub const fn magic_for_version(version: u8) -> [u8; 8] {
@@ -354,32 +355,61 @@ async fn write_wire<T: serde::Serialize>(
         .map_err(|_| LocalError::new(LocalErrorKind::Transport, "本地写入超时；回执状态可能未知"))
 }
 
-/// 实发 `Request::Submit` 的 JSON 正文字节数（不含 8 字节魔数与 4 字节长度头），与 `MAX_FRAME` 的口径一致。
-/// 图片按标准 base64 计入 `byte_length.div_ceil(3) * 4` 字节加两个引号，不分配正文。
-pub fn encoded_submit_len(plan: &PlannedTurnRequest) -> usize {
-    struct ByteCounter(usize);
+struct ByteCounter(usize);
 
-    impl std::io::Write for ByteCounter {
-        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-            self.0 += bytes.len();
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
+impl std::io::Write for ByteCounter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0 += bytes.len();
+        Ok(bytes.len())
     }
 
-    let mut counter = ByteCounter(0);
-    serde_json::to_writer(&mut counter, &PlannedSubmit::Submit { request: plan })
-        .expect("PlannedSubmit 序列化到字节计数器不应失败");
-    let images: u64 = plan
-        .parts
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn encoded_parts_image_bytes(parts: &[UserInputPart<lattice_conversation::ImageRef>]) -> u64 {
+    parts
         .iter()
         .map(|part| match part {
             UserInputPart::Image { image } => image.byte_length.div_ceil(3) * 4,
             UserInputPart::Text { .. } => 0,
         })
+        .sum()
+}
+
+/// 实发 `Request::Submit` 的 JSON 正文字节数（不含 8 字节魔数与 4 字节长度头），与 `MAX_FRAME` 的口径一致。
+/// 图片按标准 base64 计入 `byte_length.div_ceil(3) * 4` 字节加两个引号，不分配正文。
+pub fn encoded_submit_len(plan: &PlannedTurnRequest) -> usize {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, &PlannedSubmit::Submit { request: plan })
+        .expect("PlannedSubmit 序列化到字节计数器不应失败");
+    let images: u64 = plan
+        .inputs
+        .iter()
+        .map(|item| encoded_parts_image_bytes(&item.parts))
+        .sum();
+    counter.0 + images as usize
+}
+
+/// 实发 `Request::Feed` 的 JSON 正文字节数（不含 8 字节魔数与 4 字节长度头），与 `MAX_FRAME` 的口径一致。
+pub fn encoded_feed_len(plan: &PlannedFeedRequest) -> usize {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, &PlannedFeed::Feed { request: plan })
+        .expect("PlannedFeed 序列化到字节计数器不应失败");
+    let images = encoded_parts_image_bytes(&plan.parts);
+    counter.0 + images as usize
+}
+
+/// 实发 `Request::ContextOp` 的 JSON 正文字节数（不含 8 字节魔数与 4 字节长度头），与 `MAX_FRAME` 的口径一致。
+pub fn encoded_context_op_len(plan: &PlannedContextOpRequest) -> usize {
+    let mut counter = ByteCounter(0);
+    serde_json::to_writer(&mut counter, &PlannedContextOp::ContextOp { request: plan })
+        .expect("PlannedContextOp 序列化到字节计数器不应失败");
+    let images: u64 = plan
+        .images
+        .iter()
+        .map(|item| item.image.byte_length.div_ceil(3) * 4)
         .sum();
     counter.0 + images as usize
 }
@@ -896,13 +926,16 @@ mod frame_tests {
     }
 
     #[test]
-    fn encoded_submit_len_matches_actual_submit_json_bytes() {
+    fn encoded_request_lengths_match_actual_json_bytes() {
         use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::PathBuf};
 
-        use lattice_conversation::{ImageRef, SessionId, TurnId};
-        use lattice_session::store::SettingsVersion;
+        use lattice_context::{Channel, ContextEdit, ContextOp};
+        use lattice_conversation::{ImageRef, MessageSemantic, SessionId, TurnId};
+        use lattice_session::store::{NodeId, SettingsVersion};
 
-        use crate::types::{Request, TurnRequest};
+        use crate::types::{
+            ContextImage, ContextOpRequest, FeedRequest, Request, TurnInputItem, TurnRequest,
+        };
 
         enum PartSpec {
             Text(String),
@@ -923,6 +956,8 @@ mod frame_tests {
         let utf8_ws = PathBuf::from("/workspace/proj/repo");
         let version: SettingsVersion =
             serde_json::from_value(serde_json::json!("ab".repeat(32))).unwrap();
+        let cli_channel = Channel::parse("cli").unwrap();
+        let tui_channel = Channel::parse("tui").unwrap();
 
         let img_mod0 = png_with_len(9, 0x11);
         let img_mod1 = png_with_len(10, 0x22);
@@ -932,82 +967,146 @@ mod frame_tests {
 
         let cases = [
             (
-                "纯文本_转义字符_非UTF8工作区_无设置版本",
+                "纯文本_转义字符_非UTF8工作区_无基线",
                 non_utf8_ws.clone(),
                 None,
-                vec![PartSpec::Text(escaped_text.clone())],
+                None,
+                vec![(
+                    cli_channel.clone(),
+                    vec![PartSpec::Text(escaped_text.clone())],
+                )],
             ),
             (
-                "纯图片_余数0_1_2_有设置版本",
+                "纯图片_余数0_1_2_有设置与位置基线",
                 non_utf8_ws.clone(),
                 Some(version),
-                vec![
-                    PartSpec::Image(img_mod0.clone()),
-                    PartSpec::Image(img_mod1.clone()),
-                    PartSpec::Image(img_mod2.clone()),
-                ],
+                Some(NodeId(7)),
+                vec![(
+                    cli_channel.clone(),
+                    vec![
+                        PartSpec::Image(img_mod0.clone()),
+                        PartSpec::Image(img_mod1.clone()),
+                        PartSpec::Image(img_mod2.clone()),
+                    ],
+                )],
             ),
             (
-                "图文交错_含大量转义与三种长度余数",
+                "多条输入_图文交错_含大量转义与三种长度余数",
                 non_utf8_ws.clone(),
                 Some(version),
+                Some(NodeId(12)),
                 vec![
-                    PartSpec::Text(escaped_text),
-                    PartSpec::Image(img_mod0.clone()),
-                    PartSpec::Text("中间文本\\\"\n\u{1}".into()),
-                    PartSpec::Image(img_mod1),
-                    PartSpec::Image(img_mod2),
-                    PartSpec::Text("结尾文本🚀".into()),
+                    (
+                        cli_channel.clone(),
+                        vec![
+                            PartSpec::Text(escaped_text),
+                            PartSpec::Image(img_mod0.clone()),
+                            PartSpec::Text("中间文本\\\"\n\u{1}".into()),
+                        ],
+                    ),
+                    (
+                        tui_channel.clone(),
+                        vec![
+                            PartSpec::Image(img_mod1.clone()),
+                            PartSpec::Image(img_mod2.clone()),
+                            PartSpec::Text("结尾文本🚀".into()),
+                        ],
+                    ),
                 ],
             ),
             (
                 "同一图片出现两次",
-                non_utf8_ws,
+                non_utf8_ws.clone(),
                 None,
-                vec![
-                    PartSpec::Image(img_large.clone()),
-                    PartSpec::Text("间隔文本\u{1}\\\"".into()),
-                    PartSpec::Image(img_large),
-                ],
+                Some(NodeId(3)),
+                vec![(
+                    cli_channel.clone(),
+                    vec![
+                        PartSpec::Image(img_large.clone()),
+                        PartSpec::Text("间隔文本\u{1}\\\"".into()),
+                        PartSpec::Image(img_large.clone()),
+                    ],
+                )],
             ),
             (
                 "UTF8工作区_单图余数0",
                 utf8_ws,
                 Some(version),
-                vec![PartSpec::Image(img_mod0)],
+                None,
+                vec![(tui_channel.clone(), vec![PartSpec::Image(img_mod0.clone())])],
             ),
         ];
 
-        for (label, workspace, expected_settings, specs) in cases {
-            let mut real_parts = Vec::with_capacity(specs.len());
-            let mut plan_parts = Vec::with_capacity(specs.len());
-            for spec in specs {
-                match spec {
-                    PartSpec::Text(text) => {
-                        real_parts.push(UserInputPart::Text { text: text.clone() });
-                        plan_parts.push(UserInputPart::Text { text });
-                    }
-                    PartSpec::Image(bytes) => {
-                        let image_ref =
-                            ImageRef::from_bytes(&bytes).expect("构造测试图片引用应成功");
-                        real_parts.push(UserInputPart::Image { image: bytes });
-                        plan_parts.push(UserInputPart::Image { image: image_ref });
+        for (label, workspace, expected_settings, expected_position, items) in cases {
+            let mut real_inputs = Vec::with_capacity(items.len());
+            let mut plan_inputs = Vec::with_capacity(items.len());
+            for (channel, specs) in items {
+                let mut real_parts = Vec::with_capacity(specs.len());
+                let mut plan_parts = Vec::with_capacity(specs.len());
+                for spec in specs {
+                    match spec {
+                        PartSpec::Text(text) => {
+                            real_parts.push(UserInputPart::Text { text: text.clone() });
+                            plan_parts.push(UserInputPart::Text { text });
+                        }
+                        PartSpec::Image(bytes) => {
+                            let image_ref =
+                                ImageRef::from_bytes(&bytes).expect("构造测试图片引用应成功");
+                            real_parts.push(UserInputPart::Image { image: bytes });
+                            plan_parts.push(UserInputPart::Image { image: image_ref });
+                        }
                     }
                 }
+                real_inputs.push(TurnInputItem {
+                    channel: channel.clone(),
+                    parts: real_parts,
+                });
+                plan_inputs.push(TurnInputItem {
+                    channel,
+                    parts: plan_parts,
+                });
             }
+
+            let feed_real = FeedRequest {
+                session: sid,
+                workspace: workspace.clone(),
+                channel: real_inputs[0].channel.clone(),
+                parts: real_inputs[0].parts.clone(),
+                expected_position,
+            };
+            let feed_plan = PlannedFeedRequest {
+                session: sid,
+                workspace: workspace.clone(),
+                channel: plan_inputs[0].channel.clone(),
+                parts: plan_inputs[0].parts.clone(),
+                expected_position,
+            };
+            let actual_feed_len = serde_json::to_vec(&Request::Feed { request: feed_real })
+                .expect("实发 feed 请求序列化不应失败")
+                .len();
+            assert_eq!(
+                encoded_feed_len(&feed_plan),
+                actual_feed_len,
+                "用例 {label} 的 feed 零载荷计长结果必须与实发 JSON 字节数完全一致"
+            );
+
             let real = TurnRequest {
                 turn_id: tid,
                 session: sid,
                 workspace: workspace.clone(),
-                parts: real_parts,
+                trigger_channel: cli_channel.clone(),
+                inputs: real_inputs,
                 expected_settings,
+                expected_position,
             };
             let plan = PlannedTurnRequest {
                 turn_id: tid,
                 session: sid,
                 workspace,
-                parts: plan_parts,
+                trigger_channel: cli_channel.clone(),
+                inputs: plan_inputs,
                 expected_settings,
+                expected_position,
             };
             let actual_len = serde_json::to_vec(&Request::Submit { request: real })
                 .expect("实发请求序列化不应失败")
@@ -1015,7 +1114,69 @@ mod frame_tests {
             assert_eq!(
                 encoded_submit_len(&plan),
                 actual_len,
-                "用例 {label} 的零载荷计长结果必须与实发 JSON 字节数完全一致"
+                "用例 {label} 的 submit 零载荷计长结果必须与实发 JSON 字节数完全一致"
+            );
+        }
+
+        let img0_ref = ImageRef::from_bytes(&img_mod0).expect("图片 0 引用应合法");
+        let img1_ref = ImageRef::from_bytes(&img_mod1).expect("图片 1 引用应合法");
+        let img2_ref = ImageRef::from_bytes(&img_mod2).expect("图片 2 引用应合法");
+        let op_with_images = ContextOp::new(
+            tui_channel,
+            vec![
+                ContextEdit::replace_input(
+                    NodeId(1),
+                    vec![
+                        MessageSemantic::Text {
+                            text: "替换文本\\\"\n".into(),
+                        },
+                        MessageSemantic::Image { image: img0_ref },
+                        MessageSemantic::Image { image: img1_ref },
+                        MessageSemantic::Image { image: img2_ref },
+                    ],
+                )
+                .expect("ReplaceInput 编辑应合法"),
+            ],
+        )
+        .expect("ContextOp 应合法");
+        for (label, images_real, images_plan, expected_position) in [
+            ("无附带图片", Vec::new(), Vec::new(), None),
+            (
+                "三张不同余数附带图片",
+                vec![
+                    ContextImage { image: img_mod0 },
+                    ContextImage { image: img_mod1 },
+                    ContextImage { image: img_mod2 },
+                ],
+                vec![
+                    ContextImage { image: img0_ref },
+                    ContextImage { image: img1_ref },
+                    ContextImage { image: img2_ref },
+                ],
+                Some(NodeId(5)),
+            ),
+        ] {
+            let real = ContextOpRequest {
+                session: sid,
+                workspace: non_utf8_ws.clone(),
+                op: op_with_images.clone(),
+                images: images_real,
+                expected_position,
+            };
+            let plan = PlannedContextOpRequest {
+                session: sid,
+                workspace: non_utf8_ws.clone(),
+                op: op_with_images.clone(),
+                images: images_plan,
+                expected_position,
+            };
+            let actual = serde_json::to_vec(&Request::ContextOp { request: real })
+                .expect("实发 context_op 请求序列化不应失败")
+                .len();
+            assert_eq!(
+                encoded_context_op_len(&plan),
+                actual,
+                "用例 {label} 的 context_op 零载荷计长结果必须与实发 JSON 字节数完全一致"
             );
         }
     }

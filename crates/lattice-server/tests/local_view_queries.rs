@@ -55,6 +55,7 @@ fn seed_session(store: &SessionStore, root: &std::path::Path, sid: SessionId, ti
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
+                expected_position: None,
             },
         )
         .unwrap();
@@ -210,7 +211,7 @@ async fn lookup_and_watch_an_orphan_without_changing_its_facts() {
         matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Input { node: NodeId(1), .. }))
     );
     assert!(
-        matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { node: NodeId(2), ordinal: Some(1), summary: Some(_), .. }))
+        matches!(view.next().await.unwrap().unwrap(), ViewUpdate::Entry { entry } if matches!(*entry, ConversationEntry::Step { node: NodeId(2), ref step, summary: Some(_), .. } if step.key.ordinal == 0))
     );
     assert!(
         client
