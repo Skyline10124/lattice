@@ -546,6 +546,235 @@ fn issue_426_part1_replace_pending_uses_old_screen_position_and_position_changed
 }
 
 #[test]
+fn configure_reply_after_eof_does_not_bypass_old_screen_expected_position() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    assert_eq!(
+        app.head.as_ref().unwrap().position,
+        NodeId(2),
+        "初始视图应已确认在节点 2"
+    );
+    save_comment(app, "断线前评论");
+    app.focus = Focus::Dock;
+    app.input.set_text("断线前输入");
+
+    // 观察断开后外部已 rewind 到节点 0，此时用户触发 /model 或 /effort 收到携带新设置与 position=0 的 configure 回执。
+    app.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    release_dock(app);
+    let configured_head = SessionHead {
+        model: Some(ModelId::parse("gpt-next").unwrap()),
+        effort: Some(Effort::High),
+        settings_version: settings_version(0x22),
+        ..head(0, None, false)
+    };
+    app.apply_configure(
+        0,
+        Ok(ConfigureReply {
+            head: configured_head.clone(),
+            adjustment: None,
+        }),
+    );
+    assert!(
+        !app.replace_pending,
+        "configure 回执不会触发重连视图替换，replace_pending 仍为 false"
+    );
+    assert_eq!(
+        app.current_head().position,
+        NodeId(0),
+        "latest_head 已更新为 configure 回执中的新位点 0"
+    );
+    assert_eq!(
+        app.head.as_ref().unwrap().position,
+        NodeId(2),
+        "已确认展示画面的 head 仍停留在节点 2"
+    );
+
+    // 按 Enter 提交：必须同时携带新 expected_settings 与旧画面 expected_position=NodeId(2)。
+    let req = app.apply_action(KeyAction::Submit).expect("应构造提交请求");
+    assert_eq!(
+        req.expected_settings,
+        Some(settings_version(0x22)),
+        "提交必须使用 configure 返回的新设置版本"
+    );
+    assert_eq!(
+        req.expected_position,
+        Some(NodeId(2)),
+        "configure 回执不得绕过旧画面位点保护，必须仍携带已确认画面的 @2"
+    );
+    assert_eq!(req.inputs.len(), 2, "应同时提交评论草稿与输入文字");
+
+    // 后台返回 PositionChanged 拒绝后显示中文错误并完整保留输入与评论草稿。
+    let conflict = LocalError {
+        conflict: Some(lattice_local::ConflictReason::PositionChanged),
+        ..local_error(LocalErrorKind::Conflict, "session position changed")
+    };
+    app.apply_submission(receipt(
+        req.turn_id,
+        SubmissionResult::Rejected { error: conflict },
+    ));
+    let err = app.dock.message().expect("PositionChanged 应暂驻 Error");
+    assert_eq!(err.level, NoticeLevel::Error);
+    assert!(
+        err.text.contains("会话位置已变更"),
+        "错误文案应说明会话位置已变更：{}",
+        err.text
+    );
+    assert_eq!(app.input.text(), "断线前输入", "被拒后输入区文字应完整保留");
+    assert_eq!(app.drafts.draft_count(), 1, "被拒后评论草稿应完整保留");
+
+    // 重连收到 Head(0) 完成 confirm_head 后再提交，expected_position 才更新为 NodeId(0)。
+    release_dock(app);
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(configured_head));
+    assert_eq!(
+        app.head.as_ref().unwrap().position,
+        NodeId(0),
+        "重连到根节点 0 应立即完成 confirm_head"
+    );
+    let req2 = app
+        .apply_action(KeyAction::Submit)
+        .expect("确认新视图后应允许重新提交");
+    assert_eq!(
+        req2.expected_settings,
+        Some(settings_version(0x22)),
+        "重连确认后仍应携带新设置版本"
+    );
+    assert_eq!(
+        req2.expected_position,
+        Some(NodeId(0)),
+        "完成 confirm_head 后 expected_position 才更新为 @0"
+    );
+}
+
+#[test]
+fn configure_before_first_view_confirm_preserves_initial_expected_position() {
+    let root = tempfile::tempdir().unwrap();
+    let unused = lattice_local::AgentName::parse("unused").unwrap();
+    let options = TuiOptions {
+        session_id: Some(SESSION.into()),
+        agent: Some(unused),
+        session_dir: root.path().join("history"),
+        project_root: root.path().into(),
+    };
+    let mut h = Harness::with_context(
+        options,
+        SessionContext {
+            session_id: sid(),
+            initial_head: SessionHead {
+                settings_version: settings_version(0x11),
+                ..head(2, None, false)
+            },
+            initial_adjustment: None,
+        },
+        root,
+    );
+    let app = &mut h.app;
+    assert!(app.head.is_none(), "首条 watch 视图确认前 self.head 应为空");
+
+    // 首条视图尚未确认前收到 configure 回执（新设置版本与新位点 0）。
+    app.apply_configure(
+        0,
+        Ok(ConfigureReply {
+            head: SessionHead {
+                model: Some(ModelId::parse("gpt-next").unwrap()),
+                settings_version: settings_version(0x33),
+                ..head(0, None, false)
+            },
+            adjustment: None,
+        }),
+    );
+    app.input.set_text("首条视图确认前提交");
+    let req = app.apply_action(KeyAction::Submit).expect("应构造提交请求");
+    assert_eq!(
+        req.expected_settings,
+        Some(settings_version(0x33)),
+        "首条视图确认前的 configure 仍应更新 expected_settings"
+    );
+    assert_eq!(
+        req.expected_position,
+        Some(NodeId(2)),
+        "首条视图确认前 expected_position 必须锚定启动会话头初始位点 @2，不受 configure 覆盖"
+    );
+}
+
+#[test]
+fn mid_sync_after_first_entry_keeps_previous_confirmed_expected_position_until_confirm_head() {
+    let mut h = Harness::new(false);
+    h.app.term_width = 100;
+    h.app.term_height = 40;
+    let app = &mut h.app;
+    let t1 = lattice_local::new_turn_id();
+    let t2 = lattice_local::new_turn_id();
+    open_view(
+        app,
+        head(4, Some(t2), false),
+        vec![
+            user(1, t1, 1, "prompt-1"),
+            step(2, t1, 0).text("answer-1").finished().entry(),
+            user(3, t2, 2, "prompt-2"),
+            step(4, t2, 0).text("answer-2").finished().entry(),
+        ],
+    );
+    assert_eq!(
+        app.head.as_ref().unwrap().position,
+        NodeId(4),
+        "初始视图应已确认在节点 4"
+    );
+
+    // 重连收到 Head(2) 与首条 Entry(1)：replace_pending 已清为 false，但 Entry(2) 尚未到达、pending_head 仍待确认。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(2, Some(t1), false)));
+    app.apply_view(entry_update(user(1, t1, 1, "prompt-1")));
+    assert!(
+        !app.replace_pending,
+        "首个初始条目到达后 replace_pending 应为 false"
+    );
+    assert!(
+        app.pending_head.is_some(),
+        "末尾 Entry(2) 尚未到达时 pending_head 必须仍处于待确认状态"
+    );
+    assert_eq!(
+        app.head.as_ref().unwrap().position,
+        NodeId(4),
+        "confirm_head 完成前 self.head 仍保留旧确认位点 @4"
+    );
+
+    app.input.set_text("流式同步中途提交");
+    let req = app.apply_action(KeyAction::Submit).expect("应构造提交请求");
+    assert_eq!(
+        req.expected_position,
+        Some(NodeId(4)),
+        "历史条目同步未完成确认前提交必须仍携带同步前的旧位点 @4"
+    );
+
+    // 拒收归还输入后，补齐 Entry(2) 完成 confirm_head，再次提交才切到新位点 @2。
+    reject(app, req.turn_id, 1);
+    release_dock(app);
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("answer-1").finished().entry(),
+    ));
+    assert!(
+        app.pending_head.is_none(),
+        "Entry(2) 到达后应完成 confirm_head"
+    );
+    assert_eq!(
+        app.head.as_ref().unwrap().position,
+        NodeId(2),
+        "confirm_head 后 self.head 应更新为新位点 @2"
+    );
+    let req2 = app
+        .apply_action(KeyAction::Submit)
+        .expect("同步确认完成后应允许重新提交");
+    assert_eq!(
+        req2.expected_position,
+        Some(NodeId(2)),
+        "confirm_head 完成后 expected_position 才更新为 @2"
+    );
+}
+
+#[test]
 fn issue_426_part2_fallback_draft_cards_survive_initial_replay_rejection_and_support_enter_delete()
 {
     let mut h = comment_app();

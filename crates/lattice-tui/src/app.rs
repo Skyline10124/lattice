@@ -169,6 +169,8 @@ pub(crate) struct App {
     clipboard_request: bool,
     staging: Option<Staging>,
     cancelling: bool,
+    /// 启动会话头的初始位点：首条视图确认前作为 `expected_position` 基线，不随 `apply_configure` 改变。
+    initial_position: NodeId,
     /// 最新收到的会话头（来自启动读取/configure、运行中 configure 回复或视图推送），
     /// 供状态行、选择面板和 expected_settings 读取。
     latest_head: SessionHead,
@@ -269,6 +271,7 @@ impl App {
             clipboard_request: false,
             staging: None,
             cancelling: false,
+            initial_position: initial_head.position,
             latest_head: initial_head.clone(),
             head: None,
             pending_head: None,
@@ -570,15 +573,13 @@ impl App {
         self.current_head().settings_version
     }
 
-    /// 返回用户当前在屏幕上实际看到的历史位置：
-    /// 重连后处于 `replace_pending`（新视图首条 `Head` 已到、首个初始条目未到）时屏幕仍展示旧视图 `self.head`，
-    /// 必须携带旧位置以防外部 `rewind` 后被静默挂到回退后的节点。
+    /// 返回当前已同步确认的视图会话头位点（`self.head.position`）；
+    /// 首条视图确认前退回启动会话头的 `initial_position`，
+    /// 在历史条目同步完成确认（`confirm_head`）之前不随 `apply_configure` 回执或待确认 `pending_head` 提前变化。
     fn current_expected_position(&self) -> NodeId {
-        if self.replace_pending {
-            self.head.as_ref().unwrap_or(&self.latest_head).position
-        } else {
-            self.latest_head.position
-        }
+        self.head
+            .as_ref()
+            .map_or(self.initial_position, |head| head.position)
     }
 
     fn sync_head_panels(&mut self) {
