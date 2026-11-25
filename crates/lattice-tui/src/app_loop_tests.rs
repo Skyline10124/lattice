@@ -527,6 +527,679 @@ fn comment_numbering_continues_from_history_and_drafts() {
     assert_eq!(app.history.prev(), None, "仅含评论的提交不应写入输入历史");
 }
 
+fn submit_comment_wire(app: &mut App, comment_text: &str) -> (TurnId, String) {
+    save_comment(app, comment_text);
+    app.focus = Focus::Dock;
+    let req = app.submit().expect("提交评论草稿应生成 TurnRequest");
+    let [UserInputPart::Text { text: wire }] = &req.inputs[0].parts[..] else {
+        panic!("评论提交请求应只含一段文本");
+    };
+    (req.turn_id, wire.clone())
+}
+
+fn delete_draft_by_text(app: &mut App, text: &str) {
+    comment_browse(app, text);
+    app.apply_action(KeyAction::Delete);
+}
+
+#[test]
+fn comment_accepted_reserves_number_until_input_syncs_and_prunes() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let (live, wire) = submit_comment_wire(app, "accepted note");
+
+    // 收到 Accepted 回执，但视图尚未同步 Input / Step 0。
+    app.apply_submission(receipt(live, accepted_at(live, &[3], 4)));
+    assert!(app.submitted.is_none(), "已接受提交应从 submitted 移出");
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "Input 条目同步前应在 accepted_comments 中继续保留编号占用"
+    );
+    assert_eq!(app.drafts.draft_count(), 0, "已接受的评论不应回到草稿");
+
+    // 同步窗口期新建评论 B，编号必须为 #2。
+    save_comment(app, "draft during sync window");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "Accepted 后 Input 未到达时新建评论必须避开已接受的 #1"
+    );
+
+    // Input 与 Step 0 到达后，由 Block::CommentedUser 接管，accepted_comments 被裁剪释放。
+    app.apply_view(LocalUpdate::Head(head(4, Some(live), true)));
+    app.apply_view(entry_update(user(3, live, 2, &wire)));
+    app.apply_view(entry_update(
+        step(4, live, 0).turn_ordinal(2).finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "Input 条目同步进视图后应释放 accepted_comments 占位"
+    );
+
+    // 保留草稿 #2 时继续新建评论 C 应得到 #3。
+    save_comment(app, "draft three");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2, 3],
+        "保留草稿 #2 时新建评论应递增到 #3"
+    );
+
+    // 删除草稿 #3 与 #2 后再新建评论，由视图中已发送的 #1 接管，仍从 #2 起算。
+    delete_draft_by_text(app, "draft three");
+    delete_draft_by_text(app, "draft during sync window");
+    assert_eq!(app.drafts.draft_count(), 0, "草稿应已全部删除");
+    save_comment(app, "draft after takeover");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "accepted_comments 释放后仍由 Block::CommentedUser 占用 #1，新评论应得 #2"
+    );
+}
+
+#[test]
+fn comment_unknown_resolved_to_accepted_reserves_number_via_receipt_and_handoff() {
+    for via_handoff in [false, true] {
+        let mut h = comment_app();
+        let app = &mut h.app;
+        let (live, wire) = submit_comment_wire(app, "unknown then accepted");
+
+        app.apply_submission(receipt(live, SubmissionResult::Unknown { error: None }));
+        release_dock(app);
+        assert!(
+            app.unknown_submission.is_some(),
+            "结果未知时应先暂存在 unknown_submission"
+        );
+        assert!(app.accepted_comments.is_empty());
+
+        let accepted_receipt = SubmissionReceipt {
+            turn_id: live,
+            result: accepted_at(live, &[3], 4),
+            recovered: true,
+        };
+        if via_handoff {
+            app.apply_handoff(DetachReport {
+                session_id: sid(),
+                turn_id: Some(live),
+                submission: Some(accepted_receipt),
+                submission_diagnostic: None,
+                cancel: None,
+                cancel_error: None,
+                head: None,
+                summary: None,
+            });
+        } else {
+            app.apply_submission(LocalUpdate::Submit {
+                update: SubmissionUpdate::Receipt(accepted_receipt),
+            });
+        }
+
+        assert!(
+            app.unknown_submission.is_none(),
+            "确定已接受后应移出 unknown_submission（via_handoff={via_handoff}）"
+        );
+        assert!(
+            app.accepted_comments.contains_key(&live),
+            "Unknown 转为 Accepted 后 Input 未到达前应保留在 accepted_comments（via_handoff={via_handoff}）"
+        );
+        save_comment(app, "second after recovery");
+        assert_eq!(
+            app.drafts
+                .draft_comments()
+                .iter()
+                .map(|c| c.n)
+                .collect::<Vec<_>>(),
+            vec![2],
+            "Unknown 恢复为 Accepted 后视图尚未同步前新建评论应得 #2（via_handoff={via_handoff}）"
+        );
+
+        app.apply_view(LocalUpdate::Head(head(4, Some(live), false)));
+        app.apply_view(entry_update(user(3, live, 2, &wire)));
+        app.apply_view(entry_update(
+            step(4, live, 0).turn_ordinal(2).finished().entry(),
+        ));
+        assert!(
+            app.accepted_comments.is_empty(),
+            "对应 Input 同步进视图后应裁剪释放（via_handoff={via_handoff}）"
+        );
+    }
+}
+
+#[test]
+fn comment_accepted_survives_disconnect_and_reconnect_on_same_path() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let t1 = app.head.as_ref().unwrap().turn_id.unwrap();
+    let (live, wire) = submit_comment_wire(app, "accepted before eof");
+
+    app.apply_submission(receipt(live, accepted_at(live, &[3], 4)));
+    app.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "断线时不得清空 accepted_comments"
+    );
+
+    // 断线期间新建评论得到 #2。
+    save_comment(app, "during disconnect");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "断线期间新建评论应避开已接受的 #1"
+    );
+
+    // 发起重连：首条会话头到达后处于 replace_pending，此时绝不能因旧条目或状态提前裁剪。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(head(4, Some(live), false)));
+    assert!(
+        app.replace_pending,
+        "新视图首个条目到达前应处于 replace_pending"
+    );
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "replace_pending 期间必须保留 accepted_comments"
+    );
+    delete_draft_by_text(app, "during disconnect");
+    save_comment(app, "during replace pending");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "replace_pending 期间新建评论仍应得到 #2"
+    );
+
+    // 初始条目流式到达：t1 的条目先到，live 的 Input 尚未到，编号仍不丢。
+    app.apply_view(entry_update(user(1, t1, 1, "original prompt")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    assert!(
+        !app.replace_pending,
+        "首个初始条目到达后应退出 replace_pending"
+    );
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "重连后对应 Input 尚未到达前必须保留 accepted_comments"
+    );
+    delete_draft_by_text(app, "during replace pending");
+    save_comment(app, "during streaming initial");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "初始条目流式到达且 Input 未到前，新建评论仍应得到 #2"
+    );
+
+    // live 的 Input 与 Step 到达后由 Block::CommentedUser 接管并释放 accepted_comments。
+    app.apply_view(entry_update(user(3, live, 2, &wire)));
+    app.apply_view(entry_update(
+        step(4, live, 0).turn_ordinal(2).finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "重连后 Input 到达应由 Block::CommentedUser 接管并释放 accepted_comments"
+    );
+    delete_draft_by_text(app, "during streaming initial");
+    save_comment(app, "after reconnect takeover");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "接管释放后视图中的 #1 继续占位，新评论应得 #2"
+    );
+}
+
+#[test]
+fn comment_accepted_released_without_restore_on_rewound_reconnect() {
+    // 子场景 1：!has_older，重连后会话已回退到该轮之前。
+    let mut h = Harness::new(false);
+    h.app.term_width = 100;
+    h.app.term_height = 40;
+    let app = &mut h.app;
+    let t1 = lattice_local::new_turn_id();
+    let t2 = lattice_local::new_turn_id();
+    open_view(
+        app,
+        head(4, Some(t2), false),
+        vec![
+            user(1, t1, 1, "prompt-1"),
+            step(2, t1, 0).text("comment target").finished().entry(),
+            user(3, t2, 2, "prompt-2"),
+            step(4, t2, 0)
+                .turn_ordinal(2)
+                .text("reply-2")
+                .finished()
+                .entry(),
+        ],
+    );
+    let (live, _) = submit_comment_wire(app, "rewound accepted note");
+    app.apply_submission(receipt(live, accepted_at(live, &[5], 6)));
+    app.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    save_comment(app, "offline draft");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "断线期间新建评论应得 #2"
+    );
+
+    // 重连到已回退路径（head 停在节点 4，has_older=false）：初始批次收齐前先保留占位。
+    app.begin_view();
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        has_older: Some(false),
+        ..head(4, Some(t2), false)
+    }));
+    app.apply_view(entry_update(user(1, t1, 1, "prompt-1")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "初始条目尚未收齐确认 head 前应继续保留 accepted_comments"
+    );
+    delete_draft_by_text(app, "offline draft");
+    save_comment(app, "mid-batch draft");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "初始条目尚未收齐前新建评论仍应避开 #1"
+    );
+
+    // 补齐剩余初始条目确认 head(4)，确认 live 不在当前路径后释放占用且绝不恢复为草稿。
+    app.apply_view(entry_update(user(3, t2, 2, "prompt-2")));
+    app.apply_view(entry_update(
+        step(4, t2, 0)
+            .turn_ordinal(2)
+            .text("reply-2")
+            .finished()
+            .entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "!has_older 且新路径不含该轮时，收齐后应释放 accepted_comments"
+    );
+    assert!(
+        app.pending_accepted.is_none(),
+        "收齐后不在路径上的轮次应清理 pending_accepted"
+    );
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| (c.n, c.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "mid-batch draft")],
+        "已接受的评论绝不可被恢复进本地草稿"
+    );
+    delete_draft_by_text(app, "mid-batch draft");
+    save_comment(app, "fresh after rewind");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "回退释放占用并删除草稿 #2 后，新评论应从当前路径最大编号 + 1（#1）起算"
+    );
+
+    // 子场景 2：has_older == true 且 input_node >= window_min（也在 head_pos 之后）。
+    let mut h2 = Harness::new(false);
+    h2.app.term_width = 100;
+    h2.app.term_height = 40;
+    let app2 = &mut h2.app;
+    let t_win = lattice_local::new_turn_id();
+    open_view(
+        app2,
+        SessionHead {
+            has_older: Some(true),
+            ..head(4, Some(t_win), false)
+        },
+        vec![
+            user(3, t_win, 2, "prompt-win"),
+            step(4, t_win, 0)
+                .turn_ordinal(2)
+                .text("comment target")
+                .finished()
+                .entry(),
+        ],
+    );
+    let (live2, _) = submit_comment_wire(app2, "rewound older window accepted");
+    app2.apply_submission(receipt(live2, accepted_at(live2, &[5], 6)));
+    app2.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    save_comment(app2, "offline draft older");
+    assert_eq!(
+        app2.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "断线期间新建评论应得 #2"
+    );
+
+    // 重连后窗口为节点 3..=4 且 has_older == true，live2 的 input_node=5 >= window_min(3)。
+    app2.begin_view();
+    app2.apply_view(LocalUpdate::Head(SessionHead {
+        has_older: Some(true),
+        ..head(4, Some(t_win), false)
+    }));
+    app2.apply_view(entry_update(user(3, t_win, 2, "prompt-win")));
+    assert!(
+        app2.accepted_comments.contains_key(&live2),
+        "初始条目尚未收齐前应保留 accepted_comments"
+    );
+    app2.apply_view(entry_update(
+        step(4, t_win, 0)
+            .turn_ordinal(2)
+            .text("comment target")
+            .finished()
+            .entry(),
+    ));
+    assert!(app2.has_older, "当前窗口前仍有更早历史");
+    assert!(
+        app2.accepted_comments.is_empty(),
+        "has_older 为真但 input_node >= window_min 说明必在已放弃分叉上，应立即释放占用"
+    );
+    assert_eq!(
+        app2.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| (c.n, c.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "offline draft older")],
+        "has_older 场景下同样绝不将已接受评论恢复为草稿"
+    );
+    delete_draft_by_text(app2, "offline draft older");
+    save_comment(app2, "fresh after older rewind");
+    assert_eq!(
+        app2.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "删除草稿 #2 后，回退路径上新建评论应重新从 #1 起算"
+    );
+
+    // 子场景 3：has_older == true 且 input_node < window_min 时先保留，翻页到达 !has_older 后收口释放。
+    let mut h3 = Harness::new(false);
+    h3.app.term_width = 100;
+    h3.app.term_height = 40;
+    let app3 = &mut h3.app;
+    let t_a = lattice_local::new_turn_id();
+    let t_b = lattice_local::new_turn_id();
+    open_view(
+        app3,
+        SessionHead {
+            has_older: Some(false),
+            ..head(2, Some(t_a), false)
+        },
+        vec![
+            user(1, t_a, 1, "prompt-a"),
+            step(2, t_a, 0).text("comment target").finished().entry(),
+        ],
+    );
+    let (live3, _) = submit_comment_wire(app3, "older fork accepted");
+    app3.apply_submission(receipt(live3, accepted_at(live3, &[3], 4)));
+    app3.apply_view(LocalUpdate::Connection {
+        status: ConnectionStatus::Eof,
+    });
+    open_view(
+        app3,
+        SessionHead {
+            has_older: Some(true),
+            ..head(6, Some(t_b), false)
+        },
+        vec![
+            user(5, t_b, 2, "prompt-b"),
+            step(6, t_b, 0)
+                .turn_ordinal(2)
+                .text("comment target")
+                .finished()
+                .entry(),
+        ],
+    );
+    assert!(
+        app3.accepted_comments.contains_key(&live3),
+        "input_node < window_min 且 has_older 为真时应暂留占位等待向上翻页核对"
+    );
+    let older_req = OlderRequest {
+        session_id: sid(),
+        before: NodeId(5),
+        epoch: app3.epoch,
+    };
+    app3.apply_older(
+        older_req,
+        Ok(LocalHistory {
+            entries: vec![
+                user(1, t_a, 1, "prompt-a"),
+                step(2, t_a, 0).text("comment target").finished().entry(),
+            ],
+            has_more: false,
+        }),
+    );
+    assert!(!app3.has_older, "翻页到底后 has_older 应为 false");
+    assert!(
+        app3.accepted_comments.is_empty(),
+        "翻页到底确认该轮不在当前路径后应释放残留 accepted_comments 占位"
+    );
+}
+
+#[test]
+fn comment_accepted_online_path_replaced_keeps_until_batch_complete_then_reconciles() {
+    // 子场景 1：在线收到 path_replaced 后，该轮仍在活跃路径上，收齐后由 Input 接管。
+    let mut h_keep = Harness::new(false);
+    h_keep.app.term_width = 100;
+    h_keep.app.term_height = 40;
+    let app = &mut h_keep.app;
+    let t1 = lattice_local::new_turn_id();
+    let t2 = lattice_local::new_turn_id();
+    open_view(
+        app,
+        head(4, Some(t2), false),
+        vec![
+            user(1, t1, 1, "prompt-1"),
+            step(2, t1, 0).text("comment target").finished().entry(),
+            user(3, t2, 2, "prompt-2"),
+            step(4, t2, 0)
+                .turn_ordinal(2)
+                .text("reply-2")
+                .finished()
+                .entry(),
+        ],
+    );
+    let (live, wire) = submit_comment_wire(app, "kept across path replaced");
+    app.apply_submission(receipt(live, accepted_at(live, &[5], 6)));
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        has_older: Some(false),
+        ..head(6, Some(live), false)
+    }));
+    app.apply_view(entry_update(user(1, t1, 1, "prompt-1")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "path_replaced 初始批次未收齐前必须保留 accepted_comments"
+    );
+    save_comment(app, "draft before path_replaced finishes");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "path_replaced 初始批次未收齐前新建评论仍应得 #2"
+    );
+    app.apply_view(entry_update(user(3, t2, 2, "prompt-2")));
+    app.apply_view(entry_update(
+        step(4, t2, 0)
+            .turn_ordinal(2)
+            .text("reply-2")
+            .finished()
+            .entry(),
+    ));
+    app.apply_view(entry_update(user(5, live, 3, &wire)));
+    app.apply_view(entry_update(
+        step(6, live, 0).turn_ordinal(3).finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "path_replaced 后若该轮仍在路径上，Input 到达即完成接管并释放 accepted_comments"
+    );
+    delete_draft_by_text(app, "draft before path_replaced finishes");
+    save_comment(app, "after kept path_replaced");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "由 Input 接管后新建评论仍从 #2 起算"
+    );
+
+    // 子场景 2：在线 path_replaced 回退到早先轮次（head 停在节点 4）。
+    let mut h_rewind = Harness::new(false);
+    h_rewind.app.term_width = 100;
+    h_rewind.app.term_height = 40;
+    let app = &mut h_rewind.app;
+    open_view(
+        app,
+        head(4, Some(t2), false),
+        vec![
+            user(1, t1, 1, "prompt-1"),
+            step(2, t1, 0).text("comment target").finished().entry(),
+            user(3, t2, 2, "prompt-2"),
+            step(4, t2, 0)
+                .turn_ordinal(2)
+                .text("reply-2")
+                .finished()
+                .entry(),
+        ],
+    );
+    let (live_rw, _) = submit_comment_wire(app, "rewound by path replaced");
+    app.apply_submission(receipt(live_rw, accepted_at(live_rw, &[5], 6)));
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        has_older: Some(false),
+        ..head(4, Some(t2), false)
+    }));
+    app.apply_view(entry_update(user(1, t1, 1, "prompt-1")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    save_comment(app, "draft during rewind batch");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "在线 path_replaced 收齐前新建评论仍应得 #2"
+    );
+    app.apply_view(entry_update(user(3, t2, 2, "prompt-2")));
+    app.apply_view(entry_update(
+        step(4, t2, 0)
+            .turn_ordinal(2)
+            .text("reply-2")
+            .finished()
+            .entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "在线 path_replaced 回退收齐后应释放 accepted_comments"
+    );
+    assert!(
+        app.pending_accepted.is_none(),
+        "在线 path_replaced 回退收齐后应清理 pending_accepted"
+    );
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| (c.n, c.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "draft during rewind batch")],
+        "在线 path_replaced 回退后绝不恢复已接受评论到草稿"
+    );
+    delete_draft_by_text(app, "draft during rewind batch");
+    save_comment(app, "fresh after online rewind");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "删除草稿 #2 后在回退后的路径上新建评论应重新从 #1 起算"
+    );
+
+    // 子场景 3：在线 path_replaced 直接回退到根节点 NodeId(0)（立即确认会话头）。
+    let mut h_root = comment_app();
+    let app = &mut h_root.app;
+    let (live_root, _) = submit_comment_wire(app, "rewound to root");
+    app.apply_submission(receipt(live_root, accepted_at(live_root, &[3], 4)));
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        has_older: Some(false),
+        ..head(0, None, false)
+    }));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "回退到根节点 0 立即确认会话头后应释放 accepted_comments"
+    );
+    assert!(
+        app.pending_accepted.is_none(),
+        "回退到根节点 0 后应清理 pending_accepted"
+    );
+    assert_eq!(
+        app.drafts.draft_count(),
+        0,
+        "回退到根节点 0 后绝不恢复已接受评论进草稿"
+    );
+}
+
 #[test]
 fn running_enter_warns_and_preserves_input_and_drafts_while_commands_still_work() {
     for cancelling in [false, true] {
