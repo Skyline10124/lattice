@@ -384,7 +384,7 @@ fn a_new_view_rejudges_the_accepted_turn_it_was_waiting_for() {
     app.input.set_text("mine");
     app.submit().unwrap();
     let (mine, _) = app.submission_identity().unwrap();
-    app.apply_submission(receipt(mine, accepted(mine)));
+    app.apply_submission(receipt(mine, accepted_at(mine, &[3], 4)));
     assert_eq!(app.phase, TurnPhase::Streaming, "会话头指向它之前仍在运行");
     // 重连时这一轮已不在新窗口里：会话头在别的轮，例如它之后又跑了十轮以上。
     open_view(&mut app, head(24, Some(turn(12)), false), turns(3..=12));
@@ -394,7 +394,7 @@ fn a_new_view_rejudges_the_accepted_turn_it_was_waiting_for() {
     app.submit().unwrap();
     let (next, _) = app.submission_identity().unwrap();
     app.begin_view();
-    app.apply_submission(receipt(next, accepted(next)));
+    app.apply_submission(receipt(next, accepted_at(next, &[25], 26)));
     app.apply_view(LocalUpdate::Head(head(24, Some(turn(12)), false)));
     for entry in turns(3..=12) {
         app.apply_view(entry_update(entry));

@@ -1098,7 +1098,7 @@ fn comment_accepted_online_path_replaced_keeps_until_batch_complete_then_reconci
         "由 Input 接管后新建评论仍从 #2 起算"
     );
 
-    // 子场景 2：在线 path_replaced 回退到早先轮次（head 停在节点 4）。
+    // 子场景 2：watch 已观察到该轮启动会话头（因果水位 >= start_node，Input 尚未到达），随后在线 path_replaced 回退到早先轮次（head 停在节点 4）。
     let mut h_rewind = Harness::new(false);
     h_rewind.app.term_width = 100;
     h_rewind.app.term_height = 40;
@@ -1119,6 +1119,12 @@ fn comment_accepted_online_path_replaced_keeps_until_batch_complete_then_reconci
     );
     let (live_rw, _) = submit_comment_wire(app, "rewound by path replaced");
     app.apply_submission(receipt(live_rw, accepted_at(live_rw, &[5], 6)));
+    // watch 先看到该轮启动时的会话头（节点 6 >= start_node），但 Input(5) 尚未到达。
+    app.apply_view(LocalUpdate::Head(head(6, Some(live_rw), true)));
+    assert!(
+        app.accepted_comments.contains_key(&live_rw),
+        "仅收到新轮会话头而 Input 未到时仍保留 accepted_comments"
+    );
     app.apply_view(LocalUpdate::Head(SessionHead {
         path_replaced: true,
         has_older: Some(false),
@@ -1148,11 +1154,11 @@ fn comment_accepted_online_path_replaced_keeps_until_batch_complete_then_reconci
     ));
     assert!(
         app.accepted_comments.is_empty(),
-        "在线 path_replaced 回退收齐后应释放 accepted_comments"
+        "因果确认晚于接受的在线 path_replaced 回退收齐后应释放 accepted_comments"
     );
     assert!(
         app.pending_accepted.is_none(),
-        "在线 path_replaced 回退收齐后应清理 pending_accepted"
+        "因果确认晚于接受的在线 path_replaced 回退收齐后应清理 pending_accepted"
     );
     assert_eq!(
         app.drafts
@@ -1175,11 +1181,12 @@ fn comment_accepted_online_path_replaced_keeps_until_batch_complete_then_reconci
         "删除草稿 #2 后在回退后的路径上新建评论应重新从 #1 起算"
     );
 
-    // 子场景 3：在线 path_replaced 直接回退到根节点 NodeId(0)（立即确认会话头）。
+    // 子场景 3：watch 已观察到该轮启动会话头（因果水位 >= start_node），随后在线 path_replaced 直接回退到根节点 NodeId(0)（立即确认会话头）。
     let mut h_root = comment_app();
     let app = &mut h_root.app;
     let (live_root, _) = submit_comment_wire(app, "rewound to root");
     app.apply_submission(receipt(live_root, accepted_at(live_root, &[3], 4)));
+    app.apply_view(LocalUpdate::Head(head(4, Some(live_root), true)));
     app.apply_view(LocalUpdate::Head(SessionHead {
         path_replaced: true,
         has_older: Some(false),
@@ -1187,16 +1194,345 @@ fn comment_accepted_online_path_replaced_keeps_until_batch_complete_then_reconci
     }));
     assert!(
         app.accepted_comments.is_empty(),
-        "回退到根节点 0 立即确认会话头后应释放 accepted_comments"
+        "因果确认晚于接受并回退到根节点 0 后应释放 accepted_comments"
     );
     assert!(
         app.pending_accepted.is_none(),
-        "回退到根节点 0 后应清理 pending_accepted"
+        "因果确认晚于接受并回退到根节点 0 后应清理 pending_accepted"
     );
     assert_eq!(
         app.drafts.draft_count(),
         0,
         "回退到根节点 0 后绝不恢复已接受评论进草稿"
+    );
+}
+
+#[test]
+fn comment_accepted_late_pre_accept_path_replaced_snapshot_keeps_number_until_input_syncs() {
+    // 子场景 1：非空旧回退快照 S 早于接受生成、晚于 Accepted 回执到达，绝不可提前释放 #1。
+    let mut h = Harness::new(false);
+    h.app.term_width = 100;
+    h.app.term_height = 40;
+    let app = &mut h.app;
+    let t1 = lattice_local::new_turn_id();
+    let t2 = lattice_local::new_turn_id();
+    open_view(
+        app,
+        head(4, Some(t2), false),
+        vec![
+            user(1, t1, 1, "prompt-1"),
+            step(2, t1, 0).text("comment target").finished().entry(),
+            user(3, t2, 2, "prompt-2"),
+            step(4, t2, 0)
+                .turn_ordinal(2)
+                .text("reply-2")
+                .finished()
+                .entry(),
+        ],
+    );
+    let (live, wire) = submit_comment_wire(app, "accepted after stale snapshot");
+    app.apply_submission(receipt(live, accepted_at(live, &[5], 6)));
+
+    // 晚到的是接受前生成的回退快照 S（节点 1..=2，未过 start_node=6 水位）。
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        has_older: Some(false),
+        ..head(2, Some(t1), false)
+    }));
+    app.apply_view(entry_update(user(1, t1, 1, "prompt-1")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "晚到的接受前 path_replaced 快照收齐后必须继续保留 #1 占位"
+    );
+    assert_eq!(
+        app.drafts.draft_count(),
+        0,
+        "旧快照收齐后不应将评论恢复为草稿"
+    );
+    assert_eq!(
+        app.pending_accepted,
+        Some(live),
+        "旧快照未证明晚于接受时应继续保留 pending_accepted"
+    );
+    assert_eq!(
+        app.phase,
+        TurnPhase::Streaming,
+        "旧快照未证明晚于接受时应保持运行中状态"
+    );
+
+    // 此时在 t1 上新建评论草稿 B，绝不可复用 #1，必须得到 #2。
+    save_comment(app, "draft after stale snapshot");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "接受前旧回退快照收齐后、Input 到达前新建评论必须得到 #2"
+    );
+
+    // 随后 watch 推来接受后的真实条目，由 Block::CommentedUser 接管并清理等待状态。
+    app.apply_view(LocalUpdate::Head(head(6, Some(live), false)));
+    app.apply_view(entry_update(user(5, live, 2, &wire)));
+    app.apply_view(entry_update(
+        step(6, live, 0).turn_ordinal(2).finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "真实 Input 到达后应由 Block::CommentedUser 接管并清空 accepted_comments"
+    );
+    assert!(
+        app.pending_accepted.is_none(),
+        "真实 Step 0 到达后应清理 pending_accepted"
+    );
+    assert_eq!(app.phase, TurnPhase::Idle, "该轮已结束，界面应回到 Idle");
+    delete_draft_by_text(app, "draft after stale snapshot");
+    save_comment(app, "draft after real input takeover");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "删除草稿 #2 后仍由视图中的 #1 占用，新草稿应得 #2"
+    );
+
+    // 子场景 2：接受前生成的根节点回退快照 S（NodeId(0)）晚于 Accepted 到达，同样不得提前释放。
+    let mut h_root = comment_app();
+    let app = &mut h_root.app;
+    let (live_root, wire_root) = submit_comment_wire(app, "accepted after stale root snapshot");
+    app.apply_submission(receipt(live_root, accepted_at(live_root, &[3], 4)));
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        has_older: Some(false),
+        ..head(0, None, false)
+    }));
+    assert!(
+        app.accepted_comments.contains_key(&live_root),
+        "晚到的接受前根节点回退快照不得提前释放 #1 占位"
+    );
+    assert_eq!(app.drafts.draft_count(), 0, "不得将已接受评论恢复为草稿");
+    assert_eq!(
+        app.pending_accepted,
+        Some(live_root),
+        "接受前根节点快照不得提前清理 pending_accepted"
+    );
+    assert_eq!(
+        app.phase,
+        TurnPhase::Streaming,
+        "接受前根节点快照不得误判为 Idle"
+    );
+
+    // 随后 watch 推来接受后的真实条目，接管 #1 并结束等待。
+    app.apply_view(LocalUpdate::Head(head(4, Some(live_root), false)));
+    app.apply_view(entry_update(user(3, live_root, 1, &wire_root)));
+    app.apply_view(entry_update(
+        step(4, live_root, 0)
+            .turn_ordinal(1)
+            .text("comment target")
+            .finished()
+            .entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "根快照后的真实 Input 到达应接管并释放 accepted_comments"
+    );
+    assert!(
+        app.pending_accepted.is_none(),
+        "根快照后的真实 Step 0 到达应清理 pending_accepted"
+    );
+    assert_eq!(app.phase, TurnPhase::Idle);
+    save_comment(app, "draft after root recovery takeover");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "视图中的 #1 接管后新建评论应得 #2"
+    );
+
+    // 子场景 3（反向乱序）：watch 先收齐因果晚于 A(3, 4) 的回退分叉快照（节点 5、6），随后才收到迟到的 Accepted（覆盖 receipt 与 handoff 两条路径）。
+    for via_handoff in [false, true] {
+        let mut h_rev = comment_app();
+        let app = &mut h_rev.app;
+        let t1 = app.head.as_ref().unwrap().turn_id.unwrap();
+        let (live_rev, _) = submit_comment_wire(app, "late accepted after newer fork");
+        if via_handoff {
+            app.apply_submission(receipt(live_rev, SubmissionResult::Unknown { error: None }));
+            release_dock(app);
+        }
+
+        let t_other = lattice_local::new_turn_id();
+        app.apply_view(LocalUpdate::Head(SessionHead {
+            path_replaced: true,
+            has_older: Some(false),
+            ..head(6, Some(t_other), false)
+        }));
+        app.apply_view(entry_update(user(1, t1, 1, "original prompt")));
+        app.apply_view(entry_update(
+            step(2, t1, 0).text("comment target").finished().entry(),
+        ));
+        app.apply_view(entry_update(user(5, t_other, 2, "other prompt")));
+        app.apply_view(entry_update(
+            step(6, t_other, 0)
+                .turn_ordinal(2)
+                .text("other reply")
+                .finished()
+                .entry(),
+        ));
+
+        let late_receipt = SubmissionReceipt {
+            turn_id: live_rev,
+            result: accepted_at(live_rev, &[3], 4),
+            recovered: via_handoff,
+        };
+        if via_handoff {
+            app.apply_handoff(DetachReport {
+                session_id: sid(),
+                turn_id: Some(live_rev),
+                submission: Some(late_receipt),
+                submission_diagnostic: None,
+                cancel: None,
+                cancel_error: None,
+                head: None,
+                summary: None,
+            });
+        } else {
+            app.apply_submission(LocalUpdate::Submit {
+                update: SubmissionUpdate::Receipt(late_receipt),
+            });
+        }
+
+        assert!(
+            app.accepted_comments.is_empty(),
+            "迟到 Accepted 遇到已确认的 watch_max_node(6) >= 4 后应立即核销 accepted_comments（via_handoff={via_handoff}）"
+        );
+        assert!(
+            app.pending_accepted.is_none(),
+            "迟到 Accepted 核销后不得悬留 pending_accepted（via_handoff={via_handoff}）"
+        );
+        assert_eq!(
+            app.phase,
+            TurnPhase::Idle,
+            "迟到 Accepted 核销后界面应保持 Idle（via_handoff={via_handoff}）"
+        );
+        assert_eq!(
+            app.drafts.draft_count(),
+            0,
+            "迟到 Accepted 核销后绝不恢复已接受评论到草稿（via_handoff={via_handoff}）"
+        );
+        save_comment(app, "fresh after late accepted release");
+        assert_eq!(
+            app.drafts
+                .draft_comments()
+                .iter()
+                .map(|c| c.n)
+                .collect::<Vec<_>>(),
+            vec![1],
+            "反向乱序核销释放占位后新建评论应从 #1 起算（via_handoff={via_handoff}）"
+        );
+    }
+}
+
+#[test]
+fn comment_accepted_after_begin_view_keeps_number_on_stale_initial_snapshot_until_causal_proof() {
+    let mut h = comment_app();
+    let app = &mut h.app;
+    let t1 = app.head.as_ref().unwrap().turn_id.unwrap();
+    let (live, _) = submit_comment_wire(app, "accepted after begin_view");
+
+    // 先发起新 watch（begin_view），随后才收到本次提交的 Accepted 回执。
+    app.begin_view();
+    app.apply_submission(receipt(live, accepted_at(live, &[3], 4)));
+
+    // 该次 begin_view 在接受前捕获的旧初始快照到达（active_view_gen == accepted_view_gen 且 watch_max_node=2 < 4）。
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        has_older: Some(false),
+        ..head(2, Some(t1), false)
+    }));
+    app.apply_view(entry_update(user(1, t1, 1, "original prompt")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    assert!(
+        app.accepted_comments.contains_key(&live),
+        "begin_view 早于接受发起时，在途旧初始快照收齐后不得释放 #1 占位"
+    );
+    assert_eq!(
+        app.pending_accepted,
+        Some(live),
+        "未过因果水位的旧初始快照不得清理 pending_accepted"
+    );
+    assert_eq!(
+        app.phase,
+        TurnPhase::Streaming,
+        "未过因果水位的旧初始快照应保持 Streaming"
+    );
+    save_comment(app, "draft during stale initial view");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![2],
+        "旧初始快照收齐后新建评论仍必须避开 #1，得到 #2"
+    );
+
+    // 同连接随后收到因果晚于接受的新分叉快照（新轮 t_other 推进到节点 5、6，满足 watch_max_node(6) >= 4）。
+    let t_other = lattice_local::new_turn_id();
+    app.apply_view(LocalUpdate::Head(SessionHead {
+        path_replaced: true,
+        has_older: Some(false),
+        ..head(6, Some(t_other), false)
+    }));
+    app.apply_view(entry_update(user(1, t1, 1, "original prompt")));
+    app.apply_view(entry_update(
+        step(2, t1, 0).text("comment target").finished().entry(),
+    ));
+    app.apply_view(entry_update(user(5, t_other, 2, "other prompt")));
+    app.apply_view(entry_update(
+        step(6, t_other, 0)
+            .turn_ordinal(2)
+            .text("other reply")
+            .finished()
+            .entry(),
+    ));
+    assert!(
+        app.accepted_comments.is_empty(),
+        "同连接观察到节点 6 >= start_node(4) 且当前路径不含 live 后应立即释放 #1 占位"
+    );
+    assert!(
+        app.pending_accepted.is_none(),
+        "因果确认不在当前路径后应清理 pending_accepted"
+    );
+    assert_eq!(app.phase, TurnPhase::Idle, "因果确认后界面应回到 Idle");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| (c.n, c.text.as_str()))
+            .collect::<Vec<_>>(),
+        vec![(2, "draft during stale initial view")],
+        "因果确认释放占位时绝不将已接受评论恢复为草稿"
+    );
+    delete_draft_by_text(app, "draft during stale initial view");
+    save_comment(app, "fresh after causal fork release");
+    assert_eq!(
+        app.drafts
+            .draft_comments()
+            .iter()
+            .map(|c| c.n)
+            .collect::<Vec<_>>(),
+        vec![1],
+        "删除草稿 #2 后在新分叉上新建评论应重新从 #1 起算"
     );
 }
 
