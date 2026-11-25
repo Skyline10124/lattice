@@ -21,8 +21,8 @@ const JPEG_MAGIC: &[u8] = &[0xFF, 0xD8, 0xFF, 0xE0];
 const JPEG_B64: &str = "/9j/4A==";
 const BIG_IMAGE_BYTES: usize = 3 * 1024 * 1024;
 
-const BUDGET_EXCEEDED_NOTICE: &str = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
-const HTTP_413_NOTICE: &str = "目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+const BUDGET_EXCEEDED_NOTICE: &str = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
+const HTTP_413_NOTICE: &str = "目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
 const REMOTE_413_MESSAGE: &str = "remote request payload exceeds gateway limit";
 
 fn execution(command: CommandOutcome) -> SendExecution {

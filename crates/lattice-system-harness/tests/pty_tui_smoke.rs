@@ -941,7 +941,6 @@ fn pty_second_ctrl_c_preserves_cancel_acknowledgement() {
 }
 
 /// 每次读取本次窗口尺寸调整产生的完整帧，不从累计输出推断当前面板。
-#[cfg(feature = "fake-tools")]
 #[track_caller]
 fn wait_pty_frame(
     tui: &mut PtyTuiDriver,
@@ -1327,6 +1326,183 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             &mut evidence,
             sid,
             json!({"script":"503, read_panel_note fake tool, final, inherited, reopened", "provider_requests":5}),
+        );
+    }));
+    evidence.record_pty(tui.output());
+    evidence.record_captures(server.captured_requests());
+    drop(tui);
+    support::finish_recorded(evidence, result);
+}
+
+#[test]
+fn pty_tui_renders_external_feed_context_op_and_submits_self_contained_dual_channel_comment() {
+    use lattice_system_harness::{SessionSendDriver, SseScript};
+    let driver = driver();
+    let (world, mut spec) = support::direct_world("pty-context-comment", "tui-ctx", "");
+    spec.layer = ScenarioLayer::PtySmoke;
+    spec.step_timeout_secs = 120;
+    spec.total_timeout_secs = Some(300);
+    let budget = world.budget(&spec);
+    let step = || budget.cap_timeout(spec.step_timeout());
+    let mut evidence = support::evidence(&world, &spec);
+    world.start_daemon().expect("显式启动后台");
+    let server = support::wire_fake_llm(
+        &world,
+        "tui-ctx",
+        support::sequence(vec![
+            SseScript::plain("assistant reply target"),
+            SseScript::plain("dual channel reply"),
+        ]),
+    );
+    let session = SessionSendDriver::new(&driver, &world, &spec, "tui-ctx");
+    let mut tui = PtyTuiDriver::spawn(&driver, &world, "tui-ctx").expect("启动 TUI 失败");
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        tui.wait_for_ready(step()).expect("TUI 未进入备用屏幕");
+        tui.wait_for(step(), |s| s.contains("显示命令"))
+            .expect("未等到启动横幅出现");
+
+        let listed = session
+            .run_command(&["--json", "session", "list"])
+            .expect("查询会话列表失败");
+        evidence.record_command("查询 TUI 草稿会话列表", &listed);
+        assert!(listed.is_clean_exit(0), "{}", listed.summary());
+        let list: serde_json::Value = serde_json::from_slice(&listed.stdout).unwrap();
+        let sid = list[0]["session_id"].as_str().unwrap().to_owned();
+
+        // 1. 首轮从 TUI 发出普通消息，获得可评论的已关闭助手正文。
+        tui.send_line("tui first turn").expect("发送首轮消息失败");
+        wait_pty_frame(&mut tui, step(), |frame| {
+            frame.contains("assistant reply target") && frame.contains("idle")
+        });
+
+        // 2. 外部 CLI 经 session feed 与 session context-op 追加多渠道输入与上下文编辑，核验 TUI 实时呈现。
+        let fed = session
+            .run_command(&[
+                "--json",
+                "session",
+                "feed",
+                &sid,
+                "cli feed note",
+                "--channel",
+                "cli",
+            ])
+            .expect("执行外部 session feed 失败");
+        evidence.record_command("外部 CLI 投喂 cli 通道输入", &fed);
+        assert!(fed.is_clean_exit(0), "{}", fed.summary());
+        let feed_reply: serde_json::Value = serde_json::from_slice(&fed.stdout).unwrap();
+        let feed_node = feed_reply["node"].as_u64().expect("feed 应返回节点号");
+
+        wait_pty_frame(&mut tui, step(), |frame| {
+            frame.contains("USER · cli") && frame.contains("cli feed note")
+        });
+
+        let feed_node_arg = feed_node.to_string();
+        let op_out = session
+            .run_command(&[
+                "--json",
+                "session",
+                "context-op",
+                &sid,
+                "--omit-node",
+                &feed_node_arg,
+                "--channel",
+                "cli",
+            ])
+            .expect("执行外部 session context-op 失败");
+        evidence.record_command("外部 CLI 移出投喂节点", &op_out);
+        assert!(op_out.is_clean_exit(0), "{}", op_out.summary());
+
+        let expected_omit = format!("移出节点 @{feed_node}");
+        wait_pty_frame(&mut tui, step(), |frame| {
+            frame.contains("CONTEXT · cli") && frame.contains(&expected_omit)
+        });
+
+        // 3. 在 TUI 中向上浏览定位到已关闭的助手回复行，打开并保存自包含评论草稿，再返回输入区原子提交双通道请求。
+        let mut opened_editor = false;
+        for _ in 0..20 {
+            tui.send_keys(b"\x1b[A").expect("发送上方向键失败");
+            tui.send_keys(b"\r").expect("尝试打开评论编辑器失败");
+            let frame = tui.redraw_text(step()).expect("读取浏览重绘帧失败");
+            if frame.contains("Enter 保存") {
+                opened_editor = true;
+                break;
+            }
+        }
+        assert!(
+            opened_editor,
+            "向上浏览并按 Enter 应在助手正文行打开评论编辑器"
+        );
+
+        tui.send_line("please explain target")
+            .expect("输入并保存评论草稿失败");
+        wait_pty_frame(&mut tui, step(), |frame| {
+            frame.contains("please explain target")
+                && frame.contains("草稿")
+                && !frame.contains("Enter 保存")
+        });
+
+        // 单独发送 Esc（避免与后续字符粘连成 Alt+<ch>），等待翻看提示 `↓ ` 消失确认焦点已回到 Dock 并恢复跟随。
+        tui.send_keys(b"\x1b").expect("发送 Esc 回到输入区失败");
+        wait_pty_frame(&mut tui, step(), |frame| {
+            !frame.contains("↓ ") && frame.contains("1 条评论待发送")
+        });
+        tui.send_line("follow up question")
+            .expect("提交带评论的普通消息失败");
+        let after_dual = wait_pty_frame(&mut tui, step(), |frame| {
+            frame.contains("dual channel reply") && frame.contains("idle")
+        });
+        assert!(
+            after_dual.contains("USER · tui/comment")
+                && after_dual.contains("please explain target")
+                && after_dual.contains("follow up question")
+                && !after_dual.contains("[COMMENT")
+                && !after_dual.contains("原文不匹配"),
+            "双通道提交后应原地渲染 USER · tui/comment 卡片且不出现旧 [COMMENT n] 或 原文不匹配：{after_dual}"
+        );
+
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 2, "两轮应恰好向假模型发出 2 次请求");
+        let second_messages = captures[1].raw["messages"]
+            .as_array()
+            .expect("第二轮请求应包含 messages 数组");
+        let second_raw = captures[1].raw.to_string();
+        assert!(
+            !second_raw.contains("cli feed note"),
+            "被外部 context-op 移出的 cli feed 节点不得再出现在模型请求体中：{second_raw}"
+        );
+        let comment_msg = second_messages
+            .iter()
+            .find(|msg| {
+                msg["role"] == "user"
+                    && msg["content"].as_str().is_some_and(|text| {
+                        text.contains("<lattice-context channel=\"tui/comment\">")
+                    })
+            })
+            .expect("第二轮请求体必须包含 tui/comment 渠道消息");
+        let comment_text = comment_msg["content"].as_str().unwrap();
+        assert!(
+            comment_text.contains("<lattice-comment>\n<quote>\nassistant reply target\n</quote>\nplease explain target\n</lattice-comment>")
+                && !comment_text.contains("turn=")
+                && !comment_text.contains("range="),
+            "tui/comment 消息必须采用自包含 <lattice-comment> 格式且不含旧外键属性：{comment_text}"
+        );
+        let tui_msg = second_messages
+            .last()
+            .expect("第二轮请求体末尾应为 tui 普通用户输入");
+        assert_eq!(
+            tui_msg["content"],
+            "<lattice-context channel=\"tui\">\nfollow up question\n</lattice-context>",
+            "双通道提交时 tui 普通输入应排在 tui/comment 之后"
+        );
+
+        tui.send_line("/quit").expect("发送 /quit 失败");
+        tui.wait_for_exit(step()).expect("等待 TUI 退出失败");
+        assert!(processes_in_pgid(tui.pgid().unwrap()).unwrap().is_empty());
+        record_pty_session(
+            &session,
+            &mut evidence,
+            &sid,
+            serde_json::json!({"external_feed_node": feed_node, "provider_requests": 2}),
         );
     }));
     evidence.record_pty(tui.output());

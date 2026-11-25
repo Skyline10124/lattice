@@ -252,7 +252,7 @@ fn own_submission_shows_derived_wait_hint_until_entries_arrive_with_node_titles(
     app.input.set_text("hello there");
     let req = app.submit().expect("空闲提交应返回请求");
     assert_eq!(req.trigger_channel, Channel::parse("tui").unwrap());
-    assert_eq!(req.expected_position, None);
+    assert_eq!(req.expected_position, Some(NodeId(0)));
     assert_eq!(req.inputs.len(), 1);
     assert_eq!(req.inputs[0].channel, Channel::parse("tui").unwrap());
     assert!(
@@ -1643,7 +1643,7 @@ fn settings_changed_rejection_restores_input_and_shows_error() {
     direct.input.set_text("manual prompt");
     let direct_req = direct.submit().expect("空闲手动提交应返回请求");
     assert_eq!(direct_req.trigger_channel, Channel::parse("tui").unwrap());
-    assert_eq!(direct_req.expected_position, None);
+    assert_eq!(direct_req.expected_position, Some(NodeId(0)));
     assert!(
         direct_req.inputs[0].parts
             == [UserInputPart::Text {
@@ -1674,7 +1674,7 @@ fn settings_changed_rejection_restores_input_and_shows_error() {
 }
 
 #[test]
-fn context_op_is_zero_line_anchor_and_titles_use_node_ids() {
+fn context_op_renders_channel_and_edits_and_titles_use_node_ids() {
     let mut app = test_app(true);
     app.term_width = 80;
     app.term_height = 12;
@@ -1690,8 +1690,12 @@ fn context_op_is_zero_line_anchor_and_titles_use_node_ids() {
         "ContextOp 不得阻断后续条目渲染：{rendered}"
     );
     assert!(
-        !rendered.contains("context_op") && !rendered.contains("omit_node"),
-        "ContextOp 占位块不得占视觉行：{rendered}"
+        rendered.contains("── CONTEXT · tui ") && rendered.contains("@4 ──"),
+        "ContextOp 应渲染带来源通道与节点号的标题线：{rendered}"
+    );
+    assert!(
+        rendered.contains("• 移出节点 @1"),
+        "ContextOp 应渲染中文编辑摘要：{rendered}"
     );
     let mut req = None;
     for _ in 0..20 {

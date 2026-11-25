@@ -20,7 +20,7 @@ status: active
 所有尺寸减法使用饱和运算，极小终端不得下溢或 panic。渲染以实际分配高度为准，不假定对话记录至少有一行。
 `Dock::height()` 统一提供 Dock 高度；渲染、viewport 行数、输入折行和光标定位使用同一 `content_w`。
 
-界面由上至下为对话记录、[Dock](dock.md#dock-与输入区) 与 [statusline](#statusline)。对话记录与 Dock 共享 statusline 之上的高度：Dock 紧贴对话记录最后一个可见行之下，内容不足可用高度时 Dock 随内容上移，其下到 statusline 之间留空；内容填满后 Dock 停在 statusline 之上。statusline 始终在终端最后一行。停在底部时输入区看起来就是对话的最后一段；向上翻看时，Dock 与 statusline 留在原位。界面不画边框。
+界面由上至下为对话记录、[Dock](dock.md#dock-与输入区) 与 [statusline](#statusline)。对话记录包含条目块（`Input`、`ContextOp`、`Step`）、状态消息、原锚点未在屏时的末尾兜底评论草稿及纯派生提交等待提示，并与 Dock 共享 statusline 之上的高度：Dock 紧贴对话记录最后一个可见行之下，内容不足可用高度时 Dock 随内容上移，其下到 statusline 之间留空；内容填满后 Dock 停在 statusline 之上。statusline 始终在终端最后一行。停在底部时输入区看起来就是对话的最后一段；向上翻看时，Dock 与 statusline 留在原位。界面不画边框。
 
 ## statusline
 

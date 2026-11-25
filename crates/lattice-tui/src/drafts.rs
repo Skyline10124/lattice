@@ -4,23 +4,14 @@
 //! 本客户端的评论草稿与原地评论编辑器。
 
 use crate::blocks::{BlockId, BlockList};
-use crate::comment::{Anchor, Comment, Location};
+use crate::comment::{Anchor, DraftComment, Location};
 use crate::input::{InputBuffer, KeyAction};
-use std::collections::BTreeSet;
 
-/// 由输入缓冲和已验证锚点的草稿组成，不从历史消息恢复可编辑草稿。
+/// 由输入缓冲和本客户端评论草稿组成，不从历史消息恢复可编辑草稿。
 #[derive(Clone)]
 pub(crate) struct Outgoing {
     pub(crate) input: InputBuffer,
-    pub(crate) comments: Vec<Comment>,
-}
-
-fn step_present(comment: &Comment, steps: &BTreeSet<lattice_local::StepKey>) -> bool {
-    let fragment = &comment.location.fragment;
-    steps.contains(&lattice_local::StepKey {
-        turn_id: fragment.turn,
-        ordinal: fragment.step,
-    })
+    pub(crate) comments: Vec<DraftComment>,
 }
 
 fn normalized_input(mut input: InputBuffer) -> InputBuffer {
@@ -32,18 +23,25 @@ fn normalized_input(mut input: InputBuffer) -> InputBuffer {
 
 pub(crate) struct Draft {
     pub(crate) id: BlockId,
-    comment: Comment,
+    comment: DraftComment,
 }
 
 impl Draft {
-    pub(crate) fn comment(&self) -> &Comment {
+    pub(crate) fn comment(&self) -> &DraftComment {
         &self.comment
     }
 }
 
+/// 结束评论编辑后的焦点恢复依据：保留原锚点位置及已保存草稿的块身份。
+pub(crate) struct FinishEdit {
+    pub(crate) location: Location,
+    pub(crate) saved_id: Option<BlockId>,
+}
+
 struct Editor {
     draft: Draft,
-    saved: bool,
+    /// 编辑已有草稿时记录其原索引，保存或放弃时原位放回；新建草稿为 `None`。
+    saved_index: Option<usize>,
     input: InputBuffer,
 }
 
@@ -58,6 +56,24 @@ impl Drafts {
         self.editor.is_some()
     }
 
+    /// 按当前展示顺序返回全部草稿及正在编辑的草稿，并动态赋予局部序号 `#1..`。
+    /// 编辑已有草稿时保持原序号；新建未保存草稿排在末尾（`#<drafts.len() + 1>`）。
+    pub(crate) fn numbered_drafts(&self) -> Vec<(usize, &Draft)> {
+        let mut ordered: Vec<&Draft> = self.drafts.iter().collect();
+        if let Some(editor) = &self.editor {
+            match editor.saved_index {
+                Some(idx) => ordered.insert(idx.min(ordered.len()), &editor.draft),
+                None => ordered.push(&editor.draft),
+            }
+        }
+        ordered
+            .into_iter()
+            .enumerate()
+            .map(|(i, draft)| (i.saturating_add(1), draft))
+            .collect()
+    }
+
+    #[cfg(test)]
     pub(crate) fn drafts(&self) -> impl Iterator<Item = &Draft> {
         self.drafts
             .iter()
@@ -65,7 +81,10 @@ impl Drafts {
     }
 
     pub(crate) fn draft_count(&self) -> usize {
-        let saved = self.editor.as_ref().is_some_and(|editor| editor.saved);
+        let saved = self
+            .editor
+            .as_ref()
+            .is_some_and(|editor| editor.saved_index.is_some());
         self.drafts.len().saturating_add(usize::from(saved))
     }
 
@@ -88,61 +107,45 @@ impl Drafts {
         input.set_text(&draft.comment.text);
         self.editor = Some(Editor {
             draft,
-            saved: true,
+            saved_index: Some(position),
             input,
         });
         true
     }
 
-    pub(crate) fn start_comment<'a>(
-        &mut self,
-        id: BlockId,
-        anchor: Anchor,
-        blocks: &BlockList,
-        in_flight: impl IntoIterator<Item = &'a Comment>,
-    ) {
+    pub(crate) fn start_comment(&mut self, id: BlockId, anchor: Anchor) {
         if self.is_editing() {
             return;
         }
-        let sent = blocks
-            .iter()
-            .filter_map(|block| match block {
-                crate::app::Block::CommentedUser(message) => Some(message.comments.iter()),
-                _ => None,
-            })
-            .flatten();
-        let max = self
-            .drafts()
-            .map(|draft| draft.comment.n)
-            .chain(sent.map(|comment| comment.n))
-            .chain(in_flight.into_iter().map(|comment| comment.n))
-            .max()
-            .unwrap_or(0);
-        let Some(n) = max.checked_add(1) else {
-            return;
-        };
         self.editor = Some(Editor {
             draft: Draft {
                 id,
-                comment: anchor.into_comment(n),
+                comment: anchor.into_draft(),
             },
-            saved: false,
+            saved_index: None,
             input: InputBuffer::new(),
         });
     }
 
-    pub(crate) fn finish_edit(&mut self, save: bool) -> Option<Location> {
+    pub(crate) fn finish_edit(&mut self, save: bool) -> Option<FinishEdit> {
         let Editor {
-            mut draft, input, ..
+            mut draft,
+            saved_index,
+            input,
         } = self.editor.take()?;
         let location = draft.comment.location.clone();
         if save {
             draft.comment.text = input.text();
         }
-        if !draft.comment.text.trim().is_empty() {
-            self.drafts.push(draft);
-        }
-        Some(location)
+        let saved_id = if !draft.comment.text.trim().is_empty() {
+            let id = draft.id;
+            let insert_at = saved_index.map_or(self.drafts.len(), |idx| idx.min(self.drafts.len()));
+            self.drafts.insert(insert_at, draft);
+            Some(id)
+        } else {
+            None
+        };
+        Some(FinishEdit { location, saved_id })
     }
 
     pub(crate) fn edit(&mut self, action: &KeyAction, width: u16) {
@@ -156,28 +159,14 @@ impl Drafts {
         Some(self.drafts.remove(position).comment.location)
     }
 
-    #[cfg(test)]
-    pub(crate) fn draft_comments(&self) -> Vec<Comment> {
-        self.draft_comments_in(None)
-    }
-
-    pub(crate) fn draft_comments_in(
-        &self,
-        steps: Option<&BTreeSet<lattice_local::StepKey>>,
-    ) -> Vec<Comment> {
-        let mut comments: Vec<Comment> = self
-            .drafts
+    pub(crate) fn draft_comments(&self) -> Vec<DraftComment> {
+        self.drafts
             .iter()
-            .map(|draft| &draft.comment)
-            .filter(|comment| steps.is_none_or(|steps| step_present(comment, steps)))
-            .cloned()
-            .collect();
-        comments.sort_by_key(|comment| comment.n);
-        comments
+            .map(|draft| draft.comment.clone())
+            .collect()
     }
 
     pub(crate) fn take_message(&mut self, input: InputBuffer) -> Outgoing {
-        self.drafts.sort_by_key(|draft| draft.comment.n);
         Outgoing {
             input: normalized_input(input),
             comments: self.drafts.drain(..).map(|draft| draft.comment).collect(),
@@ -185,33 +174,11 @@ impl Drafts {
     }
 
     pub(crate) fn restore(&mut self, message: Outgoing, blocks: &mut BlockList) -> InputBuffer {
-        self.drafts
-            .extend(message.comments.into_iter().map(|comment| Draft {
-                id: blocks.allocate_id(),
-                comment,
-            }));
+        let restored = message.comments.into_iter().map(|comment| Draft {
+            id: blocks.allocate_id(),
+            comment,
+        });
+        self.drafts.splice(0..0, restored);
         message.input
-    }
-
-    pub(crate) fn retain_steps(&mut self, steps: &BTreeSet<lattice_local::StepKey>) -> Vec<usize> {
-        let mut dropped = Vec::new();
-        let mut keep = |comment: &Comment| {
-            let present = step_present(comment, steps);
-            if !present {
-                dropped.push(comment.n);
-            }
-            present
-        };
-        self.drafts.retain(|draft| keep(&draft.comment));
-        if self
-            .editor
-            .as_ref()
-            .is_some_and(|editor| !keep(&editor.draft.comment))
-        {
-            self.editor = None;
-        }
-        dropped.sort_unstable();
-        dropped.dedup();
-        dropped
     }
 }

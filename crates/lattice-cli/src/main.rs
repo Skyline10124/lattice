@@ -105,7 +105,13 @@ fn parse_cli(
     args: impl IntoIterator<Item = impl Into<std::ffi::OsString> + Clone>,
 ) -> Result<Cli, CliParseError> {
     let matches = cli_command().try_get_matches_from(args)?;
-    let cli = Cli::from_arg_matches(&matches)?;
+    let mut cli = Cli::from_arg_matches(&matches)?;
+    if let Some(Commands::Session {
+        action: session_cmd::SessionAction::ContextOp(args),
+    }) = &mut cli.command
+    {
+        session_cmd::populate_context_op_tokens(args, &matches);
+    }
     if let Some(Commands::Models {
         auth,
         provider,
@@ -135,14 +141,40 @@ fn first_subcommand_arg(args: &[std::ffi::OsString]) -> Option<&std::ffi::OsStr>
         .map(std::ffi::OsString::as_os_str)
 }
 
+fn option_value_arity(arg: &std::ffi::OsStr) -> usize {
+    match arg.to_str() {
+        Some(
+            "--drain-timeout"
+            | "--provider"
+            | "--image"
+            | "--session"
+            | "--agent"
+            | "--model"
+            | "--effort"
+            | "--channel"
+            | "--expected-position"
+            | "--position"
+            | "--omit-node"
+            | "--omit-invocation"
+            | "--strip-reasoning",
+        ) => 1,
+        Some("--replace-input" | "--replace-step" | "--replace-tool-result" | "--omit-image") => 2,
+        Some("--replace-image") => 3,
+        _ => 0,
+    }
+}
+
 fn args_request_json(args: &[std::ffi::OsString]) -> bool {
     let mut iter = args
         .iter()
         .skip(1)
         .take_while(|arg| arg.as_os_str() != "--");
     while let Some(arg) = iter.next() {
-        if arg == "--drain-timeout" {
-            let _ = iter.next();
+        let skip = option_value_arity(arg.as_os_str());
+        if skip > 0 {
+            for _ in 0..skip {
+                let _ = iter.next();
+            }
             continue;
         }
         let bytes = arg.as_encoded_bytes();
@@ -1030,5 +1062,301 @@ mod tests {
         assert!(!auth_stdout.contains(secret));
         let auth_json: serde_json::Value = serde_json::from_str(auth_stdout.trim()).unwrap();
         assert_eq!(auth_json["message"], "invalid command; use --help");
+    }
+
+    #[test]
+    fn send_and_context_domain_cli_flags_and_json_detection() {
+        use super::session_cmd::{RawContextOpToken, SessionAction};
+
+        // 1. SendArgs (--channel / --expected-position) 在 run 与 session send 保持一致。
+        for command in [vec!["run"], vec!["session", "send"]] {
+            let cli = parse_cli(["lattice"].into_iter().chain(command.clone()).chain([
+                "你好",
+                "--session",
+                "abcd",
+                "--channel",
+                "ci/review",
+                "--expected-position",
+                "0",
+            ]))
+            .expect("带 --session、--channel 与 --expected-position 0 应可解析");
+            let args = match cli.command.unwrap() {
+                Commands::Run(args)
+                | Commands::Session {
+                    action: SessionAction::Send(args),
+                } => args,
+                _ => panic!("预期为 SendArgs"),
+            };
+            assert_eq!(args.channel.as_str(), "ci/review");
+            assert_eq!(args.expected_position, Some(lattice_local::NodeId(0)));
+
+            // 不带 --session 时 --expected-position 必须被 clap 拒绝（退出码 2）。
+            let err = parse_cli(["lattice"].into_iter().chain(command.clone()).chain([
+                "你好",
+                "--agent",
+                "coder",
+                "--expected-position",
+                "0",
+            ]))
+            .err()
+            .expect("无 --session 时传入 --expected-position 必须解析失败");
+            assert!(matches!(
+                err,
+                super::CliParseError::Clap(ref e)
+                    if e.kind() == clap::error::ErrorKind::MissingRequiredArgument
+            ));
+
+            // 拒绝非法 NodeId（含前导 '+'）。
+            for bad_pos in ["-1", "+1", "ff00", "18446744073709551616"] {
+                assert!(
+                    parse_cli(["lattice"].into_iter().chain(command.clone()).chain([
+                        "你好",
+                        "--session",
+                        "abcd",
+                        "--expected-position",
+                        bad_pos
+                    ]),)
+                    .is_err(),
+                    "非法 --expected-position `{bad_pos}` 必须被拒绝"
+                );
+            }
+        }
+
+        // 2. session feed / trigger / inspect 参数解析。
+        let feed_cli = parse_cli([
+            "lattice",
+            "session",
+            "feed",
+            "abcd",
+            "补充信息",
+            "--image",
+            "a.png",
+            "--channel",
+            "cron",
+            "--expected-position",
+            "3",
+        ])
+        .expect("session feed 应可解析");
+        match feed_cli.command.unwrap() {
+            Commands::Session {
+                action: SessionAction::Feed(args),
+            } => {
+                assert_eq!(args.session_id, "abcd");
+                assert_eq!(args.prompt.as_deref(), Some("补充信息"));
+                assert_eq!(args.images, vec![std::path::PathBuf::from("a.png")]);
+                assert_eq!(args.channel.as_str(), "cron");
+                assert_eq!(args.expected_position, Some(lattice_local::NodeId(3)));
+            }
+            _ => panic!("预期为 SessionAction::Feed"),
+        }
+        assert!(
+            parse_cli(["lattice", "session", "feed", "abcd"]).is_err(),
+            "session feed 既无正文又无 --image 时必须失败"
+        );
+        assert!(
+            parse_cli(["lattice", "session", "feed", "abcd", "--image", "only.png"]).is_ok(),
+            "session feed 仅传 --image 时应可解析"
+        );
+
+        let trigger_cli = parse_cli([
+            "lattice",
+            "session",
+            "trigger",
+            "abcd",
+            "--channel",
+            "cron/nightly",
+            "--expected-position",
+            "5",
+            "--agent",
+            "coder",
+            "--model",
+            "local/test-model",
+            "--effort",
+            "low",
+        ])
+        .expect("session trigger 应可解析");
+        match trigger_cli.command.unwrap() {
+            Commands::Session {
+                action: SessionAction::Trigger(args),
+            } => {
+                assert_eq!(args.session_id, "abcd");
+                assert_eq!(args.channel.as_str(), "cron/nightly");
+                assert_eq!(args.expected_position, Some(lattice_local::NodeId(5)));
+                assert_eq!(args.agent.as_ref().map(|a| a.as_str()), Some("coder"));
+                assert_eq!(
+                    args.model.as_ref().map(ToString::to_string).as_deref(),
+                    Some("local/test-model")
+                );
+                assert_eq!(args.effort, Some(lattice_local::Effort::Low));
+            }
+            _ => panic!("预期为 SessionAction::Trigger"),
+        }
+
+        let inspect_cli = parse_cli(["lattice", "session", "inspect", "abcd", "--position", "7"])
+            .expect("session inspect 应可解析");
+        assert!(matches!(
+            inspect_cli.command,
+            Some(Commands::Session {
+                action: SessionAction::Inspect {
+                    ref session_id,
+                    position: Some(lattice_local::NodeId(7)),
+                }
+            }) if session_id == "abcd"
+        ));
+        assert!(
+            parse_cli(["lattice", "session", "inspect", "abcd", "--position", "+1"]).is_err(),
+            "session inspect --position 必须拒绝前导 '+'"
+        );
+
+        // 3. session context-op 严格保留编辑标志与 --image 的命令行出现顺序。
+        let inv = "10000000-0000-4000-8000-000000000001";
+        let op_cli = parse_cli([
+            "lattice",
+            "session",
+            "context-op",
+            "abcd",
+            "--omit-node",
+            "1",
+            "--replace-input",
+            "2",
+            "新输入",
+            "--image",
+            "x.png",
+            "--image",
+            "y.png",
+            "--strip-reasoning",
+            "3",
+            "--replace-step",
+            "4",
+            "压缩结论",
+            "--omit-invocation",
+            inv,
+            "--replace-tool-result",
+            inv,
+            "精简结果",
+            "--omit-image",
+            "5",
+            "@a.png",
+            "--replace-image",
+            "6",
+            "@b.png",
+            "图片摘要",
+            "--channel",
+            "cli/op",
+            "--expected-position",
+            "9",
+        ])
+        .expect("session context-op 组合标志应可解析");
+        match op_cli.command.unwrap() {
+            Commands::Session {
+                action: SessionAction::ContextOp(args),
+            } => {
+                assert_eq!(args.channel.as_str(), "cli/op");
+                assert_eq!(args.expected_position, Some(lattice_local::NodeId(9)));
+                assert_eq!(
+                    args.ordered_tokens,
+                    vec![
+                        RawContextOpToken::OmitNode(lattice_local::NodeId(1)),
+                        RawContextOpToken::ReplaceInput {
+                            node: "2".into(),
+                            text: "新输入".into(),
+                        },
+                        RawContextOpToken::Image(std::path::PathBuf::from("x.png")),
+                        RawContextOpToken::Image(std::path::PathBuf::from("y.png")),
+                        RawContextOpToken::StripReasoning(lattice_local::NodeId(3)),
+                        RawContextOpToken::ReplaceStep {
+                            node: "4".into(),
+                            text: "压缩结论".into(),
+                        },
+                        RawContextOpToken::OmitInvocation(
+                            lattice_local::InvocationId::parse(inv).unwrap()
+                        ),
+                        RawContextOpToken::ReplaceToolResult {
+                            invocation: inv.into(),
+                            text: "精简结果".into(),
+                        },
+                        RawContextOpToken::OmitImage {
+                            node: "5".into(),
+                            image: "@a.png".into(),
+                        },
+                        RawContextOpToken::ReplaceImage {
+                            node: "6".into(),
+                            image: "@b.png".into(),
+                            text: "图片摘要".into(),
+                        },
+                    ]
+                );
+            }
+            _ => panic!("预期为 SessionAction::ContextOp"),
+        }
+
+        // 4. args_request_json 跳过带值选项的参数位，避免参数值恰为 "--json" 时误触发 JSON 渲染。
+        for not_json in [
+            vec![
+                "lattice",
+                "session",
+                "send",
+                "hi",
+                "--session",
+                "abcd",
+                "--channel",
+                "--json",
+            ],
+            vec![
+                "lattice",
+                "session",
+                "context-op",
+                "abcd",
+                "--replace-step",
+                "2",
+                "--json",
+            ],
+            vec![
+                "lattice",
+                "session",
+                "context-op",
+                "abcd",
+                "--replace-image",
+                "2",
+                "@a.png",
+                "--json",
+            ],
+            vec!["lattice", "session", "feed", "abcd", "--image", "--json"],
+        ] {
+            let os: Vec<std::ffi::OsString> = not_json.iter().map(Into::into).collect();
+            assert!(
+                !super::args_request_json(&os),
+                "选项值位置上的 --json 不应误触发 JSON 模式：{not_json:?}"
+            );
+        }
+        for is_json in [
+            vec![
+                "lattice",
+                "session",
+                "context-op",
+                "abcd",
+                "--replace-step",
+                "2",
+                "ok",
+                "--json",
+            ],
+            vec![
+                "lattice",
+                "session",
+                "context-op",
+                "abcd",
+                "--replace-image",
+                "2",
+                "@a.png",
+                "ok",
+                "-j",
+            ],
+        ] {
+            let os: Vec<std::ffi::OsString> = is_json.iter().map(Into::into).collect();
+            assert!(
+                super::args_request_json(&os),
+                "真实 --json / -j 标志应正确触发 JSON 模式：{is_json:?}"
+            );
+        }
     }
 }

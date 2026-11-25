@@ -163,12 +163,19 @@ fn fast_cli_help_lists_public_commands() {
     .unwrap_or_else(|report| panic!("lattice im --help 不符合预期\n{report}"));
 
     for (args, expected) in [
-        (vec!["session", "--help"], vec!["usage"]),
+        (
+            vec!["session", "--help"],
+            vec!["usage", "feed", "context-op", "trigger", "inspect"],
+        ),
         (
             vec!["run", "--help"],
             vec![
                 "--image",
                 "<PATH>",
+                "--channel",
+                "<CHANNEL>",
+                "--expected-position",
+                "<NODE_ID>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",
@@ -181,12 +188,64 @@ fn fast_cli_help_lists_public_commands() {
             vec![
                 "--image",
                 "<PATH>",
+                "--channel",
+                "<CHANNEL>",
+                "--expected-position",
+                "<NODE_ID>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",
                 "inherit",
                 "off, minimal, low, medium, high, xhigh, max",
             ],
+        ),
+        (
+            vec!["session", "feed", "--help"],
+            vec![
+                "SESSION_ID",
+                "--image",
+                "<PATH>",
+                "--channel",
+                "<CHANNEL>",
+                "--expected-position",
+                "<NODE_ID>",
+            ],
+        ),
+        (
+            vec!["session", "context-op", "--help"],
+            vec![
+                "SESSION_ID",
+                "--omit-node",
+                "--replace-input",
+                "--image",
+                "--replace-step",
+                "--omit-invocation",
+                "--replace-tool-result",
+                "--strip-reasoning",
+                "--omit-image",
+                "--replace-image",
+                "--channel",
+                "<CHANNEL>",
+                "--expected-position",
+                "<NODE_ID>",
+            ],
+        ),
+        (
+            vec!["session", "trigger", "--help"],
+            vec![
+                "SESSION_ID",
+                "--channel",
+                "<CHANNEL>",
+                "--expected-position",
+                "<NODE_ID>",
+                "--agent",
+                "--model",
+                "--effort",
+            ],
+        ),
+        (
+            vec!["session", "inspect", "--help"],
+            vec!["SESSION_ID", "--position", "<NODE_ID>"],
         ),
         (
             vec!["session", "usage", "--help"],
@@ -211,7 +270,7 @@ fn fast_cli_help_lists_public_commands() {
         let result = assert_exit_code(&output, 0)
             .and_then(|_| assert_stdout_contains_all(&output, &expected));
         finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
-            .unwrap_or_else(|report| panic!("session usage 帮助输出不符合预期\n{report}"));
+            .unwrap_or_else(|report| panic!("session 帮助输出不符合预期\n{report}"));
     }
     for args in [vec!["session", "usage"], vec!["session", "usage", "--json"]] {
         let output = driver
@@ -274,6 +333,138 @@ fn fast_cli_help_lists_public_commands() {
                 )
                 .unwrap();
             }
+        }
+    }
+}
+
+#[test]
+fn fast_context_domain_cli_validation() {
+    let spec = ScenarioSpec::fast("context-domain-cli-validation");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
+    let driver = driver();
+    let sid = "0123456789abcdef0123456789abcdef";
+
+    // 参数组合与本地预检均在连接后台前以退出码 2 拒绝。
+    let cases: &[(&str, Vec<&str>, &str)] = &[
+        (
+            "run 无 --session 时拒绝 --expected-position",
+            vec!["run", "hi", "--agent", "reader", "--expected-position", "0"],
+            "--session",
+        ),
+        (
+            "session send 无 --session 时拒绝 --expected-position",
+            vec![
+                "session",
+                "send",
+                "hi",
+                "--agent",
+                "reader",
+                "--expected-position",
+                "0",
+            ],
+            "--session",
+        ),
+        (
+            "session send 拒绝首尾含空白的非法通道名",
+            vec![
+                "session",
+                "send",
+                "hi",
+                "--agent",
+                "reader",
+                "--channel",
+                " bad",
+            ],
+            "invalid value",
+        ),
+        (
+            "session send 拒绝空通道名",
+            vec![
+                "session",
+                "send",
+                "hi",
+                "--agent",
+                "reader",
+                "--channel",
+                "",
+            ],
+            "invalid value",
+        ),
+        (
+            "session feed 缺少正文与图片",
+            vec!["session", "feed", sid],
+            "PROMPT",
+        ),
+        (
+            "session context-op 缺少任何编辑项",
+            vec!["session", "context-op", sid],
+            "至少需要指定一条上下文编辑操作",
+        ),
+        (
+            "session context-op --image 未跟在 --replace-input 之后",
+            vec!["session", "context-op", sid, "--image", "a.png"],
+            "--image 只能紧跟在 --replace-input 之后",
+        ),
+        (
+            "session context-op --image 紧跟在 --omit-node 之后",
+            vec![
+                "session",
+                "context-op",
+                sid,
+                "--omit-node",
+                "1",
+                "--image",
+                "a.png",
+            ],
+            "--image 只能紧跟在 --replace-input 之后",
+        ),
+        (
+            "session inspect --position 拒绝前导加号",
+            vec!["session", "inspect", sid, "--position", "+1"],
+            "invalid value",
+        ),
+        (
+            "session trigger --expected-position 拒绝前导加号",
+            vec!["session", "trigger", sid, "--expected-position", "+1"],
+            "invalid value",
+        ),
+    ];
+
+    for (label, raw_args, expected_stderr) in cases {
+        for json in [false, true] {
+            let mut args = Vec::new();
+            if json {
+                args.push("--json");
+            }
+            args.extend_from_slice(raw_args);
+            let output = driver
+                .run(
+                    &world,
+                    &LatticeCommand {
+                        args: args.iter().map(|arg| (*arg).into()).collect(),
+                        timeout: Some(spec.step_timeout()),
+                    },
+                )
+                .expect("执行参数校验命令失败");
+            let result = assert_exit_code(&output, 2).and_then(|_| {
+                if json {
+                    assert_stdout_contains_all(
+                        &output,
+                        &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
+                    )
+                } else {
+                    assert_stderr_contains(&output, expected_stderr)
+                }
+            });
+            finalize_with_failure_artifacts(
+                &world,
+                &spec.name,
+                &format!("{label} (json={json})"),
+                &output,
+                &[],
+                result,
+            )
+            .unwrap_or_else(|report| panic!("{label} (json={json}) 校验失败\n{report}"));
         }
     }
 }

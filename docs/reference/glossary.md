@@ -35,18 +35,43 @@ Session 内由根节点 `0`、`Input`、`ContextOp` 与 `Step` 节点组成的�
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: Session History, branch, Git commit graph, workspace checkpoint lineage
 
+**Node**:
+会话树上的持久化基本节点，分为根节点 `Root`（`NodeId(0)`）、用户输入节点 `Input`、只追加上下文编辑节点 `ContextOp` 与模型步骤节点 `Step` 四类；除末端未关闭的 `Step` 外一经写入不再修改。
+见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
+_Avoid_: commit, message row, mutable slot
+
 **NodeId**:
 会话树节点在 Session 内单调递增的 `u64` 序号，根节点为 `0`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`。
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: Git OID, branch name, TurnId
 
+**Channel**:
+输入或上下文操作的来源渠道标签（`lattice_context::Channel`，例如 `cli`、`tui`、`tui/comment`、`im/telegram:<chat_id>`），随 `Input`、`ContextOp` 与 `Step 0` 的 `turn_start.trigger_channel` 持久保存；发往模型时将存活的 `Input` 以 `<lattice-context channel="…">` 包裹，不在前端维护渠道白名单。
+见[对话数据与模型投影](../architecture/session/conversation.md#回放与跨-provider-投影)与[ADR 0014](../adr/0014-model-context-domain.md)。
+_Avoid_: client enum, frontend tag, platform prefix
+
+**ContextInput**:
+单条 `Input` 节点承载的规范化用户输入，包含来源 `Channel`、接受时间与非空有序的文本和图片引用片段（`parts`），不绑定 `TurnId` 或模型设置；既可由 `submit` 同事务写入并由 `Step 0` 的 `turn_start.input_nodes` 认领，也可经 `feed` 独立写入而不触发推理。
+见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)与[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)。
+_Avoid_: pending prompt, Turn input owner, message queue entry
+
+**ContextOp**:
+单条 `ContextOp` 节点承载的只追加上下文编辑操作，包含操作渠道 `Channel`、接受时间与非空有序的 `ContextEdit` 列表（覆盖整节点移出、替换输入、替换步骤文本、成对移出工具调用、替换工具结果、剥离推理与移出/替换图片 7 类）；仅在有效模型上下文归约时生效，不修改或删除历史节点。
+见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)与[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)。
+_Avoid_: destructive edit, history rewrite, rewind
+
+**有效模型上下文**:
+英文名 Effective model context（`EffectiveContext`）。从会话树根节点到指定位点的父链经 `lattice-context` 顺序归约全部 `Input`、有回复的 `Step` 与 `ContextOp` 后得到的净上下文视图：`project()` 将其投影为发往模型网关的有序消息，`inspect()` 返回客观字节与结构统计快照 `ContextInspection`（不含 `32 MiB` 预算或模型图片模态判定）。
+见[表、读取范围与 rewind](../architecture/session/README.md#表读取范围与-rewind)与[实现模块与公开操作](../architecture/session/operations.md#实现模块与公开操作)。
+_Avoid_: raw transcript, view window, token budget cache
+
 **Turn**:
-一次已接受任务：以携带 `turn_start` 元数据的 `Step 0` 为起点、后接若干后续 `Step` 节点（普通提交在同一事务中先追加本轮 `Input` 节点并在 `turn_start.input_nodes` 认领），结局由最后一个 Step 节点得出；一个 Turn 可以有多个 Step。
+一次已接受任务：以携带不可变 `turn_start` 元数据（含 `trigger_channel` 与同事务认领的 `input_nodes`）的 `Step 0` 为起点、后接若干后续 `Step` 节点；普通 `submit` 在同一事务中先追加 `1..=N` 条 `Input` 节点再预留 `Step 0`，独立 `trigger` 则不写入新 `Input` 而直接基于已有有效模型上下文预留 `Step 0`；结局由最后一个 `Step` 节点得出。
 见[会话、Turn 与会话树](../architecture/session/README.md#会话turn-与会话树)。
 _Avoid_: model attempt, single tool call, terminal lifetime
 
 **Step**:
-一轮中的一个模型步骤，是会话树上的节点：在开始之前预留，记录各次 provider 请求（尝试）、完整回复、每个工具调用的槽位和结束方式。只有末端未关闭的 Step 会被改写。
+一轮中的一个模型步骤，是会话树上的节点：在开始之前预留，记录所属 `turn_id`、步骤序号、各次 provider 请求（尝试）、完整回复、每个工具调用的槽位和结束方式；`Step 0` 另携带 `turn_start` 元数据。只有末端未关闭的 `Step` 会被改写，进入模型请求前受后续 `ContextOp` 归约规则约束。
 见[Step 节点与事务序列](../architecture/session/steps.md#step-节点与事务序列)。
 _Avoid_: model attempt, partial reply, ToolCall without result
 

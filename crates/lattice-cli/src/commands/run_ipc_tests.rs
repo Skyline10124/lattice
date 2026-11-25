@@ -856,6 +856,8 @@ async fn send_configure_outcomes_and_exit_codes() {
                     agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                     model: None,
                     effort: None,
+                    channel: Channel::parse("cli").unwrap(),
+                    expected_position: None,
                 },
                 false,
                 true,
@@ -949,6 +951,8 @@ async fn send_configure_outcomes_and_exit_codes() {
                     model: existing
                         .then(|| lattice_local::ModelRef::parse("local/org/model").unwrap()),
                     effort: None,
+                    channel: Channel::parse("cli").unwrap(),
+                    expected_position: None,
                 },
                 false,
                 true,
@@ -1045,6 +1049,8 @@ async fn send_configure_outcomes_and_exit_codes() {
                     agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                     model: None,
                     effort: None,
+                    channel: Channel::parse("cli").unwrap(),
+                    expected_position: None,
                 },
                 false,
                 true,
@@ -1125,6 +1131,8 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
                 agent: (!existing).then(|| lattice_local::AgentName::parse("test").unwrap()),
                 model: explicit.then(|| lattice_local::ModelRef::parse("local/org/model").unwrap()),
                 effort: explicit.then_some(lattice_local::Effort::Off),
+                channel: Channel::parse("cli").unwrap(),
+                expected_position: None,
             },
             false,
             true,
@@ -1255,6 +1263,8 @@ async fn send_rejects_oversized_ipc_frame_before_configure_and_submit() {
                 agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                 model: None,
                 effort: None,
+                channel: Channel::parse("cli").unwrap(),
+                expected_position: None,
             },
             false,
             true,
@@ -1331,6 +1341,8 @@ async fn send_rejects_image_modified_after_configure_before_submit() {
                 agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                 model: None,
                 effort: None,
+                channel: Channel::parse("cli").unwrap(),
+                expected_position: None,
             },
             false,
             true,
@@ -1435,6 +1447,8 @@ async fn send_rejects_unreadable_image_path_before_configure() {
                 agent: Some(lattice_local::AgentName::parse("test").unwrap()),
                 model: None,
                 effort: None,
+                channel: Channel::parse("cli").unwrap(),
+                expected_position: None,
             },
             false,
             true,
@@ -1489,4 +1503,323 @@ async fn send_rejects_unreadable_image_path_before_configure() {
             .contains("无法读取第 1 张图片"),
         "错误说明应指出无法读取第 1 张图片：{records:?}"
     );
+}
+
+#[tokio::test]
+async fn send_forwards_channel_and_expected_position_to_ipc() {
+    let _guard = signal_guard().await;
+    let peer = Peer::new();
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let workspace = peer._root.path().to_path_buf();
+    let send = run_session_prompt_with_io(
+        &peer.client,
+        super::super::session::SendArgs {
+            prompt: Some("带通道提交".into()),
+            images: Vec::new(),
+            session_id: Some("1111".into()),
+            agent: None,
+            model: None,
+            effort: None,
+            channel: Channel::parse("ci/bot").unwrap(),
+            expected_position: Some(NodeId(0)),
+        },
+        false,
+        true,
+        Some(workspace),
+        &mut out,
+        &mut err,
+    );
+    let driver = async {
+        resolve_session(&peer).await;
+        let mut wire = peer.request("submit").await;
+        let req = &wire.request["request"];
+        assert_eq!(req["trigger_channel"], "ci/bot");
+        assert_eq!(
+            req["inputs"],
+            json!([{"channel":"ci/bot","parts":[{"kind":"text","text":"带通道提交"}]}])
+        );
+        assert_eq!(req["expected_position"], 0);
+        assert!(req["expected_settings"].is_null());
+        wire.reply(
+            "error",
+            json!({"kind":"conflict","message":"position changed","recovery":null,"store":null}),
+        )
+        .await;
+    };
+    let (result, ()) =
+        tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(send, driver) })
+            .await
+            .expect("提交超时");
+    assert_eq!(result.unwrap(), std::process::ExitCode::from(2));
+}
+
+#[tokio::test]
+async fn feed_context_op_inspect_and_trigger_ipc_flows() {
+    let _guard = signal_guard().await;
+    let peer = Peer::new();
+    let workspace = peer._root.path().to_path_buf();
+    let img_path = peer._root.path().join("sample.png");
+    write_test_png(&img_path, 64, 0x33);
+
+    // 1. feed 本地预检失败时不连后台。
+    let mut out = Vec::new();
+    let missing_err = super::super::session::execute_feed(
+        Some(&peer.client),
+        super::super::session::FeedArgs {
+            session_id: "1111".into(),
+            prompt: None,
+            images: vec![peer._root.path().join("missing.png")],
+            channel: Channel::parse("cli").unwrap(),
+            expected_position: None,
+        },
+        Some(workspace.clone()),
+        false,
+        &mut out,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(error_record(&missing_err).0, 2);
+    peer.assert_no_pending_request().await;
+
+    // 2. feed 正常发送并输出文本与 JSON。
+    for json_mode in [false, true] {
+        let mut out = Vec::new();
+        let fut = super::super::session::execute_feed(
+            Some(&peer.client),
+            super::super::session::FeedArgs {
+                session_id: "1111".into(),
+                prompt: Some("补充上下文".into()),
+                images: vec![img_path.clone()],
+                channel: Channel::parse("cron/feed").unwrap(),
+                expected_position: Some(NodeId(2)),
+            },
+            Some(workspace.clone()),
+            json_mode,
+            &mut out,
+        );
+        let driver = async {
+            resolve_session(&peer).await;
+            let mut wire = peer.request("feed").await;
+            let req = &wire.request["request"];
+            assert_eq!(req["session"], SESSION);
+            assert_eq!(req["channel"], "cron/feed");
+            assert_eq!(req["expected_position"], 2);
+            assert_eq!(req["parts"].as_array().unwrap().len(), 2);
+            wire.reply("feed", json!({"session_id": sid(), "node": 3}))
+                .await;
+        };
+        let (res, ()) =
+            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(fut, driver) })
+                .await
+                .unwrap();
+        assert_eq!(res.unwrap(), std::process::ExitCode::SUCCESS);
+        let text = String::from_utf8(out).unwrap();
+        if json_mode {
+            let v: Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(v["session_id"], SESSION);
+            assert_eq!(v["node"], 3);
+        } else {
+            assert_eq!(text, format!("session={SESSION} node=3\n"));
+        }
+    }
+
+    // 3. context-op 重复图片按 sha256 去重，并按序透传 edits。
+    {
+        let mut out = Vec::new();
+        let fut = super::super::session::execute_context_op(
+            Some(&peer.client),
+            super::super::session::ContextOpArgs {
+                session_id: "1111".into(),
+                channel: Channel::parse("cli/op").unwrap(),
+                expected_position: Some(NodeId(3)),
+                omit_node: Vec::new(),
+                replace_input: Vec::new(),
+                images: Vec::new(),
+                replace_step: Vec::new(),
+                omit_invocation: Vec::new(),
+                replace_tool_result: Vec::new(),
+                strip_reasoning: Vec::new(),
+                omit_image: Vec::new(),
+                replace_image: Vec::new(),
+                ordered_tokens: vec![
+                    super::super::session::RawContextOpToken::OmitNode(NodeId(1)),
+                    super::super::session::RawContextOpToken::ReplaceInput {
+                        node: "2".into(),
+                        text: "改写".into(),
+                    },
+                    super::super::session::RawContextOpToken::Image(img_path.clone()),
+                    super::super::session::RawContextOpToken::ReplaceInput {
+                        node: "3".into(),
+                        text: String::new(),
+                    },
+                    super::super::session::RawContextOpToken::Image(img_path.clone()),
+                ],
+            },
+            Some(workspace.clone()),
+            true,
+            &mut out,
+        );
+        let driver = async {
+            resolve_session(&peer).await;
+            let mut wire = peer.request("context_op").await;
+            let req = &wire.request["request"];
+            assert_eq!(req["session"], SESSION);
+            assert_eq!(req["op"]["channel"], "cli/op");
+            assert_eq!(req["op"]["edits"].as_array().unwrap().len(), 3);
+            assert_eq!(req["op"]["edits"][0]["kind"], "omit_node");
+            assert_eq!(req["op"]["edits"][1]["kind"], "replace_input");
+            assert_eq!(req["op"]["edits"][2]["kind"], "replace_input");
+            assert_eq!(
+                req["images"].as_array().unwrap().len(),
+                1,
+                "重复图片必须去重后再上传"
+            );
+            assert_eq!(req["expected_position"], 3);
+            wire.reply("context_op", json!({"session_id": sid(), "node": 4}))
+                .await;
+        };
+        let (res, ()) =
+            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(fut, driver) })
+                .await
+                .unwrap();
+        assert_eq!(res.unwrap(), std::process::ExitCode::SUCCESS);
+        let v: Value = serde_json::from_str(String::from_utf8(out).unwrap().trim()).unwrap();
+        assert_eq!(v["node"], 4);
+    }
+
+    // 4. trigger：不带设置项（完整 SessionId 不走 resolve_session）与带设置项（走 configure 并带 expected_settings）。
+    for with_configure in [false, true] {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let fut = run_session_trigger_with_io(
+            &peer.client,
+            super::super::session::TriggerArgs {
+                session_id: if with_configure {
+                    "1111".into()
+                } else {
+                    SESSION.into()
+                },
+                channel: Channel::parse("cron/trigger").unwrap(),
+                expected_position: Some(NodeId(4)),
+                agent: None,
+                model: with_configure
+                    .then(|| lattice_local::ModelRef::parse("local/model-b").unwrap()),
+                effort: None,
+            },
+            false,
+            true,
+            Some(workspace.clone()),
+            &mut out,
+            &mut err,
+        );
+        let driver = async {
+            if with_configure {
+                resolve_session(&peer).await;
+                let mut cfg = peer.request("configure").await;
+                assert_eq!(
+                    cfg.request["request"]["session"],
+                    json!({"existing": sid()})
+                );
+                let mut configured_head = head(lattice_local::new_turn_id(), false);
+                configured_head.settings_version =
+                    serde_json::from_value(json!("77".repeat(32))).unwrap();
+                cfg.reply(
+                    "configure",
+                    json!({"head": configured_head, "adjustment": null}),
+                )
+                .await;
+            }
+            let mut trig = peer.request("trigger").await;
+            let req = &trig.request["request"];
+            assert_eq!(req["session"], SESSION);
+            assert_eq!(req["trigger_channel"], "cron/trigger");
+            assert_eq!(req["expected_position"], 4);
+            if with_configure {
+                assert_eq!(req["expected_settings"], json!("77".repeat(32)));
+            } else {
+                assert!(req["expected_settings"].is_null());
+            }
+            let tid: TurnId = req["turn_id"].as_str().unwrap().parse().unwrap();
+            trig.reply(
+                "acceptance",
+                json!({"acceptance":"accepted","turn":TurnView::from(&detail(tid, "completed"))}),
+            )
+            .await;
+            let mut watch = peer.request("watch").await;
+            watch.view(ViewUpdate::Head(head(tid, false))).await;
+            watch
+                .view(ViewUpdate::Entry {
+                    entry: entry(tid, "completed"),
+                })
+                .await;
+        };
+        let (res, ()) =
+            tokio::time::timeout(Duration::from_secs(5), async { tokio::join!(fut, driver) })
+                .await
+                .unwrap();
+        assert_eq!(res.unwrap(), std::process::ExitCode::SUCCESS);
+        let records: Vec<Value> = String::from_utf8(out)
+            .unwrap()
+            .lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect();
+        assert_eq!(records[0]["stage"], "sending");
+        if with_configure {
+            assert_eq!(records[1]["type"], "configure");
+            assert_eq!(records[1]["result"], "configured");
+        }
+        assert!(
+            records
+                .iter()
+                .any(|r| r["stage"] == "receipt" && r["result"] == "accepted")
+        );
+    }
+
+    // 5. inspect 文本与 JSON 输出。
+    for json_mode in [false, true] {
+        let mut out = Vec::new();
+        let fut = super::super::session::execute_inspect(
+            &peer.client,
+            "1111",
+            Some(NodeId(4)),
+            json_mode,
+            &mut out,
+        );
+        let driver = async {
+            resolve_session(&peer).await;
+            let mut wire = peer.request("inspect").await;
+            assert_eq!(wire.request["session_id"], SESSION);
+            assert_eq!(wire.request["position"], 4);
+            wire.reply(
+                "inspect",
+                json!({
+                    "session_id": sid(),
+                    "position": 4,
+                    "inspection": {
+                        "entries": [],
+                        "operated_nodes": [],
+                        "channel_counts": {},
+                        "total_text_bytes": 0,
+                        "images": [],
+                        "total_image_bytes": 0
+                    }
+                }),
+            )
+            .await;
+        };
+        let (res, ()) =
+            tokio::time::timeout(Duration::from_secs(3), async { tokio::join!(fut, driver) })
+                .await
+                .unwrap();
+        assert_eq!(res.unwrap(), std::process::ExitCode::SUCCESS);
+        let text = String::from_utf8(out).unwrap();
+        if json_mode {
+            let v: Value = serde_json::from_str(text.trim()).unwrap();
+            assert_eq!(v["position"], 4);
+        } else {
+            assert!(text.contains(&format!("session {SESSION} @4")), "{text}");
+            assert!(text.contains("通道计数：无"), "{text}");
+        }
+    }
 }

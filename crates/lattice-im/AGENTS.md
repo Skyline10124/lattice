@@ -8,11 +8,11 @@
 | --- | --- |
 | `src/lib.rs` | 根模块最小公开面导出（`prepare_im_gateway`、`ImBuildOutcome`、`PreparedImGateway`、`ImGatewayError`），其余内部子模块全部私有 |
 | `src/config.rs` | 只读挂载构造入口 `prepare_im_gateway`：经 `PrivateDirectory` 安全读取 `im/config.toml`，严格校验 `[telegram]` 表（`allowed_senders`、`workspace` 规范化真实目录、`agent` 名称语法）并读取 `ImAuthStore`，区分 `Prepared`、`Disabled`、`Unavailable` 与 `InvalidConfiguration` |
-| `src/identity.rs` | 平台前缀身份键（`SenderKey`、`ChatKey`、`InboundId`）及 `SessionId` / `TurnId` 生成辅助 |
+| `src/identity.rs` | 平台前缀身份键（`SenderKey`、`ChatKey`、`InboundId`）、`telegram_channel`（映射为 `Channel("im/telegram:<chat_id>")`）及 `SessionId` / `TurnId` 生成辅助 |
 | `src/ledger.rs` | 私有台账 `<state-root>/lattice/im/ledger`（`version == 2`）严格解析、整组原子替换（单条 `Registered` 或相册首条 `Registered` 加其余分片 `Merged`）、读写分离短锁内存快照、会话绑定与入站相位（`Registered`、`Accepted`、`Merged`、`DeliveredTurn`、`DeliveredReset`）校验，以及超过 `24h + 5m` 重投窗口且关联轮次已终态条目的窗口清理 |
 | `src/album.rs` | 按对话维护的 `media_group_id` 多图相册收集状态机 `AlbumCollector`：`600ms` 静默窗口重置闭合、同对话新事件提前闭合、`10` 项 Telegram 单相册上限闭合、按数值 `update_id` 升序产出，以及每对话最近 `64` 个已闭合相册 ID 的迟到分片识别（`LATE_ALBUM_FRAGMENT_REPLY`） |
 | `src/media.rs` | 单图与已闭合相册共用的零网络静态快筛（格式、张数、单张/总字节与说明文字上限）、监听停机信号的有界退避重试下载（最多重试 3 次，停机中断直接退出且不确认平台）、累计原始字节与 12 字节文件头魔数核验（`ImageMediaType::sniff`），以及有序 `[Image_1, ..., Image_k]` 加可选末尾 `Text` 组装 |
-| `src/command.rs` | 私聊与数值白名单过滤、内置斜杠命令识别（`/new`、`/cancel`、`/status`、`/usage`、`/help`、`/start`，含 `HELP_REPLY` 图文发送说明与独立不支持媒体提示 `UNSUPPORTED_MEDIA_REPLY`）、不写台账命令的执行，以及后台错误与图片模态/`32 MiB` 本地请求体预算/远端 `HTTP 413` 拒绝的统一 `/new` 与 `lattice session rewind` 引导格式化 |
+| `src/command.rs` | 私聊与数值白名单过滤、内置斜杠命令识别（`/new`、`/cancel`、`/status`、`/usage`、`/help`、`/start`，含 `HELP_REPLY` 图文发送说明与独立不支持媒体提示 `UNSUPPORTED_MEDIA_REPLY`）、不写台账命令的执行，以及后台错误与图片模态/`32 MiB` 本地请求体预算/远端 `HTTP 413` 拒绝的统一 `/new`、`lattice session context-op` 与 `lattice session rewind` 引导格式化 |
 | `src/usage.rs` | `/usage` 四行会话用量与费用摘要格式化（直出会话库 `path_total` 与 `session_total`，复用状态栏缓存命中率与费用显示规则） |
 | `src/redact.rs` | 无长度门槛的平台凭据脱敏器 `ImRedactor`：`reqwest::Error` 先调用 `without_url()` 剥离请求路径，再替换任意长度已知凭据并折叠截断为单行诊断 |
 | `src/telegram.rs` | Telegram 更新解析（纯文本 `text`、最高分辨率压缩图片 `photo`、受支持图片类 `document`、转码 `animation` 动图拦截、可选 `caption` 与 `media_group_id`）、`tg:` 身份键转换、支持批量确认 `acknowledge(&[InboundId])` 的连续前缀推进器 `OffsetTracker` 与本包唯一的抽象接口 `TelegramIo`（含 `download_file`） |

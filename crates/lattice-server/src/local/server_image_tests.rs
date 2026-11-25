@@ -7,7 +7,7 @@ use lattice_conversation::MAX_IMAGE_BYTES;
 use lattice_local::{new_session_id, new_turn_id};
 use lattice_session::store::{NodeKind, TurnInput, TurnInputPart};
 
-const BUDGET_EXCEEDED_MESSAGE: &str = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+const BUDGET_EXCEEDED_MESSAGE: &str = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
 
 /// 经同一后台的 `SessionApi`、`RequestGateway` 与当前会话设置构造 `PreparedModel`，
 /// 再通过 `start_execution` 走真实网关准入预检与执行路径。

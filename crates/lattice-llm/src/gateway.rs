@@ -340,7 +340,7 @@ impl ResolvedRequest {
         {
             return Err(LlmError::UnsupportedInput {
                 message: format!(
-                    "模型 {} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+                    "模型 {} 不支持图片输入；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点",
                     self.target.model
                 ),
             });
@@ -357,7 +357,7 @@ impl ResolvedRequest {
         let len = crate::protocol::encoding::encoded_len(&body)?;
         if len > crate::protocol::encoding::MAX_MODEL_REQUEST_BYTES {
             return Err(LlmError::RequestBudgetExceeded {
-                message: "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话"
+                message: "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话"
                     .into(),
             });
         }

@@ -7,27 +7,8 @@ use lattice_local::{ModelAttemptKey, NodeId, TurnId};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(crate) enum BlockId {
     Block(u128),
-    Comment {
-        owner: u128,
-        number: usize,
-        occurrence: usize,
-    },
     /// 纯派生提交等待提示的虚拟块身份（不进入 `BlockList`，不挂载评论）。
     SubmissionWait,
-}
-
-impl BlockId {
-    pub(crate) fn comment(self, number: usize, occurrence: usize) -> Self {
-        let owner = match self {
-            Self::Block(owner) | Self::Comment { owner, .. } => owner,
-            Self::SubmissionWait => unreachable!("提交等待提示不挂载评论"),
-        };
-        Self::Comment {
-            owner,
-            number,
-            occurrence,
-        }
-    }
 }
 
 #[derive(Clone, Debug)]
@@ -57,7 +38,7 @@ fn slot_of(block: &Block, counts: &mut [usize; 4]) -> Slot {
         }) => return Slot::Closing(*turn),
         Block::Tool { id, .. } => return Slot::Tool(id.clone()),
         Block::Input { .. } | Block::ContextOp { .. } | Block::Step { .. } => 0,
-        Block::User(_) | Block::CommentedUser(_) => 1,
+        Block::User(_) | Block::SentComments(_) => 1,
         // 生成中的文字由条目中的回复取代时仍是同一块。
         Block::Assistant(_) | Block::HistoryAssistant(_) => 2,
         Block::Status(_) => 3,
@@ -127,8 +108,8 @@ impl BlockList {
         self.entries.iter().position(|entry| {
             matches!(
                 entry.block,
-                Block::Input { node: known }
-                    | Block::ContextOp { node: known }
+                Block::Input { node: known, .. }
+                    | Block::ContextOp { node: known, .. }
                     | Block::Step { node: known, .. }
                     if known == node
             )
