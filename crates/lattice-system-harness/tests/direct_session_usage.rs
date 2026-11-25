@@ -83,7 +83,11 @@ fn assert_text(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, sn
     assert_eq!(
         lines
             .iter()
-            .filter(|row| row.first().is_some_and(|word| word.parse::<u64>().is_ok()))
+            .filter(|row| {
+                row.first()
+                    .and_then(|word| word.strip_prefix('@'))
+                    .is_some_and(|node| node.parse::<u64>().is_ok())
+            })
             .count(),
         turns.len(),
         "{text}"
@@ -94,7 +98,7 @@ fn assert_text(send: &SessionSendDriver<'_>, evidence: &mut ScenarioEvidence, sn
             .iter()
             .find(|row| row.get(1) == Some(&id))
             .expect("文本报表中应包含对应轮次行");
-        assert_eq!(row[0].parse::<u64>().unwrap(), turn["ordinal"]);
+        assert_eq!(row[0], format!("@{}", turn["start_node"].as_u64().unwrap()));
         assert_eq!(
             row[2],
             format!(
@@ -350,10 +354,13 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         let full = usage(&send, &mut evidence, &sid);
         assert_eq!(full["position"], 5);
         assert_eq!(full["turns"].as_array().unwrap().len(), 2);
-        for (index, (tid, model)) in [(&a, "priced"), (&b, "unpriced")].into_iter().enumerate() {
+        for (index, (tid, model, start_node)) in [(&a, "priced", 2_u64), (&b, "unpriced", 5_u64)]
+            .into_iter()
+            .enumerate()
+        {
             let row = &full["turns"][index];
             assert_eq!(row["turn_id"], *tid);
-            assert_eq!(row["ordinal"], index + 1);
+            assert_eq!(row["start_node"], start_node);
             assert_eq!(row["provider"], "local");
             assert_eq!(row["model"], model);
         }
@@ -435,7 +442,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
         assert_eq!(fork["position"], 7);
         assert_eq!(fork["turns"].as_array().unwrap().len(), 2);
         assert_eq!(fork["turns"][1]["turn_id"], c);
-        assert_eq!(fork["turns"][1]["ordinal"], 2);
+        assert_eq!(fork["turns"][1]["start_node"], 7);
         let zero = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
             "input":tokens(json!(0), true),"cache_read":tokens(json!(0), true),"cache_write":tokens(json!(0), true),
             "output":tokens(json!(0), true),"reasoning":tokens(json!(0), true),"cost":cost(json!({"usd":0.0,"exact":true}),0)});
@@ -464,7 +471,7 @@ fn usage_follows_current_path_and_survives_read_only_reopening() {
             fork["turns"][2]["turn_id"],
             priced_branch.accepted_turn_id().unwrap()
         );
-        assert_eq!(fork["turns"][2]["ordinal"], 3);
+        assert_eq!(fork["turns"][2]["start_node"], 9);
         let priced_summary = json!({"attempts":1,"partial_attempts":0,"kind":"complete",
             "input":tokens(json!(2000), true),"cache_read":tokens(json!(400), true),"cache_write":tokens(json!(200), true),
             "output":tokens(json!(100), true),"reasoning":tokens(json!(20), true),"cost":cost(json!({"usd":0.0046,"exact":true}),0)});

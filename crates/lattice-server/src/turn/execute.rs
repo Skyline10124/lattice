@@ -12,7 +12,6 @@ use crate::{
     session::{ApiError, RequestConflict, Result, SessionApi},
 };
 use futures::FutureExt;
-use lattice_context::Channel;
 use lattice_conversation::{SessionId, TurnId};
 use lattice_session::store::*;
 use std::sync::{
@@ -20,13 +19,6 @@ use std::sync::{
     atomic::{AtomicBool, Ordering},
 };
 use tokio::sync::oneshot;
-
-/// S2 过渡期通过现有 `submit` 提交时的默认输入与触发通道。
-pub(crate) const DEFAULT_SUBMIT_CHANNEL: &str = "ipc";
-
-pub(crate) fn default_submit_channel() -> Channel {
-    Channel::parse(DEFAULT_SUBMIT_CHANNEL).expect("默认提交通道名必须合法")
-}
 
 pub(crate) struct ExecutionInput {
     pub session: SessionApi,
@@ -246,6 +238,11 @@ async fn execute_owned(
             {
                 return Err(ApiError::Conflict(RequestConflict::SettingsChanged));
             }
+            if let Some(expected_pos) = request.expected_position
+                && expected_pos != record.current
+            {
+                return Err(ApiError::Conflict(RequestConflict::PositionChanged));
+            }
             (settings, version)
         }
     };
@@ -297,13 +294,16 @@ async fn execute_owned(
     let turn_tools: Arc<dyn TurnTools> = Arc::from(tools.open_turn(session_id, &workspace).await?);
     let config = super::live::freeze_config(&settings, &target, turn_tools.specs())?;
     let timeout = config.limits.timeout_secs;
-    let submit_channel = default_submit_channel();
-    if let Some((resolved, auth)) = precheck {
+    let needs_nonempty_check = matches!(&request.payload, TurnPayload::Trigger { .. });
+    if precheck.is_some() || needs_nonempty_check {
         let precheck_config = config.clone();
-        let (precheck_input, _) = request
-            .input
-            .clone()
-            .into_context_input(submit_channel.clone());
+        let pending_inputs: Vec<lattice_context::ContextInput> = match &request.payload {
+            TurnPayload::Submit { inputs, .. } => inputs
+                .iter()
+                .map(|(channel, item)| item.clone().into_context_input(channel.clone()).0)
+                .collect(),
+            TurnPayload::Trigger { .. } => Vec::new(),
+        };
         let chat = coordinator
             .io
             .read(move |read| {
@@ -311,18 +311,20 @@ async fn execute_owned(
                     read,
                     session_id,
                     &precheck_config,
-                    &[precheck_input],
+                    &pending_inputs,
                 )
             })
             .await?;
-        let check_result = tokio::task::spawn_blocking(move || {
-            resolved
-                .check_request(&chat)
-                .map_err(|error| request_rejection(error, Some(&auth)))
-        })
-        .await
-        .map_err(|error| ApiError::Internal(format!("构造本轮模型请求失败：{error}")))?;
-        check_result?;
+        if let Some((resolved, auth)) = precheck {
+            let check_result = tokio::task::spawn_blocking(move || {
+                resolved
+                    .check_request(&chat)
+                    .map_err(|error| request_rejection(error, Some(&auth)))
+            })
+            .await
+            .map_err(|error| ApiError::Internal(format!("构造本轮模型请求失败：{error}")))?;
+            check_result?;
+        }
     }
     if shutdown.load(Ordering::Acquire) {
         return Err(StoreError::WriteDisabled.into());
@@ -339,19 +341,42 @@ async fn execute_owned(
             release.await.expect("release accept");
         }
     }
-    let result = coordinator
-        .io
-        .accept(AcceptTurn {
-            session_id,
-            turn_id,
-            project_path: project,
-            trigger_channel: submit_channel.clone(),
-            inputs: vec![(submit_channel, request.input)],
-            config,
-            accepted_at: chrono::Utc::now(),
-            settings_version,
-        })
-        .await;
+    let result = match request.payload {
+        TurnPayload::Submit {
+            trigger_channel,
+            inputs,
+        } => {
+            coordinator
+                .io
+                .accept(AcceptTurn {
+                    session_id,
+                    turn_id,
+                    project_path: project,
+                    trigger_channel,
+                    inputs,
+                    config,
+                    accepted_at: chrono::Utc::now(),
+                    settings_version,
+                    expected_position: request.expected_position,
+                })
+                .await
+        }
+        TurnPayload::Trigger { trigger_channel } => {
+            coordinator
+                .io
+                .trigger(TriggerTurn {
+                    session_id,
+                    turn_id,
+                    project_path: project,
+                    trigger_channel,
+                    config,
+                    accepted_at: chrono::Utc::now(),
+                    settings_version,
+                    expected_position: request.expected_position,
+                })
+                .await
+        }
+    };
     let result = match result {
         Ok(result) => result,
         Err(error) => {
@@ -363,6 +388,9 @@ async fn execute_owned(
                     }
                     StoreError::SettingsChanged { .. } => {
                         ApiError::Conflict(RequestConflict::SettingsChanged)
+                    }
+                    StoreError::PositionChanged { .. } => {
+                        ApiError::Conflict(RequestConflict::PositionChanged)
                     }
                     _ => ApiError::Store(store_error),
                 },

@@ -69,21 +69,30 @@ fn last_accepted_agent_survives_rewind() {
 }
 
 #[test]
-fn conversation_view_recent_turns_and_branch_ordinals() {
+fn conversation_view_recent_turns_and_has_more_boundaries() {
     let (_d, _l, db, lock) = conversation_tree();
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 2).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![4, 5, 6, 7]);
-    assert_eq!(entry_ordinals(&view.entries), vec![2, 3]);
+    assert!(view.has_more, "2 轮窗口之外仍有第 1 轮，has_more 应为 true");
     assert_eq!(view.session.current, NodeId(7));
     assert_eq!(view.current_agent.as_ref(), Some(&agent("beta")));
     assert!(
-        matches!(&view.entries[3], ConversationEntry::Step { step, summary: Some(summary), .. }
-        if step.progress == StepProgress::Reserved && summary.progress == StepProgress::Reserved)
+        matches!(&view.entries[3], ConversationEntry::Step { step, agent_name: Some(name), summary: Some(summary), .. }
+        if step.progress == StepProgress::Reserved && *name == agent("beta") && summary.progress == StepProgress::Reserved)
     );
+    let full = read.view(sid(1), u32::MAX).unwrap();
+    assert_eq!(entry_nodes(&full.entries), vec![1, 2, 3, 4, 5, 6, 7]);
+    assert!(!full.has_more, "已覆盖到根节点，has_more 应为 false");
+    let usage = read.usage(sid(1)).unwrap();
     assert_eq!(
-        entry_nodes(&read.view(sid(1), u32::MAX).unwrap().entries),
-        vec![1, 2, 3, 4, 5, 6, 7]
+        usage
+            .turns
+            .iter()
+            .map(|row| row.start_node)
+            .collect::<Vec<_>>(),
+        vec![NodeId(2), NodeId(5), NodeId(7)],
+        "TurnUsageRow.start_node 应为各轮 Step 0 节点"
     );
     drop(read);
     assert!(matches!(
@@ -100,25 +109,27 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 10).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1, 2, 8, 9]);
-    assert_eq!(entry_ordinals(&view.entries), vec![1, 2]);
+    assert!(!view.has_more);
     assert_eq!(
-        entry_ordinals(&[read
-            .entry(NodeRef {
-                session_id: sid(1),
-                node: NodeId(9)
-            })
-            .unwrap()]),
-        vec![2]
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(9)
+        })
+        .unwrap()
+        .turn_id(),
+        Some(tid(4))
     );
     drop(read);
     db.rewind(&lock, NodeId(1), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(entry_nodes(&view.entries), vec![1]);
+    assert!(!view.has_more);
     assert_eq!(view.current_agent, Some(agent("beta")));
     db.rewind(&lock, NodeId(0), &project(1), now()).unwrap();
     let view = db.begin_read().unwrap().view(sid(1), 1).unwrap();
     assert_eq!(view.session.current, NodeId(0));
     assert!(view.entries.is_empty());
+    assert!(!view.has_more);
     assert_eq!(view.current_agent, Some(agent("beta")));
 }
 
@@ -126,26 +137,30 @@ fn conversation_view_recent_turns_and_branch_ordinals() {
 fn conversation_history_pages_whole_turns_on_fixed_parent_chain() {
     let (_d, _l, db, lock) = conversation_tree();
     let read = db.begin_read().unwrap();
-    let recent = read.history(sid(1), NodeId(6), 1).unwrap();
+    let (recent, recent_more) = read.history(sid(1), NodeId(6), 1).unwrap();
     assert_eq!(entry_nodes(&recent), vec![4, 5]);
-    assert_eq!(entry_ordinals(&recent), vec![2]);
-    let older = read.history(sid(1), NodeId(4), 1).unwrap();
+    assert!(recent_more, "节点 4 之前仍有第 1 轮");
+    let (older, older_more) = read.history(sid(1), NodeId(4), 1).unwrap();
     assert_eq!(entry_nodes(&older), vec![1, 2, 3]);
-    assert_eq!(entry_ordinals(&older), vec![1]);
-    let both = read.history(sid(1), NodeId(6), 2).unwrap();
+    assert!(!older_more, "已回溯到根节点，无更多历史");
+    let (both, both_more) = read.history(sid(1), NodeId(6), 2).unwrap();
+    assert!(!both_more);
     assert_eq!(both, [older.clone(), recent].concat());
-    assert_eq!(read.history(sid(1), NodeId(6), u32::MAX).unwrap(), both);
-    assert!(read.history(sid(1), NodeId(1), 1).unwrap().is_empty());
+    assert_eq!(
+        read.history(sid(1), NodeId(6), u32::MAX).unwrap(),
+        (both.clone(), false)
+    );
+    let (empty, empty_more) = read.history(sid(1), NodeId(1), 1).unwrap();
+    assert!(empty.is_empty() && !empty_more);
     drop(read);
     db.rewind(&lock, NodeId(2), &project(1), now()).unwrap();
     let branch = accept(sid(1), tid(4));
     accept_prepared(&db, &lock, branch).unwrap();
     let read = db.begin_read().unwrap();
-    assert_eq!(read.history(sid(1), NodeId(6), 2).unwrap(), both);
-    assert_eq!(
-        entry_nodes(&read.history(sid(1), NodeId(8), 1).unwrap()),
-        vec![1, 2]
-    );
+    assert_eq!(read.history(sid(1), NodeId(6), 2).unwrap(), (both, false));
+    let (branch_older, branch_more) = read.history(sid(1), NodeId(8), 1).unwrap();
+    assert_eq!(entry_nodes(&branch_older), vec![1, 2]);
+    assert!(!branch_more);
     assert_eq!(
         read.entry(NodeRef {
             session_id: sid(1),
@@ -236,11 +251,17 @@ fn conversation_step_summary_moves_to_reserved_successor() {
     };
     let entry = db.begin_read().unwrap().entry(node).unwrap();
     let expected = detail(&db);
+    let step_node = node_at(&db, 2);
     assert_eq!(
         serde_json::to_value(&entry).unwrap(),
         json!({
-            "kind": "step", "node": 2, "content": node_at(&db, 2), "step": expected.steps[0],
-            "ordinal": 1, "retries": [], "summary": expected.summary,
+            "kind": "step",
+            "node": 2,
+            "step": expected.steps[0],
+            "agent_name": "alpha",
+            "reply": step_node.step_content().unwrap(),
+            "retries": [],
+            "summary": expected.summary,
         })
     );
     finish(&db, &lock, &calls.bindings[0], ok_reply());
@@ -322,16 +343,29 @@ fn conversation_step_summary_moves_to_reserved_successor() {
             ..node
         })
         .unwrap();
+    let Node::Input {
+        accepted_at, input, ..
+    } = node_at(&db, 1)
+    else {
+        panic!("节点 1 应为 Node::Input");
+    };
     assert_eq!(
         serde_json::to_value(&input_entry).unwrap(),
-        json!({ "kind": "input", "node": 1, "content": node_at(&db, 1) })
+        json!({
+            "kind": "input",
+            "node": 1,
+            "accepted_at": accepted_at,
+            "input": input,
+        })
+    );
+    let last_json = serde_json::to_value(&last).unwrap();
+    assert!(
+        last_json.get("agent_name").is_none(),
+        "step_ordinal > 0 不应序列化 agent_name 字段"
     );
     assert!(
-        serde_json::to_value(&last)
-            .unwrap()
-            .get("ordinal")
-            .is_none(),
-        "step_ordinal > 0 不应序列化 ordinal 字段"
+        last_json.get("content").is_none(),
+        "扁平化 ConversationEntry 不应包含物理 content 字段"
     );
     for entry in read.view(sid(1), 1).unwrap().entries {
         assert_eq!(
@@ -393,7 +427,8 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
     );
     drop(old_read);
     let read = db.begin_read().unwrap();
-    let entries = read.history(sid(1), NodeId(3), 1).unwrap();
+    let (entries, has_more) = read.history(sid(1), NodeId(3), 1).unwrap();
+    assert!(!has_more);
     assert!(
         matches!(&entries[1], ConversationEntry::Step { retries, summary: Some(summary), .. }
         if retries.len() == 1 && summary.outcome == PublicTurnOutcome::Completed)
@@ -404,7 +439,10 @@ fn conversation_retries_and_transaction_reads_survive_reopen() {
     drop(db);
     let db = SessionStore::open(&layout).unwrap();
     let read = db.begin_read().unwrap();
-    assert_eq!(read.history(sid(1), NodeId(3), 1).unwrap(), entries);
+    assert_eq!(
+        read.history(sid(1), NodeId(3), 1).unwrap(),
+        (entries.clone(), false)
+    );
     assert_eq!(
         read.entry(NodeRef {
             session_id: sid(1),
@@ -485,9 +523,11 @@ fn conversation_windows_skip_steps_outside_the_requested_turns() {
     // 树：Input(1) -> Step0(2) -> Step1(3) -> Step2(4) -> Input(5) -> Step0(6) -> Input(7) -> Step0(8)
     let read = db.begin_read().unwrap();
     let view = read.view(sid(1), 1).unwrap();
+    assert!(view.has_more);
     let history = read.history(sid(1), NodeId(7), 1).unwrap();
+    assert!(history.1);
     drop(read);
-    // 损坏 Turn 1 中间步 Step 1 (NodeId(3))；窗口外计数从 Step 2 (NodeId(4)) 直跳 Step 0 (NodeId(2))，不读 NodeId(3)。
+    // 损坏窗口之外的 Turn 1 中间步 Step 1 (NodeId(3))；窗口读取不再向根回溯，只按 head != 0 判定 has_more。
     let tx = db.db.begin_write().unwrap();
     {
         let mut nodes = tx.open_table(NODES).unwrap();
@@ -503,19 +543,19 @@ fn conversation_windows_skip_steps_outside_the_requested_turns() {
     assert_eq!(read.view(sid(1), 1).unwrap(), view);
     assert_eq!(read.history(sid(1), NodeId(7), 1).unwrap(), history);
     assert_eq!(
-        entry_ordinals(&[read
-            .entry(NodeRef {
-                session_id: sid(1),
-                node: NodeId(8)
-            })
-            .unwrap()]),
-        vec![3]
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(8)
+        })
+        .unwrap()
+        .turn_id(),
+        Some(tid(3))
     );
     assert!(read.view(sid(1), 3).is_err());
 }
 
 #[test]
-fn conversation_windows_count_older_turns_without_decoding_content() {
+fn conversation_windows_do_not_decode_nodes_outside_window() {
     for (damaged, field) in [
         (NodeId(3), "reply"),
         (NodeId(3), "attempts"),
@@ -544,18 +584,18 @@ fn conversation_windows_count_older_turns_without_decoding_content() {
         let read = db.begin_read().unwrap();
         let view = read.view(sid(1), 1).unwrap();
         assert_eq!(entry_nodes(&view.entries), vec![6, 7]);
-        assert_eq!(entry_ordinals(&view.entries), vec![3]);
-        let history = read.history(sid(1), NodeId(6), 1).unwrap();
+        assert!(view.has_more);
+        let (history, history_more) = read.history(sid(1), NodeId(6), 1).unwrap();
         assert_eq!(entry_nodes(&history), vec![4, 5]);
-        assert_eq!(entry_ordinals(&history), vec![2]);
+        assert!(history_more);
         assert_eq!(
-            entry_ordinals(&[read
-                .entry(NodeRef {
-                    session_id: sid(1),
-                    node: NodeId(7),
-                })
-                .unwrap()]),
-            vec![3]
+            read.entry(NodeRef {
+                session_id: sid(1),
+                node: NodeId(7),
+            })
+            .unwrap()
+            .turn_id(),
+            Some(tid(3))
         );
         assert!(matches!(
             read.view(sid(1), 3),
@@ -565,7 +605,7 @@ fn conversation_windows_count_older_turns_without_decoding_content() {
 }
 
 #[test]
-fn conversation_counts_reject_damaged_headers() {
+fn conversation_reads_reject_damaged_headers_within_traversed_range() {
     let cases: &[(NodeId, &[&str])] = &[
         (NodeId(1), &["kind", "parent"]),
         (NodeId(2), &["kind", "parent", "turn_id", "step_ordinal"]),
@@ -596,13 +636,8 @@ fn conversation_counts_reject_damaged_headers() {
                 let read = db.begin_read().unwrap();
                 for result in [
                     read.usage(sid(1)).map(|_| ()),
-                    read.view(sid(1), 1).map(|_| ()),
-                    read.history(sid(1), NodeId(6), 1).map(|_| ()),
-                    read.entry(NodeRef {
-                        session_id: sid(1),
-                        node: NodeId(7),
-                    })
-                    .map(|_| ()),
+                    read.view(sid(1), 3).map(|_| ()),
+                    read.history(sid(1), NodeId(6), 2).map(|_| ()),
                 ] {
                     assert!(
                         matches!(result, Err(StoreError::Corruption { ref table, ref key, .. })
@@ -634,7 +669,7 @@ fn conversation_counts_reject_invalid_value_versions() {
         tx.commit().unwrap();
         let read = db.begin_read().unwrap();
         for result in [
-            read.view(sid(1), 1).map(|_| ()),
+            read.view(sid(1), 3).map(|_| ()),
             read.usage(sid(1)).map(|_| ()),
         ] {
             if let Some(version) = version {
@@ -672,14 +707,21 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
             }
             tx.commit().unwrap();
             let read = db.begin_read().unwrap();
+            // view(1) 只读节点 3、4，且在探查节点 3 之前停止于节点 2（Step）；
+            // 若节点 2 损坏则 view(1) 也会报错，节点 1 损坏则只在读入窗口（view(2) / history / usage）报错。
             for result in [
                 read.usage(sid(1)).map(|_| ()),
-                read.view(sid(1), 1).map(|_| ()),
                 read.view(sid(1), 2).map(|_| ()),
                 read.history(sid(1), NodeId(3), 1).map(|_| ()),
             ] {
                 assert!(matches!(
                     result,
+                    Err(StoreError::Corruption { .. }) | Err(StoreError::UnsupportedVersion { .. })
+                ));
+            }
+            if damaged == NodeId(2) {
+                assert!(matches!(
+                    read.view(sid(1), 1),
                     Err(StoreError::Corruption { .. }) | Err(StoreError::UnsupportedVersion { .. })
                 ));
             }
@@ -692,7 +734,7 @@ fn conversation_reads_report_missing_nodes_and_invalid_encoding() {
                     entry,
                     Err(StoreError::NotFound { kind: "node", .. })
                 ));
-            } else {
+            } else if damaged == NodeId(2) {
                 assert!(matches!(
                     entry,
                     Err(StoreError::Corruption { .. }) | Err(StoreError::UnsupportedVersion { .. })

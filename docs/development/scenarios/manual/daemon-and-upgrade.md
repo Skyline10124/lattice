@@ -69,7 +69,7 @@ lattice --json daemon status
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `incompatible_backend` | 本地 IPC 协议版本（当前为 `67`）与运行中后台不一致；用 `systemctl --user stop lattice` 或旧二进制 `lattice daemon stop` 停止旧后台后再启动新版本 |
+| `incompatible_backend` | 本地 IPC 协议版本（当前为 `68`）与运行中后台不一致；用 `systemctl --user stop lattice` 或旧二进制 `lattice daemon stop` 停止旧后台后再启动新版本 |
 | `transport`（零字节断开） | 更早后台或崩溃断开；核对存活与版本 |
 | 拒绝格式版本较旧的库或 `*.git` 旧库 | 原库不变并列路径；存档或删除须获授权 |
 
@@ -80,8 +80,8 @@ lattice --json daemon status
 | 尝试 `usage` | `prompt_tokens`、`completion_tokens`、`total_tokens` | `input`、`cache_read`、`cache_write`、`output`、`reasoning`、`usage_kind` |
 | 尝试费用 | `estimated_cost_usd` | `cost: { usd, exact } \| null` |
 | Turn 汇总 | 三项合计与估算费用 | `attempts`、`partial_attempts`、五项 `{ known, complete, overflowed }`、`cost`、`kind` |
-| `session usage` | `total` | `path_total`、`session_total` |
-| `configure`、提交、`head`、Turn 起点与对话条目 | 无设置操作与档位字段；`UserMessage` 存接受时事实，`TurnView` 含 `user_node` | `configure` 返回 `head` 与 `adjustment`；提交可选 `expected_settings`；`head` 含 `agent`、`provider`、`model`、`effort`、`settings_version`；对话条目为 `input` / `context_op` / `step`（`Step 0` 附 `turn_start` 存档位与配置摘要），`TurnView` 含 `start_node` 与 `input_nodes` |
+| `session usage` | `total`、`turns[].ordinal` | `turns[].start_node`（文本表首列 `NODE` 显示 `@<start_node>`）、`path_total`、`session_total` |
+| `configure`、提交、`head`、Turn 起点与对话条目 | 无设置操作与档位字段；`UserMessage` 存接受时事实，`TurnView` 含 `user_node`；`ConversationEntry` 包裹物理 `Node` 与 `ordinal`/`turn_start` | `configure` 返回 `head` 与 `adjustment`；提交携带 `trigger_channel`、`inputs` 与可选 `expected_settings` / `expected_position`；`head` 含 `agent`、`provider`、`model`、`effort`、`settings_version` 及窗口 `has_older`，`history` 带 `has_more`；扁平对话条目为 `input` / `context_op` / `step`（不再包裹物理 `Node` 或 `turn_start`、`ordinal`，仅 `Step 0` 顶层带 `agent_name`），`TurnView` 含 `start_node` 与 `input_nodes` |
 | `models`、`auth status` | 无档位、状态或后台诊断 | `models` 含 `input`、`supported_efforts`、`availability`（表增 `EFFORTS`、`INPUT`、`AUTH`）；`auth status` 与登录结果中的 `ProviderAuthStatus` 含可选 `diagnostic` |
 | `daemon status`、`daemon stop` | 仅四项后台计数 | 新增必填 `components: ComponentStatus[]`（未启用组件不列入，空时为 `[]`） |
 | `session turn` 槽位与工具错误 | `descriptor_identity`、`evidence`、分类错误对象 | `tool_identity`（无 `evidence`）；失败载荷为 `ToolError { code, message }` |

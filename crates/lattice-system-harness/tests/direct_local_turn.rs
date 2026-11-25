@@ -37,13 +37,11 @@ fn turn_world(prefix: &str, agent: &str) -> (ScenarioWorld, ScenarioSpec) {
     (world, spec)
 }
 
-/// 接受回执、本轮对话条目与树形日志共同证明同一轮次；`ordinal` 是从根数起的轮次序号。
+/// 接受回执、本轮对话条目与树形日志共同证明同一轮次。
 fn assert_live_text_turn(
     outcome: &SendOutcome,
     session_id: &str,
-    prompt: &str,
     reply: &str,
-    ordinal: u64,
     log: &Value,
 ) -> Result<(), AssertError> {
     assert_accepted_and_closed(outcome)?;
@@ -63,17 +61,14 @@ fn assert_live_text_turn(
     let entries = outcome.entries();
     let text_parts = |text: &str| json!([{"replay_state":null,"semantic":{"text":{"text":text}}}]);
     require(
-        entries.len() == 2
-            && entries[0].is_input()
-            && entries[0].turn_id.is_none()
-            && entries[0].raw["content"]["input"]["message"]["parts"] == text_parts(prompt)
-            && entries[1].turn_id.as_deref() == Some(turn_id)
-            && entries[1].turn_ordinal() == Some(ordinal)
-            && entries[1].raw["content"]["reply"]["parts"] == text_parts(reply)
-            && entries[1].raw["content"]["slots"] == json!([])
-            && entries[1].raw["summary"]
+        entries.len() == 1
+            && entries[0].turn_id.as_deref() == Some(turn_id)
+            && entries[0].step().is_some_and(|step| step.ordinal == 0)
+            && entries[0].raw["reply"]["assistant"]["parts"] == text_parts(reply)
+            && entries[0].raw["step"]["slots"] == json!([])
+            && entries[0].raw["summary"]
                 == json!({"outcome":"completed","notice":null,"progress":{"progress":"closed","end":{"end":"finish"}}}),
-        "本轮条目必须携带一致的用户输入、助手回复、轮次序号与完成结局",
+        "单轮跟随条目必须携带一致的助手回复、步骤槽位与完成结局",
     )?;
     require(
         log["session"]["session_id"] == session_id
@@ -123,7 +118,7 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
         assert_clean_send(&execution)?;
         require(log_output.is_clean_exit(0), "会话日志命令必须正常退出")?;
         let log: Value = serde_json::from_slice(&log_output.stdout).expect("解析会话日志 JSON");
-        assert_live_text_turn(outcome, send.session_id().unwrap(), "ping", "ok", 1, &log)?;
+        assert_live_text_turn(outcome, send.session_id().unwrap(), "ok", &log)?;
         require(
             log["nodes"].as_array().is_some_and(|rows| rows.len() == 3),
             "会话树应仅含根节点、用户节点与步骤节点",
@@ -140,7 +135,7 @@ fn direct_local_plain_text_turn_commits_and_exit_zero() {
                 && messages[1]
                     == (
                         "user",
-                        "<lattice-context channel=\"ipc\">\nping\n</lattice-context>",
+                        "<lattice-context channel=\"cli\">\nping\n</lattice-context>",
                     ),
             "假 provider 必须收到目标模型 dl-plain 与经模型上下文投影的当前用户输入",
         )?;
@@ -205,22 +200,8 @@ fn direct_local_session_reopen_after_external_change() {
         assert_clean_send(&second)?;
         require(log_output.is_clean_exit(0), "会话日志命令必须正常退出")?;
         let log: Value = serde_json::from_slice(&log_output.stdout).expect("解析会话日志 JSON");
-        assert_live_text_turn(
-            &first,
-            send.session_id().unwrap(),
-            "ping",
-            "pong-one",
-            1,
-            &log,
-        )?;
-        assert_live_text_turn(
-            &second,
-            send.session_id().unwrap(),
-            "again",
-            "pong-two",
-            2,
-            &log,
-        )?;
+        assert_live_text_turn(&first, send.session_id().unwrap(), "pong-one", &log)?;
+        assert_live_text_turn(&second, send.session_id().unwrap(), "pong-two", &log)?;
         require(
             captures.len() == 2,
             format!("每轮对话应各发起一次模型请求，实际捕获：{captures:?}"),
@@ -234,7 +215,7 @@ fn direct_local_session_reopen_after_external_change() {
                 && first_messages[1]
                     == (
                         "user",
-                        "<lattice-context channel=\"ipc\">\nping\n</lattice-context>",
+                        "<lattice-context channel=\"cli\">\nping\n</lattice-context>",
                     )
                 && second_messages.len() == 4
                 && second_messages[0].0 == "system"
@@ -242,12 +223,12 @@ fn direct_local_session_reopen_after_external_change() {
                     == [
                         (
                             "user",
-                            "<lattice-context channel=\"ipc\">\nping\n</lattice-context>",
+                            "<lattice-context channel=\"cli\">\nping\n</lattice-context>",
                         ),
                         ("assistant", "pong-one"),
                         (
                             "user",
-                            "<lattice-context channel=\"ipc\">\nagain\n</lattice-context>",
+                            "<lattice-context channel=\"cli\">\nagain\n</lattice-context>",
                         ),
                     ],
             "两次真实请求必须携带经模型上下文投影的输入以及上一轮用户与助手上下文",

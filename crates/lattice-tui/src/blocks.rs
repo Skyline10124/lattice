@@ -12,12 +12,15 @@ pub(crate) enum BlockId {
         number: usize,
         occurrence: usize,
     },
+    /// 纯派生提交等待提示的虚拟块身份（不进入 `BlockList`，不挂载评论）。
+    SubmissionWait,
 }
 
 impl BlockId {
     pub(crate) fn comment(self, number: usize, occurrence: usize) -> Self {
         let owner = match self {
             Self::Block(owner) | Self::Comment { owner, .. } => owner,
+            Self::SubmissionWait => unreachable!("提交等待提示不挂载评论"),
         };
         Self::Comment {
             owner,
@@ -43,7 +46,7 @@ enum Slot {
     Kind(u8, usize),
 }
 
-fn slot_of(block: &Block, counts: &mut [usize; 6]) -> Slot {
+fn slot_of(block: &Block, counts: &mut [usize; 4]) -> Slot {
     let kind = match block {
         Block::Status(Status {
             retry: Some(key), ..
@@ -53,12 +56,11 @@ fn slot_of(block: &Block, counts: &mut [usize; 6]) -> Slot {
             ..
         }) => return Slot::Closing(*turn),
         Block::Tool { id, .. } => return Slot::Tool(id.clone()),
-        Block::UserTurn { .. } | Block::ContextOp { .. } | Block::Step { .. } => 0,
-        Block::User(_) | Block::CommentedUser(_) | Block::RejectedUser(_) => 1,
+        Block::Input { .. } | Block::ContextOp { .. } | Block::Step { .. } => 0,
+        Block::User(_) | Block::CommentedUser(_) => 1,
         // 生成中的文字由条目中的回复取代时仍是同一块。
         Block::Assistant(_) | Block::HistoryAssistant(_) => 2,
-        Block::AssistantStart => 3,
-        Block::Status(_) => 4,
+        Block::Status(_) => 3,
     };
     let n = counts[kind];
     counts[kind] = n.saturating_add(1);
@@ -112,7 +114,7 @@ impl BlockList {
             .enumerate()
             .skip(start.saturating_add(1))
             .find(|(_, entry)| match &entry.block {
-                Block::UserTurn { .. } | Block::ContextOp { .. } | Block::Step { .. } => true,
+                Block::Input { .. } | Block::ContextOp { .. } | Block::Step { .. } => true,
                 Block::Status(status) => status.retry.is_none() && status.closing.is_none(),
                 _ => false,
             })
@@ -125,7 +127,7 @@ impl BlockList {
         self.entries.iter().position(|entry| {
             matches!(
                 entry.block,
-                Block::UserTurn { node: Some(known), .. }
+                Block::Input { node: known }
                     | Block::ContextOp { node: known }
                     | Block::Step { node: known, .. }
                     if known == node
@@ -139,12 +141,12 @@ impl BlockList {
         range: std::ops::Range<usize>,
         blocks: Vec<Block>,
     ) -> std::ops::Range<usize> {
-        let mut counts = [0; 6];
+        let mut counts = [0; 4];
         let mut available = std::collections::HashMap::new();
         for entry in &self.entries[range.clone()] {
             available.insert(slot_of(&entry.block, &mut counts), entry.id);
         }
-        let mut counts = [0; 6];
+        let mut counts = [0; 4];
         let replacement: Vec<_> = blocks
             .into_iter()
             .map(|block| {

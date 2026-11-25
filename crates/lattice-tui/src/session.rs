@@ -9,10 +9,9 @@ use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
 
 use lattice_local::{
-    AttemptProgress, ConfigureRequest, ConfigureSession, ConflictReason, ConversationEntry,
+    AttemptProgressDetail, ConfigureRequest, ConfigureSession, ConflictReason, ConversationEntry,
     EffortAdjustment, LocalClient, LocalError, LocalErrorKind, MessageRole, MessageSemantic,
-    ModelAttemptKey, Node, ResultPayload, SessionHead, SessionId, SlotProgress, StepContent,
-    SuccessContent,
+    ModelAttemptKey, ResultPayload, SessionHead, SessionId, SlotState, StepContent, SuccessContent,
 };
 
 pub(crate) struct SessionContext {
@@ -116,21 +115,12 @@ pub(crate) struct Generating {
 /// 条目显示生成中的文字所属的尝试已 Ended：完成时由条目中的回复取代，停止时半截文字作废。
 pub(crate) fn superseded(entry: &ConversationEntry, generating: &Generating) -> bool {
     match entry {
-        ConversationEntry::Step {
-            content: Node::Step { attempts, .. },
-            ..
-        } => attempts
+        ConversationEntry::Step { step, .. } => step
+            .attempts
             .get(generating.attempt as usize)
-            .is_some_and(|attempt| matches!(attempt.progress, AttemptProgress::Ended { .. })),
+            .is_some_and(|attempt| matches!(attempt.progress, AttemptProgressDetail::Ended { .. })),
         _ => false,
     }
-}
-
-/// 已关联到某一轮的用户输入所需的展示元数据。
-pub(crate) struct InputTurnMeta<'a> {
-    pub(crate) turn_id: lattice_local::TurnId,
-    pub(crate) ordinal: Option<std::num::NonZeroUsize>,
-    pub(crate) agent: &'a str,
 }
 
 /// 一个条目的显示块。`ended` 表示条目所在的一轮已经结束：未到 Terminal 的槽位改按会话库给出的
@@ -139,64 +129,36 @@ pub(crate) fn entry_blocks(
     entry: &ConversationEntry,
     ended: bool,
     generating: Option<&Generating>,
-    input_meta: Option<InputTurnMeta<'_>>,
 ) -> Vec<Block> {
     let mut blocks = BlockList::default();
     match entry {
-        ConversationEntry::Input { node, content } => {
-            if let Node::Input { input, .. } = content {
-                let (turn_id, ordinal, agent) = match input_meta {
-                    Some(meta) => (Some(meta.turn_id), meta.ordinal, meta.agent.to_owned()),
-                    None => (None, None, String::new()),
-                };
-                blocks.push(Block::UserTurn {
-                    turn_id,
-                    node: Some(*node),
-                    ordinal,
-                    agent,
-                });
-                append_messages(&mut blocks, vec![input.message().clone()]);
-            }
+        ConversationEntry::Input { node, input, .. } => {
+            blocks.push(Block::Input { node: *node });
+            append_messages(&mut blocks, vec![input.message().clone()]);
         }
         ConversationEntry::ContextOp { node, .. } => {
             blocks.push(Block::ContextOp { node: *node });
         }
         ConversationEntry::Step {
             node,
-            content,
-            ordinal,
+            step,
+            agent_name,
+            reply,
             retries,
             summary,
-            ..
         } => {
-            let Node::Step {
-                turn_id,
-                step_ordinal,
-                turn_start,
-                slots,
-                ..
-            } = content
-            else {
-                return Vec::new();
-            };
+            let turn_id = step.key.turn_id;
+            let step_ordinal = step.key.ordinal;
             blocks.push(Block::Step {
                 node: *node,
-                key: lattice_local::StepKey {
-                    turn_id: *turn_id,
-                    ordinal: *step_ordinal,
-                },
-                ordinal: (*ordinal)
-                    .and_then(|n| usize::try_from(n).ok())
-                    .and_then(std::num::NonZeroUsize::new),
-                agent: turn_start
-                    .as_ref()
-                    .map(|meta| meta.agent_name.as_str().to_owned()),
+                key: step.key,
+                agent: agent_name.as_ref().map(|agent| agent.as_str().to_owned()),
             });
             // 重试提示排在这一步的回复之前，与它们发生的先后一致。
             for retry in retries {
                 let key = ModelAttemptKey {
-                    turn_id: *turn_id,
-                    model_step_ordinal: *step_ordinal,
+                    turn_id,
+                    model_step_ordinal: step_ordinal,
                     attempt_ordinal: retry.attempt,
                 };
                 blocks.push(Block::Status(retry_status(
@@ -205,23 +167,22 @@ pub(crate) fn entry_blocks(
                     retry.notice.clone(),
                 )));
             }
-            if let Some(step) = content.step_content() {
+            if let Some(content) = reply.clone() {
                 // 这一轮仍在执行时，未到 Terminal 的调用还在运行；结束后才取阶段给出的结论。
-                let running = slots
+                let running = step
+                    .slots
                     .iter()
-                    .filter(|slot| {
-                        !ended && !matches!(slot.progress, SlotProgress::Terminal { .. })
-                    })
-                    .map(|slot| slot.binding.invocation_id.to_string())
+                    .filter(|slot| !ended && !matches!(slot.progress, SlotState::Terminal { .. }))
+                    .map(|slot| slot.invocation_id.to_string())
                     .collect();
-                append_history_step(&mut blocks, step, *turn_id, *step_ordinal, &running);
+                append_history_step(&mut blocks, content, turn_id, step_ordinal, &running);
             } else if let Some(generating) =
                 generating.filter(|generating| !superseded(entry, generating))
             {
                 append_assistant_text(&mut blocks, generating.text.clone());
             }
             if ended && let Some(summary) = summary {
-                blocks.push(Block::Status(closing_status(*turn_id, summary.clone())));
+                blocks.push(Block::Status(closing_status(turn_id, summary.clone())));
             }
         }
     }
@@ -450,16 +411,12 @@ mod tests {
         serde_json::from_value(json!({
             "kind": "input",
             "node": node,
-            "content": {
-                "kind": "input",
-                "parent": node.saturating_sub(1),
-                "accepted_at": "2026-01-01T00:00:00Z",
-                "input": {
-                    "channel": "ipc",
-                    "message": {
-                        "role": "user",
-                        "parts": parts
-                    }
+            "accepted_at": "2026-01-01T00:00:00Z",
+            "input": {
+                "channel": "tui",
+                "message": {
+                    "role": "user",
+                    "parts": parts
                 }
             }
         }))
@@ -503,15 +460,20 @@ mod tests {
                 text_part_json("定位原因")
             ]),
         );
-        let blocks = entry_blocks(&entry, true, None, None);
+        let blocks = entry_blocks(&entry, true, None);
         assert_eq!(
             blocks.len(),
             2,
             "Input 条目应只生成一个标题块和一个 USER 正文块"
         );
         assert!(
-            matches!(blocks[0], Block::UserTurn { .. }),
-            "首块应为 UserTurn"
+            matches!(
+                blocks[0],
+                Block::Input {
+                    node: lattice_local::NodeId(1)
+                }
+            ),
+            "首块应为 Input"
         );
         assert_eq!(
             blocks[1],
@@ -530,7 +492,7 @@ mod tests {
                 text_part_json("\n第二行")
             ]),
         );
-        let ws_blocks = entry_blocks(&with_existing_whitespace, true, None, None);
+        let ws_blocks = entry_blocks(&with_existing_whitespace, true, None);
         assert_eq!(ws_blocks.len(), 2);
         assert_eq!(
             ws_blocks[1],
@@ -548,7 +510,7 @@ mod tests {
                 image_part_json('8', "png", 1024)
             ]),
         );
-        let nbsp_blocks = entry_blocks(&with_nbsp, true, None, None);
+        let nbsp_blocks = entry_blocks(&with_nbsp, true, None);
         assert_eq!(
             nbsp_blocks[1],
             Block::User(
@@ -562,7 +524,7 @@ mod tests {
     #[test]
     fn pure_image_user_message_renders_without_leading_or_trailing_spaces() {
         let single_image = input_entry_from_parts(1, json!([image_part_json('3', "webp", 1536)]));
-        let single_blocks = entry_blocks(&single_image, true, None, None);
+        let single_blocks = entry_blocks(&single_image, true, None);
         assert_eq!(single_blocks.len(), 2);
         assert_eq!(
             single_blocks[1],
@@ -579,7 +541,7 @@ mod tests {
                 image_part_json('5', "jpeg", 3_932_160)
             ]),
         );
-        let two_blocks = entry_blocks(&two_images, true, None, None);
+        let two_blocks = entry_blocks(&two_images, true, None);
         assert_eq!(two_blocks.len(), 2);
         assert_eq!(
             two_blocks[1],
@@ -608,8 +570,8 @@ mod tests {
             ]),
         );
 
-        let first_blocks = entry_blocks(&first, true, None, None);
-        let second_blocks = entry_blocks(&second, true, None, None);
+        let first_blocks = entry_blocks(&first, true, None);
+        let second_blocks = entry_blocks(&second, true, None);
         assert_eq!(
             first_blocks[1],
             Block::User(
@@ -631,7 +593,7 @@ mod tests {
     #[test]
     fn plain_text_user_message_rendering_is_unchanged() {
         let plain = input_entry_from_parts(1, json!([text_part_json("  保持原样\n第二行  ")]));
-        let blocks = entry_blocks(&plain, true, None, None);
+        let blocks = entry_blocks(&plain, true, None);
         assert_eq!(blocks.len(), 2);
         assert_eq!(
             blocks[1],

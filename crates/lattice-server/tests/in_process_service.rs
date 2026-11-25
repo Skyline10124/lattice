@@ -5,7 +5,7 @@
 //! 验证与本地 IPC `LocalClient` 共享同一套会话准入、流式正文观察与状态感知停机通知。
 
 use lattice_local::{
-    AgentName, ConfigureRequest, ConfigureSession, LocalClient, StateLayout, TurnLookup,
+    AgentName, Channel, ConfigureRequest, ConfigureSession, LocalClient, StateLayout, TurnLookup,
     TurnRequest, UserInputPart, new_session_id, new_turn_id,
 };
 use lattice_server::{
@@ -131,15 +131,17 @@ async fn serve_for_test_with_service_shares_backend_with_ipc_and_notifies_stop()
 
     let turn_id = new_turn_id();
     let mut turn: InProcessTurn = service
-        .submit(TurnRequest {
+        .submit(TurnRequest::single(
             turn_id,
-            session: sid,
+            sid,
             workspace,
-            parts: vec![UserInputPart::Text {
+            Channel::parse("cli").expect("固定通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "跨接口核对".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .expect("进程内提交轮次应成功");
 

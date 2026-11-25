@@ -34,9 +34,9 @@ use crossterm::event::{
 };
 use futures::{FutureExt, StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use lattice_local::{
-    CancelStatus, ConfigureReply, ConfigureRequest, ConfigureSession, ConnectionStatus,
+    CancelStatus, Channel, ConfigureReply, ConfigureRequest, ConfigureSession, ConnectionStatus,
     ConversationEntry, DetachReport, LocalClient, LocalError, LocalHistory, LocalTurn, LocalUpdate,
-    Node, NodeId, NoticeLevel, PlannedTurnRequest, PublicTurnOutcome, SessionHead, SessionId,
+    NodeId, NoticeLevel, PlannedTurnRequest, PublicTurnOutcome, SessionHead, SessionId,
     SettingsVersion, StepKey, SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment,
     TextUpdate, TurnId, TurnRequest, UserInputPart, ViewUpdate,
 };
@@ -49,14 +49,9 @@ const FRAME: Duration = Duration::from_millis(33);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum Block {
-    /// 一条用户输入或本客户端尚未被条目取代的提交，不占行。
-    /// `turn_id`、`ordinal` 与 `agent` 在关联到某一轮（本地提交、接受回执或 `Step 0`）时填入；
-    /// 独立输入时 `turn_id` 与 `ordinal` 为空。
-    UserTurn {
-        turn_id: Option<TurnId>,
-        node: Option<NodeId>,
-        ordinal: Option<std::num::NonZeroUsize>,
-        agent: String,
+    /// 一条持久化的用户输入条目锚点，不占视觉行。
+    Input {
+        node: NodeId,
     },
     /// 上下文操作条目的占位锚点，不占视觉行。
     ContextOp {
@@ -66,16 +61,11 @@ pub(crate) enum Block {
     Step {
         node: NodeId,
         key: StepKey,
-        ordinal: Option<std::num::NonZeroUsize>,
         agent: Option<String>,
     },
     User(String),
     CommentedUser(crate::comment::Message),
-    /// 保留被拒提交的标记，但不重复挂载已归还的评论。
-    RejectedUser(crate::comment::Message),
     HistoryAssistant(crate::comment::HistoryText),
-    /// 本客户端的提交已被接受、条目尚未到达：先显示助手标题线，不伪造正文。
-    AssistantStart,
     /// 生成中的文字，或由相邻多段拼成、不能评论的回复正文。
     Assistant(String),
     Tool {
@@ -141,6 +131,22 @@ pub(crate) struct PendingConfigure {
     pub(crate) effort: Option<Effort>,
 }
 
+/// 已被后台接受的本端轮次因果水位：用于判定完整确认的视图快照是否必然生成于该次接受之后。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AcceptedTurnWatermark {
+    turn_id: TurnId,
+    start_node: NodeId,
+    accepted_view_gen: u64,
+}
+
+/// 已被后台接受但对应 `Input` 条目尚未同步进当前视图的本端评论，用于继续占用评论编号。
+struct AcceptedComments {
+    start_node: NodeId,
+    input_nodes: Option<Vec<NodeId>>,
+    accepted_view_gen: u64,
+    comments: Vec<Comment>,
+}
+
 pub(crate) struct App {
     pub(crate) session_id: SessionId,
     project_root: PathBuf,
@@ -182,16 +188,24 @@ pub(crate) struct App {
     pending_head: Option<SessionHead>,
     /// 正在显示的条目，按 NodeId 维护；块序列中的段由它们生成。
     entries: BTreeMap<NodeId, ConversationEntry>,
-    /// 已认领为某轮输入的 `NodeId -> TurnId` 映射（来自 `TurnView.input_nodes` 或 `Step 0` 的 `turn_start.input_nodes`）。
-    input_turn: HashMap<NodeId, TurnId>,
-    /// 各轮的序号与回答 agent（来自 `Step 0` 或接受回执），供对应 `Input` 与 `Step` 块渲染标题线。
-    turn_meta: HashMap<TurnId, (Option<std::num::NonZeroUsize>, String)>,
+    /// 当前窗口之前是否还有更早历史；来自会话头 `has_older` 与 `history` 回复 `has_more`。
+    pub(crate) has_older: bool,
+    /// `replace_pending` 期间暂存的新视图 `has_older`，待真正替换条目时落入 `has_older`。
+    pending_has_older: Option<bool>,
+    /// 已被后台接受但视图尚未收到本轮任何 `Step` 的轮次身份，用于派生等待对话同步提示。
+    pub(crate) pending_accepted: Option<TurnId>,
     /// 生成中的文字，按所属 Step 节点。
     texts: HashMap<NodeId, Generating>,
     /// 已经结束的轮；由未结束变为结束的那一刻，结局才是新到的消息。
     ended: HashSet<TurnId>,
     /// 新视图开始后、首条会话头到达前为真：那条会话头之后是初始条目。
     view_starting: bool,
+    /// `begin_view()` 递增的重连视图代数；仅新建 `watch` 视图递增，路径替换不递增。
+    next_view_gen: u64,
+    /// 当前活跃 `watch` 视图对应的代数；新视图首条会话头到达时更新为 `next_view_gen`。
+    active_view_gen: u64,
+    /// 当前活跃 `watch` 流上已观察到的最大节点号；新视图首条会话头到达时重置，仅随会话头与条目推进。
+    watch_max_node: Option<NodeId>,
     /// 新视图的首条会话头已到、首个初始条目未到：重连失败时已显示的内容保留，首个条目到达才替换。
     replace_pending: bool,
     /// 新视图或路径替换的首条会话头到它当前位置的条目为止：其间的条目是初始条目，
@@ -208,11 +222,12 @@ pub(crate) struct App {
     own_turn: Option<TurnId>,
     /// 已被接受、会话头尚未指向它的那一轮：其间仍按正在运行处理。
     awaiting_head: Option<TurnId>,
-    /// 新视图开始时已在等会话头的那一轮。它的接受先于这次 `watch`，新视图的初始内容读于接受之后；
-    /// 初始条目给完仍没有到达它，它已不在执行，不再等。
-    awaiting_before_view: Option<TurnId>,
+    /// 本端已确认接受轮次的因果水位；用于判定后续已确认视图是否生成于本次接受之后。
+    accepted_turn: Option<AcceptedTurnWatermark>,
     /// 结果未知的那次提交，按 TurnId 留到收到它的确定结果为止。
     unknown_submission: Option<(TurnId, crate::drafts::Outgoing)>,
+    /// 已被后台接受、对应 `Input` 条目尚未进入当前视图的本端评论，按 TurnId 继续占用编号。
+    accepted_comments: BTreeMap<TurnId, AcceptedComments>,
     /// 已实时显示的提交回执：请求与结果种类。交接报告只省略相同的事实。
     shown_receipts: HashSet<(TurnId, std::mem::Discriminant<SubmissionResult>)>,
     pub(crate) cancel_status: Option<CancelStatus>,
@@ -264,15 +279,19 @@ impl App {
             clipboard_request: false,
             staging: None,
             cancelling: false,
-            latest_head: initial_head,
+            latest_head: initial_head.clone(),
             head: None,
             pending_head: None,
             entries: BTreeMap::new(),
-            input_turn: HashMap::new(),
-            turn_meta: HashMap::new(),
+            has_older: initial_head.has_older.unwrap_or(false),
+            pending_has_older: None,
+            pending_accepted: None,
             texts: HashMap::new(),
             ended: HashSet::new(),
             view_starting: false,
+            next_view_gen: 0,
+            active_view_gen: 0,
+            watch_max_node: None,
             replace_pending: false,
             initial: false,
             epoch: 0,
@@ -282,8 +301,9 @@ impl App {
             submitted: None,
             own_turn: None,
             awaiting_head: None,
-            awaiting_before_view: None,
+            accepted_turn: None,
             unknown_submission: None,
+            accepted_comments: BTreeMap::new(),
             shown_receipts: Default::default(),
             cancel_status: None,
             kitty_keyboard,
@@ -360,7 +380,18 @@ impl App {
                             }
                             Some(crate::view::CommentNavigation::Compose(anchor)) => {
                                 let id = self.blocks.allocate_id();
-                                self.drafts.start_comment(id, anchor, &self.blocks);
+                                let in_flight = self
+                                    .submitted
+                                    .iter()
+                                    .chain(self.unknown_submission.iter())
+                                    .flat_map(|(_, outgoing)| outgoing.comments.iter())
+                                    .chain(
+                                        self.accepted_comments
+                                            .values()
+                                            .flat_map(|item| item.comments.iter()),
+                                    );
+                                self.drafts
+                                    .start_comment(id, anchor, &self.blocks, in_flight);
                             }
                             None => {
                                 self.drafts.start_edit(cursor.block.id);
@@ -526,6 +557,7 @@ impl App {
         Some(ModelRef::new(head.provider.clone()?, head.model.clone()?))
     }
 
+    #[cfg(test)]
     pub(crate) fn current_agent(&self) -> String {
         self.current_head().agent.clone()
     }
@@ -672,17 +704,17 @@ impl App {
 
     fn apply_handoff(&mut self, report: DetachReport) {
         // 旧句柄的交接报告只生成状态消息，不覆盖新 Turn 的状态或归还输入。
-        if let Some(id) = report.turn_id
-            && matches!(
-                report.submission.as_ref().map(|receipt| &receipt.result),
-                Some(
-                    SubmissionResult::Accepted { .. }
-                        | SubmissionResult::Rejected { .. }
-                        | SubmissionResult::NotAccepted
-                )
-            )
-        {
-            self.resolve_unknown(id);
+        if let Some(id) = report.turn_id {
+            match report.submission.as_ref().map(|receipt| &receipt.result) {
+                Some(SubmissionResult::Accepted { turn }) => {
+                    self.record_accepted_submission(id, turn.start_node, Some(&turn.input_nodes));
+                    self.reconcile_confirmed_view();
+                }
+                Some(SubmissionResult::Rejected { .. } | SubmissionResult::NotAccepted) => {
+                    self.resolve_unknown(id);
+                }
+                _ => {}
+            }
         }
         // 已由本客户端实时显示的同一回执与结局不再重述；未知之后的确定结果、取消与诊断照常显示。
         let mut report = report;
@@ -722,13 +754,8 @@ impl App {
             // 起始会话头当前位置的条目已经到达，初始条目给完；评论草稿的锚点按新路径核对。
             self.initial = false;
             self.discard_missing_comments();
-            if let Some(turn) = self.awaiting_before_view.take()
-                && self.awaiting_head == Some(turn)
-                && !self.head_reached(turn)
-            {
-                self.awaiting_head = None;
-            }
         }
+        self.reconcile_confirmed_view();
         self.refresh_status_fields();
         self.refresh_phase();
     }
@@ -768,37 +795,44 @@ impl App {
             .insert((turn_id, std::mem::discriminant(&receipt.result)));
         match receipt.result {
             SubmissionResult::Accepted { turn } => {
-                self.resolve_unknown(turn_id);
-                if self
-                    .submitted
-                    .as_ref()
-                    .is_some_and(|(id, _)| *id == turn_id)
-                {
-                    self.submitted = None;
-                }
-                self.turn_meta
-                    .entry(turn_id)
-                    .or_insert_with(|| (None, turn.agent_name.as_str().to_owned()));
-                for &input_node in &turn.input_nodes {
-                    self.input_turn.insert(input_node, turn_id);
+                self.record_accepted_submission(turn_id, turn.start_node, Some(&turn.input_nodes));
+                self.record_accepted_turn(turn_id, turn.start_node);
+                if !self.has_turn_step(turn_id) {
+                    self.pending_accepted = Some(turn_id);
                 }
                 // 已确认的会话头到达这一轮之前，仍按正在运行处理。
                 if !self.head_reached(turn_id) {
                     self.awaiting_head = Some(turn_id);
                 }
-                self.reconcile_turn_inputs(turn_id, &turn.input_nodes);
-                self.mark_accepted(turn_id, &turn.agent_name);
-                // 直接收到的接受由助手标题线表达，不另写接受行。
+                self.reconcile_confirmed_view();
                 if receipt.recovered {
-                    self.push_status(recovered_status(turn_id));
+                    self.notice_once(recovered_status(turn_id));
                 }
             }
             SubmissionResult::Rejected { error } => {
+                if self.pending_accepted == Some(turn_id) {
+                    self.pending_accepted = None;
+                }
+                if self
+                    .accepted_turn
+                    .is_some_and(|watermark| watermark.turn_id == turn_id)
+                {
+                    self.accepted_turn = None;
+                }
                 let kept = self.reject_submission(turn_id);
                 self.push_status(rejected_status(turn_id, &error, kept));
             }
             // 不来自查询的未被接受是取消发生在请求写出之前，这次提交没有发出。
             SubmissionResult::NotAccepted => {
+                if self.pending_accepted == Some(turn_id) {
+                    self.pending_accepted = None;
+                }
+                if self
+                    .accepted_turn
+                    .is_some_and(|watermark| watermark.turn_id == turn_id)
+                {
+                    self.accepted_turn = None;
+                }
                 let kept = self.reject_submission(turn_id);
                 self.push_status(if receipt.recovered {
                     not_accepted_status(turn_id, kept)
@@ -811,39 +845,19 @@ impl App {
                 if let Some((id, message)) = self.submitted.take_if(|(id, _)| *id == turn_id) {
                     self.unknown_submission = Some((id, message));
                 }
+                if self.pending_accepted == Some(turn_id) {
+                    self.pending_accepted = None;
+                }
+                if self
+                    .accepted_turn
+                    .is_some_and(|watermark| watermark.turn_id == turn_id)
+                {
+                    self.accepted_turn = None;
+                }
                 self.push_status(submission_unknown_status(turn_id, error.as_ref()));
             }
         }
         self.refresh_status_fields();
-    }
-
-    /// 接受回执先于条目到达时，在提交的 USER 块后显示助手标题线。
-    fn mark_accepted(&mut self, turn_id: TurnId, agent_name: &str) {
-        if let Some(start) = self.pending_start(turn_id) {
-            if let Block::UserTurn { agent, .. } = &mut self.blocks.entries[start].block
-                && agent.is_empty()
-            {
-                *agent = agent_name.to_owned();
-            }
-            let range = self.blocks.group(start);
-            if !self.blocks.entries[range.clone()]
-                .iter()
-                .any(|entry| matches!(entry.block, Block::AssistantStart))
-            {
-                self.blocks
-                    .replace(range.end..range.end, vec![Block::AssistantStart]);
-            }
-        }
-    }
-
-    /// 本客户端提交的 USER 块，尚未被对应 Input 条目取代。
-    fn pending_start(&self, turn_id: TurnId) -> Option<usize> {
-        self.blocks.entries.iter().position(|entry| {
-            matches!(
-                entry.block,
-                Block::UserTurn { turn_id: Some(id), node: None, .. } if id == turn_id
-            )
-        })
     }
 
     /// 其他客户端提交的一轮的取消回执。
@@ -862,19 +876,38 @@ impl App {
         self.refresh_phase();
     }
 
-    /// 应用循环开始了新的视图：它的首条会话头之后是初始条目。
+    /// 应用循环开始了新的视图：递增重连视图代数，它的首条会话头之后是初始条目。
     pub(crate) fn begin_view(&mut self) {
+        self.next_view_gen = self.next_view_gen.saturating_add(1);
         self.view_starting = true;
-        self.awaiting_before_view = self.awaiting_head;
+    }
+
+    pub(crate) fn has_turn_step(&self, turn: TurnId) -> bool {
+        self.entries
+            .values()
+            .any(|entry| matches!(entry, ConversationEntry::Step { step, .. } if step.key.turn_id == turn))
+    }
+
+    pub(crate) fn submission_wait_text(&self) -> Option<&'static str> {
+        if self.submitted.is_some() {
+            Some("正在提交请求…")
+        } else if self
+            .pending_accepted
+            .is_some_and(|turn| !self.has_turn_step(turn))
+        {
+            Some("请求已接受，等待对话同步…")
+        } else {
+            None
+        }
     }
 
     fn last_summary(&self, turn: TurnId) -> Option<&lattice_local::TurnSummary> {
         self.entries.values().rev().find_map(|entry| match entry {
             ConversationEntry::Step {
-                content,
+                step,
                 summary: Some(summary),
                 ..
-            } if content.turn_id() == Some(turn) => Some(summary),
+            } if step.key.turn_id == turn => Some(summary),
             _ => None,
         })
     }
@@ -913,8 +946,7 @@ impl App {
         })
     }
 
-    /// 新视图的初始条目到达或路径替换时丢弃此前的条目及其生成中的文字；
-    /// 状态消息与未被接受的 USER 块保留。
+    /// 新视图的初始条目到达或路径替换时丢弃此前的条目及其生成中的文字；状态消息保留。
     fn discard_entries(&mut self) {
         self.entries.clear();
         self.texts.clear();
@@ -923,15 +955,10 @@ impl App {
         let mut index = 0;
         while index < self.blocks.len() {
             let range = self.blocks.group(index);
-            let discard = match &self.blocks.entries[index].block {
-                Block::UserTurn { node: Some(_), .. }
-                | Block::ContextOp { .. }
-                | Block::Step { .. } => true,
-                Block::UserTurn { node: None, .. } => self.blocks.entries[range.clone()]
-                    .iter()
-                    .any(|entry| matches!(entry.block, Block::AssistantStart)),
-                _ => false,
-            };
+            let discard = matches!(
+                &self.blocks.entries[index].block,
+                Block::Input { .. } | Block::ContextOp { .. } | Block::Step { .. }
+            );
             if discard {
                 remove[range.clone()].fill(true);
                 index = range.end;
@@ -948,10 +975,7 @@ impl App {
     /// 本轮从替换后的条目重算；会话头当前位置未到齐时不把已装入的小计当作完整值。
     fn refresh_status_fields(&mut self) {
         let latest = self.entries.values().rev().find_map(|entry| match entry {
-            ConversationEntry::Step {
-                content: Node::Step { turn_id, .. },
-                ..
-            } => Some(*turn_id),
+            ConversationEntry::Step { step, .. } => Some(step.key.turn_id),
             _ => None,
         });
         self.turn_usage = latest
@@ -965,13 +989,9 @@ impl App {
                     self.entries
                         .values()
                         .filter_map(|entry| match entry {
-                            ConversationEntry::Step {
-                                content:
-                                    Node::Step {
-                                        turn_id, attempts, ..
-                                    },
-                                ..
-                            } if *turn_id == turn => Some(attempts),
+                            ConversationEntry::Step { step, .. } if step.key.turn_id == turn => {
+                                Some(&step.attempts)
+                            }
                             _ => None,
                         })
                         .flatten()
@@ -983,10 +1003,8 @@ impl App {
             .values()
             .rev()
             .find_map(|entry| match entry {
-                ConversationEntry::Step {
-                    content: Node::Step { attempts, .. },
-                    ..
-                } => attempts
+                ConversationEntry::Step { step, .. } => step
+                    .attempts
                     .iter()
                     .rev()
                     .find_map(|attempt| attempt.usage.and_then(|usage| usage.normalized())),
@@ -1057,19 +1075,22 @@ impl App {
         parts: &[UserInputPart<PendingImage>],
         expected_settings: SettingsVersion,
     ) -> lattice_local::Result<PlannedTurnRequest> {
-        let plan = PlannedTurnRequest {
+        let channel = Channel::parse("tui").expect("固定通道名 tui 应合法");
+        let plan = PlannedTurnRequest::single(
             turn_id,
-            session: self.session_id,
-            workspace: self.project_root.clone(),
-            parts: parts
+            self.session_id,
+            self.project_root.clone(),
+            channel,
+            parts
                 .iter()
                 .map(|part| match part {
                     UserInputPart::Text { text } => UserInputPart::Text { text: text.clone() },
                     UserInputPart::Image { image } => UserInputPart::Image { image: image.meta },
                 })
                 .collect(),
-            expected_settings: Some(expected_settings),
-        };
+            Some(expected_settings),
+            None,
+        );
         lattice_local::check_turn_plan(&plan)?;
         Ok(plan)
     }
@@ -1097,13 +1118,15 @@ impl App {
                 }
             }
         }
-        Ok(TurnRequest {
-            turn_id: plan.turn_id,
-            session: plan.session,
-            workspace: plan.workspace.clone(),
-            parts: loaded,
-            expected_settings: plan.expected_settings,
-        })
+        Ok(TurnRequest::single(
+            plan.turn_id,
+            plan.session,
+            plan.workspace.clone(),
+            plan.trigger_channel.clone(),
+            loaded,
+            plan.expected_settings,
+            plan.expected_position,
+        ))
     }
 
     fn submit(&mut self) -> Option<TurnRequest> {
@@ -1129,13 +1152,11 @@ impl App {
         let steps = self.initial.then(|| self.present_steps());
         let comments = self.drafts.draft_comments_in(steps.as_ref());
         let parts = compose_parts(&self.input, &comments);
-        let (plan, request) = match self
+        let request = match self
             .plan_request(turn_id, &parts, expected_settings)
-            .and_then(|plan| {
-                let request = Self::materialize_request(&plan, &parts)?;
-                Ok((plan, request))
-            }) {
-            Ok(pair) => pair,
+            .and_then(|plan| Self::materialize_request(&plan, &parts))
+        {
+            Ok(request) => request,
             Err(error) => {
                 self.push_status(preflight_failed_status(&error));
                 return None;
@@ -1144,32 +1165,23 @@ impl App {
         self.check_comments_before_send();
         let input = std::mem::take(&mut self.input);
         let message = self.drafts.take_message(input);
-        Some(self.start_submission(message, &plan, request))
+        Some(self.start_submission(message, request))
     }
 
     fn start_submission(
         &mut self,
         message: crate::drafts::Outgoing,
-        plan: &PlannedTurnRequest,
         request: TurnRequest,
     ) -> TurnRequest {
         let id = request.turn_id;
         let text = message.input.text();
         self.history.push(text.trim());
-        let echo = crate::session::format_user_parts(plan.parts.iter().map(|part| match part {
-            UserInputPart::Text { text } => crate::session::UserPartRef::Text(text),
-            UserInputPart::Image { image } => crate::session::UserPartRef::Image(image),
-        }));
         self.cancel_status = None;
         self.own_turn = Some(id);
         self.submitted = Some((id, message));
-        self.blocks.push(Block::UserTurn {
-            turn_id: Some(id),
-            node: None,
-            ordinal: None,
-            agent: self.current_agent(),
-        });
-        self.blocks.push(crate::session::user_block(echo));
+        self.unknown_submission = None;
+        self.pending_accepted = None;
+        self.accepted_turn = None;
         self.refresh_phase();
         request
     }
@@ -1203,8 +1215,8 @@ impl App {
     }
 
     /// 提交的内容在输入区为空时完整放回，输入区已有用户的草稿时不覆盖：
-    /// 有文字时留在输入历史中，纯图片时标记为未放回。结果未知之后才确定未被接受的提交同样处理。
-    /// 只归还本客户端的草稿，不撤销已知的执行、接管或完成显示。
+    /// 仅文字时留在输入历史中，图文混合时文字留在输入历史、图片未放回，纯图片时标记为未放回。
+    /// 结果未知之后才确定未被接受的提交同样处理。只归还本客户端的草稿，不撤销已知的执行、接管或完成显示。
     fn reject_submission(&mut self, turn_id: TurnId) -> KeptInput {
         let Some((_, message)) = self
             .unknown_submission
@@ -1213,16 +1225,19 @@ impl App {
         else {
             return KeptInput::Nothing;
         };
-        self.mark_rejected_comments(turn_id);
         // 评论不进输入历史，总是恢复为草稿。
         let input = self.drafts.restore(message, &mut self.blocks);
+        let has_text = !input.text().trim().is_empty();
+        let has_images = input.image_count() > 0;
         let kept = if input.is_empty() {
             KeptInput::Nothing
         } else if self.input.is_empty() {
             self.input = input;
             self.input.move_to_end();
             KeptInput::Restored
-        } else if !input.text().trim().is_empty() {
+        } else if has_text && has_images {
+            KeptInput::HistoryWithoutImages
+        } else if has_text {
             KeptInput::History
         } else {
             KeptInput::Discarded
@@ -1242,16 +1257,174 @@ impl App {
         }
     }
 
-    fn mark_rejected_comments(&mut self, turn_id: TurnId) {
-        let Some(start) = self.pending_start(turn_id) else {
-            return;
-        };
-        let range = self.blocks.group(start);
-        for entry in &mut self.blocks.entries[range] {
-            if let Block::CommentedUser(message) = &entry.block {
-                entry.block = Block::RejectedUser(message.clone());
+    /// 判定当前活跃视图是否已因果晚于某次接受：
+    /// 要么当前 `watch` 是在客户端已知该次接受之后新建的，要么同 `watch` 流已观察到不小于 `start_node` 的节点。
+    fn view_confirmed_after(&self, start_node: NodeId, accepted_view_gen: u64) -> bool {
+        self.active_view_gen > accepted_view_gen
+            || self.watch_max_node.is_some_and(|max| max >= start_node)
+    }
+
+    /// 记录或合并本端已接受轮次的因果水位；同一轮次重复确认时保留更早的视图代数。
+    fn record_accepted_turn(&mut self, turn_id: TurnId, start_node: NodeId) {
+        let view_gen = self.next_view_gen;
+        match &mut self.accepted_turn {
+            Some(existing) if existing.turn_id == turn_id => {
+                existing.start_node = start_node;
+                existing.accepted_view_gen = existing.accepted_view_gen.min(view_gen);
+            }
+            _ => {
+                self.accepted_turn = Some(AcceptedTurnWatermark {
+                    turn_id,
+                    start_node,
+                    accepted_view_gen: view_gen,
+                });
             }
         }
+    }
+
+    /// 将本端已确认接受的提交从在途/未知槽位移出：立即丢弃输入正文与图片，仅保留非空评论继续占用编号，
+    /// 并同步记录该轮的因果水位。若提交先前已由 `Step 0` 移出，后续回执补齐 `input_nodes` 时保留更早的视图代数。
+    fn record_accepted_submission(
+        &mut self,
+        turn_id: TurnId,
+        start_node: NodeId,
+        input_nodes: Option<&[NodeId]>,
+    ) {
+        let mut taken = self.unknown_submission.take_if(|(id, _)| *id == turn_id);
+        if let Some(submitted) = self.submitted.take_if(|(id, _)| *id == turn_id)
+            && taken.is_none()
+        {
+            taken = Some(submitted);
+        }
+        let view_gen = self.next_view_gen;
+        if self.own_turn == Some(turn_id) {
+            self.record_accepted_turn(turn_id, start_node);
+        }
+        let nodes = input_nodes.map(<[NodeId]>::to_vec);
+        if let Some((_, outgoing)) = taken {
+            // 已接受的输入绝不再恢复为草稿，立即丢弃 `outgoing.input`。
+            drop(outgoing.input);
+            if !outgoing.comments.is_empty() {
+                self.accepted_comments.insert(
+                    turn_id,
+                    AcceptedComments {
+                        start_node,
+                        input_nodes: nodes,
+                        accepted_view_gen: view_gen,
+                        comments: outgoing.comments,
+                    },
+                );
+            }
+        } else if let Some(existing) = self.accepted_comments.get_mut(&turn_id) {
+            existing.start_node = start_node;
+            existing.accepted_view_gen = existing.accepted_view_gen.min(view_gen);
+            if existing.input_nodes.is_none() && nodes.is_some() {
+                existing.input_nodes = nodes;
+            }
+        }
+    }
+
+    /// 当已接受提交关联的 `Input` 条目已同步进当前视图并由 `Block::CommentedUser` 接管后，释放本地编号占位。
+    fn prune_accepted_comments(&mut self) {
+        if self.replace_pending || self.accepted_comments.is_empty() {
+            return;
+        }
+        let needs_block_numbers = self
+            .accepted_comments
+            .values()
+            .any(|item| item.input_nodes.as_ref().is_none_or(Vec::is_empty));
+        let loaded_numbers: HashSet<usize> = if needs_block_numbers {
+            self.blocks
+                .iter()
+                .filter_map(|block| match block {
+                    Block::CommentedUser(message) => Some(message.comments.iter().map(|c| c.n)),
+                    _ => None,
+                })
+                .flatten()
+                .collect()
+        } else {
+            HashSet::new()
+        };
+        self.accepted_comments.retain(|_, item| {
+            let synced = match item.input_nodes.as_deref() {
+                Some(nodes) if !nodes.is_empty() => {
+                    nodes.iter().all(|node| self.entries.contains_key(node))
+                }
+                _ => item
+                    .comments
+                    .iter()
+                    .all(|comment| loaded_numbers.contains(&comment.n)),
+            };
+            !synced
+        });
+    }
+
+    /// 视图完整确认后，按双因果水位核销待同步等待状态与已接受评论占位；
+    /// 视图尚未完整确认时仅做安全的接管裁剪，不凭未完成或早于接受的快照释放占用。
+    fn reconcile_confirmed_view(&mut self) {
+        self.prune_accepted_comments();
+        if self.view_starting
+            || self.replace_pending
+            || self.initial
+            || self.pending_head.is_some()
+            || self.head.is_none()
+        {
+            return;
+        }
+        if let Some(wm) = self.accepted_turn
+            && self.view_confirmed_after(wm.start_node, wm.accepted_view_gen)
+        {
+            if self.awaiting_head == Some(wm.turn_id) && !self.head_reached(wm.turn_id) {
+                self.awaiting_head = None;
+            }
+            if self.pending_accepted == Some(wm.turn_id) && !self.has_turn_step(wm.turn_id) {
+                self.pending_accepted = None;
+            }
+            if self.awaiting_head != Some(wm.turn_id) && self.pending_accepted != Some(wm.turn_id) {
+                self.accepted_turn = None;
+            }
+        }
+        if self.accepted_comments.is_empty() {
+            return;
+        }
+        let head_pos = self.head.as_ref().map(|head| head.position);
+        let head_turn = self.head.as_ref().and_then(|head| head.turn_id);
+        let window_min = self.entries.keys().next().copied();
+        let has_older = self.has_older;
+        let active_view_gen = self.active_view_gen;
+        let watch_max_node = self.watch_max_node;
+        let retained_steps: HashSet<TurnId> = self
+            .entries
+            .values()
+            .filter_map(|entry| match entry {
+                ConversationEntry::Step { step, .. } => Some(step.key.turn_id),
+                _ => None,
+            })
+            .collect();
+        self.accepted_comments.retain(|&turn_id, item| {
+            let confirmed_after = active_view_gen > item.accepted_view_gen
+                || watch_max_node.is_some_and(|max| max >= item.start_node);
+            if !confirmed_after {
+                return true;
+            }
+            if retained_steps.contains(&turn_id) || head_turn == Some(turn_id) {
+                return true;
+            }
+            if !has_older {
+                return false;
+            }
+            let first_node = item
+                .input_nodes
+                .as_deref()
+                .and_then(|nodes| nodes.first().copied())
+                .unwrap_or(item.start_node);
+            if window_min.is_some_and(|min| first_node >= min)
+                || head_pos.is_some_and(|pos| first_node > pos)
+            {
+                return false;
+            }
+            true
+        });
     }
 
     /// 与绘制路径使用同一内容宽度及 Dock 高度，statusline 始终占一行；
@@ -1265,14 +1438,32 @@ impl App {
     fn apply_head(&mut self, head: SessionHead) {
         // 新视图的首条会话头或路径已替换：之后到它当前位置的条目为止是初始条目。
         // 路径替换立即丢弃此前的条目；新视图等首个初始条目到达再替换，重连失败时内容保留。
-        let starts = std::mem::take(&mut self.view_starting) || head.path_replaced;
+        let was_starting = std::mem::take(&mut self.view_starting);
+        if was_starting {
+            self.active_view_gen = self.next_view_gen;
+            self.watch_max_node = Some(head.position);
+        } else {
+            self.watch_max_node = Some(
+                self.watch_max_node
+                    .map_or(head.position, |max| max.max(head.position)),
+            );
+        }
+        let starts = was_starting || head.path_replaced;
         if head.path_replaced {
-            self.input_turn.clear();
-            self.turn_meta.clear();
+            self.pending_has_older = head.has_older;
             self.replace_entries();
-            self.awaiting_head = None;
+            let clear_awaiting = match (self.awaiting_head, self.accepted_turn) {
+                (Some(awaiting), Some(wm)) if wm.turn_id == awaiting => {
+                    self.view_confirmed_after(wm.start_node, wm.accepted_view_gen)
+                }
+                _ => true,
+            };
+            if clear_awaiting {
+                self.awaiting_head = None;
+            }
         } else if starts {
             self.replace_pending = true;
+            self.pending_has_older = head.has_older;
         }
         if starts {
             self.initial = true;
@@ -1300,7 +1491,14 @@ impl App {
         if std::mem::take(&mut self.replace_pending) {
             self.replace_entries();
         }
+        let is_root = self
+            .pending_head
+            .as_ref()
+            .is_some_and(|head| head.position == NodeId(0));
         self.head = self.pending_head.take();
+        if is_root {
+            self.has_older = false;
+        }
         if self
             .awaiting_head
             .is_some_and(|turn| self.head_reached(turn))
@@ -1318,114 +1516,57 @@ impl App {
                 .head
                 .as_ref()
                 .is_some_and(|head| head.turn_id == Some(turn))
-                || self.entries.values().any(|entry| {
-                    matches!(entry, ConversationEntry::Step { .. })
-                        && entry_turn(entry) == Some(turn)
-                }))
+                || self.has_turn_step(turn))
     }
 
     /// 新视图的初始条目开始到达或路径已替换：丢弃此前的条目，迟到的历史查询结果作废。
     fn replace_entries(&mut self) {
         self.replace_pending = false;
         self.discard_entries();
+        self.has_older = self.pending_has_older.take().unwrap_or(false);
         self.epoch = self.epoch.wrapping_add(1);
         self.older_pending = false;
         self.orphan_warned = None;
     }
 
-    fn input_turn_meta(&self, turn: TurnId) -> crate::session::InputTurnMeta<'_> {
-        let (ordinal, agent) = self
-            .turn_meta
-            .get(&turn)
-            .map_or((None, ""), |(ordinal, agent)| (*ordinal, agent.as_str()));
-        crate::session::InputTurnMeta {
-            turn_id: turn,
-            ordinal,
-            agent,
-        }
-    }
-
-    /// 当接受回执或 `Step 0` 公布某轮的 `input_nodes` 时，将已到达的 `Input` 条目原位绑定到该轮
-    /// （优先取代本客户端提交时生成的暂存 USER 块以保持块身份与相对位置，否则原位更新元数据）。
-    fn reconcile_turn_inputs(&mut self, turn_id: TurnId, input_nodes: &[NodeId]) {
-        for &input_node in input_nodes {
-            if !self.entries.contains_key(&input_node) {
-                continue;
-            }
-            if self.pending_start(turn_id).is_some() {
-                if let Some(existing) = self.blocks.node_start(input_node) {
-                    let range = self.blocks.group(existing);
-                    self.blocks.replace(range, Vec::new());
-                }
-                if let Some(pending) = self.pending_start(turn_id) {
-                    let blocks = crate::session::entry_blocks(
-                        &self.entries[&input_node],
-                        false,
-                        None,
-                        Some(self.input_turn_meta(turn_id)),
-                    );
-                    self.blocks.replace(self.blocks.group(pending), blocks);
-                    continue;
-                }
-            }
-            self.render_node(input_node);
-        }
-    }
-
-    /// 同一 NodeId 原位替换；本客户端提交的 USER 块由对应的 Input 条目取代；
-    /// 其余新条目接在末尾。
+    /// 同一 NodeId 原位替换；其余新条目接在末尾。
     fn apply_entry(&mut self, entry: ConversationEntry) {
         let node = entry.node();
+        self.watch_max_node = Some(self.watch_max_node.map_or(node, |max| max.max(node)));
         if self.replace_pending {
             self.replace_entries();
         }
-        let mut step0_claimed: Option<(TurnId, Vec<NodeId>)> = None;
-        if let ConversationEntry::Step {
-            content:
-                Node::Step {
-                    turn_id,
-                    step_ordinal: 0,
-                    turn_start: Some(meta),
-                    ..
-                },
-            ordinal,
-            ..
-        } = &entry
-        {
-            let turn = *turn_id;
-            let ord = (*ordinal)
-                .and_then(|n| usize::try_from(n).ok())
-                .and_then(std::num::NonZeroUsize::new);
-            self.turn_meta
-                .insert(turn, (ord, meta.agent_name.as_str().to_owned()));
-            for &input_node in &meta.input_nodes {
-                self.input_turn.insert(input_node, turn);
+        if let ConversationEntry::Step { step, .. } = &entry {
+            let turn = step.key.turn_id;
+            if self.pending_accepted == Some(turn) {
+                self.pending_accepted = None;
             }
-            // 视图中出现这次提交的 Step 0，同样说明已被接受；回执可能更晚到或者丢失。
-            // 它只证明已接受，忙状态仍保留到会话头确认。
-            self.resolve_unknown(turn);
-            if self.submitted.as_ref().is_some_and(|(id, _)| *id == turn) {
-                self.submitted = None;
-                if !self.head_reached(turn) {
+            if step.key.ordinal == 0 {
+                // 视图中出现这次提交的 Step 0，同样说明已被接受；回执可能更晚到或者丢失。
+                // 它只证明已接受，忙状态仍保留到会话头确认。
+                let was_unknown = self
+                    .unknown_submission
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == turn);
+                let was_submitted = self.submitted.as_ref().is_some_and(|(id, _)| *id == turn);
+                if was_unknown || was_submitted {
+                    self.record_accepted_submission(turn, node, None);
+                }
+                if was_unknown {
+                    self.notice_once(recovered_status(turn));
+                }
+                if was_submitted && !self.head_reached(turn) {
                     self.awaiting_head = Some(turn);
                 }
             }
-            step0_claimed = Some((turn, meta.input_nodes.clone()));
         }
         let turn = entry_turn(&entry);
-        let input_meta_turn = match &entry {
-            ConversationEntry::Input { .. } => self.input_turn.get(&node).copied(),
-            _ => None,
-        };
         let known_retries: HashSet<u32> = match self.entries.insert(node, entry) {
             Some(ConversationEntry::Step { retries, .. }) => {
                 retries.iter().map(|retry| retry.attempt).collect()
             }
             _ => HashSet::new(),
         };
-        if let Some((claimed_turn, input_nodes)) = step0_claimed {
-            self.reconcile_turn_inputs(claimed_turn, &input_nodes);
-        }
         if self
             .texts
             .get(&node)
@@ -1433,24 +1574,19 @@ impl App {
         {
             self.texts.remove(&node);
         }
-        let input_meta = input_meta_turn.map(|t| self.input_turn_meta(t));
         let blocks = crate::session::entry_blocks(
             &self.entries[&node],
             turn.is_some_and(|t| self.ended.contains(&t)),
             self.texts.get(&node),
-            input_meta,
         );
-        let start = self
-            .blocks
-            .node_start(node)
-            .or_else(|| input_meta_turn.and_then(|t| self.pending_start(t)));
-        let range = match start {
+        let range = match self.blocks.node_start(node) {
             Some(start) => self.blocks.replace(self.blocks.group(start), blocks),
             None => {
                 let end = self.blocks.len();
                 self.blocks.replace(end..end, blocks)
             }
         };
+        self.prune_accepted_comments();
         // 推送使条目多出的重试提示是新到的消息；初始条目中已有的不是。
         if !self.initial {
             let fresh: Vec<_> = self.blocks.entries[range.clone()]
@@ -1510,15 +1646,7 @@ impl App {
             return;
         };
         let ended = entry_turn(entry).is_some_and(|turn| self.ended.contains(&turn));
-        let input_meta = match entry {
-            ConversationEntry::Input { .. } => self
-                .input_turn
-                .get(&node)
-                .copied()
-                .map(|turn| self.input_turn_meta(turn)),
-            _ => None,
-        };
-        let blocks = crate::session::entry_blocks(entry, ended, self.texts.get(&node), input_meta);
+        let blocks = crate::session::entry_blocks(entry, ended, self.texts.get(&node));
         if let Some(start) = self.blocks.node_start(node) {
             self.blocks.replace(self.blocks.group(start), blocks);
         }
@@ -1580,34 +1708,22 @@ impl App {
             .rev()
             .find_map(|(node, entry)| match entry {
                 ConversationEntry::Step {
-                    content,
+                    step,
                     summary: Some(_),
                     ..
-                } if content.turn_id() == Some(turn) => Some(*node),
+                } if step.key.turn_id == turn => Some(*node),
                 _ => None,
             })?;
         self.blocks.node_start(node)
     }
 
-    /// 视图翻到对话记录顶部而第 1 轮尚未装入时，以已装入的最早条目节点为 `before`
-    /// 取更早的轮。失败后不自动重查，等下一次翻到顶部。
+    /// 视图翻到对话记录顶部且仍有更早历史时，以已装入的最早条目节点为 `before`
+    /// 取更早条目。失败后不自动重查，等下一次翻到顶部。
     fn request_older_at_top(&mut self) {
-        if self.viewport.scroll() != 0 || self.older_pending {
+        if self.viewport.scroll() != 0 || self.older_pending || !self.has_older {
             return;
         }
         let session_id = self.session_id;
-        let Some(ordinal) = self.entries.values().find_map(|entry| match entry {
-            ConversationEntry::Step {
-                ordinal: Some(ordinal),
-                ..
-            } => Some(*ordinal),
-            _ => None,
-        }) else {
-            return;
-        };
-        if ordinal <= 1 {
-            return;
-        }
         let Some((&before, _)) = self.entries.first_key_value() else {
             return;
         };
@@ -1619,7 +1735,7 @@ impl App {
         });
     }
 
-    /// 取到的轮插在已装入的最早一轮之前，视图停在原来看到的内容上。请求发出后路径被替换时，
+    /// 取到的更早条目插在已装入的最早条目之前，视图停在原来看到的内容上。请求发出后路径被替换时，
     /// 结果属于旧路径，丢弃。
     pub(crate) fn apply_older(
         &mut self,
@@ -1637,6 +1753,13 @@ impl App {
                 return;
             }
         };
+        if history.entries.is_empty() {
+            self.has_older = false;
+            self.reconcile_confirmed_view();
+            self.refresh_phase();
+            return;
+        }
+        self.has_older = history.has_more;
         let Some(mut at) = self.blocks.node_start(request.before) else {
             return;
         };
@@ -1657,33 +1780,13 @@ impl App {
         let top = (scroll..visible.min(transcript.owners.len()))
             .find(|row| !fixed.contains(&transcript.owners[*row].id))
             .and_then(|row| Some((row, block_rows_from_end(&transcript, row)?)));
-        // 预先登记本批历史中所有 Step 0 的轮次元数据与输入归属，使前置 Input 渲染时即可带出序号与 agent。
-        for entry in &history.entries {
-            if let ConversationEntry::Step {
-                content:
-                    Node::Step {
-                        turn_id,
-                        step_ordinal: 0,
-                        turn_start: Some(meta),
-                        ..
-                    },
-                ordinal,
-                ..
-            } = entry
-            {
-                let ord = (*ordinal)
-                    .and_then(|n| usize::try_from(n).ok())
-                    .and_then(std::num::NonZeroUsize::new);
-                self.turn_meta
-                    .insert(*turn_id, (ord, meta.agent_name.as_str().to_owned()));
-                for &input_node in &meta.input_nodes {
-                    self.input_turn.insert(input_node, *turn_id);
-                }
-                self.resolve_unknown(*turn_id);
-            }
-        }
         for entry in history.entries {
             let node = entry.node();
+            if let ConversationEntry::Step { step, .. } = &entry
+                && step.key.ordinal == 0
+            {
+                self.record_accepted_submission(step.key.turn_id, node, None);
+            }
             if self.entries.contains_key(&node) {
                 continue;
             }
@@ -1698,16 +1801,7 @@ impl App {
                 }
                 ended
             });
-            let input_meta = match &self.entries[&node] {
-                ConversationEntry::Input { .. } => self
-                    .input_turn
-                    .get(&node)
-                    .copied()
-                    .map(|t| self.input_turn_meta(t)),
-                _ => None,
-            };
-            let blocks =
-                crate::session::entry_blocks(&self.entries[&node], ended, None, input_meta);
+            let blocks = crate::session::entry_blocks(&self.entries[&node], ended, None);
             at = self.blocks.replace(at..at, blocks).end;
         }
         // 浏览光标由 prepare_transcript 按所在块重新定位并保持屏幕行；焦点在 Dock 时移动视图。
@@ -1726,7 +1820,9 @@ impl App {
             }
         }
         self.settle(false);
+        self.reconcile_confirmed_view();
         self.refresh_status_fields();
+        self.refresh_phase();
     }
 
     /// 这次提交的身份：会话在启动时已存在或经 `configure(New)` 建立。
@@ -1834,10 +1930,7 @@ fn block_rows_from_end(transcript: &Transcript, row: usize) -> Option<(BlockId, 
 }
 
 fn entry_turn(entry: &ConversationEntry) -> Option<TurnId> {
-    match entry {
-        ConversationEntry::Input { .. } | ConversationEntry::ContextOp { .. } => None,
-        ConversationEntry::Step { content, .. } => content.turn_id(),
-    }
+    entry.turn_id()
 }
 
 /// 由输入缓冲与已排序的评论草稿组装有序片段：评论编码在前，正文非空时以 `"\n\n"` 分隔并合并相邻文字。
@@ -2713,12 +2806,10 @@ mod tests {
                 })
                 .collect::<Vec<_>>()
         };
-        for turns in [1..=1, 2..=3] {
-            open_view(
-                &mut app,
-                head(2 * turns.end(), Some(turn(*turns.end())), false),
-                entries(turns),
-            );
+        for (turns, has_older) in [(1..=1, false), (2..=3, true)] {
+            let mut h = head(2 * turns.end(), Some(turn(*turns.end())), false);
+            h.has_older = Some(has_older);
+            open_view(&mut app, h, entries(turns));
         }
         app.term_height = 100;
         app.apply_action(KeyAction::ScrollPageUp);
@@ -2727,6 +2818,7 @@ mod tests {
             request,
             Ok(LocalHistory {
                 entries: entries(1..=1),
+                has_more: false,
             }),
         );
         let lines = crate::view::transcript_lines(&app, 78)

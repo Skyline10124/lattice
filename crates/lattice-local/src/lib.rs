@@ -19,6 +19,11 @@ pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
 pub use image_file::{image_bytes_ref, image_file_ref, probe_image_file, read_verified_image};
+pub use lattice_context::{
+    Channel, ChannelError, ContextEdit, ContextError, ContextInput, ContextInspection, ContextOp,
+    ContextText, EffectiveContext, EffectiveEntrySummary, NodeStatus, NormalizedUserMessage,
+    OperatedNode, PathNodeKind, ToolResultText,
+};
 pub use lattice_conversation::{
     BoundToolCall, CostEstimate, CostSummary, Effort, ImageMediaType, ImageRef, InputModality,
     InvocationId, MAX_IMAGE_BYTES, MessageRole, MessageSemantic, ModelAttemptKey, ModelId,
@@ -27,30 +32,30 @@ pub use lattice_conversation::{
     TokenUsage, ToolError, ToolResultOutcome, TurnId, UsageCompleteness,
 };
 pub use lattice_ipc::{
-    Acceptance, AgentName, AgentNameError, AttemptProgress, AuthCatalogOutcome, AuthLoginOutcome,
-    AuthRemoval, AuthStatus, Availability, CancelStatus, Channel, ChannelError, ComponentState,
-    ComponentStatus, ConfigurationRequirement, ConfigureReply, ConfigureRequest, ConfigureResult,
-    ConfigureSession, ConflictReason, ConnectionStatus, ContextEdit, ContextError, ContextInput,
-    ContextOp, ContextText, ConversationEntry, DaemonStatus, DrainTimeout, EffectiveContext,
-    EffortAdjustment, HISTORY_TURNS, ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus,
-    ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, LocalError, LocalErrorKind,
-    LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary, ModelCandidate,
-    ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning, Node, NodeId, NodeKind,
-    NodeRef, NormalizedUserMessage, Notice, NoticeLevel, Page, PlannedTurnRequest, ProjectPath,
-    ProviderAuthStatus, PublicTurnOutcome, RecoveryCause, RecoveryNeed, RequestConflict, Result,
-    RetryNotice, RetryPolicy, RetryPolicyError, RevocationStatus, SessionHead, SessionListRow,
-    SessionLog, SessionRecord, SessionUsage, SettingsVersion, SlotProgress, SlotReason, SlotState,
-    StepDetail, StepEnd, StepKey, StepProgress, StoreDiagnostic, SubmissionReceipt,
-    SubmissionResult, SubmissionUpdate, TextSegment, TextUpdate, ToolResultText, TurnDetail,
-    TurnLookup, TurnRef, TurnRequest, TurnStartMeta, TurnSummary, TurnTimeout, TurnTimeoutError,
-    TurnUsageRow, TurnView, UsageSummary, UserInputPart, ViewUpdate, WATCH_TURNS,
-    parse_drain_timeout,
+    Acceptance, AgentName, AgentNameError, AttemptDetail, AttemptEndDetail, AttemptProgressDetail,
+    AuthCatalogOutcome, AuthLoginOutcome, AuthRemoval, AuthStatus, Availability, CancelStatus,
+    ComponentState, ComponentStatus, ConfigurationRequirement, ConfigureReply, ConfigureRequest,
+    ConfigureResult, ConfigureSession, ConflictReason, ConnectionStatus, ContextImage,
+    ContextOpReply, ContextOpRequest, ConversationEntry, DaemonStatus, DrainTimeout,
+    EffortAdjustment, FeedReply, FeedRequest, HISTORY_TURNS, ImAuthRemoveReply, ImAuthSetReply,
+    ImAuthStatus, ImCredentialStatus, ImMountResult, ImPlatformAuthStatus, InspectReply,
+    LocalError, LocalErrorKind, LocalHistory, LocalUpdate, MAX_HISTORY_TURNS, MaterialSummary,
+    ModelCandidate, ModelCandidateQuery, ModelCandidates, ModelPrice, ModelWarning, NodeId,
+    NodeKind, NodeRef, Notice, NoticeLevel, Page, PlannedContextOpRequest, PlannedFeedRequest,
+    PlannedTurnRequest, ProjectPath, ProviderAuthStatus, PublicTurnOutcome, RecoveryCause,
+    RecoveryNeed, RequestConflict, Result, RetryNotice, RetryPolicy, RetryPolicyError,
+    RevocationStatus, SessionHead, SessionListRow, SessionLog, SessionRecord, SessionUsage,
+    SettingsVersion, SlotDetail, SlotReason, SlotState, StepDetail, StepEnd, StepKey, StepProgress,
+    StoreDiagnostic, SubmissionReceipt, SubmissionResult, SubmissionUpdate, TextSegment,
+    TextUpdate, TriggerRequest, TurnDetail, TurnInputItem, TurnLookup, TurnRef, TurnRequest,
+    TurnSummary, TurnTimeout, TurnTimeoutError, TurnUsageRow, TurnView, UsageSummary,
+    UserInputPart, ViewUpdate, WATCH_TURNS, parse_drain_timeout,
 };
 pub use lattice_store::{PrivateDirectory, StateLayout, xdg_state_root};
 pub use logging::init_logging;
 pub use login::{AuthLoginEvent, LocalAuthLogin, SensitiveLoginUrl};
 pub use operation::{ConfigureOutcome, DetachReport, LocalTurn, STREAM_IDLE_TIMEOUT_SECS};
-pub use turn_plan::check_turn_plan;
+pub use turn_plan::{check_context_op_plan, check_feed_plan, check_turn_plan};
 
 pub fn new_session_id() -> SessionId {
     SessionId::parse(&uuid::Uuid::new_v4().simple().to_string()).expect("生成的 SessionId 格式合法")

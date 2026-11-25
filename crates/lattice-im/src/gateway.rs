@@ -14,8 +14,8 @@ use std::{
 
 use chrono::Utc;
 use lattice_ipc::{
-    ConfigureRequest, ConfigureSession, ConflictReason, LocalError, LocalErrorKind, SessionId,
-    TurnId, TurnLookup, TurnRequest, UserInputPart,
+    Channel, ConfigureRequest, ConfigureSession, ConflictReason, LocalError, LocalErrorKind,
+    SessionId, TurnId, TurnLookup, TurnRequest, UserInputPart,
 };
 use lattice_server::{InProcessTurn, Service};
 use lattice_store::StateLayout;
@@ -1467,13 +1467,15 @@ impl GatewayRuntime {
         parts: Vec<UserInputPart>,
     ) -> Result<InProcessTurn, LocalError> {
         self.service
-            .submit(TurnRequest {
+            .submit(TurnRequest::single(
                 turn_id,
-                session: session_id,
-                workspace: self.config.workspace.clone(),
+                session_id,
+                self.config.workspace.clone(),
+                Channel::parse("im").expect("固定通道名 im 应合法"),
                 parts,
-                expected_settings: None,
-            })
+                None,
+                None,
+            ))
             .await
     }
 

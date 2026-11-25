@@ -337,18 +337,63 @@ fn durable_attempt_usage_is_reported_once_with_partial_totals() {
 #[test]
 fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
     let id = lattice_local::new_turn_id();
+    let inv_id = "10000000-0000-4000-8000-000000000001";
     let mut node = ipc_tests::entry(id, "completed");
+    let make_slot = |state: &str| -> SlotDetail {
+        let (outcome, reason) = if state == "registered" {
+            ("not_executed", serde_json::Value::Null)
+        } else {
+            (
+                "indeterminate",
+                json!({"kind": "indeterminate", "value": "no_result"}),
+            )
+        };
+        serde_json::from_value(json!({
+            "invocation_id": inv_id,
+            "binding": {
+                "session_id": ipc_tests::sid(),
+                "turn_id": id,
+                "model_step_ordinal": 0,
+                "part_ordinal": 0,
+                "method": "observe__workspace",
+                "tool_identity": "test",
+                "arguments_digest": "00".repeat(32)
+            },
+            "progress": {"state": state},
+            "outcome": outcome,
+            "reason": reason,
+            "material": {"kind": "no_content"}
+        }))
+        .expect("构造 SlotDetail")
+    };
+    let make_result = |outcome: &str| -> StoredToolResult {
+        let payload = if outcome == "indeterminate" {
+            json!({"outcome": "indeterminate", "payload": "no_result"})
+        } else {
+            json!({"outcome": outcome})
+        };
+        serde_json::from_value(json!({
+            "invocation_id": inv_id,
+            "name": "observe__workspace",
+            "payload": payload
+        }))
+        .expect("构造 StoredToolResult")
+    };
     if let ConversationEntry::Step {
-        content: Node::Step {
-            progress, slots, ..
-        },
+        step,
+        reply,
         summary,
         ..
     } = node.as_mut()
     {
-        *progress = serde_json::from_value(json!({"progress":"executing"})).unwrap();
+        step.progress = serde_json::from_value(json!({"progress":"executing"})).unwrap();
         *summary = None;
-        slots.push(serde_json::from_value(json!({"binding":{"invocation_id":"10000000-0000-4000-8000-000000000001","identity":{"session_id":ipc_tests::sid(),"turn_id":id,"model_step_ordinal":0,"part_ordinal":0,"method":"observe__workspace","tool_identity":"test","arguments_digest":"00".repeat(32)}},"progress":{"progress":"registered"}})).unwrap());
+        step.slots.push(make_slot("registered"));
+        reply
+            .as_mut()
+            .expect("测试条目应带回复")
+            .results
+            .push(make_result("not_executed"));
     }
     let mut state = RunRenderState::default();
     let mut out = Vec::new();
@@ -377,12 +422,9 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
         !String::from_utf8_lossy(&err).contains("tool "),
         "运行中 Registered 不能提前打印 NotExecuted 并挡住最后结果"
     );
-    if let ConversationEntry::Step {
-        content: Node::Step { slots, .. },
-        ..
-    } = node.as_mut()
-    {
-        slots[0].progress = SlotProgress::Started;
+    if let ConversationEntry::Step { step, reply, .. } = node.as_mut() {
+        step.slots[0] = make_slot("started");
+        reply.as_mut().expect("测试条目应带回复").results[0] = make_result("indeterminate");
     }
     render_update(
         &LocalUpdate::Head(ipc_tests::head(id, false)),
@@ -410,17 +452,11 @@ fn human_tool_results_wait_for_terminal_slots_or_execution_end() {
     assert_eq!(text.lines().filter(|l| l.starts_with("tool ")).count(), 1);
     assert!(text.contains("indeterminate"));
     assert!(!text.contains("not_executed"));
-    for (progress, expected) in [
-        (SlotProgress::Registered, "not_executed"),
-        (SlotProgress::Started, "indeterminate"),
-    ] {
+    for (slot_state, expected) in [("registered", "not_executed"), ("started", "indeterminate")] {
         let mut old = node.clone();
-        if let ConversationEntry::Step {
-            content: Node::Step { slots, .. },
-            ..
-        } = old.as_mut()
-        {
-            slots[0].progress = progress;
+        if let ConversationEntry::Step { step, reply, .. } = old.as_mut() {
+            step.slots[0] = make_slot(slot_state);
+            reply.as_mut().expect("测试条目应带回复").results[0] = make_result(expected);
         }
         // 新观察者尚未显示旧轮的槽位；新一轮的 Owner 不能挡住旧轮的停止结果。
         let mut state = RunRenderState::default();
@@ -462,42 +498,20 @@ fn human_and_json_tool_failure_renders_tool_error_without_legacy_evidence() {
     let id = lattice_local::new_turn_id();
     let inv_id = "10000000-0000-4000-8000-000000000001";
     let mut node = ipc_tests::entry(id, "completed");
-    if let ConversationEntry::Step {
-        content: Node::Step { slots, .. },
-        step,
-        ..
-    } = node.as_mut()
-    {
-        slots.push(
+    if let ConversationEntry::Step { step, reply, .. } = node.as_mut() {
+        reply.as_mut().expect("测试条目应带回复").results.push(
             serde_json::from_value(json!({
-                "binding": {
-                    "invocation_id": inv_id,
-                    "identity": {
-                        "session_id": ipc_tests::sid(),
-                        "turn_id": id,
-                        "model_step_ordinal": 0,
-                        "part_ordinal": 0,
-                        "method": "observe__workspace",
-                        "tool_identity": "fake-tool-v1",
-                        "arguments_digest": "00".repeat(32)
-                    }
-                },
-                "progress": {
-                    "progress": "terminal",
-                    "result": {
-                        "invocation_id": inv_id,
-                        "name": "observe__workspace",
-                        "payload": {
-                            "outcome": "failed",
-                            "payload": {
-                                "code": "permission_denied",
-                                "message": "路径被拒绝"
-                            }
-                        }
+                "invocation_id": inv_id,
+                "name": "observe__workspace",
+                "payload": {
+                    "outcome": "failed",
+                    "payload": {
+                        "code": "permission_denied",
+                        "message": "路径被拒绝"
                     }
                 }
             }))
-            .expect("解析新结构终端槽位"),
+            .expect("解析新结构终端结果"),
         );
         step.slots.push(
             serde_json::from_value(json!({

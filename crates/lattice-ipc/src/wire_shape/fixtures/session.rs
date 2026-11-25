@@ -1,32 +1,36 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lattice-session` 线上类型片段与按架构文档规则手写的内部一致场景构造器。
+//! `lattice-session` 与 `lattice-context` 线上类型片段及按架构文档规则手写的内部一致场景构造器。
 //!
-//! 同一份场景输入同时生成原始持久节点（`Node`、`ConversationEntry`）与查询详情
+//! 同一份场景输入同时生成扁平对话条目（`ConversationEntry`）与查询详情
 //! （`TurnDetail`、`StepDetail`、`AttemptDetail`、`SlotDetail`、`SessionLog`、`SessionUsage`），
-//! 不调用生产派生函数（如 `resolve_*`、`UsageSummary::from_attempts`）或摘要函数。
+//! 不依赖任何物理持久类型（`Node`、`TurnStartMeta`、`AttemptRecord`、`InvocationSlot` 等），
+//! 也不调用生产派生函数或摘要函数。
 
-use lattice_context::{Channel, ContextEdit, ContextInput, ContextOp};
+use std::collections::BTreeMap;
+
+use lattice_context::{
+    Channel, ContextEdit, ContextInput, ContextInspection, ContextOp, EffectiveEntrySummary,
+    NodeStatus, OperatedNode, PathNodeKind,
+};
 use lattice_conversation::{
-    BoundToolCall, CostEstimate, CostSummary, Effort, IndeterminateCause, MessagePart, MessageRole,
-    MessageSemantic, ModelMessageAddress, NativeMessage, ResultPayload, SessionId,
-    StoredToolResult, SuccessContent, TokenSummary, TokenUsage, ToolCallValidation,
-    ToolResultOutcome, TurnId, UsageCompleteness, UsageSummary,
+    BoundToolCall, CostEstimate, CostSummary, IndeterminateCause, MessagePart, MessageRole,
+    MessageSemantic, ModelMessageAddress, NativeMessage, ReplayOrigin, ResultPayload, SessionId,
+    StepContent, StoredToolResult, SuccessContent, TokenSummary, TokenUsage, ToolResultOutcome,
+    TurnId, UsageCompleteness, UsageSummary,
 };
 use lattice_session::store::{
-    AttemptDetail, AttemptDiagnostic, AttemptEnd, AttemptEndDetail, AttemptProgress,
-    AttemptProgressDetail, AttemptRecord, BindingIdentity, ConversationEntry, InvocationBinding,
-    InvocationSlot, LogRow, MAX_MODEL_STEPS, MaterialSummary, Node, NodeHeader, NodeId, NodeKind,
-    Notice, NoticeLevel, PublicTurnOutcome, RetryNotice, SessionListRow as StoreSessionListRow,
-    SessionLog, SessionRecord, SessionUsage, SlotDetail, SlotProgress, SlotReason, SlotState,
-    StepDetail, StepEnd, StepKey, StepProgress, StopCause, Timestamp, TurnDetail,
-    TurnExecutionLimits, TurnLogSummary, TurnStartMeta, TurnSummary, TurnUsageRow,
+    AttemptDetail, AttemptEnd, AttemptEndDetail, AttemptProgressDetail, BindingIdentity,
+    ConversationEntry, LogRow, MaterialSummary, NodeHeader, NodeId, NodeKind, Notice, NoticeLevel,
+    PublicTurnOutcome, RetryNotice, SessionListRow as StoreSessionListRow, SessionLog,
+    SessionRecord, SessionUsage, SlotDetail, SlotReason, SlotState, StepDetail, StepEnd, StepKey,
+    StepProgress, StopCause, Timestamp, TurnDetail, TurnLogSummary, TurnSummary, TurnUsageRow,
 };
 
 use super::{
     ARGS_CARGO_TOML_DIGEST_HEX, ARGS_MISSING_TXT_DIGEST_HEX, ARGS_SLEEP_CMD_DIGEST_HEX,
-    CONFIG_DIGEST_HEX, CONTENT_LINES_42_BYTES, CONTENT_LINES_42_DIGEST_HEX, CONTENT_OVERSIZE_BYTES,
+    CONTENT_LINES_42_BYTES, CONTENT_LINES_42_DIGEST_HEX, CONTENT_OVERSIZE_BYTES,
     CONTENT_OVERSIZE_DIGEST_HEX, CaseBook, agent_coder,
     conversation::{
         bound_call_read_cargo, bound_call_read_missing, bound_call_sleep_cmd, cost_estimate_exact,
@@ -35,10 +39,10 @@ use super::{
     },
     hex_32, invocation_id_1, invocation_id_2, model_gpt5, project_path_non_utf8, provider_openai,
     session_id_primary, ts_accepted, ts_created, ts_ended, ts_step_0, turn_id_1, turn_id_2,
-    turn_id_3, turn_timeout_120s,
+    turn_id_3,
 };
 
-/// 单个场景从同一份输入同时产出的原始节点与投影视图。
+/// 单个场景从同一份输入同时产出的扁平条目与投影视图。
 pub(super) struct BuiltScenario {
     pub(super) entries: Vec<ConversationEntry>,
     pub(super) turn_detail: TurnDetail,
@@ -49,17 +53,15 @@ pub(super) struct BuiltScenario {
 struct TurnSpec {
     session_id: SessionId,
     turn_id: TurnId,
-    turn_ordinal: u64,
-    effort: Option<Effort>,
     user_parts: Vec<MessageSemantic<BoundToolCall>>,
     steps: Vec<StepSpec>,
 }
 
-fn channel_ipc() -> Channel {
-    Channel::parse("ipc").expect("固定通道名 ipc 应合法")
+pub(super) fn channel_cli() -> Channel {
+    Channel::parse("cli").expect("固定通道名 cli 应合法")
 }
 
-fn channel_tui() -> Channel {
+pub(super) fn channel_tui() -> Channel {
     Channel::parse("tui").expect("固定通道名 tui 应合法")
 }
 
@@ -94,19 +96,94 @@ pub(super) fn sample_context_op_entry() -> ConversationEntry {
     .expect("固定 ContextOp 应合法");
     ConversationEntry::ContextOp {
         node: NodeId(4),
-        content: Node::ContextOp {
-            parent: NodeId(3),
-            accepted_at: ts_ended(),
-            op,
-        },
+        accepted_at: ts_ended(),
+        op,
     }
+}
+
+pub(super) fn context_inspection_full() -> ContextInspection {
+    let mut channel_counts = BTreeMap::new();
+    channel_counts.insert(channel_cli(), 1);
+    channel_counts.insert(channel_tui(), 1);
+    ContextInspection {
+        entries: vec![
+            EffectiveEntrySummary::Input {
+                node: NodeId(1),
+                channel: channel_cli(),
+                text_bytes: 54,
+                image_count: 1,
+                image_bytes: image_ref_sample().byte_length,
+            },
+            EffectiveEntrySummary::Step {
+                node: NodeId(2),
+                text_bytes: 36,
+                reasoning_bytes: 42,
+                tool_call_count: 1,
+                tool_result_bytes: 12,
+            },
+        ],
+        operated_nodes: vec![
+            OperatedNode {
+                node: NodeId(1),
+                status: NodeStatus::Modified,
+            },
+            OperatedNode {
+                node: NodeId(3),
+                status: NodeStatus::Omitted,
+            },
+        ],
+        channel_counts,
+        total_text_bytes: 144,
+        images: vec![image_ref_sample()],
+        total_image_bytes: image_ref_sample().byte_length,
+    }
+}
+
+pub(super) fn context_inspection_minimal() -> ContextInspection {
+    ContextInspection {
+        entries: Vec::new(),
+        operated_nodes: Vec::new(),
+        channel_counts: BTreeMap::new(),
+        total_text_bytes: 0,
+        images: Vec::new(),
+        total_image_bytes: 0,
+    }
+}
+
+enum AttemptOutcomeFixture {
+    Sent,
+    Ended {
+        end: AttemptEnd,
+        provider_error: Option<String>,
+    },
+}
+
+struct AttemptFixture {
+    origin: ReplayOrigin,
+    usage: Option<TokenUsage>,
+    usage_kind: UsageCompleteness,
+    cost: Option<CostEstimate>,
+    outcome: AttemptOutcomeFixture,
+    retry_delay_ms: Option<u64>,
+}
+
+enum SlotStateFixture {
+    Registered,
+    Started,
+    Terminal(StoredToolResult),
+}
+
+struct SlotFixture {
+    invocation_id: lattice_conversation::InvocationId,
+    binding: BindingIdentity,
+    state: SlotStateFixture,
 }
 
 struct StepSpec {
     progress: StepProgress,
-    attempts: Vec<AttemptRecord>,
+    attempts: Vec<AttemptFixture>,
     reply: Option<NativeMessage<BoundToolCall>>,
-    slots: Vec<InvocationSlot>,
+    slots: Vec<SlotFixture>,
     updated_at: Timestamp,
 }
 
@@ -120,63 +197,49 @@ pub(super) fn session_record_at(current: NodeId, updated_at: Timestamp) -> Sessi
     }
 }
 
-fn turn_limits() -> TurnExecutionLimits {
-    TurnExecutionLimits {
-        timeout_secs: turn_timeout_120s(),
-        max_model_steps: MAX_MODEL_STEPS,
-        max_model_attempts: 3,
-    }
-}
-
-fn binding_for_call(
+fn binding_identity_for_call(
     call: &BoundToolCall,
     tool_identity: &str,
     arguments_digest_hex: &str,
-) -> InvocationBinding {
-    InvocationBinding {
-        invocation_id: call.invocation_id,
-        identity: BindingIdentity {
-            session_id: call.address.message.session_id,
-            turn_id: call.address.message.turn_id,
-            model_step_ordinal: call.address.message.model_step_ordinal,
-            part_ordinal: call.address.part_ordinal,
-            method: call.name.clone(),
-            tool_identity: tool_identity.to_owned(),
-            arguments_digest: hex_32(arguments_digest_hex),
-        },
+) -> BindingIdentity {
+    BindingIdentity {
+        session_id: call.address.message.session_id,
+        turn_id: call.address.message.turn_id,
+        model_step_ordinal: call.address.message.model_step_ordinal,
+        part_ordinal: call.address.part_ordinal,
+        method: call.name.clone(),
+        tool_identity: tool_identity.to_owned(),
+        arguments_digest: hex_32(arguments_digest_hex),
     }
 }
 
-fn completed_attempt(usage: TokenUsage, cost: CostEstimate) -> AttemptRecord {
-    AttemptRecord {
+fn completed_attempt(usage: TokenUsage, cost: CostEstimate) -> AttemptFixture {
+    AttemptFixture {
         origin: replay_origin_openai(),
         usage: Some(usage),
         usage_kind: UsageCompleteness::Complete,
         cost: Some(cost),
-        progress: AttemptProgress::Ended {
+        outcome: AttemptOutcomeFixture::Ended {
             end: AttemptEnd::Completed,
-            diagnostic: AttemptDiagnostic {
-                provider_error: None,
-                invalid_batch: None,
-            },
+            provider_error: None,
         },
         retry_delay_ms: None,
     }
 }
 
-fn sent_attempt_minimal() -> AttemptRecord {
-    AttemptRecord {
+fn sent_attempt_minimal() -> AttemptFixture {
+    AttemptFixture {
         origin: replay_origin_openai(),
         usage: None,
         usage_kind: UsageCompleteness::Partial,
         cost: None,
-        progress: AttemptProgress::Sent,
+        outcome: AttemptOutcomeFixture::Sent,
         retry_delay_ms: None,
     }
 }
 
-fn retryable_failed_attempt_full() -> AttemptRecord {
-    AttemptRecord {
+fn retryable_failed_attempt_full() -> AttemptFixture {
+    AttemptFixture {
         origin: replay_origin_openai(),
         usage: Some(TokenUsage {
             input: Some(600),
@@ -190,37 +253,44 @@ fn retryable_failed_attempt_full() -> AttemptRecord {
             usd: 0.0011,
             exact: false,
         }),
-        progress: AttemptProgress::Ended {
+        outcome: AttemptOutcomeFixture::Ended {
             end: AttemptEnd::Stopped {
                 cause: StopCause::ProviderError { retryable: true },
             },
-            diagnostic: AttemptDiagnostic {
-                provider_error: Some("upstream 503 service unavailable".to_owned()),
-                invalid_batch: None,
-            },
+            provider_error: Some("upstream 503 service unavailable".to_owned()),
         },
         retry_delay_ms: Some(500),
     }
 }
 
 /// 按 `docs/architecture/session/steps.md` 与 `recovery.md` 的对照表手写槽位投影。
-fn hand_project_slot(slot: &InvocationSlot) -> SlotDetail {
-    let (progress, outcome, reason, material) = match &slot.progress {
-        SlotProgress::Registered => (
+fn hand_project_slot(slot: &SlotFixture) -> (SlotDetail, StoredToolResult) {
+    let (progress, outcome, reason, material, stored_result) = match &slot.state {
+        SlotStateFixture::Registered => (
             SlotState::Registered,
             ToolResultOutcome::NotExecuted,
             None,
             MaterialSummary::NoContent,
+            StoredToolResult {
+                invocation_id: slot.invocation_id,
+                name: slot.binding.method.clone(),
+                payload: ResultPayload::NotExecuted,
+            },
         ),
-        SlotProgress::Started => (
+        SlotStateFixture::Started => (
             SlotState::Started,
             ToolResultOutcome::Indeterminate,
             Some(SlotReason::Indeterminate(IndeterminateCause::NoResult)),
             MaterialSummary::NoContent,
+            StoredToolResult {
+                invocation_id: slot.invocation_id,
+                name: slot.binding.method.clone(),
+                payload: ResultPayload::Indeterminate(IndeterminateCause::NoResult),
+            },
         ),
-        SlotProgress::Terminal { result } => {
-            assert_eq!(result.invocation_id, slot.binding.invocation_id);
-            assert_eq!(result.name, slot.binding.identity.method);
+        SlotStateFixture::Terminal(result) => {
+            assert_eq!(result.invocation_id, slot.invocation_id);
+            assert_eq!(result.name, slot.binding.method);
             let (outcome, reason, material) = match &result.payload {
                 ResultPayload::Succeeded(SuccessContent::Json {
                     digest,
@@ -277,44 +347,51 @@ fn hand_project_slot(slot: &InvocationSlot) -> SlotDetail {
                 outcome,
                 reason,
                 material,
+                result.clone(),
             )
         }
     };
 
-    SlotDetail {
-        invocation_id: slot.binding.invocation_id,
-        binding: slot.binding.identity.clone(),
-        progress,
-        outcome,
-        reason,
-        material,
-    }
+    (
+        SlotDetail {
+            invocation_id: slot.invocation_id,
+            binding: slot.binding.clone(),
+            progress,
+            outcome,
+            reason,
+            material,
+        },
+        stored_result,
+    )
 }
 
 /// 按架构文档规则手写单次模型尝试的详情投影。
 fn hand_project_attempt(
     attempt_ordinal: u32,
-    record: &AttemptRecord,
+    record: &AttemptFixture,
     step_address: ModelMessageAddress,
 ) -> AttemptDetail {
-    let (progress, end) = match &record.progress {
-        AttemptProgress::Sent => (
+    let (progress, end) = match &record.outcome {
+        AttemptOutcomeFixture::Sent => (
             AttemptProgressDetail::Sent,
             AttemptEndDetail::Stopped {
                 cause: StopCause::ProcessExit,
                 diagnostic: None,
             },
         ),
-        AttemptProgress::Ended { end, diagnostic } => {
+        AttemptOutcomeFixture::Ended {
+            end,
+            provider_error,
+        } => {
             let progress_detail = AttemptProgressDetail::Ended {
                 end: end.clone(),
-                diagnostic: diagnostic.provider_error.clone(),
+                diagnostic: provider_error.clone(),
             };
             let end_detail = match end {
                 AttemptEnd::Completed => AttemptEndDetail::Completed { step: step_address },
                 AttemptEnd::Stopped { cause } => AttemptEndDetail::Stopped {
                     cause: cause.clone(),
-                    diagnostic: diagnostic.provider_error.clone(),
+                    diagnostic: provider_error.clone(),
                 },
             };
             (progress_detail, end_detail)
@@ -334,25 +411,25 @@ fn hand_project_attempt(
 }
 
 /// 按 `recovery.md` 对照表确定 Step 的有效结束方式。
-fn hand_effective_step_end(progress: &StepProgress, slots: &[InvocationSlot]) -> StepEnd {
+fn hand_effective_step_end(progress: &StepProgress, slots: &[SlotFixture]) -> StepEnd {
     match progress {
         StepProgress::Reserved | StepProgress::Requesting => StepEnd::Stop {
             cause: StopCause::ProcessExit,
         },
         StepProgress::Executing => {
-            let slot_cause = slots.iter().find_map(|slot| match &slot.progress {
-                SlotProgress::Terminal { result } => match &result.payload {
+            let slot_cause = slots.iter().find_map(|slot| match &slot.state {
+                SlotStateFixture::Terminal(result) => match &result.payload {
                     ResultPayload::Indeterminate(IndeterminateCause::Cancelled) => {
                         Some(StopCause::Cancelled)
                     }
                     ResultPayload::Indeterminate(IndeterminateCause::Reported) => {
                         Some(StopCause::InvocationIndeterminate {
-                            invocation_id: slot.binding.invocation_id,
+                            invocation_id: slot.invocation_id,
                         })
                     }
                     _ => None,
                 },
-                SlotProgress::Registered | SlotProgress::Started => None,
+                SlotStateFixture::Registered | SlotStateFixture::Started => None,
             });
             StepEnd::Stop {
                 cause: slot_cause.unwrap_or(StopCause::ProcessExit),
@@ -365,8 +442,8 @@ fn hand_effective_step_end(progress: &StepProgress, slots: &[InvocationSlot]) ->
 /// 按 `steps.md` 与 `recovery.md` 手写 Step/Turn 结论摘要。
 fn hand_turn_summary(
     progress: &StepProgress,
-    attempts: &[AttemptRecord],
-    slots: &[InvocationSlot],
+    attempts: &[AttemptFixture],
+    slots: &[SlotFixture],
 ) -> TurnSummary {
     let end = hand_effective_step_end(progress, slots);
     match end {
@@ -390,11 +467,11 @@ fn hand_turn_summary(
                 let text = match &cause {
                     StopCause::ProviderError { .. } => attempts
                         .last()
-                        .and_then(|a| match &a.progress {
-                            AttemptProgress::Ended { diagnostic, .. } => {
-                                diagnostic.provider_error.clone()
+                        .and_then(|a| match &a.outcome {
+                            AttemptOutcomeFixture::Ended { provider_error, .. } => {
+                                provider_error.clone()
                             }
-                            AttemptProgress::Sent => None,
+                            AttemptOutcomeFixture::Sent => None,
                         })
                         .expect("ProviderError 终止必须携带诊断文本"),
                     StopCause::Cancelled => unreachable!(),
@@ -420,12 +497,8 @@ fn hand_turn_summary(
     }
 }
 
-/// 手写尝试用量汇总，规则与 `UsageSummary::from_attempts` 相同，但不调用它：
-/// - 各项计数分别累加；某次尝试没有报告这一项，这一项就不完整；
-/// - 没有尝试时，各项计数为 0 且完整，费用为精确的 0；
-/// - 费用按尝试顺序以 `f64` 依次相加，不做舍入；有费用未知的尝试时不精确；
-/// - 有部分尝试时整体为 partial。夹具的计数都很小，不涉及溢出。
-fn hand_usage_summary(attempts: &[&AttemptRecord]) -> UsageSummary {
+/// 手写尝试用量汇总，规则与 `UsageSummary::from_attempts` 相同，但不调用它。
+fn hand_usage_summary(attempts: &[&AttemptFixture]) -> UsageSummary {
     let count = attempts.len() as u64;
     let partial_attempts = attempts
         .iter()
@@ -500,26 +573,22 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
     assert!(!spec.steps.is_empty(), "真实 Turn 至少包含一个 Step");
     let input_node_id = NodeId(1);
     let start_node_id = NodeId(2);
-    let input_node = Node::Input {
-        parent: NodeId(0),
-        accepted_at: ts_accepted(),
-        input: ContextInput::new(channel_ipc(), spec.user_parts).expect("固定用户输入应合法"),
-    };
+    let input = ContextInput::new(channel_cli(), spec.user_parts).expect("固定用户输入应合法");
 
     let mut entries = Vec::with_capacity(1 + spec.steps.len());
     entries.push(ConversationEntry::Input {
         node: input_node_id,
-        content: input_node,
+        accepted_at: ts_accepted(),
+        input,
     });
 
     let mut step_details = Vec::with_capacity(spec.steps.len());
-    let mut all_attempts: Vec<&AttemptRecord> = Vec::new();
+    let mut all_attempts: Vec<&AttemptFixture> = Vec::new();
     let total_steps = spec.steps.len();
 
     for (idx, step_spec) in spec.steps.iter().enumerate() {
         let step_ordinal = idx as u32;
         let node_id = NodeId(start_node_id.0 + u64::from(step_ordinal));
-        let parent_id = NodeId(node_id.0 - 1);
 
         let is_continue = matches!(
             step_spec.progress,
@@ -574,7 +643,13 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
                 hand_project_attempt(attempt_idx as u32, record, step_address)
             })
             .collect();
-        let slot_details: Vec<SlotDetail> = step_spec.slots.iter().map(hand_project_slot).collect();
+        let mut slot_details = Vec::with_capacity(step_spec.slots.len());
+        let mut stored_results = Vec::with_capacity(step_spec.slots.len());
+        for slot in &step_spec.slots {
+            let (detail, result) = hand_project_slot(slot);
+            slot_details.push(detail);
+            stored_results.push(result);
+        }
         let effective_end = hand_effective_step_end(&step_spec.progress, &step_spec.slots);
 
         let step_detail = StepDetail {
@@ -596,12 +671,11 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
             .enumerate()
             .filter_map(|(attempt_idx, record)| {
                 let delay_ms = record.retry_delay_ms?;
-                let text = match &record.progress {
-                    AttemptProgress::Ended { diagnostic, .. } => diagnostic
-                        .provider_error
+                let text = match &record.outcome {
+                    AttemptOutcomeFixture::Ended { provider_error, .. } => provider_error
                         .clone()
                         .expect("带重试延迟的尝试必须包含 provider_error"),
-                    AttemptProgress::Sent => panic!("Sent 尝试不应携带 retry_delay_ms"),
+                    AttemptOutcomeFixture::Sent => panic!("Sent 尝试不应携带 retry_delay_ms"),
                 };
                 Some(RetryNotice {
                     attempt: attempt_idx as u32,
@@ -624,35 +698,16 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
             ))
         };
 
-        let turn_start = (step_ordinal == 0).then(|| TurnStartMeta {
-            accepted_at: ts_accepted(),
-            trigger_channel: channel_ipc(),
-            input_nodes: vec![input_node_id],
-            agent_name: agent_coder(),
-            model: model_gpt5(),
-            provider: provider_openai(),
-            effort: spec.effort,
-            limits: turn_limits(),
-            config_digest: hex_32(CONFIG_DIGEST_HEX),
+        let step_content = step_spec.reply.as_ref().map(|assistant| StepContent {
+            assistant: assistant.clone(),
+            results: stored_results,
         });
-
-        let raw_step_node = Node::Step {
-            parent: parent_id,
-            turn_id: spec.turn_id,
-            step_ordinal,
-            turn_start,
-            progress: step_spec.progress.clone(),
-            attempts: step_spec.attempts.clone(),
-            reply: step_spec.reply.clone(),
-            slots: step_spec.slots.clone(),
-            updated_at: step_spec.updated_at,
-        };
 
         entries.push(ConversationEntry::Step {
             node: node_id,
-            content: raw_step_node,
             step: step_detail.clone(),
-            ordinal: (step_ordinal == 0).then_some(spec.turn_ordinal),
+            agent_name: (step_ordinal == 0).then(agent_coder),
+            reply: step_content,
             retries,
             summary: entry_summary,
         });
@@ -732,7 +787,7 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
         position: tip_node_id,
         turns: vec![TurnUsageRow {
             turn_id: spec.turn_id,
-            ordinal: spec.turn_ordinal,
+            start_node: start_node_id,
             provider: provider_openai(),
             model: model_gpt5(),
             usage: usage.clone(),
@@ -752,16 +807,16 @@ fn build_scenario(spec: TurnSpec) -> BuiltScenario {
 /// 场景 1：成功（Step 0 执行工具并以 `Continue` 关闭，`summary == None`；Step 1 以 `Finish` 关闭）。
 pub(super) fn scenario_success_tool_then_finish() -> BuiltScenario {
     let call = bound_call_read_cargo(turn_id_1(), 0, 1, invocation_id_1(), Some("call_read_01"));
-    let binding = binding_for_call(&call, "builtin:read_file@v1", ARGS_CARGO_TOML_DIGEST_HEX);
-    let slot = InvocationSlot {
+    let binding =
+        binding_identity_for_call(&call, "builtin:read_file@v1", ARGS_CARGO_TOML_DIGEST_HEX);
+    let slot = SlotFixture {
+        invocation_id: call.invocation_id,
         binding,
-        progress: SlotProgress::Terminal {
-            result: StoredToolResult {
-                invocation_id: invocation_id_1(),
-                name: "read_file".to_owned(),
-                payload: ResultPayload::Succeeded(success_content_json_sample()),
-            },
-        },
+        state: SlotStateFixture::Terminal(StoredToolResult {
+            invocation_id: invocation_id_1(),
+            name: "read_file".to_owned(),
+            payload: ResultPayload::Succeeded(success_content_json_sample()),
+        }),
     };
     let step_0_reply = NativeMessage {
         role: MessageRole::Assistant,
@@ -793,8 +848,6 @@ pub(super) fn scenario_success_tool_then_finish() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_1(),
-        turn_ordinal: 1,
-        effort: Some(Effort::High),
         user_parts: user_text_parts("请查看 Cargo.toml 的行数"),
         steps: vec![
             StepSpec {
@@ -846,8 +899,6 @@ pub(super) fn scenario_retry_then_success() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_2(),
-        turn_ordinal: 1,
-        effort: Some(Effort::Medium),
         user_parts: user_interleaved_image_parts("请结合截图检查服务连通性：", "定位报错原因"),
         steps: vec![StepSpec {
             progress: StepProgress::Closed {
@@ -864,19 +915,19 @@ pub(super) fn scenario_retry_then_success() -> BuiltScenario {
     })
 }
 
-/// 场景 3：工具失败（原始 `InvocationSlot` 与投影 `SlotDetail` 同为 `Failed(not_found)`，模型在下一步说明原因后结束）。
+/// 场景 3：工具失败（槽位状态与结果同为 `Failed(not_found)`，模型在下一步说明原因后结束）。
 pub(super) fn scenario_tool_failed() -> BuiltScenario {
     let call = bound_call_read_missing(turn_id_3(), 0, 0, invocation_id_1());
-    let binding = binding_for_call(&call, "builtin:read_file@v1", ARGS_MISSING_TXT_DIGEST_HEX);
-    let failed_slot = InvocationSlot {
+    let binding =
+        binding_identity_for_call(&call, "builtin:read_file@v1", ARGS_MISSING_TXT_DIGEST_HEX);
+    let failed_slot = SlotFixture {
+        invocation_id: call.invocation_id,
         binding,
-        progress: SlotProgress::Terminal {
-            result: StoredToolResult {
-                invocation_id: invocation_id_1(),
-                name: "read_file".to_owned(),
-                payload: ResultPayload::Failed(tool_error_not_found()),
-            },
-        },
+        state: SlotStateFixture::Terminal(StoredToolResult {
+            invocation_id: invocation_id_1(),
+            name: "read_file".to_owned(),
+            payload: ResultPayload::Failed(tool_error_not_found()),
+        }),
     };
     let step_0_reply = NativeMessage {
         role: MessageRole::Assistant,
@@ -900,8 +951,6 @@ pub(super) fn scenario_tool_failed() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_3(),
-        turn_ordinal: 1,
-        effort: Some(Effort::Low),
         user_parts: user_text_parts("读取 missing.txt"),
         steps: vec![
             StepSpec {
@@ -930,19 +979,27 @@ pub(super) fn scenario_tool_failed() -> BuiltScenario {
 pub(super) fn scenario_cancelled() -> BuiltScenario {
     let call_0 = bound_call_sleep_cmd(turn_id_1(), 0, 0, invocation_id_1());
     let call_1 = bound_call_read_cargo(turn_id_1(), 0, 1, invocation_id_2(), None);
-    let slot_0 = InvocationSlot {
-        binding: binding_for_call(&call_0, "builtin:run_shell@v1", ARGS_SLEEP_CMD_DIGEST_HEX),
-        progress: SlotProgress::Terminal {
-            result: StoredToolResult {
-                invocation_id: invocation_id_1(),
-                name: "run_shell".to_owned(),
-                payload: ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
-            },
-        },
+    let slot_0 = SlotFixture {
+        invocation_id: call_0.invocation_id,
+        binding: binding_identity_for_call(
+            &call_0,
+            "builtin:run_shell@v1",
+            ARGS_SLEEP_CMD_DIGEST_HEX,
+        ),
+        state: SlotStateFixture::Terminal(StoredToolResult {
+            invocation_id: invocation_id_1(),
+            name: "run_shell".to_owned(),
+            payload: ResultPayload::Indeterminate(IndeterminateCause::Cancelled),
+        }),
     };
-    let slot_1 = InvocationSlot {
-        binding: binding_for_call(&call_1, "builtin:read_file@v1", ARGS_CARGO_TOML_DIGEST_HEX),
-        progress: SlotProgress::Registered,
+    let slot_1 = SlotFixture {
+        invocation_id: call_1.invocation_id,
+        binding: binding_identity_for_call(
+            &call_1,
+            "builtin:read_file@v1",
+            ARGS_CARGO_TOML_DIGEST_HEX,
+        ),
+        state: SlotStateFixture::Registered,
     };
     let reply = NativeMessage {
         role: MessageRole::Assistant,
@@ -962,8 +1019,6 @@ pub(super) fn scenario_cancelled() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_1(),
-        turn_ordinal: 1,
-        effort: None,
         user_parts: user_text_parts("运行耗时命令后读取配置"),
         steps: vec![StepSpec {
             progress: StepProgress::Closed {
@@ -984,8 +1039,6 @@ pub(super) fn scenario_orphan_reserved() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_2(),
-        turn_ordinal: 1,
-        effort: None,
         user_parts: user_text_parts("刚接受尚未发出请求的轮次"),
         steps: vec![StepSpec {
             progress: StepProgress::Reserved,
@@ -1002,8 +1055,6 @@ pub(super) fn scenario_orphan_requesting() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_2(),
-        turn_ordinal: 1,
-        effort: Some(Effort::Medium),
         user_parts: user_text_parts("模型流式响应中途进程退出"),
         steps: vec![StepSpec {
             progress: StepProgress::Requesting,
@@ -1019,19 +1070,27 @@ pub(super) fn scenario_orphan_requesting() -> BuiltScenario {
 pub(super) fn scenario_orphan_executing() -> BuiltScenario {
     let call_0 = bound_call_read_cargo(turn_id_2(), 0, 0, invocation_id_1(), Some("call_exec_0"));
     let call_1 = bound_call_read_missing(turn_id_2(), 0, 1, invocation_id_2());
-    let slot_0 = InvocationSlot {
-        binding: binding_for_call(&call_0, "builtin:read_file@v1", ARGS_CARGO_TOML_DIGEST_HEX),
-        progress: SlotProgress::Terminal {
-            result: StoredToolResult {
-                invocation_id: invocation_id_1(),
-                name: "read_file".to_owned(),
-                payload: ResultPayload::Succeeded(success_content_json_sample()),
-            },
-        },
+    let slot_0 = SlotFixture {
+        invocation_id: call_0.invocation_id,
+        binding: binding_identity_for_call(
+            &call_0,
+            "builtin:read_file@v1",
+            ARGS_CARGO_TOML_DIGEST_HEX,
+        ),
+        state: SlotStateFixture::Terminal(StoredToolResult {
+            invocation_id: invocation_id_1(),
+            name: "read_file".to_owned(),
+            payload: ResultPayload::Succeeded(success_content_json_sample()),
+        }),
     };
-    let slot_1 = InvocationSlot {
-        binding: binding_for_call(&call_1, "builtin:read_file@v1", ARGS_MISSING_TXT_DIGEST_HEX),
-        progress: SlotProgress::Registered,
+    let slot_1 = SlotFixture {
+        invocation_id: call_1.invocation_id,
+        binding: binding_identity_for_call(
+            &call_1,
+            "builtin:read_file@v1",
+            ARGS_MISSING_TXT_DIGEST_HEX,
+        ),
+        state: SlotStateFixture::Registered,
     };
     let reply = NativeMessage {
         role: MessageRole::Assistant,
@@ -1051,8 +1110,6 @@ pub(super) fn scenario_orphan_executing() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_2(),
-        turn_ordinal: 1,
-        effort: Some(Effort::High),
         user_parts: user_text_parts("依次读取两个文件"),
         steps: vec![StepSpec {
             progress: StepProgress::Executing,
@@ -1067,9 +1124,14 @@ pub(super) fn scenario_orphan_executing() -> BuiltScenario {
 /// 场景 8：调用效果不确定——`Indeterminate(NoResult)`（槽位已越过 `Started`，轮次超时停止时尚未取得结果）。
 pub(super) fn scenario_indeterminate_no_result() -> BuiltScenario {
     let call = bound_call_sleep_cmd(turn_id_3(), 0, 0, invocation_id_1());
-    let started_slot = InvocationSlot {
-        binding: binding_for_call(&call, "builtin:run_shell@v1", ARGS_SLEEP_CMD_DIGEST_HEX),
-        progress: SlotProgress::Started,
+    let started_slot = SlotFixture {
+        invocation_id: call.invocation_id,
+        binding: binding_identity_for_call(
+            &call,
+            "builtin:run_shell@v1",
+            ARGS_SLEEP_CMD_DIGEST_HEX,
+        ),
+        state: SlotStateFixture::Started,
     };
     let reply = NativeMessage {
         role: MessageRole::Assistant,
@@ -1083,8 +1145,6 @@ pub(super) fn scenario_indeterminate_no_result() -> BuiltScenario {
     build_scenario(TurnSpec {
         session_id: session_id_primary(),
         turn_id: turn_id_3(),
-        turn_ordinal: 1,
-        effort: Some(Effort::High),
         user_parts: user_text_parts("执行外部脚本直至轮次超时"),
         steps: vec![StepSpec {
             progress: StepProgress::Closed {
@@ -1143,6 +1203,66 @@ pub(super) fn register(book: &mut CaseBook) {
 
     enum_fragments!(
         book,
+        "path_node_kind",
+        PathNodeKind {
+            ("input", PathNodeKind::Input => PathNodeKind::Input),
+            ("step", PathNodeKind::Step => PathNodeKind::Step),
+            ("op", PathNodeKind::Op => PathNodeKind::Op),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "node_status",
+        NodeStatus {
+            ("modified", NodeStatus::Modified => NodeStatus::Modified),
+            ("skipped_empty", NodeStatus::SkippedEmpty => NodeStatus::SkippedEmpty),
+            ("omitted", NodeStatus::Omitted => NodeStatus::Omitted),
+        }
+    );
+
+    enum_fragments!(
+        book,
+        "effective_entry_summary",
+        EffectiveEntrySummary {
+            (
+                "input",
+                EffectiveEntrySummary::Input { .. } => EffectiveEntrySummary::Input {
+                    node: NodeId(1),
+                    channel: channel_cli(),
+                    text_bytes: 54,
+                    image_count: 1,
+                    image_bytes: image_ref_sample().byte_length,
+                }
+            ),
+            (
+                "step",
+                EffectiveEntrySummary::Step { .. } => EffectiveEntrySummary::Step {
+                    node: NodeId(2),
+                    text_bytes: 36,
+                    reasoning_bytes: 42,
+                    tool_call_count: 1,
+                    tool_result_bytes: 12,
+                }
+            ),
+        }
+    );
+
+    book.insert(
+        "fragment/operated_node/modified",
+        &OperatedNode {
+            node: NodeId(1),
+            status: NodeStatus::Modified,
+        },
+    );
+    book.insert_struct_pair(
+        "context_inspection",
+        &context_inspection_full(),
+        &context_inspection_minimal(),
+    );
+
+    enum_fragments!(
+        book,
         "context_edit",
         ContextEdit {
             ("omit_node", ContextEdit::OmitNode { .. } => ContextEdit::omit_node(NodeId(1))),
@@ -1196,7 +1316,7 @@ pub(super) fn register(book: &mut CaseBook) {
     );
 
     let context_input_full = ContextInput::new(
-        channel_ipc(),
+        channel_cli(),
         user_interleaved_image_parts("请结合截图检查服务连通性：", "定位报错原因"),
     )
     .expect("固定多模态 ContextInput 应合法");
@@ -1206,44 +1326,9 @@ pub(super) fn register(book: &mut CaseBook) {
     book.insert_struct_pair("context_input", &context_input_full, &context_input_minimal);
 
     let context_op_entry = sample_context_op_entry();
-    let ConversationEntry::ContextOp {
-        content: ref raw_context_op_node,
-        ..
-    } = context_op_entry
-    else {
-        unreachable!()
-    };
-    if let Node::ContextOp { op, .. } = raw_context_op_node {
+    if let ConversationEntry::ContextOp { op, .. } = &context_op_entry {
         book.insert("fragment/context_op/full", op);
     }
-
-    let turn_start_meta_full = TurnStartMeta {
-        accepted_at: ts_accepted(),
-        trigger_channel: channel_ipc(),
-        input_nodes: vec![NodeId(1)],
-        agent_name: agent_coder(),
-        model: model_gpt5(),
-        provider: provider_openai(),
-        effort: Some(Effort::High),
-        limits: turn_limits(),
-        config_digest: hex_32(CONFIG_DIGEST_HEX),
-    };
-    let turn_start_meta_minimal = TurnStartMeta {
-        accepted_at: ts_accepted(),
-        trigger_channel: channel_tui(),
-        input_nodes: Vec::new(),
-        agent_name: agent_coder(),
-        model: model_gpt5(),
-        provider: provider_openai(),
-        effort: None,
-        limits: turn_limits(),
-        config_digest: hex_32(CONFIG_DIGEST_HEX),
-    };
-    book.insert_struct_pair(
-        "turn_start_meta",
-        &turn_start_meta_full,
-        &turn_start_meta_minimal,
-    );
 
     enum_fragments!(
         book,
@@ -1333,24 +1418,6 @@ pub(super) fn register(book: &mut CaseBook) {
         }
     );
 
-    enum_fragments!(
-        book,
-        "attempt_progress",
-        AttemptProgress {
-            ("sent", AttemptProgress::Sent => AttemptProgress::Sent),
-            (
-                "ended",
-                AttemptProgress::Ended { .. } => AttemptProgress::Ended {
-                    end: AttemptEnd::Completed,
-                    diagnostic: AttemptDiagnostic {
-                        provider_error: None,
-                        invalid_batch: None,
-                    },
-                }
-            ),
-        }
-    );
-
     let step_address = ModelMessageAddress {
         session_id: session_id_primary(),
         turn_id: turn_id_1(),
@@ -1389,25 +1456,6 @@ pub(super) fn register(book: &mut CaseBook) {
                 AttemptEndDetail::Stopped { .. } => AttemptEndDetail::Stopped {
                     cause: StopCause::ProcessExit,
                     diagnostic: None,
-                }
-            ),
-        }
-    );
-
-    enum_fragments!(
-        book,
-        "slot_progress",
-        SlotProgress {
-            ("registered", SlotProgress::Registered => SlotProgress::Registered),
-            ("started", SlotProgress::Started => SlotProgress::Started),
-            (
-                "terminal",
-                SlotProgress::Terminal { .. } => SlotProgress::Terminal {
-                    result: StoredToolResult {
-                        invocation_id: invocation_id_1(),
-                        name: "read_file".to_owned(),
-                        payload: ResultPayload::Succeeded(success_content_json_sample()),
-                    },
                 }
             ),
         }
@@ -1472,42 +1520,8 @@ pub(super) fn register(book: &mut CaseBook) {
         }
     );
 
-    let ConversationEntry::Input {
-        content: ref raw_input_node,
-        ..
-    } = success.entries[0]
-    else {
-        unreachable!()
-    };
-    let ConversationEntry::Step {
-        content: ref raw_continue_step_node,
-        ..
-    } = success.entries[1]
-    else {
-        unreachable!()
-    };
-    let ConversationEntry::Step {
-        content: ref raw_finish_step_node,
-        ..
-    } = success.entries[2]
-    else {
-        unreachable!()
-    };
-
-    enum_fragments!(
-        book,
-        "node",
-        Node {
-            ("root", Node::Root => Node::Root),
-            ("input", Node::Input { .. } => raw_input_node.clone()),
-            ("context_op", Node::ContextOp { .. } => raw_context_op_node.clone()),
-            ("step", Node::Step { .. } => raw_continue_step_node.clone()),
-        }
-    );
-    book.insert("fragment/node/step_continuation", raw_finish_step_node);
-
-    // ConversationEntry::Step 主片段取 Step 0（ordinal 为 Some(1)、summary 为 None，验证省略形态），
-    // 并补充 step_continuation（Step 1：ordinal 为 None、summary 为 Some）。
+    // ConversationEntry::Step 主片段取 Step 0（agent_name 为 Some("coder")、reply 为 Some、summary 为 None），
+    // 并补充 step_continuation（Step 1：agent_name 为 None、summary 为 Some）与 step_reserved（reply 为 None）。
     enum_fragments!(
         book,
         "conversation_entry",
@@ -1525,30 +1539,14 @@ pub(super) fn register(book: &mut CaseBook) {
         "fragment/conversation_entry/step_continuation",
         &success.entries[2],
     );
+    book.insert(
+        "fragment/conversation_entry/step_reserved",
+        &orphan_reserved.entries[1],
+    );
 
     let turn_summary_full = indeterminate.turn_detail.summary.clone();
     let turn_summary_minimal = success.turn_detail.summary.clone();
     book.insert_struct_pair("turn_summary", &turn_summary_full, &turn_summary_minimal);
-
-    let attempt_diag_full = AttemptDiagnostic {
-        provider_error: Some("invalid tool arguments".to_owned()),
-        invalid_batch: Some(ToolCallValidation::MalformedArguments { call_ordinal: 0 }),
-    };
-    let attempt_diag_minimal = AttemptDiagnostic {
-        provider_error: None,
-        invalid_batch: None,
-    };
-    book.insert_struct_pair(
-        "attempt_diagnostic",
-        &attempt_diag_full,
-        &attempt_diag_minimal,
-    );
-
-    book.insert_struct_pair(
-        "attempt_record",
-        &retryable_failed_attempt_full(),
-        &sent_attempt_minimal(),
-    );
 
     book.insert_struct_pair(
         "attempt_detail",

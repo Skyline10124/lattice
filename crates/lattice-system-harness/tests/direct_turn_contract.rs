@@ -92,12 +92,12 @@ fn direct_turn_completed_reopen_contract() {
                 && messages[0]["role"] == "system"
                 && messages[1]["role"] == "user"
                 && messages[1]["content"]
-                    == "<lattice-context channel=\"ipc\">\nfirst prompt\n</lattice-context>"
+                    == "<lattice-context channel=\"cli\">\nfirst prompt\n</lattice-context>"
                 && messages[2]["role"] == "assistant"
                 && messages[2]["content"] == "first answer"
                 && messages[3]["role"] == "user"
                 && messages[3]["content"]
-                    == "<lattice-context channel=\"ipc\">\nsecond prompt\n</lattice-context>",
+                    == "<lattice-context channel=\"cli\">\nsecond prompt\n</lattice-context>",
             "新输入之前必须携带经模型上下文投影的上一轮用户与助手对话",
         )?;
         let tree: Value = serde_json::from_slice(&log.stdout).unwrap();

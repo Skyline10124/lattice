@@ -1261,15 +1261,13 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
         let starts = view
             .entries
             .values()
-            .filter(|entry| {
-                entry.raw["kind"] == "step" && entry.raw["content"]["step_ordinal"] == 0
-            })
+            .filter(|entry| entry.step().is_some_and(|step| step.ordinal == 0))
             .collect::<Vec<_>>();
         assert_eq!(starts.len(), 3);
         let final_head = view.head.as_ref().unwrap();
         let mut observed_turns = starts
             .iter()
-            .map(|step| step.raw["content"]["turn_id"].as_str().unwrap())
+            .map(|step| step.turn_id.as_deref().unwrap())
             .collect::<Vec<_>>();
         let mut accepted_turns = vec![
             first,
@@ -1282,13 +1280,20 @@ fn pty_model_effort_selection_survives_retry_tools_and_reopening() {
             observed_turns, accepted_turns,
             "三次提交与公开 Step 0 的身份一致"
         );
+        let usage_out = support::cli(&world, &spec, &["--json", "session", "usage", sid]);
+        evidence.record_command("查询 TUI 面板三次提交的用量快照", &usage_out);
+        assert!(usage_out.is_clean_exit(0), "{}", usage_out.summary());
+        let usage_json: serde_json::Value = serde_json::from_slice(&usage_out.stdout).unwrap();
         for start in starts {
-            assert_eq!(
-                start.raw["content"]["turn_start"]["provider"],
-                "openai-chat"
-            );
-            assert_eq!(start.raw["content"]["turn_start"]["model"], "gpt-6-luna");
-            assert_eq!(start.raw["content"]["turn_start"]["effort"], "off");
+            let row = usage_json["turns"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|row| row["turn_id"] == start.turn_id.as_deref().unwrap())
+                .unwrap();
+            assert_eq!(row["start_node"], start.node);
+            assert_eq!(row["provider"], "openai-chat");
+            assert_eq!(row["model"], "gpt-6-luna");
         }
         assert_eq!(final_head.effort.as_deref(), Some("off"));
         let captures = server.captured_requests();

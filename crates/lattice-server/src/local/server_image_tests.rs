@@ -47,14 +47,19 @@ async fn submit_with_images_via_gateway(
         };
     let workspace = LocalWorkspaceRoot::from_path(&env.workspace()).expect("解析测试工作区应成功");
     let shutdown = api.shutdown();
+    let cli = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
     let execution = crate::turn::start_execution(crate::turn::execute::ExecutionInput {
         session: api,
         turn_id,
         workspace,
         request: RunTurnRequest {
-            input,
+            payload: TurnPayload::Submit {
+                trigger_channel: cli.clone(),
+                inputs: vec![(cli, input)],
+            },
             session_id,
             expected_settings: Some(settings_version),
+            expected_position: None,
             cancel_flag: None,
             tools: Some(env.backend.tools.clone()),
             #[cfg(any(test, feature = "test-utils"))]
@@ -492,7 +497,7 @@ async fn small_interleaved_images_are_sent_as_ordered_data_urls() {
     assert_eq!(
         user_msg["content"],
         serde_json::json!([
-            { "type": "text", "text": "<lattice-context channel=\"ipc\">\n第一段文字" },
+            { "type": "text", "text": "<lattice-context channel=\"cli\">\n第一段文字" },
             {
                 "type": "image_url",
                 "image_url": {

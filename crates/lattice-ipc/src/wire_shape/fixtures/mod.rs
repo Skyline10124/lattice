@@ -14,14 +14,10 @@ use std::{ffi::OsStr, os::unix::ffi::OsStrExt, path::PathBuf};
 
 use chrono::{DateTime, TimeZone, Timelike, Utc};
 use lattice_conversation::{InvocationId, ModelId, ProviderId, SessionId, TurnId};
-use lattice_session::store::{AgentName, ProjectPath, SettingsVersion, TurnTimeout};
+use lattice_session::store::{AgentName, ProjectPath, SettingsVersion};
 
 use super::CaseBook;
 use crate::{AuthKey, ModelRef};
-
-/// 固定的冻结配置摘要（64 位小写十六进制）。
-pub(super) const CONFIG_DIGEST_HEX: &str =
-    "d37f1f0dc49724083a27a078c93099241240a76143b5abbf844965978d8e1a90";
 
 /// 固定的会话设置版本（经公开 JSON 反序列化构造）。
 const SETTINGS_VERSION_JSON: &str =
@@ -115,10 +111,6 @@ pub(super) fn model_gpt5() -> ModelId {
 
 pub(super) fn model_ref_gpt5() -> ModelRef {
     ModelRef::parse("openai/gpt-5").expect("固定 ModelRef 应合法")
-}
-
-pub(super) fn turn_timeout_120s() -> TurnTimeout {
-    TurnTimeout::new(120).expect("固定 TurnTimeout 应合法")
 }
 
 pub(super) fn settings_version_fixed() -> SettingsVersion {

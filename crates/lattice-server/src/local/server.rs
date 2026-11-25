@@ -7,7 +7,7 @@ use crate::{
     root::LocalWorkspaceRoot,
     session::{ApiError, SessionApi},
     turn::{
-        RunTurnRequest, ToolExecutor, TurnAcceptance, TurnCompletion,
+        RunTurnRequest, ToolExecutor, TurnAcceptance, TurnCompletion, TurnPayload,
         coordinator::{CoordinatorStoreIo, RandomIdSource, TurnCoordinator},
         observer::ObserverSink,
     },
@@ -31,6 +31,9 @@ use tokio::{
 #[cfg(test)]
 #[path = "server_configure_tests.rs"]
 mod configure_tests;
+#[cfg(test)]
+#[path = "server_context_tests.rs"]
+mod context_tests;
 #[cfg(test)]
 #[path = "server_image_tests.rs"]
 mod image_tests;
@@ -130,6 +133,16 @@ pub(super) enum BackendOperation {
         request: TurnRequest,
         source: SubmitSource,
     },
+    Trigger {
+        request: TriggerRequest,
+        source: SubmitSource,
+    },
+    Feed {
+        request: FeedRequest,
+    },
+    ContextOp {
+        request: ContextOpRequest,
+    },
     Configure {
         request: ConfigureRequest,
     },
@@ -153,6 +166,8 @@ pub(super) enum SubmitOutcome {
 #[derive(Clone)]
 pub(super) enum OwnerReply {
     Submit(SubmitOutcome),
+    Feed(FeedReply),
+    ContextOp(ContextOpReply),
     Configure(ConfigureReply),
     Rewind(lattice_session::store::SessionRecord),
     Error(LocalError),
@@ -297,6 +312,7 @@ fn conflict(reason: ConflictReason) -> LocalError {
             LocalErrorKind::Conflict,
             match reason {
                 ConflictReason::SettingsChanged => "session settings changed",
+                ConflictReason::PositionChanged => "session position changed",
                 _ => "request identity conflicts",
             },
         )
@@ -664,19 +680,24 @@ impl Backend {
         }
     }
     pub(super) fn claim(self: &Arc<Self>, operation: BackendOperation) -> Result<Arc<Owner>> {
-        let (turn_id, session) = match &operation {
+        let (turn_id, session, eager_session_claim) = match &operation {
             BackendOperation::Submit { request, .. } => {
-                (Some(request.turn_id), Some(request.session))
+                (Some(request.turn_id), Some(request.session), false)
             }
-            BackendOperation::Rewind { session_id, .. } => (None, Some(*session_id)),
-            BackendOperation::Configure { request } => (None, Some(request.session.id())),
+            BackendOperation::Trigger { request, .. } => {
+                (Some(request.turn_id), Some(request.session), false)
+            }
+            BackendOperation::Feed { request } => (None, Some(request.session), false),
+            BackendOperation::ContextOp { request } => (None, Some(request.session), false),
+            BackendOperation::Rewind { session_id, .. } => (None, Some(*session_id), true),
+            BackendOperation::Configure { request } => (None, Some(request.session.id()), true),
         };
         let owner = {
             let mut state = lock(&self.admission);
             if turn_id.is_some_and(|id| state.turns.contains_key(&id)) {
                 return Err(conflict(ConflictReason::TurnIdUsed));
             }
-            if turn_id.is_none() && session.is_some_and(|sid| state.sessions.contains_key(&sid)) {
+            if eager_session_claim && session.is_some_and(|sid| state.sessions.contains_key(&sid)) {
                 return Err(busy());
             }
             if state.stop.is_stopping() {
@@ -702,7 +723,7 @@ impl Backend {
             });
             if let Some(turn_id) = owner.turn_id {
                 state.turns.insert(turn_id, owner.clone());
-            } else if let Some(sid) = session {
+            } else if eager_session_claim && let Some(sid) = session {
                 state.sessions.insert(sid, owner.clone());
                 owner.observer.owner_changed();
             }
@@ -770,8 +791,10 @@ impl Backend {
                         .is_some_and(|o| Arc::ptr_eq(o, &task_owner))
                 {
                     state.sessions.remove(&sid);
-                    task_owner.observer.owner_changed();
-                    task_owner.observer.release_turn(task_owner.turn_id);
+                    if let Some(turn_id) = task_owner.turn_id {
+                        task_owner.observer.owner_changed();
+                        task_owner.observer.release_turn(Some(turn_id));
+                    }
                 }
                 state.owners.retain(|o| !Arc::ptr_eq(o, &task_owner));
                 task_owner.done.send_replace(Some(result));
@@ -791,6 +814,11 @@ impl Backend {
             BackendOperation::Submit { request, source } => {
                 self.submit(request, owner, source).await
             }
+            BackendOperation::Trigger { request, source } => {
+                self.trigger(request, owner, source).await
+            }
+            BackendOperation::Feed { request } => self.feed(request, owner).await,
+            BackendOperation::ContextOp { request } => self.context_op(request, owner).await,
             BackendOperation::Configure { request } => self.configure(request, owner).await,
             BackendOperation::Rewind {
                 session_id,
@@ -975,29 +1003,17 @@ impl Backend {
         owner.reply(OwnerReply::Configure(ConfigureReply { head, adjustment }));
         Ok(())
     }
-    async fn submit(
-        self: &Arc<Self>,
-        request: TurnRequest,
-        owner: &Arc<Owner>,
-        source: SubmitSource,
-    ) -> Result<()> {
-        let api = self.optional_store().await?;
-        *lock(&owner.store) = api.clone();
-        // 身份优先于工作区、会话存在性、绑定和同会话 Busy；重发不承担找回职责。
-        if let Some(api) = &api {
-            let turn_id = request.turn_id;
-            if api.read(move |r| r.turn_node(turn_id)).await?.is_some() {
-                return Err(conflict(ConflictReason::TurnIdUsed));
-            }
+    async fn verify_session_write_target(
+        &self,
+        api: Option<SessionApi>,
+        sid: SessionId,
+        workspace: std::path::PathBuf,
+        invalid_message: &str,
+    ) -> Result<(SessionApi, LocalWorkspaceRoot)> {
+        if !workspace.is_absolute() {
+            return Err(LocalError::new(LocalErrorKind::BadRequest, invalid_message));
         }
-        if !request.workspace.is_absolute() {
-            return Err(LocalError::new(
-                LocalErrorKind::BadRequest,
-                "invalid Turn request",
-            ));
-        }
-        let workspace = canonical_workspace(request.workspace.clone()).await?;
-        let sid = request.session;
+        let workspace = canonical_workspace(workspace).await?;
         let api = api.ok_or_else(not_found)?;
         let record = match api.read(move |r| r.session(sid)).await {
             Ok(record) => record,
@@ -1014,35 +1030,221 @@ impl Backend {
         if record.project_path != workspace.project_path() {
             return Err(conflict(ConflictReason::BindingMismatch));
         }
-        let parts = request
-            .parts
-            .into_iter()
-            .map(|part| match part {
-                UserInputPart::Text { text } => {
-                    lattice_session::store::TurnInputPart::Text { text }
-                }
-                UserInputPart::Image { image } => {
-                    lattice_session::store::TurnInputPart::Image { bytes: image }
-                }
-            })
-            .collect();
+        Ok((api, workspace))
+    }
+
+    async fn feed(self: &Arc<Self>, request: FeedRequest, owner: &Arc<Owner>) -> Result<()> {
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        let sid = request.session;
+        let (api, workspace) = self
+            .verify_session_write_target(api, sid, request.workspace, "invalid Feed request")
+            .await?;
         // 图片摘要在准入锁外计算；输入无效的拒绝仍排在同会话 Busy 之后。
-        let input = lattice_session::store::TurnInput::new(parts);
+        let prepared = build_turn_input(request.parts, "invalid Feed request");
         let input = {
             let mut state = lock(&self.admission);
             if state.sessions.contains_key(&sid) {
                 return Err(busy());
             }
-            let input = input
-                .map_err(|_| LocalError::new(LocalErrorKind::BadRequest, "invalid Turn request"))?;
+            let input = prepared?;
             state.sessions.insert(sid, owner.clone());
-            owner.observer.owner_changed();
             input
         };
+        let io = CoordinatorStoreIo::acquire_api(api, sid)
+            .await
+            .map_err(ApiError::from)?;
+        let record = io
+            .read(move |read| read.session(sid))
+            .await
+            .map_err(ApiError::from)?;
+        if let Some(expected) = request.expected_position
+            && expected != record.current
+        {
+            return Err(conflict(ConflictReason::PositionChanged));
+        }
+        owner.started.store(true, Ordering::Release);
+        let node = io
+            .feed_input(lattice_session::store::FeedInput {
+                session_id: sid,
+                project_path: workspace.project_path(),
+                channel: request.channel,
+                input,
+                accepted_at: chrono::Utc::now(),
+                expected_position: request.expected_position,
+            })
+            .await
+            .map_err(ApiError::from)?;
+        owner.observer.record_appended_node(node);
+        owner.reply(OwnerReply::Feed(FeedReply {
+            session_id: sid,
+            node,
+        }));
+        Ok(())
+    }
+
+    async fn context_op(
+        self: &Arc<Self>,
+        request: ContextOpRequest,
+        owner: &Arc<Owner>,
+    ) -> Result<()> {
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        let sid = request.session;
+        let (api, workspace) = self
+            .verify_session_write_target(api, sid, request.workspace, "invalid ContextOp request")
+            .await?;
+        // 附带图片字节与摘要在准入锁外校验；无效或重复摘要的拒绝仍排在同会话 Busy 之后。
+        let prepared_blobs = build_context_op_blobs(request.images);
+        let blobs = {
+            let mut state = lock(&self.admission);
+            if state.sessions.contains_key(&sid) {
+                return Err(busy());
+            }
+            let blobs = prepared_blobs?;
+            state.sessions.insert(sid, owner.clone());
+            blobs
+        };
+        let io = CoordinatorStoreIo::acquire_api(api, sid)
+            .await
+            .map_err(ApiError::from)?;
+        let record = io
+            .read(move |read| read.session(sid))
+            .await
+            .map_err(ApiError::from)?;
+        if let Some(expected) = request.expected_position
+            && expected != record.current
+        {
+            return Err(conflict(ConflictReason::PositionChanged));
+        }
+        owner.started.store(true, Ordering::Release);
+        let node = io
+            .apply_context_op(lattice_session::store::ApplyContextOp {
+                session_id: sid,
+                project_path: workspace.project_path(),
+                op: request.op,
+                blobs,
+                accepted_at: chrono::Utc::now(),
+                expected_position: request.expected_position,
+            })
+            .await
+            .map_err(ApiError::from)?;
+        owner.observer.record_appended_node(node);
+        owner.reply(OwnerReply::ContextOp(ContextOpReply {
+            session_id: sid,
+            node,
+        }));
+        Ok(())
+    }
+
+    async fn submit(
+        self: &Arc<Self>,
+        request: TurnRequest,
+        owner: &Arc<Owner>,
+        source: SubmitSource,
+    ) -> Result<()> {
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        // 身份优先于工作区、会话存在性、绑定和同会话 Busy；重发不承担找回职责。
+        if let Some(api) = &api {
+            let turn_id = request.turn_id;
+            if api.read(move |r| r.turn_node(turn_id)).await?.is_some() {
+                return Err(conflict(ConflictReason::TurnIdUsed));
+            }
+        }
+        let sid = request.session;
+        let (api, workspace) = self
+            .verify_session_write_target(api, sid, request.workspace, "invalid Turn request")
+            .await?;
+        // 图片摘要与批次上限在准入锁外计算；输入无效的拒绝仍排在同会话 Busy 之后。
+        let prepared_inputs = build_submit_inputs(request.inputs);
+        let inputs = {
+            let mut state = lock(&self.admission);
+            if state.sessions.contains_key(&sid) {
+                return Err(busy());
+            }
+            let inputs = prepared_inputs?;
+            state.sessions.insert(sid, owner.clone());
+            owner.observer.owner_changed();
+            inputs
+        };
+        self.admit_and_execute_turn(
+            api,
+            workspace,
+            sid,
+            request.turn_id,
+            TurnPayload::Submit {
+                trigger_channel: request.trigger_channel,
+                inputs,
+            },
+            request.expected_settings,
+            request.expected_position,
+            owner,
+            source,
+        )
+        .await
+    }
+
+    async fn trigger(
+        self: &Arc<Self>,
+        request: TriggerRequest,
+        owner: &Arc<Owner>,
+        source: SubmitSource,
+    ) -> Result<()> {
+        let api = self.optional_store().await?;
+        *lock(&owner.store) = api.clone();
+        // 身份优先于工作区、会话存在性、绑定和同会话 Busy；重发不承担找回职责。
+        if let Some(api) = &api {
+            let turn_id = request.turn_id;
+            if api.read(move |r| r.turn_node(turn_id)).await?.is_some() {
+                return Err(conflict(ConflictReason::TurnIdUsed));
+            }
+        }
+        let sid = request.session;
+        let (api, workspace) = self
+            .verify_session_write_target(api, sid, request.workspace, "invalid Trigger request")
+            .await?;
+        {
+            let mut state = lock(&self.admission);
+            if state.sessions.contains_key(&sid) {
+                return Err(busy());
+            }
+            state.sessions.insert(sid, owner.clone());
+            owner.observer.owner_changed();
+        }
+        self.admit_and_execute_turn(
+            api,
+            workspace,
+            sid,
+            request.turn_id,
+            TurnPayload::Trigger {
+                trigger_channel: request.trigger_channel,
+            },
+            request.expected_settings,
+            request.expected_position,
+            owner,
+            source,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn admit_and_execute_turn(
+        self: &Arc<Self>,
+        api: SessionApi,
+        workspace: LocalWorkspaceRoot,
+        sid: SessionId,
+        turn_id: TurnId,
+        payload: TurnPayload,
+        expected_settings: Option<lattice_session::store::SettingsVersion>,
+        expected_position: Option<lattice_session::store::NodeId>,
+        owner: &Arc<Owner>,
+        source: SubmitSource,
+    ) -> Result<()> {
         #[cfg(feature = "test-crash-barriers")]
         crate::turn::crash_barrier::schedule(
             "admission_registered",
-            serde_json::json!({"turn_id":request.turn_id,"session_id":sid}),
+            serde_json::json!({"turn_id":turn_id,"session_id":sid}),
         )
         .await;
         #[cfg(test)]
@@ -1051,19 +1253,24 @@ impl Backend {
         let io = CoordinatorStoreIo::acquire_api(api.clone(), sid)
             .await
             .map_err(ApiError::from)?;
-        let (settings, settings_version) = io
+        let (record, settings, settings_version) = io
             .read(move |read| {
-                read.session(sid)?;
+                let record = read.session(sid)?;
                 let settings = read.session_settings(sid)?;
                 let version = settings.version()?;
-                Ok((settings, version))
+                Ok((record, settings, version))
             })
             .await
             .map_err(ApiError::from)?;
-        if let Some(expected) = &request.expected_settings
+        if let Some(expected) = &expected_settings
             && *expected != settings_version
         {
             return Err(conflict(ConflictReason::SettingsChanged));
+        }
+        if let Some(expected) = expected_position
+            && expected != record.current
+        {
+            return Err(conflict(ConflictReason::PositionChanged));
         }
         #[cfg(test)]
         tests::pause(&self.gates.prepare).await;
@@ -1079,14 +1286,15 @@ impl Backend {
         }
         let execution = crate::turn::start_execution(crate::turn::execute::ExecutionInput {
             session: api,
-            turn_id: request.turn_id,
+            turn_id,
             workspace,
             shutdown,
             observer: owner.observer.clone(),
             request: RunTurnRequest {
-                input,
+                payload,
                 session_id: sid,
-                expected_settings: request.expected_settings,
+                expected_settings,
+                expected_position,
                 cancel_flag: Some(owner.execution_cancel.clone()),
                 tools: Some(self.tools.clone()),
                 #[cfg(any(test, feature = "test-utils"))]
@@ -1106,7 +1314,7 @@ impl Backend {
             }
             Err(_) => {
                 owner.reply(OwnerReply::Submit(SubmitOutcome::ConfirmationUnknown {
-                    turn_id: request.turn_id,
+                    turn_id,
                     session_id: sid,
                     cause: RecoveryCause::WorkerFailed,
                 }));
@@ -1432,18 +1640,27 @@ impl Backend {
                         "history turns must be between 1 and 100",
                     ));
                 }
-                Ok(Response::History(LocalHistory {
-                    entries: self
-                        .open()
-                        .await?
-                        .read(move |r| r.history(session_id, before, turns))
-                        .await?,
-                }))
+                let (entries, has_more) = self
+                    .open()
+                    .await?
+                    .read(move |r| r.history(session_id, before, turns))
+                    .await?;
+                Ok(Response::History(LocalHistory { entries, has_more }))
             }
+            Request::Feed { request } => Ok(Response::Feed(self.service().feed(request).await?)),
+            Request::ContextOp { request } => Ok(Response::ContextOp(
+                self.service().context_op(request).await?,
+            )),
+            Request::Inspect {
+                session_id,
+                position,
+            } => Ok(Response::Inspect(
+                self.service().inspect(session_id, position).await?,
+            )),
             Request::Cancel { turn_id } => Ok(Response::Cancelled {
                 owned: self.service().cancel(turn_id).await?,
             }),
-            Request::Submit { .. } => Err(internal()),
+            Request::Submit { .. } | Request::Trigger { .. } => Err(internal()),
             Request::Configure { .. } => Err(internal()),
             Request::Rewind {
                 session_id,
@@ -1470,7 +1687,11 @@ impl Backend {
             if let Some(response) = response {
                 if matches!(
                     response,
-                    OwnerReply::Error(_) | OwnerReply::Rewind(_) | OwnerReply::Configure(_)
+                    OwnerReply::Error(_)
+                        | OwnerReply::Rewind(_)
+                        | OwnerReply::Configure(_)
+                        | OwnerReply::Feed(_)
+                        | OwnerReply::ContextOp(_)
                 ) {
                     let mut done = owner.done.subscribe();
                     while done.borrow_and_update().is_none() {
@@ -1626,6 +1847,60 @@ impl Backend {
         }
     }
 }
+fn build_turn_input(
+    parts: Vec<UserInputPart>,
+    invalid_message: &str,
+) -> Result<lattice_session::store::TurnInput> {
+    let parts = parts
+        .into_iter()
+        .map(|part| match part {
+            UserInputPart::Text { text } => lattice_session::store::TurnInputPart::Text { text },
+            UserInputPart::Image { image } => {
+                lattice_session::store::TurnInputPart::Image { bytes: image }
+            }
+        })
+        .collect();
+    lattice_session::store::TurnInput::new(parts)
+        .map_err(|_| LocalError::new(LocalErrorKind::BadRequest, invalid_message))
+}
+
+fn build_submit_inputs(
+    items: Vec<TurnInputItem>,
+) -> Result<Vec<(lattice_context::Channel, lattice_session::store::TurnInput)>> {
+    if items.is_empty() {
+        return Err(LocalError::new(
+            LocalErrorKind::BadRequest,
+            "invalid Turn request",
+        ));
+    }
+    let mut built = Vec::with_capacity(items.len());
+    for item in items {
+        let input = build_turn_input(item.parts, "invalid Turn request")?;
+        built.push((item.channel, input));
+    }
+    lattice_session::store::validate_turn_input_batch(&built)
+        .map_err(|_| LocalError::new(LocalErrorKind::BadRequest, "invalid Turn request"))?;
+    Ok(built)
+}
+
+fn build_context_op_blobs(
+    images: Vec<ContextImage>,
+) -> Result<std::collections::BTreeMap<[u8; 32], Vec<u8>>> {
+    let mut blobs = std::collections::BTreeMap::new();
+    for item in images {
+        let image_ref = lattice_conversation::ImageRef::from_bytes(&item.image).map_err(|_| {
+            LocalError::new(LocalErrorKind::BadRequest, "上下文操作附带的图片字节无效")
+        })?;
+        if blobs.insert(image_ref.sha256, item.image).is_some() {
+            return Err(LocalError::new(
+                LocalErrorKind::BadRequest,
+                "上下文操作附带了重复摘要的图片",
+            ));
+        }
+    }
+    Ok(blobs)
+}
+
 fn head_status(state: &Admission, turn: Option<TurnId>) -> (bool, Option<LocalError>) {
     (
         turn.is_some_and(|turn| {
@@ -1750,6 +2025,18 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
             (
                 service
                     .submit_ipc(request, submitter)
+                    .await
+                    .map(Response::Acceptance),
+                None,
+            )
+        }
+        Request::Trigger { request } => {
+            let socket = stream.into_std()?;
+            let submitter = UnixStream::from_std(socket.try_clone()?)?;
+            stream = UnixStream::from_std(socket)?;
+            (
+                service
+                    .trigger_ipc(request, submitter)
                     .await
                     .map(Response::Acceptance),
                 None,

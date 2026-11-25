@@ -244,6 +244,7 @@ mod tests {
                 "session is bound to another workspace",
             ),
             (RequestConflict::SettingsChanged, "session settings changed"),
+            (RequestConflict::PositionChanged, "session position changed"),
         ] {
             assert_eq!(
                 ApiError::Conflict(reason).to_string(),

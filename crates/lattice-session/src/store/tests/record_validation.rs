@@ -404,16 +404,18 @@ fn ordinary_operations_load_only_referenced_turns() {
         entry_nodes(&read.view(sid(1), 1).unwrap().entries),
         vec![3, 4]
     );
+    assert!(!read.view(sid(1), 1).unwrap().has_more);
     assert_eq!(
-        entry_ordinals(&[read
-            .entry(NodeRef {
-                session_id: sid(1),
-                node: NodeId(4)
-            })
-            .unwrap()]),
-        vec![1]
+        read.entry(NodeRef {
+            session_id: sid(1),
+            node: NodeId(4)
+        })
+        .unwrap()
+        .turn_id(),
+        Some(tid(2))
     );
-    assert!(read.history(sid(1), NodeId(3), 1).unwrap().is_empty());
+    let (older, has_more) = read.history(sid(1), NodeId(3), 1).unwrap();
+    assert!(older.is_empty() && !has_more);
     assert!(read.turn_node(tid(1)).is_err());
     db.start_request(&lock, key(tid(2), 0, 0), origin(), now())
         .unwrap();

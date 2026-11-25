@@ -74,7 +74,7 @@ fn first_prompt_is_the_only_session_creation_and_request() {
                 .unwrap()
                 .last()
                 .unwrap()["content"],
-            "<lattice-context channel=\"ipc\">\nfirst real input\n</lattice-context>"
+            "<lattice-context channel=\"cli\">\nfirst real input\n</lattice-context>"
         );
         evidence.record_captures(captures);
         provider.shutdown(spec.step_timeout()).unwrap();
@@ -489,36 +489,34 @@ fn multi_step_two_agent_tree_rewind_preserves_files_and_old_turn() {
         assert_eq!(captures[2].raw["model"], "beta");
         assert_eq!(captures[3].raw["model"], "beta");
         // 固定夹具的规定投影：来源是公开历史；不导入产品投影器，也不拿上一次请求作参照。
-        let step = &fork_history["entries"][1]["content"];
-        let call = &step["reply"]["parts"][0]["semantic"]["tool_call"]["call"];
+        let step_entry = &fork_history["entries"][1];
+        let call = &step_entry["reply"]["assistant"]["parts"][0]["semantic"]["tool_call"]["call"];
         assert_eq!(call["provider_call_id"], "create");
         assert_eq!(call["name"], "write_marker");
         assert_eq!(
             call["arguments"],
             json!({"action":"append_marker","line":"kept\n","path":kept_path})
         );
-        assert_eq!(
-            step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"],
-            json!({"appended":true})
-        );
-        let first_text = fork_history["entries"][0]["content"]["input"]["message"]["parts"][0]
-            ["semantic"]["text"]["text"]
-            .as_str()
-            .unwrap();
+        let tool_value = &step_entry["reply"]["results"][0]["payload"]["payload"]["value"];
+        assert_eq!(tool_value, &json!({"appended":true}));
+        let first_text =
+            fork_history["entries"][0]["input"]["message"]["parts"][0]["semantic"]["text"]["text"]
+                .as_str()
+                .unwrap();
         let expected = json!([
             {"role":"system","content":"Beta isolated prompt."},
-            {"role":"user","content":format!("<lattice-context channel=\"ipc\">\n{first_text}\n</lattice-context>")},
+            {"role":"user","content":format!("<lattice-context channel=\"cli\">\n{first_text}\n</lattice-context>")},
             {"role":"assistant","content":null,"tool_calls":[{"id":"create","type":"function","function":{
                 "name":"write_marker","arguments":serde_json::to_string(&call["arguments"]).unwrap()}}]},
-            {"role":"tool","tool_call_id":"create","content":serde_json::to_string(&step["slots"][0]["progress"]["result"]["payload"]["payload"]["value"]).unwrap()},
-            {"role":"user","content":"<lattice-context channel=\"ipc\">\nfork\n</lattice-context>"},
+            {"role":"tool","tool_call_id":"create","content":serde_json::to_string(tool_value).unwrap()},
+            {"role":"user","content":"<lattice-context channel=\"cli\">\nfork\n</lattice-context>"},
         ]);
         assert_eq!(captures[2].raw["messages"], expected);
         assert_eq!(
             captures[4].raw["messages"],
             json!([
                 {"role":"system","content":"Beta isolated prompt."},
-                {"role":"user","content":"<lattice-context channel=\"ipc\">\nroot input\n</lattice-context>"}
+                {"role":"user","content":"<lattice-context channel=\"cli\">\nroot input\n</lattice-context>"}
             ])
         );
         for request in &captures {
@@ -762,4 +760,222 @@ fn legacy_stores_are_refused_before_any_new_database_or_request() {
         server.shutdown(spec.step_timeout()).unwrap();
     }));
     support::finish_recorded(evidence, result);
+}
+
+/// 黑盒 IPC 端到端验证 `feed`、`context_op`、`inspect`、`trigger`、`expected_position` 冲突与 `Watcher` 实时推送。
+#[test]
+fn ipc_context_feed_op_inspect_trigger_and_expected_position_end_to_end() {
+    use serde_json::json;
+    use std::time::Instant;
+    const SESSION: &str = "33333333333343338333333333333333";
+    const TRIGGER_TURN: &str = "44444444-4444-4444-8444-000000000001";
+    const STALE_TRIGGER_TURN: &str = "44444444-4444-4444-8444-000000000002";
+    const STALE_SUBMIT_TURN: &str = "44444444-4444-4444-8444-000000000003";
+
+    let (world, spec) = support::direct_world("ipc-context-ops", "reader", "");
+    let budget = world.budget(&spec);
+    let wait = || budget.cap_timeout(spec.step_timeout());
+    let mut evidence = support::evidence(&world, &spec);
+
+    let checked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        world.start_daemon().expect("显式启动后台");
+        let (mut server, gate) =
+            support::wire_gated_fake_llm(&world, "reader", SseScript::plain("triggered reply"));
+
+        // 1. 通过 configure 创建草稿会话，并用 Watcher 订阅验证初始窗口头 `has_older: Some(false)`。
+        let configured = support::ipc(
+            &world,
+            wait(),
+            support::configure_request(&world, json!({"new": SESSION}), Some("reader"), None, None),
+        );
+        assert_eq!(configured["response"], "configure", "{configured}");
+        let mut watcher = support::Watcher::open(&world, wait(), SESSION);
+        let initial_head = watcher.initial().head.clone().expect("初始会话头");
+        assert_eq!(initial_head.position, 0);
+        assert_eq!(initial_head.has_older, Some(false));
+
+        // 2. 连续执行两次 `feed`（跨渠道），验证 `Watcher` 实时推送两条 `Input` 条目。
+        let feed1 = support::ipc(
+            &world,
+            wait(),
+            support::feed_request(&world, SESSION, "cli", "first omitted note", Some(0)),
+        );
+        assert_eq!(feed1["response"], "feed", "{feed1}");
+        assert_eq!(feed1["value"]["node"], 1);
+        let feed2 = support::ipc(
+            &world,
+            wait(),
+            support::feed_request(&world, SESSION, "im", "original draft", Some(1)),
+        );
+        assert_eq!(feed2["response"], "feed", "{feed2}");
+        assert_eq!(feed2["value"]["node"], 2);
+        watcher.until(Instant::now() + wait(), "收到两次 feed 推送", |view| {
+            view.head.as_ref().is_some_and(|head| head.position == 2)
+                && view.entries.contains_key(&1)
+                && view.entries.contains_key(&2)
+        });
+        assert!(watcher.view.entries[&1].is_input());
+        assert!(watcher.view.entries[&2].is_input());
+
+        // 3. `inspect` 检查当前位点与历史位点 `@1`。
+        let inspect_pos1 = support::ipc(&world, wait(), support::inspect_request(SESSION, Some(1)));
+        assert_eq!(inspect_pos1["response"], "inspect", "{inspect_pos1}");
+        assert_eq!(inspect_pos1["value"]["position"], 1);
+        assert_eq!(
+            inspect_pos1["value"]["inspection"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+
+        // 4. `context_op` 省略节点 1 并替换节点 2 正文，验证 `Watcher` 实时收到 `ContextOp` 且 `inspect` 生效。
+        let op_reply = support::ipc(
+            &world,
+            wait(),
+            support::context_op_request(
+                &world,
+                SESSION,
+                json!({
+                    "channel": "cli",
+                    "edits": [
+                        {"kind": "omit_node", "node": 1},
+                        {
+                            "kind": "replace_input",
+                            "node": 2,
+                            "message": {
+                                "role": "user",
+                                "parts": [{"semantic": {"text": {"text": "rewritten prompt"}}}]
+                            }
+                        }
+                    ]
+                }),
+                Vec::new(),
+                Some(2),
+            ),
+        );
+        assert_eq!(op_reply["response"], "context_op", "{op_reply}");
+        assert_eq!(op_reply["value"]["node"], 3);
+        watcher.until(Instant::now() + wait(), "收到 context_op 推送", |view| {
+            view.head.as_ref().is_some_and(|head| head.position == 3)
+                && view.entries.get(&3).is_some_and(|e| e.is_context_op())
+        });
+        let inspect_after_op =
+            support::ipc(&world, wait(), support::inspect_request(SESSION, None));
+        assert_eq!(
+            inspect_after_op["response"], "inspect",
+            "{inspect_after_op}"
+        );
+        assert_eq!(inspect_after_op["value"]["position"], 3);
+        assert_eq!(
+            inspect_after_op["value"]["inspection"]["entries"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            inspect_after_op["value"]["inspection"]["operated_nodes"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+
+        // 5. 四类写操作携带过期 `expected_position` 均返回 `Conflict(position_changed)` 且不推进位点。
+        let stale_feed = support::ipc(
+            &world,
+            wait(),
+            support::feed_request(&world, SESSION, "cli", "stale feed", Some(2)),
+        );
+        assert_eq!(stale_feed["response"], "error", "{stale_feed}");
+        assert_eq!(stale_feed["value"]["kind"], "conflict", "{stale_feed}");
+        assert_eq!(
+            stale_feed["value"]["conflict"], "position_changed",
+            "{stale_feed}"
+        );
+        let stale_op = support::ipc(
+            &world,
+            wait(),
+            support::context_op_request(
+                &world,
+                SESSION,
+                json!({"channel": "cli", "edits": [{"kind": "omit_node", "node": 2}]}),
+                Vec::new(),
+                Some(2),
+            ),
+        );
+        assert_eq!(
+            stale_op["value"]["conflict"], "position_changed",
+            "{stale_op}"
+        );
+        let stale_trigger = support::ipc(
+            &world,
+            wait(),
+            support::trigger_request(&world, STALE_TRIGGER_TURN, SESSION, "cli", None, Some(2)),
+        );
+        assert_eq!(
+            stale_trigger["value"]["conflict"], "position_changed",
+            "{stale_trigger}"
+        );
+        let mut stale_submit_req =
+            support::submit_request(&world, STALE_SUBMIT_TURN, SESSION, "stale submit");
+        stale_submit_req["request"]["expected_position"] = json!(2);
+        let stale_submit = support::ipc(&world, wait(), stale_submit_req);
+        assert_eq!(
+            stale_submit["value"]["conflict"], "position_changed",
+            "{stale_submit}"
+        );
+
+        // 6. 携带正确 `expected_position: Some(3)` 发起独立 `trigger`，并在模型请求悬停期间验证并发只读 `inspect` 不阻塞。
+        let triggered = support::ipc(
+            &world,
+            wait(),
+            support::trigger_request(&world, TRIGGER_TURN, SESSION, "cli", None, Some(3)),
+        );
+        assert_eq!(triggered["response"], "acceptance", "{triggered}");
+        assert_eq!(triggered["value"]["acceptance"], "accepted", "{triggered}");
+        assert_eq!(triggered["value"]["turn"]["start_node"], 4);
+        assert_eq!(triggered["value"]["turn"]["input_nodes"], json!([]));
+
+        gate.wait_until_stalled(1, wait()).unwrap();
+        let concurrent_inspect =
+            support::ipc(&world, wait(), support::inspect_request(SESSION, None));
+        assert_eq!(
+            concurrent_inspect["response"], "inspect",
+            "活跃 Turn 执行期间只读 inspect 必须直接成功：{concurrent_inspect}"
+        );
+        gate.release_next(wait()).unwrap();
+
+        watcher.until(
+            Instant::now() + wait(),
+            "独立 trigger 轮次完成",
+            |view| support::turn_closed(view, TRIGGER_TURN),
+        );
+        assert_eq!(
+            watcher.view.entries[&4]
+                .step()
+                .unwrap()
+                .agent_name
+                .as_deref(),
+            Some("reader")
+        );
+
+        let captures = server.captured_requests();
+        assert_eq!(captures.len(), 1);
+        let messages = captures[0].raw["messages"].as_array().unwrap();
+        assert_eq!(
+            messages.len(),
+            2,
+            "省略节点 1 后模型只应看到 system 与被替换后的节点 2：{messages:?}"
+        );
+        assert_eq!(messages[1]["role"], "user");
+        assert_eq!(
+            messages[1]["content"],
+            "<lattice-context channel=\"im\">\nrewritten prompt\n</lattice-context>"
+        );
+        evidence.record_captures(captures);
+        server.shutdown(wait()).unwrap();
+    }));
+    support::finish_recorded(evidence, checked);
 }

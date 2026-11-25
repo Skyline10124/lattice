@@ -115,6 +115,7 @@ fn accept(s: SessionId, t: TurnId) -> AcceptTurn {
         settings_version: SessionSettings::for_test(&cfg).version().unwrap(),
         config: cfg,
         accepted_at: now(),
+        expected_position: None,
     }
 }
 
@@ -310,16 +311,6 @@ fn records(db: &SessionStore) -> Records {
 
 fn entry_nodes(entries: &[ConversationEntry]) -> Vec<u64> {
     entries.iter().map(|entry| entry.node().0).collect()
-}
-
-fn entry_ordinals(entries: &[ConversationEntry]) -> Vec<u64> {
-    entries
-        .iter()
-        .filter_map(|entry| match entry {
-            ConversationEntry::Step { ordinal, .. } => *ordinal,
-            ConversationEntry::Input { .. } | ConversationEntry::ContextOp { .. } => None,
-        })
-        .collect()
 }
 
 // 损坏夹具绕过正常编码器的输入拒绝，让严格打开实际读到坏字节。

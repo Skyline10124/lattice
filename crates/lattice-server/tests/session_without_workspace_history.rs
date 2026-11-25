@@ -155,15 +155,17 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
     );
     let first_turn = new_turn_id();
     let accepted = client
-        .submit(TurnRequest {
-            turn_id: first_turn,
-            session: session_id,
-            workspace: workspace.canonical_path().to_path_buf(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            first_turn,
+            session_id,
+            workspace.canonical_path().to_path_buf(),
+            Channel::parse("cli").expect("固定通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "第一轮对话".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .unwrap();
     assert!(matches!(accepted, Acceptance::Accepted { .. }));
@@ -173,15 +175,17 @@ async fn new_and_continued_sessions_neither_create_nor_require_workspace_history
 
     let second_turn = new_turn_id();
     let accepted = client
-        .submit(TurnRequest {
-            turn_id: second_turn,
-            session: session_id,
-            workspace: workspace.canonical_path().to_path_buf(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            second_turn,
+            session_id,
+            workspace.canonical_path().to_path_buf(),
+            Channel::parse("cli").expect("固定通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "第二轮续写".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .unwrap();
     assert!(matches!(accepted, Acceptance::Accepted { .. }));
@@ -247,15 +251,17 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
         .unwrap();
     let first_turn = new_turn_id();
     client
-        .submit(TurnRequest {
-            turn_id: first_turn,
-            session: session_id,
-            workspace: workspace.canonical_path().to_path_buf(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            first_turn,
+            session_id,
+            workspace.canonical_path().to_path_buf(),
+            Channel::parse("cli").expect("固定通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "新建会话".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .unwrap();
     let first_detail = wait_turn_closed(&client, first_turn).await;
@@ -263,15 +269,17 @@ async fn preexisting_workspace_history_directory_is_left_untouched_across_turns(
 
     let second_turn = new_turn_id();
     client
-        .submit(TurnRequest {
-            turn_id: second_turn,
-            session: session_id,
-            workspace: workspace.canonical_path().to_path_buf(),
-            parts: vec![UserInputPart::Text {
+        .submit(TurnRequest::single(
+            second_turn,
+            session_id,
+            workspace.canonical_path().to_path_buf(),
+            Channel::parse("cli").expect("固定通道名 cli 应合法"),
+            vec![UserInputPart::Text {
                 text: "续写会话".into(),
             }],
-            expected_settings: None,
-        })
+            None,
+            None,
+        ))
         .await
         .unwrap();
     let second_detail = wait_turn_closed(&client, second_turn).await;

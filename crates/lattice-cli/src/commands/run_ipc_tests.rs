@@ -406,40 +406,19 @@ pub(super) fn head(id: TurnId, owner: bool) -> SessionHead {
         owner,
         diagnostic: None,
         path_replaced: false,
+        has_older: None,
     }
 }
 pub(super) fn entry(id: TurnId, outcome: &str) -> Box<ConversationEntry> {
     let turn = detail(id, outcome);
     Box::new(ConversationEntry::Step {
         node: NodeId(2),
-        content: Node::Step {
-            parent: NodeId(1),
-            turn_id: id,
-            step_ordinal: 0,
-            turn_start: Some(lattice_local::TurnStartMeta {
-                accepted_at: turn.accepted_at,
-                trigger_channel: lattice_local::Channel::parse("ipc").expect("解析测试通道"),
-                input_nodes: vec![NodeId(1)],
-                agent_name: lattice_local::AgentName::parse("test").unwrap(),
-                model: lattice_local::ModelId::parse("test").unwrap(),
-                provider: lattice_local::ProviderId::parse("openai-compatible").unwrap(),
-                effort: None,
-                limits: lattice_session::store::TurnExecutionLimits {
-                    timeout_secs: lattice_session::store::TurnTimeout::default(),
-                    max_model_steps: 32,
-                    max_model_attempts: 1,
-                },
-                config_digest: [0; 32],
-            }),
-            progress: turn.summary.progress.clone(),
-            attempts: vec![],
-            reply: (outcome == "completed")
-                .then(|| lattice_session::test_helpers::assistant_msg("answer")),
-            slots: vec![],
-            updated_at: turn.ended_at,
-        },
         step: turn.steps[0].clone(),
-        ordinal: Some(1),
+        agent_name: Some(lattice_local::AgentName::parse("test").unwrap()),
+        reply: (outcome == "completed").then(|| StepContent {
+            assistant: lattice_session::test_helpers::assistant_msg("answer"),
+            results: Vec::new(),
+        }),
         retries: vec![],
         summary: Some(turn.summary),
     })
@@ -640,17 +619,10 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
             let mut err = Vec::new();
             let mut latest = detail(id, "completed");
             let mut middle = entry(id, "completed");
-            if let ConversationEntry::Step {
-                content: Node::Step { progress, .. },
-                step,
-                summary,
-                ..
-            } = middle.as_mut()
-            {
-                *progress = StepProgress::Closed {
+            if let ConversationEntry::Step { step, summary, .. } = middle.as_mut() {
+                step.progress = StepProgress::Closed {
                     end: StepEnd::Continue,
                 };
-                step.progress = progress.clone();
                 step.end = StepEnd::Continue;
                 *summary = None;
                 latest.steps.insert(0, step.clone());
@@ -660,17 +632,14 @@ async fn follow_requeries_latest_conclusion_after_rewind_into_the_selected_turn(
             if user_position {
                 *middle = ConversationEntry::Input {
                     node: NodeId(1),
-                    content: Node::Input {
-                        parent: NodeId(0),
-                        accepted_at: latest.accepted_at,
-                        input: lattice_local::ContextInput::new(
-                            lattice_local::Channel::parse("ipc").expect("解析测试通道"),
-                            vec![lattice_local::MessageSemantic::Text {
-                                text: "input".into(),
-                            }],
-                        )
-                        .expect("构造测试输入"),
-                    },
+                    accepted_at: latest.accepted_at,
+                    input: lattice_local::ContextInput::new(
+                        lattice_local::Channel::parse("cli").expect("解析测试通道"),
+                        vec![lattice_local::MessageSemantic::Text {
+                            text: "input".into(),
+                        }],
+                    )
+                    .expect("构造测试输入"),
                 };
             }
             let command = super::super::session::show_turn(
@@ -793,15 +762,17 @@ async fn late_acceptance_keeps_the_printed_unknown_receipt_and_exit_one() {
     let _guard = signal_guard().await;
     let peer = Peer::new();
     let id = lattice_local::new_turn_id();
-    let turn = peer.client.start_turn(TurnRequest {
-        turn_id: id,
-        session: sid(),
-        workspace: peer._root.path().into(),
-        parts: vec![UserInputPart::Text {
+    let turn = peer.client.start_turn(TurnRequest::single(
+        id,
+        sid(),
+        peer._root.path().into(),
+        Channel::parse("cli").expect("固定通道名 cli 应合法"),
+        vec![UserInputPart::Text {
             text: "input".into(),
         }],
-        expected_settings: None,
-    });
+        None,
+        None,
+    ));
     let mut submit = peer.request("submit").await;
     turn.cancel();
     let mut out = Vec::new();
@@ -1193,12 +1164,14 @@ async fn send_configures_new_and_explicit_sessions_before_submitting() {
             };
             let mut wire = peer.request("submit").await;
             let request = &wire.request["request"];
+            assert_eq!(request["trigger_channel"], "cli");
             assert_eq!(
-                request["parts"],
-                json!([{"kind":"text","text":"original input"}])
+                request["inputs"],
+                json!([{"channel":"cli","parts":[{"kind":"text","text":"original input"}]}])
             );
             assert_eq!(request["session"], expected_sid.to_string());
             assert!(request["expected_settings"].is_null());
+            assert!(request["expected_position"].is_null());
             assert!(TurnId::parse(request["turn_id"].as_str().unwrap()).is_ok());
             assert_eq!(
                 wire.request

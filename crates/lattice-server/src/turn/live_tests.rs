@@ -44,7 +44,7 @@ fn seed(
             chrono::Utc::now(),
         )
         .unwrap();
-    let channel = super::execute::default_submit_channel();
+    let channel = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
     fixture
         .store
         .accept_turn(
@@ -61,6 +61,7 @@ fn seed(
                 accepted_at: chrono::Utc::now(),
                 config,
                 settings_version,
+                expected_position: None,
             },
         )
         .unwrap();
@@ -268,7 +269,11 @@ async fn used_turn_conflicts_before_configuration_and_never_runs_twice() {
         ))
     ));
     assert!(execution.completion.await.unwrap().is_err());
-    retry.input = TurnInput::text("hello ".into()).expect("构造测试输入");
+    let ch = Channel::parse("cli").expect("测试通道名应合法");
+    retry.payload = TurnPayload::Submit {
+        trigger_channel: ch.clone(),
+        inputs: vec![(ch, TurnInput::text("hello ".into()).expect("构造测试输入"))],
+    };
     let conflict = start_turn(
         fixture.api.clone(),
         first.turn_id,

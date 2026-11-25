@@ -5,8 +5,8 @@
 use super::types::{AttemptSegments, TextSegment, TurnEvent};
 use crate::local::{SessionHead, TextUpdate, ViewUpdate, WATCH_TURNS};
 use lattice_session::store::{
-    AttemptProgress, ConversationEntry, Node, NodeId, NodeRef, SessionRead, SessionStore,
-    StoreError,
+    AttemptProgressDetail, ConversationEntry, NodeId, NodeRef, SessionRead, SessionSettings,
+    SessionStore, StoreError,
 };
 use std::{
     collections::BTreeSet,
@@ -139,11 +139,20 @@ impl ObserverSink {
     }
     pub(crate) fn replace_path(&self, position: NodeId) {
         let mut state = self.state.lock().expect("observation lock");
+        state.owner_generation += 1;
         state.start_node = None;
         state.current = (position != NodeId(0)).then_some(position);
         state.attempt = None;
         state.closed_turn = None;
         Self::mark(&mut state, &[], true);
+        self.changed.send_replace(());
+    }
+    /// 记录 `feed` 或 `context_op` 落库后的最新节点，触发全部观察者增量推送。
+    pub(crate) fn record_appended_node(&self, node: NodeId) {
+        let mut state = self.state.lock().expect("观察状态锁不应中毒");
+        state.owner_generation += 1;
+        state.current = Some(node);
+        Self::mark(&mut state, &[node], false);
         self.changed.send_replace(());
     }
     pub(crate) fn path_replacement_pending(&self, cursor: &Mutex<PushState>) -> bool {
@@ -336,13 +345,31 @@ impl ObserverSink {
                     }
                     view.entries.sort_by_key(|entry| entry.node());
                 }
-                (
-                    SessionHead {
-                        path_replaced: replaced,
-                        ..session_head(&read, session_id)?
-                    },
-                    view.entries,
-                )
+                let turn_id = if view.session.current == NodeId(0) {
+                    None
+                } else if let Some(entry) = view
+                    .entries
+                    .iter()
+                    .rev()
+                    .find(|entry| entry.node() == view.session.current)
+                {
+                    entry.turn_id()
+                } else {
+                    read.entry(NodeRef {
+                        session_id,
+                        node: view.session.current,
+                    })?
+                    .turn_id()
+                };
+                let head = build_head(
+                    session_id,
+                    view.session.current,
+                    turn_id,
+                    &view.settings,
+                    replaced,
+                    Some(view.has_more),
+                )?;
+                (head, view.entries)
             } else {
                 let record = session_record(&read, session_id)?;
                 // 只要推 head，就从同一事务补上当前位置，供读者确认这一轮是否结束。
@@ -353,14 +380,17 @@ impl ObserverSink {
                     .into_iter()
                     .map(|node| read.entry(NodeRef { session_id, node }))
                     .collect::<lattice_session::store::Result<Vec<_>>>()?;
-                let current = entries
-                    .iter()
-                    .find(|entry| entry.node() == record.current)
-                    .map_or(&Node::Root, content);
-                (
-                    head_from_node(&read, session_id, record.current, current)?,
-                    entries,
-                )
+                let turn_id = if record.current == NodeId(0) {
+                    None
+                } else {
+                    entries
+                        .iter()
+                        .find(|entry| entry.node() == record.current)
+                        .and_then(ConversationEntry::turn_id)
+                };
+                let settings = read.session_settings(session_id)?;
+                let head = build_head(session_id, record.current, turn_id, &settings, false, None)?;
+                (head, entries)
             };
             updates.push(ViewUpdate::Head(head));
             updates.extend(entries.into_iter().map(|entry| ViewUpdate::Entry {
@@ -371,13 +401,20 @@ impl ObserverSink {
             && !segments.is_empty()
         {
             let captured = updates.iter().find_map(|update| match update {
-                ViewUpdate::Entry { entry } if entry.node() == node => Some(content(entry)),
+                ViewUpdate::Entry { entry } if entry.node() == node => Some(entry.as_ref()),
                 _ => None,
             });
-            let sent = if let Some(value) = captured {
-                matches!(value, Node::Step { turn_id, step_ordinal, attempts, .. }
-                    if *turn_id == key.turn_id && *step_ordinal == key.model_step_ordinal
-                    && attempts.get(key.attempt_ordinal as usize).is_some_and(|a| matches!(a.progress, AttemptProgress::Sent)))
+            let sent = if let Some(entry) = captured {
+                matches!(
+                    entry,
+                    ConversationEntry::Step { step, .. }
+                        if step.key.turn_id == key.turn_id
+                            && step.key.ordinal == key.model_step_ordinal
+                            && step
+                                .attempts
+                                .get(key.attempt_ordinal as usize)
+                                .is_some_and(|a| matches!(a.progress, AttemptProgressDetail::Sent))
+                )
             } else {
                 read.attempt_is_sent(session_id, node, key)?
             };
@@ -398,9 +435,6 @@ impl ObserverSink {
         self.state.lock().unwrap().events.clone()
     }
 }
-fn content(entry: &ConversationEntry) -> &Node {
-    entry.content()
-}
 fn session_record(
     read: &SessionRead,
     session_id: lattice_conversation::SessionId,
@@ -416,16 +450,22 @@ pub(crate) fn session_head(
     session_id: lattice_conversation::SessionId,
 ) -> lattice_session::store::Result<SessionHead> {
     let record = session_record(read, session_id)?;
-    let current = read.path_node(session_id, record.current)?;
-    head_from_node(read, session_id, record.current, &current)
+    let turn_id = if record.current == NodeId(0) {
+        None
+    } else {
+        read.path_node(session_id, record.current)?.turn_id()
+    };
+    let settings = read.session_settings(session_id)?;
+    build_head(session_id, record.current, turn_id, &settings, false, None)
 }
-fn head_from_node(
-    read: &SessionRead,
+fn build_head(
     session_id: lattice_conversation::SessionId,
     position: NodeId,
-    current: &Node,
+    turn_id: Option<lattice_conversation::TurnId>,
+    settings: &SessionSettings,
+    path_replaced: bool,
+    has_older: Option<bool>,
 ) -> lattice_session::store::Result<SessionHead> {
-    let settings = read.session_settings(session_id)?;
     let settings_version = settings.version()?;
     let (provider, model) = match &settings.model {
         Some(target) => (
@@ -442,10 +482,11 @@ fn head_from_node(
         provider,
         effort: settings.effort,
         settings_version,
-        turn_id: current.turn_id(),
+        turn_id,
         owner: false,
         diagnostic: None,
-        path_replaced: false,
+        path_replaced,
+        has_older,
     })
 }
 fn suffix(segments: &[TextSegment], offset: usize) -> (Vec<TextSegment>, usize) {

@@ -236,8 +236,10 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut cache = app.markdown_cache.borrow_mut();
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
-    let mut turn = None;
-    // 已经过的各轮的序号与 agent，供被别的 USER 块隔开的步骤重画标题线。
+    let mut turn: Option<lattice_local::TurnId> = None;
+    let mut turn_node: Option<lattice_local::NodeId> = None;
+    let mut input_node: Option<lattice_local::NodeId> = None;
+    // 已经过的各轮首步节点与 agent，供被别的 USER 块隔开的步骤重画标题线。
     let mut turns = std::collections::HashMap::new();
     if let Some((id, banner)) = &app.banner {
         for text in banner {
@@ -249,48 +251,42 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         let block = &entry.block;
         let start = lines.len();
         match block {
-            Block::UserTurn {
-                turn_id,
-                ordinal,
-                agent: name,
-                ..
-            } => {
-                turn = turn_id.map(|id| (id, *ordinal));
-                agent = (!name.is_empty()).then_some(name.as_str());
-                if let Some(id) = turn_id {
-                    turns.insert(*id, (*ordinal, name.as_str()));
-                }
+            Block::Input { node } => {
+                input_node = Some(*node);
+                turn = None;
+                turn_node = None;
+                agent = None;
             }
             Block::ContextOp { .. } => {}
-            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。新条目接在末尾，
-            // 这一轮的步骤可能接在别的 USER 块（例如本地未被接受的提交）之后，这时另起标题线，
-            // 不显得挂在那个 USER 之下。
+            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。若中间隔开了别的 USER 块，
+            // 另起标题线，不显得挂在那个 USER 之下。
             Block::Step {
+                node,
                 key,
-                ordinal,
                 agent: step_agent,
-                ..
             } => {
                 if let Some(name) = step_agent.as_deref() {
-                    turns.insert(key.turn_id, (*ordinal, name));
+                    turns.insert(key.turn_id, (*node, name));
                 }
-                if turn.is_none_or(|(id, _)| id != key.turn_id) {
+                if turn != Some(key.turn_id) {
                     turn = None;
-                    if let Some(&(ord, name)) = turns.get(&key.turn_id) {
-                        turn = Some((key.turn_id, ord));
+                    turn_node = None;
+                    if let Some(&(start_node, name)) = turns.get(&key.turn_id) {
+                        turn = Some(key.turn_id);
+                        turn_node = Some(start_node);
                         agent = Some(name);
                         assistant_header = false;
                         ensure_assistant_header(
                             &mut lines,
                             &mut assistant_header,
                             agent,
-                            turn.map(|(_, n)| n),
+                            turn_node,
                             content_w,
                         );
                     }
                 } else {
-                    if let Some(&(ord, name)) = turns.get(&key.turn_id) {
-                        turn = Some((key.turn_id, ord));
+                    if let Some(&(start_node, name)) = turns.get(&key.turn_id) {
+                        turn_node = Some(start_node);
                         agent = Some(name);
                     }
                     if key.ordinal == 0 {
@@ -298,20 +294,14 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                             &mut lines,
                             &mut assistant_header,
                             agent,
-                            turn.map(|(_, n)| n),
+                            turn_node,
                             content_w,
                         );
                     }
                 }
             }
             Block::User(text) => {
-                transcript_title(
-                    &mut lines,
-                    "USER",
-                    Role::User,
-                    turn.and_then(|(_, n)| n),
-                    content_w,
-                );
+                transcript_title(&mut lines, "USER", Role::User, input_node.take(), content_w);
                 lines.extend(
                     cache
                         .render(text, content_w)
@@ -320,31 +310,14 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 );
                 assistant_header = false;
             }
-            Block::CommentedUser(message) | Block::RejectedUser(message) => {
-                transcript_title(
+            Block::CommentedUser(message) => {
+                transcript_title(&mut lines, "USER", Role::User, input_node.take(), content_w);
+                comments::markers(
                     &mut lines,
-                    "USER",
-                    Role::User,
-                    turn.and_then(|(_, n)| n),
+                    &mut markers,
+                    comments::identified(&message.comments, entry.id),
                     content_w,
                 );
-                if matches!(block, Block::RejectedUser(_)) {
-                    let targets = message.comments.iter().map(|comment| {
-                        let id = app
-                            .drafts
-                            .pending_comment_id(comment.n)
-                            .unwrap_or_else(|| entry.id.comment(comment.n, 0));
-                        (id, comment)
-                    });
-                    comments::markers(&mut lines, &mut markers, targets, content_w);
-                } else {
-                    comments::markers(
-                        &mut lines,
-                        &mut markers,
-                        comments::identified(&message.comments, entry.id),
-                        content_w,
-                    );
-                }
                 if !message.text.is_empty() {
                     lines.extend(
                         cache
@@ -361,7 +334,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                         &mut lines,
                         &mut assistant_header,
                         agent,
-                        turn.map(|(_, n)| n),
+                        turn_node,
                         content_w,
                     );
                     let rendered = cache.render(&text.text, content_w);
@@ -387,20 +360,13 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     lines.extend(rendered.iter().map(|row| row.line.clone()));
                 }
             }
-            Block::AssistantStart => ensure_assistant_header(
-                &mut lines,
-                &mut assistant_header,
-                agent,
-                turn.map(|(_, n)| n),
-                content_w,
-            ),
             Block::Assistant(text) if text.is_empty() => {}
             Block::Assistant(text) => {
                 ensure_assistant_header(
                     &mut lines,
                     &mut assistant_header,
                     agent,
-                    turn.map(|(_, n)| n),
+                    turn_node,
                     content_w,
                 );
                 lines.extend(
@@ -415,7 +381,7 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                     &mut lines,
                     &mut assistant_header,
                     agent,
-                    turn.map(|(_, n)| n),
+                    turn_node,
                     content_w,
                 );
                 lines.extend(tool_lines(name, state, content_w));
@@ -426,17 +392,17 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 if app.dock.parks(entry.id, status) {
                     continue;
                 }
-                // 只有本轮的结局属于助手段；其余状态消息与序号未知的结局不带标题线。
+                // 只有本轮的结局属于助手段；其余状态消息不带标题线。
                 let in_segment = status
                     .closing
                     .as_ref()
-                    .is_some_and(|(id, _)| turn.is_some_and(|(scope, _)| scope == *id));
+                    .is_some_and(|(id, _)| turn == Some(*id));
                 if in_segment {
                     ensure_assistant_header(
                         &mut lines,
                         &mut assistant_header,
                         agent,
-                        turn.map(|(_, n)| n),
+                        turn_node,
                         content_w,
                     );
                 }
@@ -450,6 +416,16 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         owners.extend((start..lines.len()).map(|row| BlockPosition {
             id: entry.id,
             row: row.saturating_sub(start),
+        }));
+    }
+    if let Some(wait_text) = app.submission_wait_text() {
+        let wait_start = lines.len();
+        separate(&mut lines);
+        let text = format!("{} {wait_text}", symbol(SymbolKind::Running));
+        lines.extend(body(&text, content_w, role_style(Role::DimMeta)));
+        owners.extend((wait_start..lines.len()).map(|row| BlockPosition {
+            id: crate::blocks::BlockId::SubmissionWait,
+            row: row.saturating_sub(wait_start),
         }));
     }
     cache.finish_render();
@@ -481,27 +457,27 @@ fn transcript_title(
     lines: &mut Vec<Line<'static>>,
     title: &str,
     role: Role,
-    ordinal: Option<std::num::NonZeroUsize>,
+    node: Option<lattice_local::NodeId>,
     content_w: u16,
 ) {
     separate(lines);
-    let right = ordinal
-        .map(|n| format!("#{n}"))
+    let right = node
+        .map(|id| format!("@{}", id.0))
         .into_iter()
         .collect::<Vec<_>>();
     lines.push(title_line(title, role, &right, usize::from(content_w)));
 }
 
-/// `turn` 为所在一轮的序号；不在任何一轮之内时为 None，刚提交、条目未到的一轮还没有序号。
+/// 助手段标题线在所属轮次首个 Step 节点之前输出，右端标注 `@<node>`。
 fn ensure_assistant_header(
     lines: &mut Vec<Line<'static>>,
     shown: &mut bool,
     agent: Option<&str>,
-    turn: Option<Option<std::num::NonZeroUsize>>,
+    node: Option<lattice_local::NodeId>,
     content_w: u16,
 ) {
-    if !*shown && let (Some(agent), Some(ordinal)) = (agent, turn) {
-        transcript_title(lines, agent, Role::Assistant, ordinal, content_w);
+    if !*shown && let (Some(agent), Some(node)) = (agent, node) {
+        transcript_title(lines, agent, Role::Assistant, Some(node), content_w);
         *shown = true;
     }
 }
@@ -871,6 +847,7 @@ mod tests {
                     owner: false,
                     diagnostic: None,
                     path_replaced: false,
+                    has_older: None,
                 },
                 initial_adjustment: None,
             },

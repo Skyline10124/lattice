@@ -237,7 +237,7 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
         assert_eq!(reopened[8], final_step);
         assert_eq!(
             reopened[9]["content"][0]["text"],
-            "<lattice-context channel=\"ipc\">\ncontinue after restart\n</lattice-context>"
+            "<lattice-context channel=\"cli\">\ncontinue after restart\n</lattice-context>"
         );
         let mut watcher = support::Watcher::open(&world, spec.step_timeout(), sid);
         let view = watcher.initial();
@@ -245,7 +245,9 @@ fn interactions_replays_thoughts_and_two_tool_results_after_backend_restart() {
             view.head.as_ref().unwrap().provider.as_deref(),
             Some("interactions-fixture")
         );
-        let user = view.turn_start_node(2).unwrap();
+        let user = view
+            .turn_unit_start(second.accepted_turn_id().unwrap())
+            .unwrap();
         let history = support::history(&world, spec.step_timeout(), sid, user, 100).unwrap();
         assert_eq!(
             history,
@@ -661,7 +663,7 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
         assert_eq!(reopened[7], final_item);
         assert_eq!(
             reopened[8]["content"][0]["text"],
-            "<lattice-context channel=\"ipc\">\ncontinue after restart\n</lattice-context>"
+            "<lattice-context channel=\"cli\">\ncontinue after restart\n</lattice-context>"
         );
         assert_eq!(captures[2].raw["prompt_cache_key"], sid);
         assert_eq!(
@@ -675,7 +677,9 @@ fn responses_replays_phase_reasoning_and_two_tool_results_after_backend_restart(
             view.head.as_ref().unwrap().provider.as_deref(),
             Some("responses-fixture")
         );
-        let current_user = view.turn_start_node(2).unwrap();
+        let current_user = view
+            .turn_unit_start(second.accepted_turn_id().unwrap())
+            .unwrap();
         let history =
             support::history(&world, spec.step_timeout(), sid, current_user, 100).unwrap();
         assert_eq!(
@@ -887,7 +891,7 @@ fn responses_failures_preserve_usage_and_incomplete_saves_only_valid_replies() {
             .filter(|entry| entry.step().is_some())
             .collect::<Vec<_>>();
         assert_eq!(steps.len(), 1);
-        assert_eq!(steps[0].raw["content"].get("reply"), Some(&Value::Null));
+        assert!(steps[0].raw.get("reply").is_none_or(Value::is_null));
         let detail = send
             .run_command(&[
                 "--json",
@@ -2049,12 +2053,12 @@ fn same_protocol_provider_switch_preserves_tool_ids_and_restores_source_reasonin
         assert_eq!(restored.as_array().unwrap().len(), 5);
         assert_eq!(
             restored[1]["content"],
-            "<lattice-context channel=\"ipc\">\nread notes\n</lattice-context>"
+            "<lattice-context channel=\"cli\">\nread notes\n</lattice-context>"
         );
         assert_eq!(restored[2]["reasoning_content"], "source-a-reasoning");
         assert_eq!(
             restored[4]["content"],
-            "<lattice-context channel=\"ipc\">\nreturn to source\n</lattice-context>"
+            "<lattice-context channel=\"cli\">\nreturn to source\n</lattice-context>"
         );
         for excluded in [
             "source-b-reasoning",

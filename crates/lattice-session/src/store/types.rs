@@ -295,6 +295,7 @@ pub struct FeedInput {
     pub channel: Channel,
     pub input: super::TurnInput,
     pub accepted_at: Timestamp,
+    pub expected_position: Option<NodeId>,
 }
 
 /// 显式追加一条批量上下文操作（不开启 Turn）。
@@ -305,6 +306,7 @@ pub struct ApplyContextOp {
     pub op: ContextOp,
     pub blobs: std::collections::BTreeMap<[u8; 32], Vec<u8>>,
     pub accepted_at: Timestamp,
+    pub expected_position: Option<NodeId>,
 }
 
 impl ApplyContextOp {
@@ -321,12 +323,19 @@ impl ApplyContextOp {
             op,
             blobs: std::collections::BTreeMap::new(),
             accepted_at,
+            expected_position: None,
         }
     }
 
     /// 附加本次操作中 `ReplaceInput` 引用的新增图片字节。
     pub fn with_blobs(mut self, blobs: std::collections::BTreeMap<[u8; 32], Vec<u8>>) -> Self {
         self.blobs = blobs;
+        self
+    }
+
+    /// 指定写入前期望的会话当前位置基线。
+    pub fn with_expected_position(mut self, expected_position: Option<NodeId>) -> Self {
+        self.expected_position = expected_position;
         self
     }
 }
@@ -341,6 +350,7 @@ pub struct TriggerTurn {
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
     pub settings_version: super::SettingsVersion,
+    pub expected_position: Option<NodeId>,
 }
 
 /// 原子投喂 `1..=N` 条上下文输入并触发一轮模型推理。
@@ -354,6 +364,7 @@ pub struct AcceptTurn {
     pub config: FrozenTurnConfig,
     pub accepted_at: Timestamp,
     pub settings_version: super::SettingsVersion,
+    pub expected_position: Option<NodeId>,
 }
 #[derive(Debug, Clone, PartialEq)]
 pub enum AcceptedTurn {
@@ -513,7 +524,7 @@ pub struct SessionUsage {
 #[serde(deny_unknown_fields)]
 pub struct TurnUsageRow {
     pub turn_id: TurnId,
-    pub ordinal: u64,
+    pub start_node: NodeId,
     pub provider: ProviderId,
     pub model: ModelId,
     pub usage: UsageSummary,
@@ -524,6 +535,7 @@ pub struct TurnDetail {
     pub turn_id: TurnId,
     pub session_id: SessionId,
     pub start_node: NodeId,
+    /// 同一次 `submit` 写事务内随本轮一并写入的输入节点（独立 `trigger` 为空），不代表本轮独占的模型上下文。
     pub input_nodes: Vec<NodeId>,
     pub agent_name: AgentName,
     pub accepted_at: Timestamp,
@@ -585,25 +597,28 @@ pub struct SlotDetail {
     pub reason: Option<SlotReason>,
     pub material: MaterialSummary,
 }
-// 保持对话条目变体直接承载节点与步骤视图，与 IPC/存储合同字段形状一致。
+// 保持对话条目变体直接承载扁平视图数据，与 IPC/存储合同字段形状一致，不暴露物理存储类型。
 #[allow(clippy::large_enum_variant)]
 #[derive(Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ConversationEntry {
     Input {
         node: NodeId,
-        content: Node,
+        accepted_at: Timestamp,
+        input: ContextInput,
     },
     ContextOp {
         node: NodeId,
-        content: Node,
+        accepted_at: Timestamp,
+        op: ContextOp,
     },
     Step {
         node: NodeId,
-        content: Node,
         step: StepDetail,
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        ordinal: Option<u64>,
+        agent_name: Option<AgentName>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reply: Option<StepContent>,
         retries: Vec<RetryNotice>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         summary: Option<TurnSummary>,
@@ -618,11 +633,10 @@ impl ConversationEntry {
         }
     }
 
-    pub fn content(&self) -> &Node {
+    pub fn turn_id(&self) -> Option<TurnId> {
         match self {
-            Self::Input { content, .. }
-            | Self::ContextOp { content, .. }
-            | Self::Step { content, .. } => content,
+            Self::Step { step, .. } => Some(step.key.turn_id),
+            Self::Input { .. } | Self::ContextOp { .. } => None,
         }
     }
 }
@@ -630,7 +644,9 @@ impl ConversationEntry {
 pub struct SessionView {
     pub session: SessionRecord,
     pub current_agent: Option<AgentName>,
+    pub settings: super::SessionSettings,
     pub entries: Vec<ConversationEntry>,
+    pub has_more: bool,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Page<T, C> {
@@ -740,6 +756,12 @@ pub enum StoreError {
     BindingMismatch { session_id: SessionId },
     #[error("session settings changed: {session_id}")]
     SettingsChanged { session_id: SessionId },
+    #[error("会话当前位置已变更：{session_id}（期望 @{}，实际 @{}）", .expected.0, .actual.0)]
+    PositionChanged {
+        session_id: SessionId,
+        expected: NodeId,
+        actual: NodeId,
+    },
     #[error("sequence exhausted: {kind}")]
     SequenceExhausted { kind: &'static str },
     #[error("writes disabled; close and reopen the database")]

@@ -98,7 +98,7 @@ fn provider_failure(name: &str, test: &str, script: SseScript, partial: bool) {
             .find(|entry| entry.step().is_some())
             .expect("即使尝试失败，预留的步骤条目也必须持久化");
         require(
-            outcome.reply_text().is_empty() && entry.raw["content"]["reply"].is_null(),
+            outcome.reply_text().is_empty() && entry.raw.get("reply").is_none_or(Value::is_null),
             "失败尝试不得产生完整回复",
         )?;
         // 停止尝试的半截文字不持久化；只从本次连接收到的实时文字证明输出。
@@ -311,7 +311,7 @@ fn reported_usage_survives_failed_attempt_and_retry_without_partial_reply() {
         )?;
         let entries = outcome.entries();
         let entry = entries.iter().find(|entry| entry.step().is_some()).unwrap();
-        let reply = &entry.raw["content"]["reply"];
+        let reply = &entry.raw["reply"]["assistant"];
         require(
             saved["steps"][0]["end"]["end"] == "continue"
                 && reply.is_object()

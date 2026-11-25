@@ -130,7 +130,7 @@ mod tests {
         ])
         .expect("构造含图轮次输入");
 
-        let channel = super::super::execute::default_submit_channel();
+        let channel = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
         store
             .accept_turn(
                 &lock,
@@ -143,6 +143,7 @@ mod tests {
                     config,
                     accepted_at: chrono::Utc::now(),
                     settings_version,
+                    expected_position: None,
                 },
             )
             .expect("接受含图轮次");

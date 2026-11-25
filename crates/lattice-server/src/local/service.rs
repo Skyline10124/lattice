@@ -295,18 +295,68 @@ impl Service {
         let (_owner, outcome) = self
             .submit_raw(request, SubmitSource::Ipc(submitter))
             .await?;
-        Ok(match outcome {
-            SubmitOutcome::Accepted(turn) => Acceptance::Accepted {
-                turn: TurnView::from(turn.as_ref()),
-            },
-            SubmitOutcome::ConfirmationUnknown {
-                turn_id,
-                session_id,
-                ..
-            } => Acceptance::ConfirmationUnknown {
-                turn_id,
-                session_id,
-            },
+        Ok(submit_outcome_to_acceptance(outcome))
+    }
+
+    async fn trigger_raw(
+        &self,
+        request: TriggerRequest,
+        source: SubmitSource,
+    ) -> Result<(Arc<Owner>, SubmitOutcome)> {
+        let owner = self
+            .backend
+            .claim(BackendOperation::Trigger { request, source })?;
+        match self.backend.wait_owner_reply(owner.clone()).await? {
+            OwnerReply::Submit(outcome) => Ok((owner, outcome)),
+            _ => Err(internal()),
+        }
+    }
+
+    pub(super) async fn trigger_ipc(
+        &self,
+        request: TriggerRequest,
+        submitter: UnixStream,
+    ) -> Result<Acceptance> {
+        let (_owner, outcome) = self
+            .trigger_raw(request, SubmitSource::Ipc(submitter))
+            .await?;
+        Ok(submit_outcome_to_acceptance(outcome))
+    }
+
+    /// 仅向会话追加用户输入而不触发轮次。
+    pub async fn feed(&self, request: FeedRequest) -> Result<FeedReply> {
+        let owner = self.backend.claim(BackendOperation::Feed { request })?;
+        match self.backend.wait_owner_reply(owner).await? {
+            OwnerReply::Feed(reply) => Ok(reply),
+            _ => Err(internal()),
+        }
+    }
+
+    /// 向会话追加批量上下文编辑操作。
+    pub async fn context_op(&self, request: ContextOpRequest) -> Result<ContextOpReply> {
+        let owner = self
+            .backend
+            .claim(BackendOperation::ContextOp { request })?;
+        match self.backend.wait_owner_reply(owner).await? {
+            OwnerReply::ContextOp(reply) => Ok(reply),
+            _ => Err(internal()),
+        }
+    }
+
+    /// 只读检视会话在当前位置或指定节点的有效模型上下文统计。
+    pub async fn inspect(
+        &self,
+        session_id: SessionId,
+        position: Option<lattice_session::store::NodeId>,
+    ) -> Result<InspectReply> {
+        let api = self.backend.optional_store().await?.ok_or_else(not_found)?;
+        let (resolved_position, inspection) = api
+            .read(move |read| read.inspect_context(session_id, position))
+            .await?;
+        Ok(InspectReply {
+            session_id,
+            position: resolved_position,
+            inspection,
         })
     }
 
@@ -315,6 +365,24 @@ impl Service {
         let session_id = request.session;
         let turn_id = request.turn_id;
         let (owner, outcome) = self.submit_raw(request, SubmitSource::InProcess).await?;
+        self.in_process_turn_from_outcome(session_id, turn_id, owner, outcome)
+    }
+
+    /// 在不新增用户输入的前提下触发新轮次并返回只读观察句柄。
+    pub async fn trigger(&self, request: TriggerRequest) -> Result<InProcessTurn> {
+        let session_id = request.session;
+        let turn_id = request.turn_id;
+        let (owner, outcome) = self.trigger_raw(request, SubmitSource::InProcess).await?;
+        self.in_process_turn_from_outcome(session_id, turn_id, owner, outcome)
+    }
+
+    fn in_process_turn_from_outcome(
+        &self,
+        session_id: SessionId,
+        turn_id: TurnId,
+        owner: Arc<Owner>,
+        outcome: SubmitOutcome,
+    ) -> Result<InProcessTurn> {
         match outcome {
             SubmitOutcome::Accepted(_) => Ok(InProcessTurn::from_owner(
                 self.backend.clone(),
@@ -451,6 +519,22 @@ impl Service {
             }
         });
         (entered_rx, release_tx)
+    }
+}
+
+fn submit_outcome_to_acceptance(outcome: SubmitOutcome) -> Acceptance {
+    match outcome {
+        SubmitOutcome::Accepted(turn) => Acceptance::Accepted {
+            turn: TurnView::from(turn.as_ref()),
+        },
+        SubmitOutcome::ConfirmationUnknown {
+            turn_id,
+            session_id,
+            ..
+        } => Acceptance::ConfirmationUnknown {
+            turn_id,
+            session_id,
+        },
     }
 }
 

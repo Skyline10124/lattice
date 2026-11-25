@@ -28,7 +28,7 @@ Session（会话）保存用户的一段持续对话，以 `SessionId` 标识，
 
 - **Input**：一条独立的用户输入事件，记录来源渠道（`Channel`）、接受时间与规范化后的有序文本/图片引用片段（`ContextInput`）；图片原始字节保存在 `blobs` 表，见[对话数据与模型投影](conversation.md#用户图片与单轮输入规范化)。`Input` 节点本身不持有 `turn_id`、也不绑定模型配置。
 - **ContextOp**：一条只追加的上下文编辑操作，记录操作渠道、接受时间与非空编辑列表（`ContextOp`），在归约模型有效上下文时按路径顺序作用于祖先节点，不修改或删除历史节点。
-- **Step**：这一轮的一个模型步骤。它记录所属 `turn_id`、步骤序号（`step_ordinal`）、各次模型请求（尝试）、得到的模型回复、回复发出的各个工具调用及其结果（每个调用一个槽位）、这一步怎么结束，以及最后一次推进的时间。每个 Turn 的起始步骤（`step_ordinal == 0`）携带不可变的 `turn_start` 元数据（`TurnStartMeta`）：接受时间、agent 名、模型、provider、推理档位、执行限制、配置表内容摘要、触发渠道（`trigger_channel`）与本轮认领的前置输入节点列表（`input_nodes`）；`step_ordinal > 0` 不携带 `turn_start`。
+- **Step**：这一轮的一个模型步骤。它记录所属 `turn_id`、步骤序号（`step_ordinal`）、各次模型请求（尝试）、得到的模型回复、回复发出的各个工具调用及其结果（每个调用一个槽位）、这一步怎么结束，以及最后一次推进的时间。每个 Turn 的起始步骤（`step_ordinal == 0`）携带不可变的 `turn_start` 元数据（`TurnStartMeta`）：接受时间、agent 名、模型、provider、推理档位、执行限制、配置表内容摘要、触发渠道（`trigger_channel`）与同一次 `submit` 写事务内随本轮一并写入的输入节点列表（`input_nodes`，独立 `trigger` 为空，不代表本轮独占的模型上下文）；`step_ordinal > 0` 不携带 `turn_start`。
 
 每个 Session 建立时写入根节点 `0`：它没有内容、不属于任何 Turn，代表空对话，树始终只有这一个根。`Input` 与 `ContextOp` 记录父节点；`Step` 节点另记所属 `turn_id` 与步骤序号。节点身份 NodeId 是每个 Session 内单调递增的 `u64`，写入节点时分配，根节点之后的首个节点为 `1`，父节点序号恒小于子节点；跨 Session 引用写作 `(SessionId, seq)`，用户可以直接输入序号。**当前位置**是 Session 记录中的一个 NodeId：新节点以当前位置为父，写入后当前位置前移到新节点。
 
@@ -80,7 +80,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 会话库对路径的读取分为两条职责独立的路径（[ADR 0014](../../adr/0014-model-context-domain.md)）：
 
 - **原始路径读路径**（面向人类与审计）：`view`、`history`、`entry`、`log`、`usage`、`turn_detail` 直接沿当前位置或指定父链读取原始历史节点，不经上下文归约。
-- **有效模型上下文读路径**（面向模型请求）：`effective_context` 与 `effective_context_with_pending` 沿根到指定节点的父链收集 `Input`、`ContextOp` 与已有完整回复的 `Step`，交由 `lattice_context::resolve` 归约为 `EffectiveContext`，再经 `EffectiveContext::project()` 投影为发往模型网关的 `Vec<ConversationItem>`（每个存活的 `Input` 以 `<lattice-context channel="…">` 标签包裹）。没有回复的 Step 不进入模型上下文，根节点 `0` 不含内容。要让模型上下文与当前视图换到其他分叉上的对话，先 `rewind` 到那里；历史查询按 `before` 的父链读取，不受当前位置限制，见[观察与重连](recovery.md#观察与重连)。
+- **有效模型上下文读路径**（面向模型请求与 `inspect` 检查）：`effective_context`、`effective_context_with_pending` 与 `inspect_context` 沿根到指定节点的父链收集 `Input`、`ContextOp` 与已有完整回复的 `Step`，交由 `lattice_context::resolve` / `lattice_context::inspect` 归约为 `EffectiveContext` 或 `ContextInspection`，再经 `EffectiveContext::project()` 投影为发往模型网关的 `Vec<ConversationItem>`（每个存活的 `Input` 以 `<lattice-context channel="…">` 标签包裹）。没有回复的 Step 不进入模型上下文，根节点 `0` 不含内容。要让模型上下文与当前视图换到其他分叉上的对话，先 `rewind` 到那里；历史查询按 `before` 的父链读取，不受当前位置限制，见[观察与重连](recovery.md#观察与重连)。
 
 `rewind N` 只有一种语义：把当前位置移到节点 N 本身，下一次提交的新节点以 N 为父。它只移动这个指针，不在树上写入节点：对树的操作不进入树的记录。改写某条用户输入就是退回到它的父节点再发送，改写第一条消息就是 `rewind 0`。退回到一个没有回复的 Step，与退回到它的父节点，发给模型的上下文相同。
 
@@ -88,7 +88,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 ### 组件与接口
 
-后台 API 分为三类：命令改变会话或执行（`configure`、`submit`、`cancel`、`rewind`），视图推送会话现在的样子（`watch`），查询读取已写入的事实（`head`、`history`、`turn`、`list`、`log`、`usage`）。LocalClient 把它们交给前端。一次提交经 `LocalTurn` 进行：它是这次提交的具体句柄，保留原请求身份，处理接受回执、取消意图与退出交接；它不是第二个持久 Turn，也不拥有后台执行。前端持有句柄、消费视图，后台的 Owner 与 TurnCoordinator 分别监督操作和推进持久执行。
+后台 API 分为三类：命令改变会话或执行（`configure`、`feed`、`context_op`、`trigger`、`submit`、`cancel`、`rewind`），视图推送会话现在的样子（`watch`），查询读取已写入的事实（`head`、`history`、`inspect`、`turn`、`list`、`log`、`usage`）。LocalClient 把它们交给前端。一次提交或独立触发经 `LocalTurn` 进行：它是这次提交的具体句柄，保留原请求身份，处理接受回执、取消意图与退出交接；它不是第二个持久 Turn，也不拥有后台执行。前端持有句柄、消费视图，后台的 Owner 与 TurnCoordinator 分别监督操作和推进持久执行。
 
 | 场景中的角色 | 负责的工作与交接 |
 | --- | --- |
@@ -130,7 +130,7 @@ Turn 没有单独保存的结局，也没有单独的结束节点。它的结局
 
 E2E 崩溃场景在每个提交点 SIGKILL 后重开，先不做任何写入，核验：每个 Step、尝试和槽位停在崩溃前最后提交的阶段，读出的结论符合[预留、progress 与结论](#预留progress-与结论)的表；一个 Turn 中除最后一个 Step 外都以 `Continue` 关闭；`TurnSummary` 与最后一个 Step 的结论一致。随后核验 `send` 与 `rewind` 直接成功，旧 Turn 的节点保持原样；有 Owner 执行的 Turn 存在时 `send` 与 `rewind` 返回 Busy。
 
-观察场景核验：中途开始的观察、变慢的观察者、空闲时 `rewind` 替换路径、Turn 关闭与最后一次推送同时就绪，各情况下观察者最后持有的条目与关闭后用历史查询重读的一致，并核验上文的段列表一致性；实时观察与重新打开会话看到的条目相同，包括重试提示；执行者消失后重新打开，会话头直接说明没有 Owner。历史查询的页边界落在轮次边界之前（首个前置输入与 `Step 0` 成完整轮次单元，轮次序号记在 `Step 0` 上并与从根数起的结果相同）。会话设置场景核验：原 `agent.toml` 修改或删除后，已有会话仍按已保存的会话设置执行；`configure` 修改模型或档位后重新打开会话，沿用当前会话设置的模型与档位；`rewind` 不改变会话设置与当前 agent；草稿会话逾期无观察者时被删除，有观察者或已接受过一轮的会话保留；前端的环境与后台启动时不同时，后台继续使用启动时的配置。提交场景覆盖[请求身份与找回](recovery.md#请求身份与找回)表中的每一行，以及接受结果不明时按 TurnId 查询找回。CLI 场景核验 `--json` 只出现八种记录，`send` 第一条是写明身份的 `submit`，按需输出 `configure` 记录，此后恰好有一条同一 TurnId 的 `submit` 回执，`session send --json` 只输出本轮，`session cancel <SESSION_ID>` 取消正在执行的一轮、没有时报告无可取消。
+观察场景核验：中途开始的观察、变慢的观察者、空闲时 `rewind` 替换路径、`feed` / `context_op` 实时推送、Turn 关闭与最后一次推送同时就绪，各情况下观察者最后持有的条目与关闭后用历史查询重读的一致，并核验上文的段列表一致性；实时观察与重新打开会话看到的条目相同，包括重试提示；执行者消失后重新打开，会话头直接说明没有 Owner。历史查询的页边界落在轮次边界之前（紧邻 `Step 0` 之前的连续 `Input` / `ContextOp` 与该轮 `Step 0..=last_step` 成完整轮次单元，并由窗口头 `has_older` 与历史回复 `has_more` 显式告知是否还有更早历史）。会话设置场景核验：原 `agent.toml` 修改或删除后，已有会话仍按已保存的会话设置执行；`configure` 修改模型或档位后重新打开会话，沿用当前会话设置的模型与档位；`rewind` 不改变会话设置与当前 agent；草稿会话逾期无观察者时被删除，有观察者或已写入过节点（含 `feed`、`context_op`、`submit`、`trigger`）的会话保留；前端的环境与后台启动时不同时，后台继续使用启动时的配置。提交场景覆盖[请求身份与找回](recovery.md#请求身份与找回)表中的每一行，以及接受结果不明时按 TurnId 查询找回。CLI 场景核验 `--json` 只出现八种记录，`send` 第一条是写明身份的 `submit`，按需输出 `configure` 记录，此后恰好有一条同一 TurnId 的 `submit` 回执，单轮跟随模式（`session send --json` 与 `session turn --follow --json`）只输出归属本轮的 `Step` 条目，`session cancel <SESSION_ID>` 取消正在执行的一轮、没有时报告无可取消。
 
 纯文档修订静态核对职责、流程、条款承接、数值来源、引用和差异；语义审阅须能复述提交、并行观察、结果取得、退回分叉及执行者消失后的结局，链接检查不能代替它。实际测试和未验证范围记录在对应任务中。
 

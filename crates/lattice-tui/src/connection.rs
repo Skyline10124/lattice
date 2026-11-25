@@ -88,7 +88,7 @@ fn outcome_word(outcome: &PublicTurnOutcome) -> &'static str {
     }
 }
 
-/// 接受结果不明后按 TurnId 查到这一轮已被接受。直接收到的接受回执由助手标题线表达，不推入。
+/// 接受结果不明后按 TurnId 查到这一轮已被接受。
 pub(crate) fn recovered_status(turn_id: TurnId) -> Status {
     status(NoticeLevel::Info, recovered_notice(turn_id))
 }
@@ -109,8 +109,10 @@ pub(crate) fn submit_configuring_status() -> Status {
 pub(crate) enum KeptInput {
     /// 放回了输入区。
     Restored,
-    /// 没有放回：输入区已有用户的草稿；原输入在输入历史中。
+    /// 没有放回：输入区已有用户的草稿；原输入仅含文字且在输入历史中。
     History,
+    /// 没有放回：输入区已有用户的草稿；原图文中的文字在输入历史中，随附图片未放回。
+    HistoryWithoutImages,
     /// 没有放回且没有文字历史：纯图片消息未覆盖新草稿；图片未放回。
     Discarded,
     /// 没有可归还到输入区的内容：本次提交不含输入区内容、已有过确定结果，或不是本客户端在等结果的提交。
@@ -121,6 +123,9 @@ fn history_hint(kept: KeptInput) -> &'static str {
     match kept {
         KeptInput::Restored | KeptInput::Nothing => "",
         KeptInput::History => "；原输入未放回，可按 Ctrl+↑ 从输入历史找回",
+        KeptInput::HistoryWithoutImages => {
+            "；原文字未放回，可按 Ctrl+↑ 从输入历史找回，随附图片未放回"
+        }
         KeptInput::Discarded => "；图片未放回",
     }
 }
@@ -131,7 +136,10 @@ pub(crate) fn not_accepted_status(turn_id: TurnId, kept: KeptInput) -> Status {
     let notice = not_accepted_notice(turn_id);
     let kept = match kept {
         KeptInput::Restored => "，输入已保留",
-        KeptInput::History | KeptInput::Discarded | KeptInput::Nothing => history_hint(kept),
+        KeptInput::History
+        | KeptInput::HistoryWithoutImages
+        | KeptInput::Discarded
+        | KeptInput::Nothing => history_hint(kept),
     };
     status(NoticeLevel::Error, format!("{notice}{kept}"))
 }
@@ -185,6 +193,12 @@ pub(crate) fn rejected_status(turn_id: TurnId, error: &LocalError, kept: KeptInp
     let text = if error.conflict == Some(lattice_local::ConflictReason::SettingsChanged) {
         format!(
             "请求 {} 被拒绝：会话设置已变更，请确认当前设置后重试{}",
+            turn_id,
+            history_hint(kept)
+        )
+    } else if error.conflict == Some(lattice_local::ConflictReason::PositionChanged) {
+        format!(
+            "请求 {} 被拒绝：会话位置已变更，请确认当前历史后重试{}",
             turn_id,
             history_hint(kept)
         )

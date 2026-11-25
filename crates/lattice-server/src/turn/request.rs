@@ -272,7 +272,7 @@ mod tests {
             .expect("创建测试会话");
 
         // 先完成一轮历史对话，验证预览与首步实际请求在非空历史链上同样一致。
-        let channel = super::super::execute::default_submit_channel();
+        let channel = lattice_context::Channel::parse("cli").expect("测试通道名 cli 应合法");
         let first_turn =
             lattice_conversation::TurnId::parse("00000000-0000-4000-8000-000000000011")
                 .expect("解析首轮 TurnId");
@@ -291,6 +291,7 @@ mod tests {
                     config: config.clone(),
                     accepted_at: chrono::Utc::now(),
                     settings_version,
+                    expected_position: None,
                 },
             )
             .expect("接受首轮测试请求");
@@ -372,6 +373,7 @@ mod tests {
                     config,
                     accepted_at: chrono::Utc::now(),
                     settings_version,
+                    expected_position: None,
                 },
             )
             .expect("接受第二轮测试请求");
@@ -390,7 +392,7 @@ mod tests {
             preview, persisted,
             "接受前由 first_step_chat_request 生成的预览必须与接受后首步实际请求完全相等"
         );
-        // 核验首轮文本与第二轮图文交错输入均已通过通道边界投影为 `<lattice-context channel="ipc">`。
+        // 核验首轮文本与第二轮图文交错输入均已通过通道边界投影为 `<lattice-context channel="cli">`。
         let first_user_text = match &persisted.messages[1] {
             ConversationItem::Message(msg) => match &msg.parts[0].semantic {
                 lattice_conversation::MessageSemantic::Text { text } => text.as_str(),
@@ -400,8 +402,8 @@ mod tests {
         };
         assert_eq!(
             first_user_text,
-            "<lattice-context channel=\"ipc\">\n先看上一轮文本\n</lattice-context>",
-            "投影后的用户消息必须携带默认 ipc 通道标记"
+            "<lattice-context channel=\"cli\">\n先看上一轮文本\n</lattice-context>",
+            "投影后的用户消息必须携带显式 cli 通道标记"
         );
     }
 }
