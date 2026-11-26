@@ -4,17 +4,28 @@ on:
   # against the release binary), so it does not gate every PR — the ordinary
   # CI lane does. It runs nightly for release evidence and on demand.
   workflow_dispatch:
+    inputs:
+      publish_nightly:
+        description: "rollout 通过后更新 nightly 预发布（只在 main 上生效）"
+        type: boolean
+        default: false
   schedule:
     - cron: "0 3 * * *"
 
 permissions:
   contents: read
 
+# 同一分支上的运行依次执行、按触发顺序完成，较早的提交不会覆盖较新的 nightly。
+concurrency:
+  group: full-gate-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   full-gate:
     # Linux is LATTICE's sole supported host. The rollout gate records host
     # capabilities without requiring virtualization.
-    runs-on: ubuntu-latest
+    # 固定镜像版本：nightly 发布的就是这里构建的 release 二进制，换新镜像会抬高它们要求的 glibc 版本。
+    runs-on: ubuntu-24.04
     # See ci.yml: debug test binaries overrun the hosted runner's disk and lld
     # dies with SIGBUS mid-link. Job-level so every step shares one profile.
     # `cargo xtask rollout` builds its own --locked --release artifact, which
@@ -53,6 +64,17 @@ jobs:
       - run: cargo xtask crate-boundary
       - name: alpha rollout (locked release binary, JSON record)
         run: cargo xtask rollout --channel alpha
+      # rollout 通过才会走到这一步：把它构建并核验过 sha256 的两个 release 二进制与记录交给 publish-nightly。
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nightly-binaries
+          path: |
+            target/release/lattice
+            target/release/lattice-daemon
+            target/rollout/alpha-latest.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: true
       # rollout 在被拒绝或失败时也会写出记录，因此无条件上传 target/rollout/
       #（含记录与 harness 失败 bundle）。
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -67,3 +89,77 @@ jobs:
           name: harness-failures-full-gate
           path: target/harness-failures/
           if-no-files-found: ignore
+
+  publish-nightly:
+    needs: full-gate
+    runs-on: ubuntu-24.04
+    # 只有这个 job 持有写权限；它不检出、不运行仓库代码，只核对 rollout 记录、打包并更新 Release。
+    permissions:
+      contents: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      ASSET: lattice-nightly-x86_64-unknown-linux-gnu.tar.gz
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: nightly-binaries
+          path: dist
+      # 发布的必须是 rollout 核验过的那两个文件：结论、提交或 sha256 任一不符即失败。
+      - name: 核对 rollout 记录并打包
+        run: |
+          set -euo pipefail
+          record=dist/rollout/alpha-latest.json
+          verdict=$(jq -r .verdict "$record")
+          commit=$(jq -r .commit_sha "$record")
+          if [ "$verdict" != pass ] || [ "$commit" != "$GITHUB_SHA" ]; then
+            echo "::error::rollout 记录不能用于发布（结论：$verdict，记录提交：$commit，本次运行：$GITHUB_SHA）"
+            exit 1
+          fi
+          mkdir pkg
+          for name in lattice lattice-daemon; do
+            expected=$(jq -r --arg name "$name" '.artifacts[] | select(.name == $name) | .sha256' "$record")
+            actual=$(sha256sum "dist/release/$name" | cut -d ' ' -f 1)
+            if [ "$expected" != "$actual" ]; then
+              echo "::error::$name 的 sha256 与 rollout 记录不符（记录：${expected:-无}，实际：$actual）"
+              exit 1
+            fi
+            # 上传产物不保留可执行位，打包前恢复。
+            install -m 0755 "dist/release/$name" "pkg/$name"
+          done
+          tar -C pkg -czf "$ASSET" lattice lattice-daemon
+          (cd pkg && sha256sum lattice lattice-daemon) > SHA256SUMS
+          sha256sum "$ASSET" >> SHA256SUMS
+          cp "$record" rollout-record.json
+      # 只有 main 上的定时运行，或勾选了 publish_nightly 的手动运行才更新；其余运行只核对到打包为止。
+      - name: 更新 nightly 预发布
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'schedule' || inputs.publish_nightly)
+        run: |
+          set -euo pipefail
+          if gh release view nightly >/dev/null 2>&1; then
+            current=$(gh api "repos/$GH_REPO/git/ref/tags/nightly" --jq .object.sha 2>/dev/null || true)
+            assets=$(gh release view nightly --json assets --jq '[.assets[].name] | sort | join(" ")')
+            if [ "$current" = "$GITHUB_SHA" ] && [ "$assets" = "SHA256SUMS $ASSET rollout-record.json" ]; then
+              echo "nightly 已是 $GITHUB_SHA 的完整发布，跳过"
+              exit 0
+            fi
+            gh release delete nightly --yes --cleanup-tag
+          fi
+          # Release 已不在但标签残留时，先删标签再重建。
+          if gh api "repos/$GH_REPO/git/ref/tags/nightly" >/dev/null 2>&1; then
+            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly"
+          fi
+          short=${GITHUB_SHA:0:12}
+          day=$(date -u +%F)
+          {
+            echo "main@$short（$day UTC）的 nightly 构建，已通过 full-gate 的 alpha rollout，记录见附件 \`rollout-record.json\`。"
+            echo
+            echo "安装与升级见 [README 的「安装」](https://github.com/$GH_REPO#安装)。"
+          } > notes.md
+          gh release create nightly \
+            --target "$GITHUB_SHA" \
+            --prerelease \
+            --latest=false \
+            --title "nightly $day ($short)" \
+            --notes-file notes.md \
+            "$ASSET" SHA256SUMS rollout-record.json
