@@ -362,7 +362,16 @@ fn safe_validation_reason(error: &clap::Error) -> Option<String> {
 }
 
 pub(crate) fn parse_agent_name(value: &str) -> Result<lattice_local::AgentName, String> {
-    lattice_local::AgentName::parse(value).map_err(|_| "Agent 名称格式无效".to_owned())
+    lattice_local::AgentName::parse(value).map_err(|err| {
+        match err {
+            lattice_local::AgentNameError::Empty => "Agent 名称不能为空",
+            lattice_local::AgentNameError::TooLong => "Agent 名称长度不能超过 128 字节",
+            lattice_local::AgentNameError::ControlCharacter => "Agent 名称不能包含控制字符",
+            lattice_local::AgentNameError::Slash => "Agent 名称不能包含 '/'",
+            lattice_local::AgentNameError::DotComponent => "Agent 名称不能为 '.' 或 '..'",
+        }
+        .to_owned()
+    })
 }
 
 pub(crate) fn parse_provider_id(value: &str) -> Result<lattice_local::ProviderId, String> {
