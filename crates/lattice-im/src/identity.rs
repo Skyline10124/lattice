@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use lattice_ipc::{SessionId, TurnId};
+use lattice_ipc::{Channel, SessionId, TurnId};
 use serde::{Deserialize, Deserializer, Serialize, de};
 
 /// 验证 `<platform>:<id>` 形式的身份键字符串。
@@ -78,6 +78,15 @@ impl ChatKey {
         let (found_prefix, rest) = self.0.split_once(':')?;
         (found_prefix == prefix).then_some(rest)
     }
+}
+
+/// 将 Telegram 对话身份键映射为通道标识 `im/telegram:<chat_id>`。
+pub(crate) fn telegram_channel(chat: &ChatKey) -> Channel {
+    let chat_id = chat
+        .strip_platform("tg")
+        .expect("Telegram 对话身份键必须以 tg: 开头");
+    Channel::parse(&format!("im/telegram:{chat_id}"))
+        .expect("Telegram 通道标识 im/telegram:<chat_id> 必须合法")
 }
 
 define_identity_key!(
@@ -153,5 +162,13 @@ mod tests {
         let t2 = new_turn_id();
         assert_ne!(t1, t2);
         assert_eq!(t1.to_string().len(), 36);
+    }
+
+    #[test]
+    fn formats_telegram_channel_from_chat_key() {
+        let positive = ChatKey::from_platform_id("tg", "7001");
+        let negative = ChatKey::from_platform_id("tg", "-10099");
+        assert_eq!(telegram_channel(&positive).as_str(), "im/telegram:7001");
+        assert_eq!(telegram_channel(&negative).as_str(), "im/telegram:-10099");
     }
 }

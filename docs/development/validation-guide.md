@@ -34,9 +34,9 @@ status: active
 
 | 退出码 | 含义 |
 | --- | --- |
-| `0` | 命令成功。`run`、`session send` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；纯查询只表示读取成功，业务结局看 `TurnSummary`；`lattice im reload` 表示挂载结果为 `Mounted` 或 `Disabled`；`lattice im auth set\|remove\|status` 表示凭据读写或状态查询成功（即使随后挂载结果为 `Unmounted` 或 `Disabled`）；`daemon status` 在 `unconfirmed_operations == 0` 时返回 `0`（可选组件未挂载不影响后台健康退出码）；`lattice-daemon` 表示在途工作排空完成且无运行错误 |
+| `0` | 命令成功。`run`、`session send`、`session trigger` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；`session feed`、`session context-op` 与纯查询（含 `session inspect`）表示写入或读取成功（业务结局看 `TurnSummary`）；`lattice im reload` 表示挂载结果为 `Mounted` 或 `Disabled`；`lattice im auth set\|remove\|status` 表示凭据读写或状态查询成功（即使随后挂载结果为 `Unmounted` 或 `Disabled`）；`daemon status` 在 `unconfirmed_operations == 0` 时返回 `0`（可选组件未挂载不影响后台健康退出码）；`lattice-daemon` 表示在途工作排空完成且无运行错误 |
 | `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，后台未运行（`not_running`），`lattice im reload` 返回 `UsingPreviousConfiguration` 或 `Unmounted`，`daemon status`、`daemon stop` 读到非零 `unconfirmed_operations`（`daemon stop` 另在标准错误提示有未确认收尾的操作），以及其余行之外的后台与运行错误（如 `Busy`、`Stopping`、`Transport`） |
-| `2` | 使用错误或取消：参数错误（含 `lattice-daemon` 缺 `--state-root`、相对路径、无效或溢出的 `--drain-timeout`，`lattice daemon install` 找不到同目录有效用户可执行的 `lattice-daemon`、传入 `--json` 或可执行路径 / 状态根含无法写入 systemd unit 的字符，以及 `lattice im auth set\|remove` 传入不受支持的平台名或无效凭据文本），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`，以及这一轮 Cancelled |
+| `2` | 使用错误或取消：参数错误（含 `session send`/`run` 无 `--session` 传 `--expected-position`、`session context-op` 无编辑项或 `--image` 位置不当、`lattice-daemon` 缺 `--state-root`、相对路径、无效或溢出的 `--drain-timeout`，`lattice daemon install` 找不到同目录有效用户可执行的 `lattice-daemon`、传入 `--json` 或可执行路径 / 状态根含无法写入 systemd unit 的字符，以及 `lattice im auth set\|remove` 传入不受支持的平台名或无效凭据文本），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`（含 `position_changed` 与 `settings_changed`），以及这一轮 Cancelled |
 | `3` | `lattice-daemon` 取不到 `owner.lock`（状态根已被另一个后台占用，能连上已发布 socket 时附对端进程号） |
 | `4` | `lattice-daemon` 排空超时，或排空期间收到 `SIGTERM`、`SIGINT`；在途操作停止写入，见[停止后台](../architecture/session/recovery.md#停止后台) |
 

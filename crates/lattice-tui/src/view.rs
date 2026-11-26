@@ -213,7 +213,6 @@ pub(crate) struct Transcript {
     editor_width: Option<u16>,
     anchors: Vec<(usize, crate::comment::Anchor, usize)>,
     ending_items: std::collections::HashMap<crate::comment::Location, usize>,
-    markers: Vec<comments::Marker>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -227,19 +226,105 @@ pub(crate) fn transcript_lines(app: &App, content_w: u16) -> Vec<Line<'static>> 
     render_transcript(app, content_w).lines
 }
 
+fn input_title(channel: Option<&lattice_local::Channel>) -> String {
+    match channel {
+        Some(ch) if ch.as_str() != "tui" => format!("USER · {ch}"),
+        _ => "USER".to_owned(),
+    }
+}
+
+fn short_sha256(bytes: &[u8; 32]) -> String {
+    format!(
+        "{:02x}{:02x}{:02x}{:02x}",
+        bytes[0], bytes[1], bytes[2], bytes[3]
+    )
+}
+
+fn format_context_edit(edit: &lattice_local::ContextEdit) -> String {
+    match edit {
+        lattice_local::ContextEdit::OmitNode { node } => format!("• 移出节点 @{}", node.0),
+        lattice_local::ContextEdit::ReplaceInput { node, message } => {
+            let mut text_bytes = 0usize;
+            let mut image_count = 0usize;
+            for part in &message.as_message().parts {
+                match &part.semantic {
+                    lattice_local::MessageSemantic::Text { text } => {
+                        text_bytes = text_bytes.saturating_add(text.len());
+                    }
+                    lattice_local::MessageSemantic::Image { .. } => {
+                        image_count = image_count.saturating_add(1);
+                    }
+                    lattice_local::MessageSemantic::Reasoning { .. }
+                    | lattice_local::MessageSemantic::ToolCall { .. } => {}
+                }
+            }
+            match (text_bytes > 0, image_count > 0) {
+                (true, true) => {
+                    format!(
+                        "• 替换输入 @{}（文本 {} B，图片 {} 张）",
+                        node.0, text_bytes, image_count
+                    )
+                }
+                (true, false) => format!("• 替换输入 @{}（文本 {} B）", node.0, text_bytes),
+                (false, true) => format!("• 替换输入 @{}（图片 {} 张）", node.0, image_count),
+                (false, false) => format!("• 替换输入 @{}", node.0),
+            }
+        }
+        lattice_local::ContextEdit::ReplaceStep { node, text } => {
+            format!("• 替换步骤 @{}（文本 {} B）", node.0, text.as_str().len())
+        }
+        lattice_local::ContextEdit::OmitInvocation { invocation } => {
+            format!("• 移出工具调用 {invocation}")
+        }
+        lattice_local::ContextEdit::ReplaceToolResult { invocation, text } => {
+            format!(
+                "• 替换工具结果 {invocation}（文本 {} B）",
+                text.as_str().len()
+            )
+        }
+        lattice_local::ContextEdit::StripReasoning { node } => {
+            format!("• 剥离推理内容 @{}", node.0)
+        }
+        lattice_local::ContextEdit::ReplaceImage {
+            node,
+            image,
+            text: None,
+        } => {
+            format!(
+                "• 移出图片 @{}（{} · {}）",
+                node.0,
+                image.media_type.extension(),
+                short_sha256(&image.sha256)
+            )
+        }
+        lattice_local::ContextEdit::ReplaceImage {
+            node,
+            image,
+            text: Some(text),
+        } => {
+            format!(
+                "• 替换图片为文本 @{}（{} · {} → {} B）",
+                node.0,
+                image.media_type.extension(),
+                short_sha256(&image.sha256),
+                text.as_str().len()
+            )
+        }
+    }
+}
+
 pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
     let mut lines = Vec::new();
     let mut owners = Vec::new();
     let mut anchors = Vec::new();
     let mut ending_items = std::collections::HashMap::new();
-    let mut markers = Vec::new();
     let mut cache = app.markdown_cache.borrow_mut();
     let mut assistant_header = false;
     let mut agent: Option<&str> = None;
     let mut turn: Option<lattice_local::TurnId> = None;
     let mut turn_node: Option<lattice_local::NodeId> = None;
-    let mut input_node: Option<lattice_local::NodeId> = None;
-    // 已经过的各轮首步节点与 agent，供被别的 USER 块隔开的步骤重画标题线。
+    let mut input_header: Option<(lattice_local::NodeId, &lattice_local::Channel)> = None;
+    // 已经过的各轮首步节点与 agent，供被别的 USER/CONTEXT 块隔开的步骤重画标题线。
     let mut turns = std::collections::HashMap::new();
     if let Some((id, banner)) = &app.banner {
         for text in banner {
@@ -251,15 +336,26 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         let block = &entry.block;
         let start = lines.len();
         match block {
-            Block::Input { node } => {
-                input_node = Some(*node);
+            Block::Input { node, channel } => {
+                input_header = Some((*node, channel));
                 turn = None;
                 turn_node = None;
                 agent = None;
             }
-            Block::ContextOp { .. } => {}
-            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。若中间隔开了别的 USER 块，
-            // 另起标题线，不显得挂在那个 USER 之下。
+            Block::ContextOp { node, op } => {
+                turn = None;
+                turn_node = None;
+                agent = None;
+                assistant_header = false;
+                let title = format!("CONTEXT · {}", op.channel());
+                transcript_title(&mut lines, &title, Role::DimMeta, Some(*node), content_w);
+                for edit in op.edits() {
+                    let summary = format_context_edit(edit);
+                    lines.extend(body(&summary, content_w, role_style(Role::DimMeta)));
+                }
+            }
+            // 助手段标题线在这一轮第一个 Step 条目之前；其后的步骤沿用它。若中间隔开了别的 USER/CONTEXT 块，
+            // 另起标题线，不显得挂在那个块之下。
             Block::Step {
                 node,
                 key,
@@ -301,7 +397,11 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 }
             }
             Block::User(text) => {
-                transcript_title(&mut lines, "USER", Role::User, input_node.take(), content_w);
+                let (node, channel) = input_header
+                    .take()
+                    .map_or((None, None), |(n, ch)| (Some(n), Some(ch)));
+                let title = input_title(channel);
+                transcript_title(&mut lines, &title, Role::User, node, content_w);
                 lines.extend(
                     cache
                         .render(text, content_w)
@@ -310,22 +410,13 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
                 );
                 assistant_header = false;
             }
-            Block::CommentedUser(message) => {
-                transcript_title(&mut lines, "USER", Role::User, input_node.take(), content_w);
-                comments::markers(
-                    &mut lines,
-                    &mut markers,
-                    comments::identified(&message.comments, entry.id),
-                    content_w,
-                );
-                if !message.text.is_empty() {
-                    lines.extend(
-                        cache
-                            .render(&message.text, content_w)
-                            .iter()
-                            .map(|row| row.line.clone()),
-                    );
-                }
+            Block::SentComments(comments) => {
+                let (node, channel) = input_header
+                    .take()
+                    .map_or((None, None), |(n, ch)| (Some(n), Some(ch)));
+                let title = input_title(channel);
+                transcript_title(&mut lines, &title, Role::User, node, content_w);
+                comments::render_sent_cards(&mut lines, comments, content_w);
                 assistant_header = false;
             }
             Block::HistoryAssistant(text) => {
@@ -418,8 +509,8 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
             row: row.saturating_sub(start),
         }));
     }
+    let wait_start = lines.len();
     if let Some(wait_text) = app.submission_wait_text() {
-        let wait_start = lines.len();
         separate(&mut lines);
         let text = format!("{} {wait_text}", symbol(SymbolKind::Running));
         lines.extend(body(&text, content_w, role_style(Role::DimMeta)));
@@ -436,9 +527,8 @@ pub(crate) fn render_transcript(app: &App, content_w: u16) -> Transcript {
         editor_cursor: None,
         anchors,
         ending_items,
-        markers,
     };
-    comments::attach(app, &mut transcript, content_w);
+    comments::attach(app, &mut transcript, wait_start, content_w);
     transcript
 }
 

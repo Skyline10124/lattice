@@ -51,7 +51,7 @@ fn seconds(value: &str, unit: f64) -> Option<Duration> {
     Some(Duration::try_from_secs_f64(number * unit).unwrap_or(Duration::MAX))
 }
 
-const PAYLOAD_TOO_LARGE_SUFFIX: &str = "；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+const PAYLOAD_TOO_LARGE_SUFFIX: &str = "；目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
 
 /// 非 2xx 响应的类型化错误：一行诊断、是否可重试、建议等待。
 /// 正文与请求标识由 client 在调用前按凭据脱敏。
@@ -509,7 +509,7 @@ mod tests {
 
     #[test]
     fn status_413_is_never_retryable_and_preserves_bounded_suffix() {
-        let suffix = "；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let suffix = "；目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
         let body = r#"{"error":{"message":"Request payload size exceeds the limit: 20971520 bytes.","status":"INVALID_ARGUMENT"}}"#;
         let expected_line = format!(
             "HTTP 413 INVALID_ARGUMENT: Request payload size exceeds the limit: 20971520 bytes.{suffix}"

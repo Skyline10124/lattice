@@ -269,6 +269,109 @@ pub async fn run_session_prompt(
     )
     .await
 }
+
+pub async fn run_session_trigger(
+    api: &LocalClient,
+    args: super::session::TriggerArgs,
+    verbose: bool,
+    json: bool,
+) -> Result<std::process::ExitCode> {
+    run_session_trigger_with_io(
+        api,
+        args,
+        verbose,
+        json,
+        None,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    )
+    .await
+}
+
+async fn prepare_workspace_or_interrupt(
+    workspace_override: Option<std::path::PathBuf>,
+    signal: &mut tokio::signal::unix::Signal,
+) -> Option<std::result::Result<std::path::PathBuf, LocalError>> {
+    let prepare = async {
+        if let Some(path) = workspace_override {
+            return Ok::<_, LocalError>(path);
+        }
+        std::env::current_dir().map_err(|_| {
+            LocalError::new(
+                LocalErrorKind::Internal,
+                "operation failed; inspect durable state",
+            )
+        })
+    };
+    tokio::select! {
+        biased;
+        _ = signal.recv() => None,
+        result = prepare => Some(result),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn configure_session_if_needed(
+    api: &LocalClient,
+    configure_session: Option<ConfigureSession>,
+    workspace: &std::path::Path,
+    agent: Option<AgentName>,
+    model: Option<ModelRef>,
+    effort: Option<Effort>,
+    turn_id: TurnId,
+    signal: &mut tokio::signal::unix::Signal,
+    state: &mut RunRenderState,
+    out: &mut impl Write,
+    err: &mut impl Write,
+    verbose: bool,
+    json: bool,
+) -> Result<std::result::Result<Option<SessionHead>, std::process::ExitCode>> {
+    let Some(session) = configure_session else {
+        return Ok(Ok(None));
+    };
+    let session_id = session.id();
+    let configure_req = ConfigureRequest {
+        session,
+        workspace: workspace.to_path_buf(),
+        agent,
+        model,
+        effort,
+    };
+    let configure_result = configure_once_or_interrupt(api, configure_req, signal).await;
+    render_update(
+        &LocalUpdate::Configure {
+            session_id,
+            result: configure_result.clone(),
+        },
+        state,
+        out,
+        err,
+        verbose,
+        json,
+    )?;
+    match configure_result {
+        ConfigureResult::Configured { head, .. } => Ok(Ok(Some(head))),
+        ConfigureResult::Rejected { error } => Ok(Err(finish_submit_receipt(
+            turn_id,
+            SubmissionResult::Rejected { error },
+            state,
+            out,
+            err,
+            verbose,
+            json,
+        )?)),
+        ConfigureResult::Unknown { .. } => Ok(Err(finish_submit_receipt(
+            turn_id,
+            SubmissionResult::NotAccepted,
+            state,
+            out,
+            err,
+            verbose,
+            json,
+        )?)),
+    }
+}
+
 pub(super) async fn run_session_prompt_with_io(
     api: &LocalClient,
     args: super::session::SendArgs,
@@ -298,19 +401,7 @@ pub(super) async fn run_session_prompt_with_io(
         json,
     )?;
     let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
-    let prepare = async {
-        if let Some(path) = workspace_override {
-            return Ok::<_, LocalError>(path);
-        }
-        std::env::current_dir().map_err(|_| {
-            LocalError::new(
-                LocalErrorKind::Internal,
-                "operation failed; inspect durable state",
-            )
-        })
-    };
-    let prepared = tokio::select! {biased;_=signal.recv()=>None,result=prepare=>Some(result)};
-    let workspace = match prepared {
+    let workspace = match prepare_workspace_or_interrupt(workspace_override, &mut signal).await {
         Some(Ok(value)) => value,
         result => {
             let result = match result {
@@ -343,7 +434,7 @@ pub(super) async fn run_session_prompt_with_io(
         planned_refs.push(image);
         plan_parts.push(UserInputPart::Image { image });
     }
-    let channel = Channel::parse("cli").expect("固定通道名 cli 应合法");
+    let channel = args.channel;
     let plan = PlannedTurnRequest::single(
         id,
         session_id,
@@ -351,7 +442,7 @@ pub(super) async fn run_session_prompt_with_io(
         channel.clone(),
         plan_parts,
         None,
-        None,
+        args.expected_position,
     );
     if let Err(error) = lattice_local::check_turn_plan(&plan) {
         return finish_submit_receipt(
@@ -371,51 +462,24 @@ pub(super) async fn run_session_prompt_with_io(
     } else {
         None
     };
-    if let Some(session) = configure_session {
-        let configure_req = ConfigureRequest {
-            session,
-            workspace: workspace.clone(),
-            agent: args.agent,
-            model: args.model,
-            effort: args.effort,
-        };
-        let configure_result = configure_once_or_interrupt(api, configure_req, &mut signal).await;
-        render_update(
-            &LocalUpdate::Configure {
-                session_id,
-                result: configure_result.clone(),
-            },
-            &mut state,
-            out,
-            err,
-            verbose,
-            json,
-        )?;
-        match configure_result {
-            ConfigureResult::Configured { .. } => {}
-            ConfigureResult::Rejected { error } => {
-                return finish_submit_receipt(
-                    id,
-                    SubmissionResult::Rejected { error },
-                    &mut state,
-                    out,
-                    err,
-                    verbose,
-                    json,
-                );
-            }
-            ConfigureResult::Unknown { .. } => {
-                return finish_submit_receipt(
-                    id,
-                    SubmissionResult::NotAccepted,
-                    &mut state,
-                    out,
-                    err,
-                    verbose,
-                    json,
-                );
-            }
-        }
+    if let Err(exit_code) = configure_session_if_needed(
+        api,
+        configure_session,
+        &workspace,
+        args.agent,
+        args.model,
+        args.effort,
+        id,
+        &mut signal,
+        &mut state,
+        out,
+        err,
+        verbose,
+        json,
+    )
+    .await?
+    {
+        return Ok(exit_code);
     }
     let mut parts = Vec::new();
     if let Some(text) = args.prompt {
@@ -437,8 +501,94 @@ pub(super) async fn run_session_prompt_with_io(
             }
         }
     }
-    let request = TurnRequest::single(id, session_id, workspace, channel, parts, None, None);
+    let request = TurnRequest::single(
+        id,
+        session_id,
+        workspace,
+        channel,
+        parts,
+        None,
+        args.expected_position,
+    );
     let turn = api.start_turn(request);
+    consume(turn, None, state, verbose, json, signal, out, err).await
+}
+
+pub(super) async fn run_session_trigger_with_io(
+    api: &LocalClient,
+    args: super::session::TriggerArgs,
+    verbose: bool,
+    json: bool,
+    workspace_override: Option<std::path::PathBuf>,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> Result<std::process::ExitCode> {
+    let session_id = match SessionId::parse(&args.session_id) {
+        Ok(id) => id,
+        Err(_) => api.resolve_session(&args.session_id).await?.session_id,
+    };
+    let id = lattice_local::new_turn_id();
+    let mut state = RunRenderState::default();
+    render_update(
+        &LocalUpdate::Submit {
+            update: SubmissionUpdate::Sending {
+                turn_id: id,
+                session_id,
+            },
+        },
+        &mut state,
+        out,
+        err,
+        verbose,
+        json,
+    )?;
+    let mut signal = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?;
+    let workspace = match prepare_workspace_or_interrupt(workspace_override, &mut signal).await {
+        Some(Ok(value)) => value,
+        result => {
+            let result = match result {
+                Some(Err(error)) => SubmissionResult::Rejected { error },
+                _ => SubmissionResult::NotAccepted,
+            };
+            return finish_submit_receipt(id, result, &mut state, out, err, verbose, json);
+        }
+    };
+    let configure_session = if args.agent.is_some() || args.model.is_some() || args.effort.is_some()
+    {
+        Some(ConfigureSession::Existing(session_id))
+    } else {
+        None
+    };
+    let expected_settings = match configure_session_if_needed(
+        api,
+        configure_session,
+        &workspace,
+        args.agent,
+        args.model,
+        args.effort,
+        id,
+        &mut signal,
+        &mut state,
+        out,
+        err,
+        verbose,
+        json,
+    )
+    .await?
+    {
+        Ok(Some(head)) => Some(head.settings_version),
+        Ok(None) => None,
+        Err(exit_code) => return Ok(exit_code),
+    };
+    let request = TriggerRequest {
+        turn_id: id,
+        session: session_id,
+        workspace,
+        trigger_channel: args.channel,
+        expected_settings,
+        expected_position: args.expected_position,
+    };
+    let turn = api.start_trigger(request);
     consume(turn, None, state, verbose, json, signal, out, err).await
 }
 

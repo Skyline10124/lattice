@@ -392,8 +392,8 @@ mod opening_error_tests {
 
     #[tokio::test]
     async fn opening_budget_and_413_errors_are_non_retryable_and_preserve_messages() {
-        let budget_msg = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
-        let http_413_msg = "HTTP 413 request_too_large: payload exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let budget_msg = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
+        let http_413_msg = "HTTP 413 request_too_large: payload exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
 
         for (label, llm_error, expected_msg) in [
             (

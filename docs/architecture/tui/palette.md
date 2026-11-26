@@ -10,7 +10,7 @@ TUI 面向支持真彩色和 UTF-8 的深色终端，直接使用下列 hex 与 
 
 | 前景角色 | Token | Hex | 用途 |
 | --- | --- | --- | --- |
-| User | iris-7 | `#8695e3` | USER 标题、`[COMMENT n]` 标记、stream phase |
+| User | iris-7 | `#8695e3` | `USER` / `USER · <channel>` 标题、stream phase |
 | Assistant | cream-2 | `#f5f3ef` | agent 标题、正文、输入、评论正文、Warn 正文和面板的标题与内容 |
 | ToolOk | cyan-7 | `#2ab0b0` | 成功勾号、diff 新增行 |
 | ToolErr | signal-red-9 | `#cb2b31` | 失败符号、错误摘要、Error 级状态消息、cancel phase、ERROR 标题和 diff 删除行 |

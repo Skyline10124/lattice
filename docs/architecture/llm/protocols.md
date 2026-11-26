@@ -59,15 +59,15 @@ status: active
 `ResolvedRequest::check_request`（供 `lattice-server` 准入前预检）与每次 `ResolvedRequest::stream_chat` 发送前共用同一检查入口，在不读取图片原始字节、不发起网络请求的前提下按顺序核对：
 
 1. **请求目标与身份。** `ChatRequest.target` 与解析句柄的 `ModelTarget` 一致，且携带 `SessionId`（`client_request_id`）。
-2. **模型输入能力。** 请求消息（含历史重放与当前轮输入）包含用户 `Image` 片段时：目标模型合并后的 `input` 为 `Some(list)` 且不含 `image` 的，以不可重试的 `LlmError::UnsupportedInput` 拒绝（属于配置类拒绝，消息只含中文说明），提示改用支持图片的模型或执行 `lattice session rewind` 退回不含图片的节点；`input` 为 `None`（元数据未知）时放行，由远端服务判定。
+2. **模型输入能力。** 请求消息（含历史重放与当前轮输入）包含用户 `Image` 片段时：目标模型合并后的 `input` 为 `Some(list)` 且不含 `image` 的，以不可重试的 `LlmError::UnsupportedInput` 拒绝（属于配置类拒绝，消息只含中文说明：`模型 <model> 不支持图片输入；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点`）；`input` 为 `None`（元数据未知）时放行，由远端服务判定。
 3. **本地请求体预算。** 构造目标协议 `RequestBody` 并经同源流式序列化器计算编码后的整包 JSON UTF-8 字节数，上限为 `MAX_MODEL_REQUEST_BYTES`（32 MiB，即 33,554,432 字节，含等于上限）。
 
 本地请求体预算与远端 `HTTP 413` 独立判定，两者均不可重试：
 
 | 情形 | 判定位置与条件 | 性质与依据 | 错误分类与面向用户的说明 |
 | --- | --- | --- | --- |
-| 超过本地请求体预算 | 发送前检查（`ResolvedRequest::check_request` 与每次 `stream_chat`）算出编码后 HTTP 请求体 `> MAX_MODEL_REQUEST_BYTES`（32 MiB，即 33,554,432 字节） | LATTICE 后台单次模型 HTTP 请求体的本地内存预算，五种协议统一适用，不代表远端服务的协议上限 | 不读取图片、不发出 HTTP 请求，返回不可重试的 `LlmError::RequestBudgetExceeded`（协调层在准入前映射为 `BadRequest` 并保留该说明，步骤执行中作为不可重试尝试错误结束）；说明“编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 `lattice session rewind` 退回较早节点或新建会话” |
-| 目标服务拒绝请求大小 | 本地预算内放行发出后，远端返回 `HTTP 413` | 具体目标服务或网关的载荷上限（如 Gemini inline 20 MB 限制） | `transport::status_error` 固定标为不可重试（`retryable = false`、`retry_after = None`，忽略 `x-should-retry` 与 `Retry-After`，不附等待提示），在 256 字符单行上限内保留远端脱敏摘要并附说明：“目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 `lattice session rewind` 退回较早节点或新建会话” |
+| 超过本地请求体预算 | 发送前检查（`ResolvedRequest::check_request` 与每次 `stream_chat`）算出编码后 HTTP 请求体 `> MAX_MODEL_REQUEST_BYTES`（32 MiB，即 33,554,432 字节） | LATTICE 后台单次模型 HTTP 请求体的本地内存预算，五种协议统一适用，不代表远端服务的协议上限 | 不读取图片、不发出 HTTP 请求，返回不可重试的 `LlmError::RequestBudgetExceeded`（协调层在准入前映射为 `BadRequest` 并保留该说明，步骤执行中作为不可重试尝试错误结束）；说明“编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话” |
+| 目标服务拒绝请求大小 | 本地预算内放行发出后，远端返回 `HTTP 413` | 具体目标服务或网关的载荷上限（如 Gemini inline 20 MB 限制） | `transport::status_error` 固定标为不可重试（`retryable = false`、`retry_after = None`，忽略 `x-should-retry` 与 `Retry-After`，不附等待提示），在 256 字符单行上限内保留远端脱敏摘要并附说明：“目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话” |
 
 ### 回放来源
 

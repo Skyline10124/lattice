@@ -285,20 +285,6 @@ pub(crate) fn orphaned_turn_status(turn_id: TurnId) -> Status {
     )
 }
 
-pub(crate) fn discarded_comments_status(numbers: &[usize]) -> Status {
-    status(
-        NoticeLevel::Warn,
-        format!(
-            "锚点 Step 不在当前历史，丢弃评论：{}",
-            numbers
-                .iter()
-                .map(|n| format!("#{n}"))
-                .collect::<Vec<_>>()
-                .join("、")
-        ),
-    )
-}
-
 /// 旧句柄退出报告中的一行；只作历史说明，不代表当前目标的状态。
 pub(crate) fn handoff_status(line: &str) -> Status {
     status(NoticeLevel::Info, format!("历史交接：{line}"))

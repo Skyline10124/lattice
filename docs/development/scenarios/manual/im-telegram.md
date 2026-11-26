@@ -57,4 +57,4 @@ lattice im auth remove telegram
 | `im：已挂载；仍按上一份配置运行；<原因>`（`lattice im reload` 退出 `1`） | 新修改的配置文件或凭据文件不合规，后台保留修改前仍在运行的网关实例继续服务；按提示修复文件后保存或执行 `lattice im reload` |
 | `im：未挂载；<原因>`（`lattice im reload` 退出 `1`） | 缺少凭据、目录/文件权限过宽（须属于当前用户且无组/其他用户权限，后台不自动改权限）、工作区不存在或运行期遭遇不可恢复台账错误；按原因修复后执行 `lattice im reload` |
 | 删除 `~/.lattice/im` 后自动重载未触发 | 目录被删会使原 `inotify` 监视失效且后台不自动重建目录；执行一次 `lattice im reload` 即可重建 `0700` `~/.lattice/im` 并恢复自动监视 |
-| 私聊发送合法 PNG/JPEG/WebP/GIF 单图或相册创建轮次，发送贴纸/视频/语音等不受支持媒体收到 `只支持文本和图片消息（PNG、JPEG、WebP、GIF）`，群聊或非白名单账号无响应 | 支持图片输入的模型收到白名单私聊内的合法单图或相册会下载核验并创建轮次；不受支持媒体收到 `只支持文本和图片消息（PNG、JPEG、WebP、GIF）`；非私聊或非白名单消息静默确认丢弃 |
+| 私聊发送合法 PNG/JPEG/WebP/GIF 单图或相册创建轮次，发送贴纸/视频/语音等不受支持媒体收到 `只支持文本和图片消息（PNG、JPEG、WebP、GIF）`，群聊或非白名单账号无响应 | 支持图片输入的模型收到白名单私聊内的合法单图或相册会以 `im/telegram:<chat_id>` 渠道下载核验并创建轮次；不受支持媒体收到 `只支持文本和图片消息（PNG、JPEG、WebP、GIF）`；模型不支持图片、累计超 `32 MiB` 预算或远端 `HTTP 413` 拒收时会提示减少图片、发送 `/new` 或在终端执行 `lattice session context-op` / `lattice session rewind`；非私聊或非白名单消息静默确认丢弃 |

@@ -30,6 +30,13 @@ lattice --json run "测试档位拒绝。" --session "$SESSION_ID" --effort max
 lattice --json run "$PROMPT" --agent <无模型的agent>
 DRAFT_SESSION_ID="替换为该次首条 submit 记录中的 session_id"
 lattice --json run "$PROMPT" --session "$DRAFT_SESSION_ID" --model anthropic/claude-sonnet-4-6
+
+# 带渠道标签、位点保护与分离式投喂/上下文编辑/触发
+lattice --json session send "按渠道提交。" --session "$SESSION_ID" \
+  --channel cli/review --expected-position 4
+lattice --json session feed "$SESSION_ID" "先写入一条待讨论笔记。" --channel cli/note
+lattice --json session context-op "$SESSION_ID" --omit-node 5 --channel cli/edit
+lattice --json session trigger "$SESSION_ID" --channel cli/trigger --expected-position 6
 ```
 
 ### 中断后找回
@@ -47,7 +54,8 @@ lattice --json session turn "$TURN_ID"
 | --- | --- |
 | `configure`：`configured` | 会话设置已保存，返回 `head` 与可选的 `adjustment`；接着发起 `submit` |
 | `configure`：`rejected` | 设置校验、项目绑定或会话状态被拒，随后以同一错误输出 `submit` 的 `rejected` 回执，本轮不进入提交（`configure(New)` 被拒时不创建会话） |
-| `submit`：`accepted` | 这一轮的接受事务已完成（会话设置在此之前已保存）；继续观察或按 `turn_id` 查询 |
+| `submit`：`accepted` | 这一轮（含 `session trigger`）的接受事务已完成（会话设置在此之前已保存）；继续观察或按 `turn_id` 查询 |
+| `session feed` / `context-op` 退出 `0` | 已写入 `Input` 或 `ContextOp` 节点并推进当前位置，不触发模型推理；文本输出 `session=<id> node=<n>`，`--json` 输出对应回执 |
 | `submit`：`rejected`（`configure` 已成功或跳过） | 会话已经存在，本轮未建立；例如没有模型的草稿会话首次提交因 `bad_request` 被拒，选定模型后可对同一 `SessionId` 继续提交 |
 | `rejected`（`busy`） | 同会话或全局槽位正忙；空闲后重发 |
 | `rejected`（`bad_request` / `not_found`） | 参数、配置、档位或会话不存在被拒；按诊断修正后重发 |

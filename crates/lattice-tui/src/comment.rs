@@ -17,10 +17,17 @@ pub(crate) struct Location {
     pub(crate) range: Range<usize>,
 }
 
+/// 本地未发送评论草稿的语义载荷；`location` 仅用于屏内同位置挂载探测，不序列化上线。
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Comment {
-    pub(crate) n: usize,
+pub(crate) struct DraftComment {
     pub(crate) location: Location,
+    pub(crate) quote: String,
+    pub(crate) text: String,
+}
+
+/// `tui/comment` 通道线上与历史块中的自包含评论。
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct SentComment {
     pub(crate) quote: String,
     pub(crate) text: String,
 }
@@ -55,18 +62,19 @@ impl Anchor {
     pub(crate) fn location(&self) -> &Location {
         &self.location
     }
-    pub(crate) fn matches(&self, comment: &Comment) -> bool {
+
+    pub(crate) fn matches(&self, comment: &DraftComment) -> bool {
         self.location == comment.location
             && self.source.get(self.location.range.clone()) == Some(comment.quote.as_str())
     }
-    pub(crate) fn into_comment(self, n: usize) -> Comment {
+
+    pub(crate) fn into_draft(self) -> DraftComment {
         let quote = self
             .source
             .get(self.location.range.clone())
             .unwrap_or("")
             .to_owned();
-        Comment {
-            n,
+        DraftComment {
             location: self.location,
             quote,
             text: String::new(),
@@ -74,111 +82,59 @@ impl Anchor {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Message {
-    pub(crate) text: String,
-    pub(crate) comments: Vec<Comment>,
+fn encode_pair(quote: &str, text: &str) -> String {
+    format!(
+        "<lattice-comment>\n<quote>\n{}\n</quote>\n{}\n</lattice-comment>",
+        escape(quote),
+        escape(text)
+    )
 }
 
-pub(crate) fn encode_comments(comments: &[Comment]) -> String {
+pub(crate) fn encode_sent_comments(comments: &[SentComment]) -> String {
     comments
         .iter()
-        .map(|comment| {
-            let Fragment { turn, step, part } = comment.location.fragment;
-            let range = &comment.location.range;
-            format!(
-                "<lattice-comment n=\"{}\" turn=\"{turn}\" step=\"{step}\" part=\"{part}\" range=\"{}..{}\">\n<quote>\n{}\n</quote>\n{}\n</lattice-comment>",
-                comment.n,
-                range.start,
-                range.end,
-                escape(&comment.quote),
-                escape(&comment.text)
-            )
-        })
+        .map(|comment| encode_pair(&comment.quote, &comment.text))
         .collect::<Vec<_>>()
         .join("\n\n")
 }
 
-impl Message {
-    pub(crate) fn encode(&self) -> String {
-        let prefix = encode_comments(&self.comments);
-        match (prefix.is_empty(), self.text.trim().is_empty()) {
-            (true, true) => String::new(),
-            (false, true) => prefix,
-            (true, false) => self.text.clone(),
-            (false, false) => format!("{prefix}\n\n{}", self.text),
-        }
-    }
-
-    /// 任一开头元素损坏时，调用方显示整条原文。
-    pub(crate) fn parse(source: &str) -> Option<Self> {
-        let mut rest = source;
-        let mut comments = Vec::new();
-        loop {
-            let (header, after) = rest.split_once('\n')?;
-            let attributes = header.strip_prefix("<lattice-comment n=\"")?;
-            let (n, attributes) = attributes.split_once("\" turn=\"")?;
-            let (turn, attributes) = attributes.split_once("\" step=\"")?;
-            let (step, attributes) = attributes.split_once("\" part=\"")?;
-            let (part, range) = attributes.split_once("\" range=\"")?;
-            let (start, end) = range.strip_suffix("\">")?.split_once("..")?;
-            let n = number(n)?;
-            if n == 0 {
-                return None;
-            }
-            let turn_id: TurnId = turn.parse().ok()?;
-            if turn_id.to_string() != turn {
-                return None;
-            }
-            let range = number(start)?..number(end)?;
-            if range.start > range.end {
-                return None;
-            }
-            let after = after.strip_prefix("<quote>\n")?;
-            let (quote, after) = section(after, "</quote>")?;
-            let (text, after) = section(after.strip_prefix('\n')?, "</lattice-comment>")?;
-            if text.trim().is_empty() {
-                return None;
-            }
-            comments.push(Comment {
-                n,
-                location: Location {
-                    fragment: Fragment {
-                        turn: turn_id,
-                        step: number(step)?.try_into().ok()?,
-                        part: number(part)?,
-                    },
-                    range,
-                },
-                quote,
-                text,
-            });
-            if after.is_empty() {
-                rest = "";
-                break;
-            }
-            rest = after.strip_prefix("\n\n")?;
-            if !rest.starts_with("<lattice-comment") {
-                break;
-            }
-        }
-        let parsed = Self {
-            text: rest.into(),
-            comments,
-        };
-        // 拒绝多余属性、非规范转义与分隔。
-        (parsed.encode() == source).then_some(parsed)
-    }
+pub(crate) fn encode_draft_comments(comments: &[DraftComment]) -> String {
+    comments
+        .iter()
+        .map(|comment| encode_pair(&comment.quote, &comment.text))
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
-fn number(text: &str) -> Option<usize> {
-    let value: usize = text.parse().ok()?;
-    (value.to_string() == text).then_some(value)
+/// 严格解析 `tui/comment` 通道的自包含评论序列；任一结构损坏、空白批注或非规范转义均返回 `None`。
+pub(crate) fn parse_sent_comments(source: &str) -> Option<Vec<SentComment>> {
+    let mut rest = source;
+    let mut comments = Vec::new();
+    loop {
+        let after = rest.strip_prefix("<lattice-comment>\n<quote>\n")?;
+        let (quote, after) = section(after, "</quote>")?;
+        let (text, after) = section(after.strip_prefix('\n')?, "</lattice-comment>")?;
+        if text.trim().is_empty() {
+            return None;
+        }
+        comments.push(SentComment { quote, text });
+        if after.is_empty() {
+            break;
+        }
+        rest = after.strip_prefix("\n\n")?;
+    }
+    if comments.is_empty() {
+        return None;
+    }
+    // 拒绝多余属性、非规范转义与分隔。
+    (encode_sent_comments(&comments) == source).then_some(comments)
 }
 
+/// 与 `lattice-context` 保持一致：先剥离行尾 `\r` 再判定保留闭合标签，转义与解转义均保留原 `\r`。
 fn reserved(line: &str) -> bool {
+    let bare = line.strip_suffix('\r').unwrap_or(line);
     matches!(
-        line.trim_start_matches('\\'),
+        bare.trim_start_matches('\\'),
         "</quote>" | "</lattice-comment>"
     )
 }
@@ -204,7 +160,7 @@ fn section<'a>(source: &'a str, end: &str) -> Option<(String, &'a str)> {
             (line, rest.get(line.len()..).unwrap_or(""))
         });
         if line == end {
-            // 写出时补一个结构换行；split/join 保留载荷本身的末尾换行。
+            // 写出时补一个结构换行；split/join 保留载荷本身的末尾换行与行尾 \r。
             return Some((lines.join("\n"), after));
         }
         if reserved(line) && !line.starts_with('\\') {
@@ -224,60 +180,76 @@ mod tests {
     use super::*;
 
     #[test]
-    fn structured_comments_round_trip_preserves_paragraphs_quotes_and_escapes() {
-        let turn = lattice_local::new_turn_id();
-        for quote in ["原文", "原文\n\n末段\n", "</quote>\n\\</lattice-comment>\n"] {
-            for (comment, body) in [
-                ("第一段\n\n第二段", ""),
-                ("第一段", "第二段"),
-                (
-                    "</quote>\n\\</lattice-comment>\n末尾\n",
-                    "**正文**\n\n- 内容",
-                ),
+    fn self_contained_comments_round_trip_preserves_crlf_quotes_and_escapes() {
+        for quote in [
+            "",
+            "原文",
+            "原文\n\n末段\n",
+            "首行\r\n次行\r\n",
+            "</quote>\n\\</lattice-comment>\n",
+            "</quote>\r\n\\</lattice-comment>\r\n尾行",
+        ] {
+            for body in [
+                "第一段\n\n第二段",
+                "含回车\r\n第二行",
+                "</quote>\r\n\\</lattice-comment>\r\n末尾\r\n",
             ] {
-                let message = Message {
+                let single = vec![SentComment {
+                    quote: quote.into(),
                     text: body.into(),
-                    comments: vec![Comment {
-                        n: 1,
-                        location: Location {
-                            fragment: Fragment {
-                                turn,
-                                step: 3,
-                                part: 0,
-                            },
-                            range: 0..quote.len(),
-                        },
-                        quote: quote.into(),
-                        text: comment.into(),
-                    }],
-                };
-                let wire = message.encode();
-                assert!(wire.starts_with(&format!("<lattice-comment n=\"1\" turn=\"{turn}\" step=\"3\" part=\"0\" range=\"0..{}\">\n<quote>\n", quote.len())));
-                assert_eq!(Message::parse(&wire), Some(message.clone()));
-                let mut multiple = message.clone();
-                let mut second = message.comments[0].clone();
-                second.n = 2;
-                multiple.comments.push(second);
-                assert_eq!(Message::parse(&multiple.encode()), Some(multiple));
+                }];
+                let wire = encode_sent_comments(&single);
+                assert!(
+                    wire.starts_with("<lattice-comment>\n<quote>\n"),
+                    "线格式不应携带旧外键属性：{wire}"
+                );
+                assert_eq!(
+                    parse_sent_comments(&wire),
+                    Some(single.clone()),
+                    "单条自包含评论必须无损往返（含 CRLF）"
+                );
+
+                let multiple = vec![
+                    single[0].clone(),
+                    SentComment {
+                        quote: "第二条引文\r\n".into(),
+                        text: "第二条批注".into(),
+                    },
+                ];
+                let multi_wire = encode_sent_comments(&multiple);
+                assert_eq!(
+                    parse_sent_comments(&multi_wire),
+                    Some(multiple),
+                    "多条自包含评论必须无损往返"
+                );
             }
         }
-        let wire = format!(
-            "<lattice-comment n=\"1\" turn=\"{turn}\" step=\"3\" part=\"0\" range=\"0..3\">\n<quote>\n原\n</quote>\n一\n\n二\n</lattice-comment>"
+
+        let wire = "<lattice-comment>\n<quote>\n原\n</quote>\n一\n\n二\n</lattice-comment>";
+        assert_eq!(
+            parse_sent_comments(wire)
+                .map(|c| encode_sent_comments(&c))
+                .as_deref(),
+            Some(wire)
         );
-        assert_eq!(Message::parse(&wire).unwrap().encode(), wire);
+
         for bad in [
-            wire.replace("n=\"1\"", "n=\"01\""),
-            wire.replace("step=\"3\" part=\"0\"", "part=\"0\" step=\"3\""),
-            wire.replace("<quote>", "<quote> "),
-            wire.replace("一\n\n二", " \n\t"),
-            format!("{wire}\n\n<lattice-comment broken>"),
-            format!("{wire}\nbody"),
-            wire.replace("range=", "extra=\"x\" range="),
+            "",
+            "普通文本",
+            "<lattice-comment n=\"1\">\n<quote>\n原\n</quote>\n一\n</lattice-comment>",
+            "<lattice-comment>\r\n<quote>\n原\n</quote>\n一\n</lattice-comment>",
+            "<lattice-comment>\n<quote> \n原\n</quote>\n一\n</lattice-comment>",
+            "<lattice-comment>\n<quote>\n原\n</quote>\n \n\t\n</lattice-comment>",
+            "<lattice-comment>\n<quote>\n</quote>\r\n</quote>\n一\n</lattice-comment>",
+            "<lattice-comment>\n<quote>\n原\n</quote>\n</lattice-comment>\r\n</lattice-comment>",
+            &format!("{wire}\n\n附加正文"),
+            &format!("{wire}\n{wire}"),
         ] {
-            assert_eq!(Message::parse(&bad), None, "{bad}");
+            assert_eq!(
+                parse_sent_comments(bad),
+                None,
+                "非法或非规范评论线格式必须被拒绝：{bad:?}"
+            );
         }
-        let mut whitespace = Message::parse(&wire).unwrap();
-        whitespace.text = " \n\t".into();
-        assert_eq!(whitespace.encode(), wire);
     }
 }

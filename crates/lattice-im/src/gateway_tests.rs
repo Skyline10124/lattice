@@ -3875,7 +3875,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"im\">"
+                "text": "<lattice-context channel=\"im/telegram:7001\">"
             },
             {
                 "type": "image_url",
@@ -3931,7 +3931,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"im\">"
+                "text": "<lattice-context channel=\"im/telegram:7001\">"
             },
             {
                 "type": "image_url",
@@ -3971,7 +3971,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"im\">"
+                "text": "<lattice-context channel=\"im/telegram:7001\">"
             },
             {
                 "type": "image_url",
@@ -4037,7 +4037,7 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
             serde_json::json!([
                 {
                     "type": "text",
-                    "text": "<lattice-context channel=\"im\">"
+                    "text": "<lattice-context channel=\"im/telegram:7001\">"
                 },
                 {
                     "type": "image_url",
@@ -4089,9 +4089,9 @@ async fn submits_single_photo_and_uncompressed_image_documents_preserving_order_
     assert_eq!(last_user7["role"], "user");
     assert!(
         last_user7["content"]
-            == "<lattice-context channel=\"im\">\n总结以上全部图片\n</lattice-context>"
+            == "<lattice-context channel=\"im/telegram:7001\">\n总结以上全部图片\n</lattice-context>"
             || last_user7["content"]
-                == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"im\">\n总结以上全部图片\n</lattice-context>"}]),
+                == serde_json::json!([{"type": "text", "text": "<lattice-context channel=\"im/telegram:7001\">\n总结以上全部图片\n</lattice-context>"}]),
         "第 7 轮末尾用户消息正文必须为包裹 channel 后的“总结以上全部图片”，实际: {}",
         last_user7["content"]
     );
@@ -4926,7 +4926,7 @@ async fn merges_out_of_order_album_batches_after_600ms_and_acks_atomically_after
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"im\">"
+                "text": "<lattice-context channel=\"im/telegram:7001\">"
             },
             {
                 "type": "image_url",
@@ -6806,8 +6806,9 @@ async fn rejects_image_for_text_only_model_with_im_guidance_and_marks_delivered_
     assert!(
         reply.contains("减少图片")
             && reply.contains("/new")
+            && reply.contains("lattice session context-op")
             && reply.contains("lattice session rewind"),
-        "拒绝回复必须同时引导减少图片、发送 /new 与执行 lattice session rewind：{reply}"
+        "拒绝回复必须同时引导减少图片、发送 /new 与执行 lattice session context-op / rewind：{reply}"
     );
     assert!(
         !reply.contains("INTEGRATION_BOT_SECRET"),
@@ -6931,8 +6932,9 @@ async fn rejects_fourth_round_exceeding_32mib_local_request_budget_with_im_guida
     assert!(
         fourth_reply.contains("减少图片")
             && fourth_reply.contains("/new")
+            && fourth_reply.contains("lattice session context-op")
             && fourth_reply.contains("lattice session rewind"),
-        "第 4 轮回复必须包含减少图片、/new 与 lattice session rewind 引导：{fourth_reply}"
+        "第 4 轮回复必须包含减少图片、/new 与 lattice session context-op / rewind 引导：{fourth_reply}"
     );
     assert!(!fourth_reply.contains("INTEGRATION_BOT_SECRET"));
 
@@ -7015,8 +7017,9 @@ async fn delivers_http_413_guidance_both_live_and_via_recovered_summary_notice()
     assert!(
         live_reply.contains("减少图片")
             && live_reply.contains("/new")
+            && live_reply.contains("lattice session context-op")
             && live_reply.contains("lattice session rewind"),
-        "实时 413 回复必须包含减少图片、/new 与 lattice session rewind：{live_reply}"
+        "实时 413 回复必须包含减少图片、/new 与 lattice session context-op / rewind：{live_reply}"
     );
     assert!(!live_reply.contains("INTEGRATION_BOT_SECRET"));
 
@@ -7119,8 +7122,9 @@ async fn delivers_http_413_guidance_both_live_and_via_recovered_summary_notice()
     assert!(
         recovered_reply.contains("减少图片")
             && recovered_reply.contains("/new")
+            && recovered_reply.contains("lattice session context-op")
             && recovered_reply.contains("lattice session rewind"),
-        "恢复补发的 413 回复必须包含减少图片、/new 与 lattice session rewind：{recovered_reply}"
+        "恢复补发的 413 回复必须包含减少图片、/new 与 lattice session context-op / rewind：{recovered_reply}"
     );
     assert!(!recovered_reply.contains("INTEGRATION_BOT_SECRET"));
 
@@ -7217,6 +7221,7 @@ async fn strictly_classifies_413_lookalikes_and_bounds_600_char_model_through_re
         reply_named_413.contains("模型 local/HTTP 413 不支持图片输入")
             && reply_named_413.contains("减少图片")
             && reply_named_413.contains("/new")
+            && reply_named_413.contains("lattice session context-op")
             && reply_named_413.contains("lattice session rewind"),
         "名为 local/HTTP 413 的纯文本模型发图应输出不支持图片输入引导：{reply_named_413}"
     );
@@ -7251,6 +7256,7 @@ async fn strictly_classifies_413_lookalikes_and_bounds_600_char_model_through_re
         reply_long.contains("不支持图片输入")
             && reply_long.contains("减少图片")
             && reply_long.contains("/new")
+            && reply_long.contains("lattice session context-op")
             && reply_long.contains("lattice session rewind"),
         "600 字符长模型名走真实准入路径时必须完整保留原因与全部操作引导：{reply_long}"
     );
@@ -7312,7 +7318,7 @@ async fn replays_im_persisted_blobs_when_local_client_continues_same_session() {
         serde_json::json!([
             {
                 "type": "text",
-                "text": "<lattice-context channel=\"im\">"
+                "text": "<lattice-context channel=\"im/telegram:7001\">"
             },
             {
                 "type": "image_url",

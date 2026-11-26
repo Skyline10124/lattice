@@ -799,17 +799,17 @@ mod tests {
         let cases = [
             (
                 "不支持图片输入",
-                "模型 local/m-secret-tok-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+                "模型 local/m-secret-tok-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点",
                 "不支持图片输入",
             ),
             (
                 "32 MiB 本地请求体预算",
-                "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话",
+                "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话",
                 "本地请求体预算（32 MiB）",
             ),
             (
                 "远端 HTTP 413",
-                "HTTP 413 request_too_large: secret-tok-415 exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话",
+                "HTTP 413 request_too_large: secret-tok-415 exceeds limit；目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话",
                 "目标服务拒绝了本次请求大小（HTTP 413）",
             ),
         ];
@@ -842,6 +842,7 @@ mod tests {
                     rendered.contains(expected_reason)
                         && rendered.contains("减少图片")
                         && rendered.contains("/new")
+                        && rendered.contains("lattice session context-op")
                         && rendered.contains("lattice session rewind"),
                     "{label} 应包含脱敏中文原因与完整 IM 引导：{rendered}"
                 );
@@ -871,7 +872,7 @@ mod tests {
         assert!(!not_found_413.contains("/new"));
 
         let long_model_raw = format!(
-            "模型 local/{} 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点",
+            "模型 local/{} 不支持图片输入；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点",
             "a".repeat(600)
         );
         let long_model_reply = compose_final_reply(
@@ -882,6 +883,7 @@ mod tests {
             long_model_reply.contains("不支持图片输入")
                 && long_model_reply.contains("减少图片")
                 && long_model_reply.contains("/new")
+                && long_model_reply.contains("lattice session context-op")
                 && long_model_reply.contains("lattice session rewind"),
             "Failed 结局下超长模型名必须在截断前识别并保留完整引导：{long_model_reply}"
         );

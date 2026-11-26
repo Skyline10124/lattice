@@ -14,8 +14,8 @@ use std::{
 
 use chrono::Utc;
 use lattice_ipc::{
-    Channel, ConfigureRequest, ConfigureSession, ConflictReason, LocalError, LocalErrorKind,
-    SessionId, TurnId, TurnLookup, TurnRequest, UserInputPart,
+    ConfigureRequest, ConfigureSession, ConflictReason, LocalError, LocalErrorKind, SessionId,
+    TurnId, TurnLookup, TurnRequest, UserInputPart,
 };
 use lattice_server::{InProcessTurn, Service};
 use lattice_store::StateLayout;
@@ -33,7 +33,7 @@ use crate::{
         parse_text_input,
     },
     config::TelegramGatewayConfig,
-    identity::{ChatKey, InboundId, new_session_id, new_turn_id},
+    identity::{ChatKey, InboundId, new_session_id, new_turn_id, telegram_channel},
     ledger::{InboundRecord, Ledger, LedgerError, LedgerPublicationGuard, LedgerPublicationLatch},
     media::{IncomingMediaItem, MediaBatchOutcome, prepare_media_turn},
     redact::ImRedactor,
@@ -1361,10 +1361,10 @@ impl GatewayRuntime {
 
         let retry_parts = (!is_new).then(|| parts.clone());
         let mut submit_result = if is_new {
-            self.configure_new_and_submit(session_id, turn_id, parts)
+            self.configure_new_and_submit(&chat, session_id, turn_id, parts)
                 .await
         } else {
-            self.submit_only(session_id, turn_id, parts).await
+            self.submit_only(&chat, session_id, turn_id, parts).await
         };
 
         // 绑定的草稿会话已被后台清理或会话库尚未初始化时，复用台账中已登记的同一个 SessionId、TurnId 与 parts 重建并提交。
@@ -1373,7 +1373,7 @@ impl GatewayRuntime {
             && is_not_found_or_uninitialized(err)
         {
             submit_result = self
-                .configure_new_and_submit(session_id, turn_id, parts_for_rebuild)
+                .configure_new_and_submit(&chat, session_id, turn_id, parts_for_rebuild)
                 .await;
         }
 
@@ -1438,6 +1438,7 @@ impl GatewayRuntime {
 
     async fn configure_new_and_submit(
         &self,
+        chat: &ChatKey,
         session_id: SessionId,
         turn_id: TurnId,
         parts: Vec<UserInputPart>,
@@ -1457,11 +1458,12 @@ impl GatewayRuntime {
             Err(err) if err.conflict == Some(ConflictReason::SessionExists) => {}
             Err(err) => return Err(err),
         }
-        self.submit_only(session_id, turn_id, parts).await
+        self.submit_only(chat, session_id, turn_id, parts).await
     }
 
     async fn submit_only(
         &self,
+        chat: &ChatKey,
         session_id: SessionId,
         turn_id: TurnId,
         parts: Vec<UserInputPart>,
@@ -1471,7 +1473,7 @@ impl GatewayRuntime {
                 turn_id,
                 session_id,
                 self.config.workspace.clone(),
-                Channel::parse("im").expect("固定通道名 im 应合法"),
+                telegram_channel(chat),
                 parts,
                 None,
                 None,

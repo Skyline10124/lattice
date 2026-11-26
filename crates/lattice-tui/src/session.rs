@@ -133,11 +133,17 @@ pub(crate) fn entry_blocks(
     let mut blocks = BlockList::default();
     match entry {
         ConversationEntry::Input { node, input, .. } => {
-            blocks.push(Block::Input { node: *node });
-            append_messages(&mut blocks, vec![input.message().clone()]);
+            blocks.push(Block::Input {
+                node: *node,
+                channel: input.channel().clone(),
+            });
+            append_context_input(&mut blocks, input);
         }
-        ConversationEntry::ContextOp { node, .. } => {
-            blocks.push(Block::ContextOp { node: *node });
+        ConversationEntry::ContextOp { node, op, .. } => {
+            blocks.push(Block::ContextOp {
+                node: *node,
+                op: Box::new(op.clone()),
+            });
         }
         ConversationEntry::Step {
             node,
@@ -234,11 +240,16 @@ fn append_history_step(
     }
 }
 
-pub(crate) fn user_block(text: String) -> Block {
-    match crate::comment::Message::parse(&text) {
-        Some(message) => Block::CommentedUser(message),
-        None => Block::User(text),
+fn append_context_input(blocks: &mut BlockList, input: &lattice_local::ContextInput) {
+    if input.channel().as_str() == "tui/comment"
+        && let [part] = &input.message().parts[..]
+        && let MessageSemantic::Text { text } = &part.semantic
+        && let Some(comments) = crate::comment::parse_sent_comments(text)
+    {
+        blocks.push(Block::SentComments(comments));
+        return;
     }
+    append_user_message(blocks, input.message().clone());
 }
 
 fn append_step(
@@ -391,7 +402,7 @@ fn append_user_message(
                 MessageSemantic::ToolCall { .. } | MessageSemantic::Reasoning { .. } => None,
             }),
     );
-    blocks.push(user_block(out));
+    blocks.push(Block::User(out));
 }
 
 /// 隐藏 reasoning 不应在生成中的文字由回复取代时引入原来没有的换行。
@@ -468,12 +479,13 @@ mod tests {
         );
         assert!(
             matches!(
-                blocks[0],
+                &blocks[0],
                 Block::Input {
-                    node: lattice_local::NodeId(1)
-                }
+                    node: lattice_local::NodeId(1),
+                    channel,
+                } if channel.as_str() == "tui"
             ),
-            "首块应为 Input"
+            "首块应为 tui 通道 Input"
         );
         assert_eq!(
             blocks[1],

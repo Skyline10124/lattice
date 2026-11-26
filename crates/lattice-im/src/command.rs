@@ -97,15 +97,12 @@ pub(crate) fn is_not_found_or_uninitialized(error: &LocalError) -> bool {
 
 const UNSUPPORTED_IMAGE_PREFIX: &str = "模型 ";
 const UNSUPPORTED_IMAGE_MARKER: &str = " 不支持图片输入";
-const CLI_UNSUPPORTED_IMAGE_SUFFIX: &str =
-    "；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点";
+const CLI_UNSUPPORTED_IMAGE_SUFFIX: &str = "；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点";
 const LOCAL_BUDGET_PREFIX: &str = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB）";
-const CLI_REQUEST_SIZE_SUFFIX: &str =
-    "，请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+const CLI_REQUEST_SIZE_SUFFIX: &str = "，请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
 const HTTP_413_STATUS_PREFIX: &str = "HTTP 413";
 const HTTP_413_REASON_MARKER: &str = "；目标服务拒绝了本次请求大小（HTTP 413）";
-const IM_IMAGE_REJECTION_GUIDANCE: &str =
-    "请减少图片、发送 /new 开启新会话，或在终端执行 lattice session rewind 退回较早节点";
+const IM_IMAGE_REJECTION_GUIDANCE: &str = "请减少图片、发送 /new 开启新会话，或在终端执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点";
 
 /// 按后台固定前缀与后缀精确识别三类图片或请求体大小拒绝（模型不支持图片输入、超过 32 MiB 本地请求体预算、远端 HTTP 413），
 /// 在截断前完成脱敏与结构匹配，仅对过长的模型名或 HTTP 413 错误头截断，完整保留中文原因与面向 IM 用户的操作引导。
@@ -391,9 +388,9 @@ mod tests {
         let secret = lattice_server::ImToken::parse("bot-secret-token-415").unwrap();
         let redactor = ImRedactor::new([secret]);
 
-        let unsupported_raw = "模型 local/text-only-bot-secret-token-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点";
-        let budget_raw = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
-        let http_413_raw = "HTTP 413 INVALID_ARGUMENT: payload bot-secret-token-415 too large；目标服务拒绝了本次请求大小（HTTP 413），请减少图片、执行 lattice session rewind 退回较早节点或新建会话";
+        let unsupported_raw = "模型 local/text-only-bot-secret-token-415 不支持图片输入；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点";
+        let budget_raw = "编码后的模型请求超过 LATTICE 本地请求体预算（32 MiB），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
+        let http_413_raw = "HTTP 413 INVALID_ARGUMENT: payload bot-secret-token-415 too large；目标服务拒绝了本次请求大小（HTTP 413），请减少图片，或执行 lattice session context-op 精简历史内容与图片、lattice session rewind 退回较早节点或新建会话";
 
         for (label, raw_msg, expected_reason) in [
             ("模型不支持图片输入", unsupported_raw, "不支持图片输入"),
@@ -421,13 +418,19 @@ mod tests {
             assert!(
                 rendered.contains("减少图片")
                     && rendered.contains("/new")
+                    && rendered.contains("lattice session context-op")
                     && rendered.contains("lattice session rewind"),
-                "{label} 必须同时引导减少图片、发送 /new 与执行 lattice session rewind：{rendered}"
+                "{label} 必须同时引导减少图片、发送 /new 与执行 lattice session context-op / rewind：{rendered}"
             );
             assert_eq!(
                 rendered.matches("减少图片").count(),
                 1,
                 "{label} 不得重复拼接两份引导说明：{rendered}"
+            );
+            assert_eq!(
+                rendered.matches("lattice session context-op").count(),
+                1,
+                "{label} 不得重复出现两处 lattice session context-op：{rendered}"
             );
             assert_eq!(
                 rendered.matches("lattice session rewind").count(),
@@ -459,7 +462,7 @@ mod tests {
         }
 
         // 2. 名为 local/HTTP 413 的纯文本模型发图被拒：仅输出不支持图片输入引导，绝不拼入 HTTP 413 大小拒绝说明
-        let named_413_raw = "模型 local/HTTP 413 不支持图片输入；请改用支持图片的模型，或执行 lattice session rewind 退回不含图片的节点";
+        let named_413_raw = "模型 local/HTTP 413 不支持图片输入；请改用支持图片的模型，或执行 lattice session context-op 移出/替换历史图片，或执行 lattice session rewind 退回不含图片的节点";
         let named_413_rendered = describe_local_error(
             &LocalError::new(LocalErrorKind::BadRequest, named_413_raw),
             &redactor,
@@ -489,6 +492,7 @@ mod tests {
             long_rendered.contains("不支持图片输入")
                 && long_rendered.contains("减少图片")
                 && long_rendered.contains("/new")
+                && long_rendered.contains("lattice session context-op")
                 && long_rendered.contains("lattice session rewind"),
             "超长模型名截断不得丢失不支持图片输入原因或任何操作引导：{long_rendered}"
         );
