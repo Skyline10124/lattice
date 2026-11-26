@@ -19,7 +19,7 @@ use rustix::fs::{FlockOperation, OFlags};
 use tokio::net::UnixStream;
 
 /// 前端连不上后台时唯一生成的中文提示。
-const NOT_RUNNING_MESSAGE: &str = "后台未运行；可执行 `systemctl --user start lattice` 启动，尚未安装用户服务时先执行 `lattice daemon install`（并请确认前端与后台的状态根一致）";
+const NOT_RUNNING_MESSAGE: &str = "后台未运行；可执行 `lattice daemon start`（或 `systemctl --user start lattice`）启动，尚未安装用户服务时先执行 `lattice daemon install`（并请确认前端与后台的状态根一致）";
 
 fn client_not_running() -> LocalError {
     LocalError::new(LocalErrorKind::NotRunning, NOT_RUNNING_MESSAGE)
@@ -129,15 +129,27 @@ impl Departure {
     /// 在 `timeout` 内等旧后台释放实例锁；超时报 Stopping，后台可能仍在收尾。
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn wait(self, timeout: Duration) -> Result<()> {
-        self.wait_inner(timeout).await
+        self.wait_with_timeout_message(
+            timeout,
+            "后台已确认停机，但未在期限内释放状态根；请执行 `lattice daemon status` 复核",
+        )
+        .await
     }
 
     #[cfg(not(any(test, feature = "test-utils")))]
     pub(crate) async fn wait(self, timeout: Duration) -> Result<()> {
-        self.wait_inner(timeout).await
+        self.wait_with_timeout_message(
+            timeout,
+            "后台已确认停机，但未在期限内释放状态根；请执行 `lattice daemon status` 复核",
+        )
+        .await
     }
 
-    async fn wait_inner(self, timeout: Duration) -> Result<()> {
+    pub(crate) async fn wait_with_timeout_message(
+        self,
+        timeout: Duration,
+        timeout_message: &str,
+    ) -> Result<()> {
         // 用真实时钟计上限：测试运行时的暂停时钟不应让等待提前判为超时。
         let deadline = std::time::Instant::now() + timeout;
         loop {
@@ -145,10 +157,7 @@ impl Departure {
                 return Ok(());
             }
             if std::time::Instant::now() >= deadline {
-                return Err(LocalError::new(
-                    LocalErrorKind::Stopping,
-                    "后台已确认停机，但未在期限内释放状态根；请执行 `lattice daemon status` 复核",
-                ));
+                return Err(LocalError::new(LocalErrorKind::Stopping, timeout_message));
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
@@ -190,12 +199,18 @@ impl Departure {
 }
 
 pub(crate) async fn connect(layout: StateLayout) -> Result<UnixStream> {
-    let path = tokio::task::spawn_blocking(move || {
+    let (stream, _) = connect_with_identity(layout).await?;
+    Ok(stream)
+}
+
+/// 连接本地后台并返回连接前核验的 `api.sock` `(dev, ino)` 身份，供跨版本停机复核是否仍为同一实例。
+pub(crate) async fn connect_with_identity(layout: StateLayout) -> Result<(UnixStream, (u64, u64))> {
+    let (path, socket_id) = tokio::task::spawn_blocking(move || {
         let path = endpoint(&layout).map_err(with_client_not_running)?;
         let meta = fs::symlink_metadata(&path)
             .map_err(|error| client_connect_io_error("检查本地连接套接字", &path, error))?;
         check_socket(&path, &meta)?;
-        Ok::<_, LocalError>(path)
+        Ok::<_, LocalError>((path, (meta.dev(), meta.ino())))
     })
     .await
     .map_err(|_| LocalError::new(LocalErrorKind::Internal, "本地端点工作线程异常退出"))??;
@@ -203,7 +218,7 @@ pub(crate) async fn connect(layout: StateLayout) -> Result<UnixStream> {
         .await
         .map_err(|error| client_connect_io_error("连接本地套接字", &path, error))?;
     check_peer(&stream)?;
-    Ok(stream)
+    Ok((stream, socket_id))
 }
 
 #[cfg(test)]
@@ -235,6 +250,7 @@ mod tests {
         assert_eq!(missing_root.kind, LocalErrorKind::NotRunning);
         for required in [
             "后台未运行",
+            "lattice daemon start",
             "systemctl --user start lattice",
             "lattice daemon install",
             "状态根",

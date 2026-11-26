@@ -1732,7 +1732,7 @@ async fn status_against(
     .await
 }
 
-const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请用旧二进制执行 `lattice daemon stop` 停止它";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice`（或手动结束旧 `lattice-daemon` 进程）后重启新后台";
 
 /// 已发布的旧后台读到不认识的魔数就关连接，不回写任何字节；请求剩下的部分留在它的接收队列里。
 #[tokio::test]
@@ -1782,9 +1782,9 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
         })
     })
     .await;
+    let self_pid = std::process::id();
     let expected = format!(
-        "运行中的后台版本较旧且不兼容（对端进程号：{}）；请用旧二进制执行 `lattice daemon stop` 停止它",
-        std::process::id()
+        "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
     );
     assert_eq!(
         (error.kind, error.message.as_str()),
@@ -1812,4 +1812,173 @@ async fn status_reports_a_backend_newer_than_the_client() {
         (error.kind, error.message.as_str()),
         (LocalErrorKind::IncompatibleBackend, expected.as_str())
     );
+}
+
+#[tokio::test]
+async fn server_accepts_version_independent_control_stop_frame_and_drains_cleanly() {
+    use lattice_ipc::ipc::{ControlStopExchange, ControlStopStatus, exchange_control_stop};
+    use lattice_local::test_support;
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = lattice_store::StateLayout::in_state_root(dir.path());
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+    let serve_layout = layout.clone();
+    let serving = tokio::spawn(async move {
+        crate::serve_for_test(serve_layout, None, Duration::from_secs(5), stop_rx).await
+    });
+
+    let client = LocalClient::new(layout.clone());
+    let expected_epoch = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(status) = client.status().await {
+                break status.epoch;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("等待测试后台就绪超时");
+
+    // 1. 携带与当前后台不匹配的 expected_protocol_version：后台必须拒绝停机并继续服务。
+    let mut mismatch_stream = test_support::connect(layout.clone()).await.unwrap();
+    let mismatch = exchange_control_stop(&mut mismatch_stream, ipc::PROTOCOL_VERSION - 1)
+        .await
+        .unwrap();
+    drop(mismatch_stream);
+    assert_eq!(
+        mismatch,
+        ControlStopExchange::PeerChanged {
+            protocol_version: ipc::PROTOCOL_VERSION,
+        }
+    );
+    let still_alive = client.status().await.unwrap();
+    assert!(!still_alive.stopping, "版本不匹配的控制停机不得触发停机");
+    assert_eq!(still_alive.epoch, expected_epoch);
+
+    // 2. 携带匹配的 expected_protocol_version：后台正常排空并返回最小停机状态。
+    let mut stream = test_support::connect(layout.clone()).await.unwrap();
+    let reply = exchange_control_stop(&mut stream, ipc::PROTOCOL_VERSION)
+        .await
+        .unwrap();
+    drop(stream);
+    assert_eq!(
+        reply,
+        ControlStopExchange::Stopped(ControlStopStatus {
+            epoch: expected_epoch,
+            owners: 0,
+            unconfirmed_operations: 0,
+        })
+    );
+    drop(stop_tx);
+    let exit = tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("控制停机后后台应在期限内退出")
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit.drain, crate::DrainOutcome::Completed);
+    assert!(exit.failure.is_none());
+    drop(exit.instance);
+    assert!(
+        !layout.lattice_root().join("local/api.sock").exists(),
+        "控制停机完成后 api.sock 应已撤下"
+    );
+}
+
+/// 竞态回归（复现审查场景“协议 67 替身 → 当前真实后台”）：
+/// 首连确认旧协议后、次连前后台被新的真实后台替换，`stop` 必须中止且不得误停新后台。
+#[tokio::test]
+async fn cross_version_stop_aborts_without_stopping_replacement_real_backend() {
+    use std::os::unix::fs::PermissionsExt;
+    use tokio::net::UnixListener;
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = lattice_store::StateLayout::in_state_root(dir.path());
+    let local_dir = layout.lattice_root().join("local");
+    std::fs::create_dir_all(&local_dir).unwrap();
+    std::fs::set_permissions(
+        layout.lattice_root(),
+        std::fs::Permissions::from_mode(0o700),
+    )
+    .unwrap();
+    std::fs::set_permissions(&local_dir, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let sock_path = local_dir.join("api.sock");
+    let fake_listener = UnixListener::bind(&sock_path).unwrap();
+    std::fs::set_permissions(&sock_path, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+    let client = LocalClient::new(layout.clone());
+    let swap_layout = layout.clone();
+    let swap_client = client.clone();
+
+    let swap_task = tokio::spawn(async move {
+        let (mut s1, _) = fake_listener.accept().await.unwrap();
+        let mut magic = [0_u8; 8];
+        s1.read_exact(&mut magic).await.unwrap();
+
+        // 模拟旧协议后台退出并由当前真实后台在同一状态根重启接管。
+        drop(fake_listener);
+        std::fs::remove_file(&sock_path).unwrap();
+        let serving = tokio::spawn(async move {
+            crate::serve_for_test(swap_layout, None, Duration::from_secs(5), stop_rx).await
+        });
+        let real_epoch = tokio::time::timeout(Duration::from_secs(3), async {
+            loop {
+                if let Ok(status) = swap_client.status().await {
+                    break status.epoch;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("等待替换后的真实后台就绪超时");
+
+        // 新后台已完全就绪后再向旧连接回写旧协议魔数，强制次连落到新后台上。
+        let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+        s1.write_all(&older).await.unwrap();
+        s1.write_u32(4).await.unwrap();
+        s1.write_all(b"null").await.unwrap();
+        drop(s1);
+        (serving, real_epoch)
+    });
+
+    let err = tokio::time::timeout(
+        Duration::from_secs(5),
+        client.stop_within(Duration::from_secs(2)),
+    )
+    .await
+    .expect("竞态 stop 不应超时")
+    .expect_err("后台在跨版本停机窗口内被替换时，旧 stop 必须中止而不能返回成功");
+    assert_eq!(err.kind, LocalErrorKind::Transport);
+    assert!(
+        err.message.contains("后台实例已变更") && err.message.contains("未停止新后台"),
+        "错误信息应明确提示未停止新后台：{}",
+        err.message
+    );
+
+    let (serving, real_epoch) = swap_task.await.unwrap();
+    let alive = client
+        .status()
+        .await
+        .expect("刚替换的真实后台不应被旧 stop 误停");
+    assert_eq!(alive.epoch, real_epoch);
+    assert!(!alive.stopping, "新后台不应进入停机状态");
+
+    // 正常收尾清理测试后台（同进程 serve_for_test 需先取回并释放 ServeExit.instance 再等待锁退场）。
+    let (stopped, departure) = client
+        .request_stop()
+        .await
+        .expect("同版本 request_stop 应正常返回 DaemonStatus");
+    assert_eq!(stopped.epoch, real_epoch);
+    drop(stop_tx);
+    let exit = tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit.drain, crate::DrainOutcome::Completed);
+    drop(exit.instance);
+    departure
+        .wait(Duration::from_secs(2))
+        .await
+        .expect("释放 InstanceLock 后状态根应已释放");
 }

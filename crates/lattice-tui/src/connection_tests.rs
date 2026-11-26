@@ -1762,3 +1762,24 @@ fn context_op_renders_channel_and_edits_and_titles_use_node_ids() {
         "助手标题线应标注 @2：{assistant}"
     );
 }
+
+#[test]
+fn incompatible_backend_observation_loss_never_suggests_reconnect() {
+    let status = crate::connection::observation_lost_status(&ConnectionStatus::Error(
+        lattice_local::LocalError::new(
+            lattice_local::LocalErrorKind::IncompatibleBackend,
+            "运行中的后台版本较新且不兼容（对端进程号：4242）；请换用匹配的前端",
+        ),
+    ));
+    assert_eq!(status.level, NoticeLevel::Error);
+    assert!(
+        status.text.contains("版本较新且不兼容") && status.text.contains("对端进程号：4242"),
+        "应保留版本不兼容与对端进程号诊断：{}",
+        status.text
+    );
+    assert!(
+        !status.text.contains("/reconnect"),
+        "协议版本不兼容时不应提示 /reconnect 重连：{}",
+        status.text
+    );
+}

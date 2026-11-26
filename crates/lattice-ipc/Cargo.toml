@@ -13,7 +13,7 @@ chrono = { workspace = true, features = ["serde"] }
 lattice-context = { workspace = true }
 lattice-conversation = { workspace = true }
 lattice-session = { workspace = true }
-rustix = { workspace = true, features = ["net", "process"] }
+rustix = { workspace = true, features = ["event", "net", "process"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
 thiserror = { workspace = true }

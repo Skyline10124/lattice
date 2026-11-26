@@ -148,7 +148,7 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 ## 停止后台
 
-`SIGTERM`、`SIGINT` 与 IPC `stop` 共用同一个停机顺序，信号处理在绑定 `api.sock` 之前就绪（就绪前收到的信号以及绑定后 listener `accept` 失败也进入同一流程）：
+`SIGTERM`、`SIGINT`、同版本 IPC `stop` 与版本无关控制停机帧（`LTCTRL\0\x01`）共用同一个停机顺序，信号处理在绑定 `api.sock` 之前就绪（就绪前收到的信号以及绑定后 listener `accept` 失败也进入同一流程）：
 
 | 阶段 | 动作与期限 | 到期或完成结果 |
 | --- | --- | --- |
@@ -162,5 +162,5 @@ true 后由后台履行责任，不自动补发；再次明确取消可开始新
 
 - **后台参数与排空上限**：`lattice-daemon` 要求显式传入绝对路径 `--state-root <绝对路径>`（不回退到环境变量解析），并接受可选的 `--drain-timeout <时长>`（非负整数加单位 `ms`、`s` 或 `m`，省略单位按秒，默认 `60s`；缺参数、相对路径或无效时长以 `2` 退出）。
 - **排空超时的停写与计数**：排空超时时，后台在准入锁内将每个尚未退休的操作计入一次 `unconfirmed_operations`（一轮草稿会话清理无论正在处理哪个候选会话都按一个操作计；已被计入的操作随后因错误退休时保持计数不变），释放准入锁后置位会话库租约的 `shutdown` 标志与 `SessionStore` 的写闸 `write_disabled`，并将会话库管理器置入终态。写闸占用每次写入从开始到提交持有的健康锁，停写只等待正在进行的那次提交结束，停写之后的会话库随最终释放关闭；此后任何写入都返回 `WriteDisabled`，在途 Turn 停在已写入的进度，见[执行者消失后的 Turn](#执行者消失后的-turn)。`unconfirmed_operations` 统计本进程未确认收尾的操作数，不等同于会话库中未关闭 Turn 的数量；连接中断也不能证明后台已停止。
-- **IPC `stop` 回执与客户端等待**：IPC `stop` 在第 2 步结束时立即收到保存的 `DaemonStatus` 回执（早于组件、元数据、认证与连接尾段），排空结束后、进入连接收尾前到达的 `stop` 直接读取同一份保存的结果。客户端收到回执后在 30 秒内等待 `api.sock` 撤下与 `owner.lock` 可取得，随后返回，调用方即可在同一状态根启动新后台（客户端不等待旧进程完全退出）；30 秒内锁仍被持有时返回 `Stopping`，由用户以 `lattice daemon status` 复核。`unconfirmed_operations` 非零时，`lattice daemon stop` 在标准错误提示有操作未确认收尾并以 `1` 退出。
+- **IPC `stop` 回执、跨版本停机与客户端等待**：同版本 IPC `stop` 与版本无关控制停机帧（`LTCTRL\0\x01`）均在第 2 步结束时立即收到保存的停机结果（同版本返回完整 `DaemonStatus`，控制帧携带首连确认的 `expected_protocol_version`，仅在目标版本匹配时才触发停机并返回最小冻结结构 `{ epoch, owners, unconfirmed_operations }`，版本不匹配时回复 `version_mismatch` 而不进入停机），排空结束后、进入连接收尾前到达的 `stop` 直接读取同一份保存的结果。客户端首连确认更旧协议后台后，在次连发控制帧前会复核 `api.sock` `(dev, ino)`、对端 `SO_PEERCRED` 进程号与首连 `pidfd` 存活状态，发现后台在窗口内已替换或版本变更时立即中止（不误停新后台）。客户端收到停机回执后在 30 秒内等待 `api.sock` 撤下与 `owner.lock` 可取得，随后返回，调用方即可在同一状态根启动新后台（客户端不等待旧进程完全退出）；30 秒内锁仍被持有时返回 `Stopping`，由用户以 `lattice daemon status` 复核。`unconfirmed_operations` 非零时，`lattice daemon stop` 在标准错误提示有操作未确认收尾并以 `1` 退出。若目标后台为不支持 `LTCTRL\0\x01` 的历史更旧版本且首连发请求前捕获的同有效 UID 非自身 `pidfd` 仍存活（并在首连主动回写更旧魔数），客户端经 `pidfd_send_signal` 发送 `SIGTERM` 触发同一停机流程（遇到 `ESRCH` 同样中止），并在 90 秒上限内等待 `api.sock` 撤下与 `owner.lock` 可取得（超时报 `Stopping`），完成后在标准错误注明无法读取排空计数；对更新协议后台或静默断连绝不发信号。`--json` 模式下，同版本停机输出 `DaemonStatus`，跨版本控制停机输出 `{"cross_version":true,"method":"control","epoch":…,"stopping":true,"owners":…,"unconfirmed_operations":…}`，跨版本信号停机输出 `{"cross_version":true,"method":"signal","peer_pid":…}`。
 - **`lattice-daemon` 退出码**：排空超时（含排空中收到停机信号）退出 `4`，优先于其他运行错误；状态根已被另一个后台占用（取不到 `owner.lock`）退出 `3`，能连上已发布 socket 时经 `SO_PEERCRED` 附带对端进程号（连接失败时写“对端进程号不可用”）；参数错误退出 `2`；排空完成但存在绑定后运行错误（如 listener 失败）或启动运行错误退出 `1`；排空完成且无运行错误（含就绪前收到停机信号）退出 `0`。尾段到期不改变排空结果。

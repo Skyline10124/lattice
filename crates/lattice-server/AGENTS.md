@@ -10,7 +10,7 @@
 | `src/im_auth.rs` | 配置目录下私有文件 `im/auth.json` 的严格权限核验与原子读写（`ImAuthStore`）、零化秘密包装 `ImToken`（不实现 `Debug` 或 `Display`）、平台状态查询 `ImPlatformCredentialState` 及零秘密回显的 `ImAuthError` |
 | `src/session.rs` | 内部会话库异步门面 `SessionApi`（`spawn_blocking` 封装、写异常上报、`SessionId` 精确/前缀解析与 `usage` 查询；类型本身与 `from_store` 仅在 `test` 或 `test-utils` 下对外导出） |
 | `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
-| `src/stores.rs` | 共享 `SessionStore` 句柄、提交异常后的库级停写与关闭重开、以及排空超时停写终态（`disable_writes`） |
+| `src/stores.rs` | 共享 `SessionStore` 句柄、首次打开失败保持 `Unopened`（避免缓存旧库版本或残留旧路径错误）、提交或创建同步异常后的库级停写与关闭重开，以及排空超时停写终态（`disable_writes`） |
 | `src/local/mod.rs`、`src/local/types.rs`、`src/local/ipc.rs` | 本地后台宿主入口与不透明 `InstanceLock` 重导出、模块内部类型别名，以及基于 `rustix::fs::flock` 的实例锁持有与 socket 绑定/残留核验/清理（分帧、目录权限与对端 UID 核验委托 `lattice-ipc`） |
 | `src/local/components.rs`、`src/local/components_tests.rs` | 进程内受托管组件的就绪后非阻塞初始挂载、单槽合并重新挂载（10 秒停旧等待、超时 `abort` 强拆后启新、热重载保留运行中旧配置）、组件作用域 panic 载荷抑制与异常退出故障隔离、`DaemonStatus.components` 按字典序投影，以及停机第 1 步取消信号广播与第 3 步严格 10 秒上限并行收尾 |
 | `src/local/error.rs`、`src/local/presentation.rs` | `ApiError` 到 `LocalError`（含 `RequestBudgetExceeded` 保留原文为 `BadRequest`）的分类与安全存储诊断映射；后台边界 `lattice-llm` 与 `lattice-ipc` 模型查询、模型候选及凭据状态的逐字段无通配符转换（含由 `lattice-llm::Availability::diagnostic` 直接填充 `ProviderAuthStatus.diagnostic`） |

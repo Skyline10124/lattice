@@ -9,7 +9,7 @@ use std::{io::Write, process::ExitCode};
 
 use clap::{ArgAction, Args, Subcommand};
 use lattice_local::{
-    ComponentState, DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout,
+    ComponentState, DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout, StopOutcome,
 };
 
 pub(crate) use install::InstallArgs;
@@ -62,7 +62,39 @@ pub(crate) enum DaemonAction {
         )]
         help: Option<bool>,
     },
-    /// 停止接收新请求，等待已接管工作与持久化收尾完成并释放状态根。
+    /// 启动已安装的用户级 systemd 后台服务（不支持 --json）。
+    #[command(
+        help_template = SUBCOMMAND_HELP_TEMPLATE,
+        override_usage = "lattice daemon start",
+        disable_help_flag = true
+    )]
+    Start {
+        /// 显示帮助。
+        #[arg(
+            short = 'h',
+            long = "help",
+            action = ArgAction::Help,
+            display_order = 1000
+        )]
+        help: Option<bool>,
+    },
+    /// 重启已安装的用户级 systemd 后台服务（不支持 --json）。
+    #[command(
+        help_template = SUBCOMMAND_HELP_TEMPLATE,
+        override_usage = "lattice daemon restart",
+        disable_help_flag = true
+    )]
+    Restart {
+        /// 显示帮助。
+        #[arg(
+            short = 'h',
+            long = "help",
+            action = ArgAction::Help,
+            display_order = 1000
+        )]
+        help: Option<bool>,
+    },
+    /// 停止接收新请求，等待已接管工作与持久化收尾完成并释放状态根（支持跨版本停止较旧后台）。
     #[command(
         help_template = SUBCOMMAND_HELP_TEMPLATE,
         override_usage = "lattice daemon stop [--json]",
@@ -78,7 +110,7 @@ pub(crate) enum DaemonAction {
         )]
         help: Option<bool>,
     },
-    /// 写出用户级 systemd 服务单元（lattice.service）并启用与启动后台（不支持 --json）。
+    /// 写出用户级 systemd 服务单元（lattice.service）并启用与启动或重启后台（不支持 --json）。
     #[command(
         help_template = SUBCOMMAND_HELP_TEMPLATE,
         override_usage = "lattice daemon install [--drain-timeout <时长>]",
@@ -87,11 +119,26 @@ pub(crate) enum DaemonAction {
     Install(InstallArgs),
 }
 
-/// `lattice daemon install` 搭配 `--json` / `-j` 时返回的固定中文错误文案。
-pub(crate) const INSTALL_JSON_UNSUPPORTED_MESSAGE: &str =
-    "`lattice daemon install` 不支持 `--json`；执行 `lattice daemon install --help` 查看用法";
+impl DaemonAction {
+    /// 对不支持 `--json` 的子命令返回其子命令名称。
+    pub(crate) fn json_unsupported_name(&self) -> Option<&'static str> {
+        match self {
+            Self::Install(_) => Some("install"),
+            Self::Start { .. } => Some("start"),
+            Self::Restart { .. } => Some("restart"),
+            Self::Status { .. } | Self::Stop { .. } => None,
+        }
+    }
+}
 
-/// 将根命令向下传播的全局选项在 `daemon` 子命令组内替换为中文说明，并在 `install` 中隐藏不使用的 `--json`。
+/// 不支持 `--json` 的 `lattice daemon` 子命令（`install`、`start`、`restart`）返回的中文错误文案。
+pub(crate) fn json_unsupported_message(subcommand: &str) -> String {
+    format!(
+        "`lattice daemon {subcommand}` 不支持 `--json`；执行 `lattice daemon {subcommand} --help` 查看用法"
+    )
+}
+
+/// 将根命令向下传播的全局选项在 `daemon` 子命令组内替换为中文说明，并在不支持 `--json` 的子命令中隐藏该选项。
 pub(crate) fn localize_help(cmd: clap::Command) -> clap::Command {
     let localize_common = |sub: clap::Command, hide_json: bool| {
         sub.mut_arg("json", |arg| {
@@ -106,6 +153,8 @@ pub(crate) fn localize_help(cmd: clap::Command) -> clap::Command {
 
     localize_common(cmd, false)
         .mut_subcommand("status", |sub| localize_common(sub, false))
+        .mut_subcommand("start", |sub| localize_common(sub, true))
+        .mut_subcommand("restart", |sub| localize_common(sub, true))
         .mut_subcommand("stop", |sub| localize_common(sub, false))
         .mut_subcommand("install", |sub| localize_common(sub, true))
 }
@@ -150,54 +199,57 @@ pub(crate) fn format_cli_error(error: &clap::Error) -> String {
 
 pub(crate) async fn run(action: DaemonAction, json: bool) -> anyhow::Result<ExitCode> {
     match action {
-        DaemonAction::Status { .. } => run_client(false, json).await,
-        DaemonAction::Stop { .. } => run_client(true, json).await,
+        DaemonAction::Status { .. } => run_status(json).await,
+        DaemonAction::Start { .. } => Ok(install::run_start().await),
+        DaemonAction::Restart { .. } => Ok(install::run_restart().await),
+        DaemonAction::Stop { .. } => run_stop(json).await,
         DaemonAction::Install(args) => Ok(install::run(args).await),
     }
 }
 
-async fn run_client(is_stop: bool, json: bool) -> anyhow::Result<ExitCode> {
-    let layout = match StateLayout::resolve() {
-        Ok(layout) => layout,
+fn resolve_client(json: bool) -> anyhow::Result<Result<LocalClient, ExitCode>> {
+    match StateLayout::resolve() {
+        Ok(layout) => Ok(Ok(LocalClient::new(layout))),
         Err(_) => {
             let msg = "无法解析状态根目录：请设置绝对路径的 XDG_STATE_HOME 或 HOME";
             if json {
                 return Err(LocalError::new(LocalErrorKind::Internal, msg).into());
             }
             eprintln!("错误：{msg}");
-            return Ok(ExitCode::from(1));
+            Ok(Err(ExitCode::from(1)))
         }
+    }
+}
+
+fn report_daemon_error(error: LocalError, json: bool) -> anyhow::Result<ExitCode> {
+    if json {
+        return Err(error.into());
+    }
+    eprintln!("错误：{}", error.message);
+    if let Some(store) = &error.store
+        && let Ok(raw) = serde_json::to_string(store)
+    {
+        eprintln!("{raw}");
+    }
+    let code = match error.kind {
+        LocalErrorKind::BadRequest | LocalErrorKind::NotFound | LocalErrorKind::Conflict => 2,
+        _ => 1,
     };
-    let client = LocalClient::new(layout);
-    let status = if is_stop {
-        client.stop().await
-    } else {
-        client.status().await
+    Ok(ExitCode::from(code))
+}
+
+async fn run_status(json: bool) -> anyhow::Result<ExitCode> {
+    let client = match resolve_client(json)? {
+        Ok(client) => client,
+        Err(code) => return Ok(code),
     };
-    let status = match status {
+    let status = match client.status().await {
         Ok(status) => status,
-        Err(error) => {
-            if json {
-                return Err(error.into());
-            }
-            eprintln!("错误：{}", error.message);
-            if let Some(store) = &error.store
-                && let Ok(raw) = serde_json::to_string(store)
-            {
-                eprintln!("{raw}");
-            }
-            let code = match error.kind {
-                LocalErrorKind::BadRequest
-                | LocalErrorKind::NotFound
-                | LocalErrorKind::Conflict => 2,
-                _ => 1,
-            };
-            return Ok(ExitCode::from(code));
-        }
+        Err(error) => return report_daemon_error(error, json),
     };
     match render_daemon_status(
         &status,
-        is_stop,
+        false,
         json,
         &mut std::io::stdout(),
         &mut std::io::stderr(),
@@ -211,6 +263,100 @@ async fn run_client(is_stop: bool, json: bool) -> anyhow::Result<ExitCode> {
         Err(error) => {
             eprintln!("错误：写出后台状态失败：{error}");
             Ok(ExitCode::from(1))
+        }
+    }
+}
+
+async fn run_stop(json: bool) -> anyhow::Result<ExitCode> {
+    let client = match resolve_client(json)? {
+        Ok(client) => client,
+        Err(code) => return Ok(code),
+    };
+    let outcome = match client.stop().await {
+        Ok(outcome) => outcome,
+        Err(error) => return report_daemon_error(error, json),
+    };
+    match render_stop_outcome(
+        &outcome,
+        json,
+        &mut std::io::stdout(),
+        &mut std::io::stderr(),
+    ) {
+        Ok(code) => Ok(code),
+        Err(error) if json => Err(LocalError::new(
+            LocalErrorKind::Internal,
+            &format!("写出后台停机结果失败：{error}"),
+        )
+        .into()),
+        Err(error) => {
+            eprintln!("错误：写出后台停机结果失败：{error}");
+            Ok(ExitCode::from(1))
+        }
+    }
+}
+
+fn render_stop_outcome(
+    outcome: &StopOutcome,
+    json: bool,
+    out: &mut impl Write,
+    err: &mut impl Write,
+) -> anyhow::Result<ExitCode> {
+    match outcome {
+        StopOutcome::Status(status) => render_daemon_status(status, true, json, out, err),
+        StopOutcome::CrossVersionControl {
+            epoch,
+            owners,
+            unconfirmed_operations,
+        } => {
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    serde_json::json!({
+                        "cross_version": true,
+                        "method": "control",
+                        "epoch": epoch,
+                        "stopping": true,
+                        "owners": owners,
+                        "unconfirmed_operations": unconfirmed_operations,
+                    })
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "后台已停止（跨版本控制停机，代次：{epoch}，剩余在途执行者：{owners}，未确认收尾操作：{unconfirmed_operations}）"
+                )?;
+            }
+            if *unconfirmed_operations != 0 {
+                writeln!(
+                    err,
+                    "有 {unconfirmed_operations} 个操作没有确认收尾，其中的在途 turn 在后台重启后显示为执行者消失。"
+                )?;
+            }
+            Ok(ExitCode::from(u8::from(*unconfirmed_operations != 0)))
+        }
+        StopOutcome::CrossVersionSignal { peer_pid } => {
+            if json {
+                writeln!(
+                    out,
+                    "{}",
+                    serde_json::json!({
+                        "cross_version": true,
+                        "method": "signal",
+                        "peer_pid": peer_pid,
+                    })
+                )?;
+            } else {
+                writeln!(
+                    out,
+                    "已向旧版本后台（对端进程号：{peer_pid}）发送停机信号，状态根已释放。"
+                )?;
+            }
+            writeln!(
+                err,
+                "跨版本信号停机无法读取排空计数；如有在途 turn，请在启动新后台后检查对应会话状态。"
+            )?;
+            Ok(ExitCode::SUCCESS)
         }
     }
 }
@@ -280,8 +426,8 @@ fn render_daemon_status(
 
 #[cfg(test)]
 mod tests {
-    use super::render_daemon_status;
-    use lattice_local::{ComponentState, ComponentStatus, DaemonStatus};
+    use super::{render_daemon_status, render_stop_outcome};
+    use lattice_local::{ComponentState, ComponentStatus, DaemonStatus, StopOutcome};
 
     #[test]
     fn daemon_stop_warns_on_stderr_when_operations_are_unconfirmed_while_status_stays_silent() {
@@ -421,6 +567,104 @@ mod tests {
         assert_eq!(
             serde_json::from_slice::<DaemonStatus>(&json_out).unwrap(),
             with_components
+        );
+    }
+
+    #[test]
+    fn cross_version_stop_outcomes_render_clean_text_json_warnings_and_exit_codes() {
+        // 1. 跨版本控制帧（无未确认操作）：退出 0，JSON 使用显式跨版本形状且不伪造 components。
+        let control_clean = StopOutcome::CrossVersionControl {
+            epoch: "15".into(),
+            owners: 0,
+            unconfirmed_operations: 0,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let code = render_stop_outcome(&control_clean, true, &mut out, &mut err).unwrap();
+        assert_eq!(code, std::process::ExitCode::SUCCESS);
+        assert!(err.is_empty());
+        let parsed: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(
+            parsed,
+            serde_json::json!({
+                "cross_version": true,
+                "method": "control",
+                "epoch": "15",
+                "stopping": true,
+                "owners": 0,
+                "unconfirmed_operations": 0,
+            })
+        );
+
+        let mut text_out = Vec::new();
+        let mut text_err = Vec::new();
+        let text_code =
+            render_stop_outcome(&control_clean, false, &mut text_out, &mut text_err).unwrap();
+        assert_eq!(text_code, std::process::ExitCode::SUCCESS);
+        assert!(text_err.is_empty());
+        let text = String::from_utf8(text_out).unwrap();
+        assert!(
+            text.contains("后台已停止")
+                && text.contains("跨版本控制停机")
+                && text.contains("代次：15"),
+            "人类可读跨版本控制停机输出不符：{text:?}"
+        );
+
+        // 2. 跨版本控制帧（存在未确认收尾操作）：退出 1，stderr 给出明确警告。
+        let control_unconfirmed = StopOutcome::CrossVersionControl {
+            epoch: "16".into(),
+            owners: 1,
+            unconfirmed_operations: 2,
+        };
+        let mut unc_out = Vec::new();
+        let mut unc_err = Vec::new();
+        let unc_code =
+            render_stop_outcome(&control_unconfirmed, true, &mut unc_out, &mut unc_err).unwrap();
+        assert_eq!(unc_code, std::process::ExitCode::from(1));
+        let unc_stderr = String::from_utf8(unc_err).unwrap();
+        assert!(
+            unc_stderr.contains('2')
+                && unc_stderr.contains("没有确认收尾")
+                && unc_stderr.contains("执行者消失"),
+            "跨版本控制停机未确认收尾提示不符：{unc_stderr:?}"
+        );
+
+        // 3. 跨版本信号兜底：退出 0，JSON 输出 signal 形状，stderr 注明无法读取排空计数。
+        let signal_stop = StopOutcome::CrossVersionSignal { peer_pid: 1248 };
+        let mut sig_json_out = Vec::new();
+        let mut sig_json_err = Vec::new();
+        let sig_json_code =
+            render_stop_outcome(&signal_stop, true, &mut sig_json_out, &mut sig_json_err).unwrap();
+        assert_eq!(sig_json_code, std::process::ExitCode::SUCCESS);
+        let sig_parsed: serde_json::Value = serde_json::from_slice(&sig_json_out).unwrap();
+        assert_eq!(
+            sig_parsed,
+            serde_json::json!({
+                "cross_version": true,
+                "method": "signal",
+                "peer_pid": 1248,
+            })
+        );
+        let sig_json_stderr = String::from_utf8(sig_json_err).unwrap();
+        assert!(
+            sig_json_stderr.contains("无法读取排空计数"),
+            "信号停机 JSON 模式应在 stderr 说明无法读取排空计数：{sig_json_stderr:?}"
+        );
+
+        let mut sig_text_out = Vec::new();
+        let mut sig_text_err = Vec::new();
+        let sig_text_code =
+            render_stop_outcome(&signal_stop, false, &mut sig_text_out, &mut sig_text_err).unwrap();
+        assert_eq!(sig_text_code, std::process::ExitCode::SUCCESS);
+        let sig_text = String::from_utf8(sig_text_out).unwrap();
+        assert!(
+            sig_text.contains("对端进程号：1248") && sig_text.contains("状态根已释放"),
+            "信号停机人类可读输出不符：{sig_text:?}"
+        );
+        assert!(
+            String::from_utf8(sig_text_err)
+                .unwrap()
+                .contains("无法读取排空计数")
         );
     }
 }

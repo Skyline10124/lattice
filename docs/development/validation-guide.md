@@ -19,14 +19,15 @@ status: active
 ## 环境与后台
 
 - 后台（`lattice-daemon`）在启动时按自己的宿主环境确定配置目录、全局 agents 目录与 TLS 根（带 `test-fake-tools` 的测试构建还会读取逗号分隔的 `LATTICE_TEST_TOOLS` 注册假工具），之后保持不变；`providers.toml` 与凭据在每次请求时重读。更换决定这些位置、TLS 根或假工具名单的环境后，重启后台使新环境生效。规则见[配置来源与后台启动](../architecture/session/acceptance.md#配置来源与后台启动)。
-- 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。跨 IPC 协议版本（当前为 `68`）升级后台时，新旧二进制互连会报 `incompatible_backend`（连接存活时附对端 pid），先用 `systemctl --user stop lattice` 或旧版 `lattice daemon stop` 停下旧后台再启动新版。
+- 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。跨 IPC 协议版本（当前为 `68`）升级后台时，新旧二进制互连普通请求会报 `incompatible_backend`（连接存活时附对端 pid）；systemd 托管下执行 `lattice daemon restart`（或重新执行 `lattice daemon install`），手动运行时新前端直接执行 `lattice daemon stop` 跨版本停下更旧后台（优先经 `LTCTRL\0\x01` 控制帧，历史旧后台经 `pidfd` 发送 `SIGTERM` 兜底）后再启动新版。重启后后台仍较旧时命令退出 `1` 并指出实际运行的 `lattice-daemon`。
 - 崩溃注入与强制清理只在隔离的状态根上进行，例如以 `lattice-daemon --state-root <绝对路径>` 启动的后台。
 
 | 入口 | 与后台的关系 |
 | --- | --- |
-| `lattice` 的 `run`、`session`、`tui`、`auth`、`im`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台） |
-| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload` 与按该文件绝对路径的 `systemctl --user enable --now`（不支持 `--json`） |
-| `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；启动时以 `0700` 准备 `~/.lattice/im` 并建立 `inotify` 配置监视，就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT` 或 IPC `stop` 停机并在排空开始时发出 `STOPPING=1` |
+| `lattice` 的 `run`、`session`、`tui`、`auth`、`im`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台）；其中 `daemon stop` 另支持跨版本停止更旧协议后台 |
+| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload`、按该文件绝对路径的 `systemctl --user enable` 与 `systemctl --user restart lattice.service`（不支持 `--json`），成功后探测一次状态根，只有协议一致的后台应答才退出 `0`，不兼容或连不上时退出 `1` |
+| `lattice daemon start`、`lattice daemon restart` | 薄封装 `systemctl --user start|restart lattice.service`（不支持 `--json`），成功后探测一次状态根，只有协议一致的后台应答才退出 `0`，不兼容或连不上时退出 `1`；失败时区分未安装 unit 与状态根被占用并附对端进程号诊断 |
+| `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；启动时以 `0700` 准备 `~/.lattice/im` 并建立 `inotify` 配置监视，就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT`、同版本 IPC `stop` 或版本无关控制帧 `LTCTRL\0\x01` 停机并在排空开始时发出 `STOPPING=1` |
 
 ## 判读结果
 
@@ -36,7 +37,7 @@ status: active
 | --- | --- |
 | `0` | 命令成功。`run`、`session send`、`session trigger` 与 `session turn --follow` 表示这一轮 Completed 且读取完整；`session feed`、`session context-op` 与纯查询（含 `session inspect`）表示写入或读取成功（业务结局看 `TurnSummary`）；`lattice im reload` 表示挂载结果为 `Mounted` 或 `Disabled`；`lattice im auth set\|remove\|status` 表示凭据读写或状态查询成功（即使随后挂载结果为 `Unmounted` 或 `Disabled`）；`daemon status` 在 `unconfirmed_operations == 0` 时返回 `0`（可选组件未挂载不影响后台健康退出码）；`lattice-daemon` 表示在途工作排空完成且无运行错误 |
 | `1` | 执行、观察或读取失败：这一轮 Failed，已知 Completed 但观察或正文读取失败，回执为 `not_accepted` 或 `unknown`，后台未运行（`not_running`），`lattice im reload` 返回 `UsingPreviousConfiguration` 或 `Unmounted`，`daemon status`、`daemon stop` 读到非零 `unconfirmed_operations`（`daemon stop` 另在标准错误提示有未确认收尾的操作），以及其余行之外的后台与运行错误（如 `Busy`、`Stopping`、`Transport`） |
-| `2` | 使用错误或取消：参数错误（含 `session send`/`run` 无 `--session` 传 `--expected-position`、`session context-op` 无编辑项或 `--image` 位置不当、`lattice-daemon` 缺 `--state-root`、相对路径、无效或溢出的 `--drain-timeout`，`lattice daemon install` 找不到同目录有效用户可执行的 `lattice-daemon`、传入 `--json` 或可执行路径 / 状态根含无法写入 systemd unit 的字符，以及 `lattice im auth set\|remove` 传入不受支持的平台名或无效凭据文本），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`（含 `position_changed` 与 `settings_changed`），以及这一轮 Cancelled |
+| `2` | 使用错误或取消：参数错误（含 `session send`/`run` 无 `--session` 传 `--expected-position`、`session context-op` 无编辑项或 `--image` 位置不当、`lattice-daemon` 缺 `--state-root`、相对路径、无效或溢出的 `--drain-timeout`，`lattice daemon install` 找不到同目录有效用户可执行的 `lattice-daemon` 或可执行路径 / 状态根含无法写入 systemd unit 的字符，`lattice daemon install\|start\|restart` 传入 `--json`，以及 `lattice im auth set\|remove` 传入不受支持的平台名或无效凭据文本），后台错误 `BadRequest`（含配置拒绝）、`NotFound`、`Conflict`（含 `position_changed` 与 `settings_changed`），以及这一轮 Cancelled |
 | `3` | `lattice-daemon` 取不到 `owner.lock`（状态根已被另一个后台占用，能连上已发布 socket 时附对端进程号） |
 | `4` | `lattice-daemon` 排空超时，或排空期间收到 `SIGTERM`、`SIGINT`；在途操作停止写入，见[停止后台](../architecture/session/recovery.md#停止后台) |
 

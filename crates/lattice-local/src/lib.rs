@@ -12,9 +12,9 @@ mod login;
 mod operation;
 mod turn_plan;
 
-pub use client::LocalClient;
 #[cfg(any(test, feature = "test-utils"))]
 pub use client::LocalWatch;
+pub use client::{LocalClient, StatusProbe, StopOutcome};
 pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;

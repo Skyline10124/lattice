@@ -73,7 +73,7 @@ system = "请用中文回答，表达简洁准确。"
 lattice daemon install
 ```
 
-日常通过 `systemctl --user start|stop|restart lattice` 或 `lattice daemon stop` 管理后台。需要后台在当前用户没有任何登录会话时也保持运行的，执行：
+日常通过 `lattice daemon start|restart|stop|status`（或 `systemctl --user start|stop|restart lattice`）管理后台。需要后台在当前用户没有任何登录会话时也保持运行的，执行：
 
 ```sh
 loginctl enable-linger
@@ -150,7 +150,7 @@ lattice daemon status
 
 Session 命令、TUI、`auth`、`im` 与 `models` 只连接已经运行的本地后台（`lattice-daemon`），不会自动拉起后台。请求被接受后，即使关闭终端，任务也会在后台继续执行。
 
-`lattice-daemon` 使用启动它的宿主进程环境（systemd user manager 环境或手动启动时的进程环境），在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据、`im/` 与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，执行 `systemctl --user restart lattice`（手动运行时先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`）。
+`lattice-daemon` 使用启动它的宿主进程环境（systemd user manager 环境或手动启动时的进程环境），在启动时确定配置目录的位置（默认 `$HOME/.lattice`，其中有 `providers.toml`、凭据、`im/` 与全局 agents 目录），并载入 TLS 根证书。目录位置与 TLS 根在运行期间保持不变。换了决定目录位置或 TLS 根的环境后，执行 `lattice daemon restart`（手动运行时先执行 `lattice daemon stop` 再重新启动 `lattice-daemon`）。
 
 配置目录里的 `providers.toml` 与凭据在每次模型请求时重读，其中用于请求发送的配置与凭据修改从下一次请求起生效。凭据也可通过 `lattice auth set` 更新。价格的生效时机见[费用估算](docs/architecture/llm/usage.md#费用估算)。TLS 根只在后台启动时载入；修改 TLS 信任后需要重启后台。
 
@@ -163,6 +163,8 @@ lattice session turn <turn_id>
 lattice session turn <turn_id> --follow
 lattice session cancel <session_id> <turn_id>
 lattice daemon install
+lattice daemon start
+lattice daemon restart
 lattice daemon status
 lattice daemon stop
 lattice im --help
@@ -202,7 +204,7 @@ lattice session usage <session_id>
 lattice --json session usage <session_id>
 ```
 
-由 systemd 托管时，升级先执行 `systemctl --user stop lattice`（或 `lattice daemon stop`），覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `systemctl --user start lattice`。跨本地 IPC 协议版本（当前为 `66`）升级或从旧版本迁移时，若新前端与运行中旧后台报 `incompatible_backend`，先执行 `systemctl --user stop lattice`（手动运行后台时用旧二进制执行 `lattice daemon stop`），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
+由 systemd 托管时，升级覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `lattice daemon restart`（或重新执行 `lattice daemon install` 更新 unit 并重启）。跨本地 IPC 协议版本（当前为 `68`）升级或手动运行旧后台时，新前端直接执行 `lattice daemon stop` 即可跨版本优雅停止更旧协议的后台（优先经版本无关控制帧 `LTCTRL\0\x01`，对历史旧后台经 `pidfd` 发送 `SIGTERM` 兜底），再启动新后台。协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 
