@@ -45,11 +45,16 @@ const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice`（或手动结束旧 `lattice-daemon` 进程）后重启新后台";
 
-/// 版本无关控制请求：仅承载跨协议停机，不随业务展示结构变化。
+/// 当前编译进本二进制的本地 IPC 业务协议版本号。
+pub const fn current_protocol_version() -> u8 {
+    PROTOCOL_VERSION
+}
+
+/// 版本无关控制请求：仅承载跨协议停机，携带首连确认的对端协议版本以防实例替换误停。
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ControlRequest {
-    Stop,
+    Stop { expected_protocol_version: u8 },
 }
 
 /// 版本无关控制停机回执：只含与具体业务展示解耦的最小停机计数。
@@ -59,6 +64,25 @@ pub struct ControlStopStatus {
     pub epoch: String,
     pub owners: usize,
     pub unconfirmed_operations: usize,
+}
+
+/// 版本无关控制停机响应帧：区分确认停机与对端协议版本已变更。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ControlStopResponse {
+    Stopped(ControlStopStatus),
+    VersionMismatch { protocol_version: u8 },
+}
+
+/// 客户端执行版本无关控制停机交换后的分类结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ControlStopExchange {
+    /// 目标后台确认版本一致并已完成排空停机。
+    Stopped(ControlStopStatus),
+    /// 对端协议版本与首连确认的目标版本不一致（后台已被替换）；严禁继续信号兜底。
+    PeerChanged { protocol_version: u8 },
+    /// 对端不认识 `LTCTRL\0\x01`（同版本的历史旧后台回写旧业务魔数或关闭连接）。
+    Unsupported,
 }
 
 /// 后台首帧读取结果：当前版本业务请求，或版本无关控制请求。
@@ -76,7 +100,7 @@ pub enum FirstResponse<T> {
 /// 已连接对端的内核进程句柄（经 `SO_PEERCRED` + `pidfd_open` 获取，纯 `rustix` 无 `unsafe`）。
 ///
 /// 调用方必须在发送首帧前打开该句柄，并仅在对端随后于同一连接上主动回写更旧协议魔数后
-/// 才允许发送 `SIGTERM`，从而证明监听进程在打开句柄时仍存活且 PID 未被复用。
+/// 才允许用于实例身份核验与发送 `SIGTERM`，从而证明监听进程在打开句柄时仍存活且 PID 未被复用。
 pub struct PeerProcess {
     pid: i32,
     pidfd: std::os::fd::OwnedFd,
@@ -87,11 +111,32 @@ impl PeerProcess {
         self.pid
     }
 
-    /// 经 `pidfd_send_signal` 向绑定的内核进程实例发送 `SIGTERM`；进程已退出（`ESRCH`）视为已终结。
-    pub fn terminate(&self) -> std::io::Result<()> {
+    /// 经 `poll(pidfd, POLLIN, 0)` 非阻塞检查该内核进程实例是否已退出（含僵尸态）。
+    pub fn has_exited(&self) -> std::io::Result<bool> {
+        let mut fds = [rustix::event::PollFd::new(
+            &self.pidfd,
+            rustix::event::PollFlags::IN,
+        )];
+        let timeout = rustix::event::Timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
+        let ready = rustix::event::poll(&mut fds, Some(&timeout)).map_err(std::io::Error::from)?;
+        if ready == 0 {
+            return Ok(false);
+        }
+        let revents = fds[0].revents();
+        if revents.intersects(rustix::event::PollFlags::ERR | rustix::event::PollFlags::NVAL) {
+            return Err(std::io::Error::other("检查对端 pidfd 状态失败"));
+        }
+        Ok(revents.contains(rustix::event::PollFlags::IN))
+    }
+
+    /// 经 `pidfd_send_signal` 向绑定的内核进程实例发送 `SIGTERM`；返回 `Ok(false)` 表示进程已退出（`ESRCH`）。
+    pub fn terminate(&self) -> std::io::Result<bool> {
         match rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::TERM) {
-            Ok(()) => Ok(()),
-            Err(rustix::io::Errno::SRCH) => Ok(()),
+            Ok(()) => Ok(true),
+            Err(rustix::io::Errno::SRCH) => Ok(false),
             Err(errno) => Err(std::io::Error::from(errno)),
         }
     }
@@ -357,12 +402,19 @@ pub async fn write_control<T: serde::Serialize>(
     Ok(write_wire_with_magic(stream, CONTROL_MAGIC, value).await??)
 }
 
-/// 向对端发送版本无关控制停机请求并读取最小停机回执。
+/// 向对端发送携带目标协议版本的控制停机请求并读取响应。
 ///
-/// 对端不认识 `LTCTRL\0\x01`（例如历史旧版本后台回写其自身 `LTLOCAL<v>` 魔数或直接关闭连接）时返回 `Ok(None)`，
-/// 供客户端决定是否走信号兜底。
-pub async fn exchange_control_stop(stream: &mut UnixStream) -> Result<Option<ControlStopStatus>> {
-    match write_wire_with_magic(stream, CONTROL_MAGIC, &ControlRequest::Stop).await? {
+/// - 对端支持 `LTCTRL\0\x01` 且版本匹配时返回 `Stopped`；
+/// - 对端协议版本与 `expected_protocol_version` 不符时（无论经控制帧还是业务魔数）返回 `PeerChanged`；
+/// - 对端为同版本的历史旧后台、不认识 `LTCTRL\0\x01` 时返回 `Unsupported`，供客户端走信号兜底。
+pub async fn exchange_control_stop(
+    stream: &mut UnixStream,
+    expected_protocol_version: u8,
+) -> Result<ControlStopExchange> {
+    let request = ControlRequest::Stop {
+        expected_protocol_version,
+    };
+    match write_wire_with_magic(stream, CONTROL_MAGIC, &request).await? {
         Ok(()) => {}
         Err(error)
             if matches!(
@@ -370,15 +422,17 @@ pub async fn exchange_control_stop(stream: &mut UnixStream) -> Result<Option<Con
                 std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
             ) =>
         {
-            return Ok(None);
+            return Ok(ControlStopExchange::Unsupported);
         }
         Err(error) => return Err(error.into()),
     }
     let mut magic = [0; 8];
     match stream.read(&mut magic[..1]).await {
-        Ok(0) => return Ok(None),
+        Ok(0) => return Ok(ControlStopExchange::Unsupported),
         Ok(_) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return Ok(None),
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+            return Ok(ControlStopExchange::Unsupported);
+        }
         Err(error) => return Err(error.into()),
     }
     match stream.read_exact(&mut magic[1..]).await {
@@ -389,16 +443,26 @@ pub async fn exchange_control_stop(stream: &mut UnixStream) -> Result<Option<Con
                 std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
             ) =>
         {
-            return Ok(None);
+            return Ok(ControlStopExchange::Unsupported);
         }
         Err(error) => return Err(error.into()),
     }
     if &magic == CONTROL_MAGIC {
-        let status: ControlStopStatus = read_body(stream).await?;
-        return Ok(Some(status));
+        return match read_body::<ControlStopResponse>(stream).await? {
+            ControlStopResponse::Stopped(status) => Ok(ControlStopExchange::Stopped(status)),
+            ControlStopResponse::VersionMismatch { protocol_version } => {
+                Ok(ControlStopExchange::PeerChanged { protocol_version })
+            }
+        };
     }
-    if magic_version(&magic).is_some() {
-        return Ok(None);
+    if let Some(version) = magic_version(&magic) {
+        return if version == expected_protocol_version {
+            Ok(ControlStopExchange::Unsupported)
+        } else {
+            Ok(ControlStopExchange::PeerChanged {
+                protocol_version: version,
+            })
+        };
     }
     Err(protocol())
 }
@@ -1491,9 +1555,13 @@ mod frame_tests {
     async fn control_stop_wire_shape_incoming_dispatch_and_legacy_fallback_work() {
         // 1. 锁定控制帧 JSON 线上形状与独立魔数，确保不随业务 PROTOCOL_VERSION 漂移。
         assert_eq!(CONTROL_MAGIC, b"LTCTRL\0\x01");
+        let older_version = PROTOCOL_VERSION - 1;
         assert_eq!(
-            serde_json::to_string(&ControlRequest::Stop).unwrap(),
-            r#"{"action":"stop"}"#
+            serde_json::to_string(&ControlRequest::Stop {
+                expected_protocol_version: older_version,
+            })
+            .unwrap(),
+            format!(r#"{{"action":"stop","expected_protocol_version":{older_version}}}"#)
         );
         let sample = ControlStopStatus {
             epoch: "7".into(),
@@ -1501,55 +1569,103 @@ mod frame_tests {
             unconfirmed_operations: 2,
         };
         assert_eq!(
-            serde_json::to_string(&sample).unwrap(),
-            r#"{"epoch":"7","owners":1,"unconfirmed_operations":2}"#
+            serde_json::to_string(&ControlStopResponse::Stopped(sample.clone())).unwrap(),
+            r#"{"status":"stopped","epoch":"7","owners":1,"unconfirmed_operations":2}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&ControlStopResponse::VersionMismatch {
+                protocol_version: PROTOCOL_VERSION,
+            })
+            .unwrap(),
+            format!(r#"{{"status":"version_mismatch","protocol_version":{PROTOCOL_VERSION}}}"#)
         );
 
-        // 2. read_incoming_request 同时支持版本无关控制帧与当前业务请求帧。
+        // 2. read_incoming_request 同时支持版本无关控制帧与目标版本匹配/不匹配分支。
         let (mut client, mut server) = UnixStream::pair().unwrap();
         let server_task = tokio::spawn(async move {
             match read_incoming_request::<serde_json::Value>(&mut server)
                 .await
                 .unwrap()
             {
-                IncomingRequest::Control(ControlRequest::Stop) => {
-                    write_control(&mut server, &sample).await.unwrap();
+                IncomingRequest::Control(ControlRequest::Stop {
+                    expected_protocol_version,
+                }) => {
+                    assert_eq!(expected_protocol_version, older_version);
+                    write_control(&mut server, &ControlStopResponse::Stopped(sample))
+                        .await
+                        .unwrap();
                 }
                 IncomingRequest::Request(_) => panic!("预期识别为版本无关控制停机请求"),
             }
         });
-        let reply = exchange_control_stop(&mut client)
-            .await
-            .unwrap()
-            .expect("支持控制帧的后台应返回 ControlStopStatus");
         assert_eq!(
-            reply,
-            ControlStopStatus {
+            exchange_control_stop(&mut client, older_version)
+                .await
+                .unwrap(),
+            ControlStopExchange::Stopped(ControlStopStatus {
                 epoch: "7".into(),
                 owners: 1,
                 unconfirmed_operations: 2,
+            })
+        );
+        server_task.await.unwrap();
+
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            let _ = read_incoming_request::<serde_json::Value>(&mut server)
+                .await
+                .unwrap();
+            write_control(
+                &mut server,
+                &ControlStopResponse::VersionMismatch {
+                    protocol_version: PROTOCOL_VERSION + 1,
+                },
+            )
+            .await
+            .unwrap();
+        });
+        assert_eq!(
+            exchange_control_stop(&mut client, older_version)
+                .await
+                .unwrap(),
+            ControlStopExchange::PeerChanged {
+                protocol_version: PROTOCOL_VERSION + 1,
             }
         );
         server_task.await.unwrap();
 
-        // 3. 历史旧后台不认识 LTCTRL，回写旧业务魔数或静默关闭时，exchange_control_stop 返回 Ok(None)。
-        for reply_older_magic in [true, false] {
+        // 3. 历史旧后台不认识 LTCTRL：回写同版本旧业务魔数或静默关闭返回 Unsupported；
+        //    若回写的是不同协议版本的业务魔数则返回 PeerChanged，绝不误发信号。
+        for (reply_magic, expected) in [
+            (
+                Some(magic_for_version(older_version)),
+                ControlStopExchange::Unsupported,
+            ),
+            (None, ControlStopExchange::Unsupported),
+            (
+                Some(magic_for_version(PROTOCOL_VERSION)),
+                ControlStopExchange::PeerChanged {
+                    protocol_version: PROTOCOL_VERSION,
+                },
+            ),
+        ] {
             let (mut client, mut server) = UnixStream::pair().unwrap();
             let server_task = tokio::spawn(async move {
                 let mut header = [0_u8; 8];
                 server.read_exact(&mut header).await.unwrap();
                 assert_eq!(&header, CONTROL_MAGIC);
-                if reply_older_magic {
-                    let older = magic_for_version(PROTOCOL_VERSION - 1);
-                    server.write_all(&older).await.unwrap();
+                if let Some(magic) = reply_magic {
+                    server.write_all(&magic).await.unwrap();
                     server.write_u32(4).await.unwrap();
                     server.write_all(b"null").await.unwrap();
                 }
             });
             assert_eq!(
-                exchange_control_stop(&mut client).await.unwrap(),
-                None,
-                "reply_older_magic={reply_older_magic}"
+                exchange_control_stop(&mut client, older_version)
+                    .await
+                    .unwrap(),
+                expected,
+                "reply_magic={reply_magic:?}"
             );
             server_task.await.unwrap();
         }

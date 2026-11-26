@@ -13,8 +13,9 @@ use std::{
 };
 
 pub(crate) use lattice_ipc::ipc::{
-    ControlRequest, ControlStopStatus, IncomingRequest, ResponseWriter, check_dir, check_peer,
-    read_incoming_request, read_login_action, uid, write_control,
+    ControlRequest, ControlStopResponse, ControlStopStatus, IncomingRequest, ResponseWriter,
+    check_dir, check_peer, current_protocol_version, read_incoming_request, read_login_action, uid,
+    write_control,
 };
 #[cfg(test)]
 pub(crate) use lattice_ipc::ipc::{

@@ -1965,12 +1965,21 @@ async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()>
     .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??
     {
         ipc::IncomingRequest::Request(request) => request,
-        ipc::IncomingRequest::Control(ipc::ControlRequest::Stop) => {
-            let status = backend.stop_and_wait().await?;
-            let reply = ipc::ControlStopStatus {
-                epoch: status.epoch,
-                owners: status.owners,
-                unconfirmed_operations: status.unconfirmed_operations,
+        ipc::IncomingRequest::Control(ipc::ControlRequest::Stop {
+            expected_protocol_version,
+        }) => {
+            let current = ipc::current_protocol_version();
+            let reply = if expected_protocol_version == current {
+                let status = backend.stop_and_wait().await?;
+                ipc::ControlStopResponse::Stopped(ipc::ControlStopStatus {
+                    epoch: status.epoch,
+                    owners: status.owners,
+                    unconfirmed_operations: status.unconfirmed_operations,
+                })
+            } else {
+                ipc::ControlStopResponse::VersionMismatch {
+                    protocol_version: current,
+                }
             };
             return ipc::write_control(&mut stream, &reply).await;
         }

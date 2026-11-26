@@ -199,12 +199,18 @@ impl Departure {
 }
 
 pub(crate) async fn connect(layout: StateLayout) -> Result<UnixStream> {
-    let path = tokio::task::spawn_blocking(move || {
+    let (stream, _) = connect_with_identity(layout).await?;
+    Ok(stream)
+}
+
+/// 连接本地后台并返回连接前核验的 `api.sock` `(dev, ino)` 身份，供跨版本停机复核是否仍为同一实例。
+pub(crate) async fn connect_with_identity(layout: StateLayout) -> Result<(UnixStream, (u64, u64))> {
+    let (path, socket_id) = tokio::task::spawn_blocking(move || {
         let path = endpoint(&layout).map_err(with_client_not_running)?;
         let meta = fs::symlink_metadata(&path)
             .map_err(|error| client_connect_io_error("检查本地连接套接字", &path, error))?;
         check_socket(&path, &meta)?;
-        Ok::<_, LocalError>(path)
+        Ok::<_, LocalError>((path, (meta.dev(), meta.ino())))
     })
     .await
     .map_err(|_| LocalError::new(LocalErrorKind::Internal, "本地端点工作线程异常退出"))??;
@@ -212,7 +218,7 @@ pub(crate) async fn connect(layout: StateLayout) -> Result<UnixStream> {
         .await
         .map_err(|error| client_connect_io_error("连接本地套接字", &path, error))?;
     check_peer(&stream)?;
-    Ok(stream)
+    Ok((stream, socket_id))
 }
 
 #[cfg(test)]
