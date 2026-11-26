@@ -58,6 +58,6 @@ status: active
 | --- | --- | --- | --- |
 | 本地 [`xtask ci`](../../xtask/src/ci.rs) | 手动 | 工具链预检；逐 crate 测试带超时 | rollout |
 | 普通 CI [`ci.yml`](../../.github/workflows/ci.yml) | `main` push 与所有 PR | 只改 `.md` 的 PR 只运行 `docs-check` | rollout |
-| [`full-gate`](../../.github/workflows/full-gate.yml) | 每日定时与手动 | 运行无测试 feature 的 alpha rollout | `docs-check` |
+| [`full-gate`](../../.github/workflows/full-gate.yml) | 每日定时与手动 | 运行无测试 feature 的 alpha rollout，通过后按[条件](testing.md#ci-与发布证据)更新 `nightly` 预发布 | `docs-check` |
 
 运行重型验证之前，核对并行的编译任务、内存与磁盘余量；资源限制按[工程规范](engineering.md#验证)执行。

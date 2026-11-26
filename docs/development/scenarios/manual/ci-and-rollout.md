@@ -25,6 +25,9 @@ env -u LATTICE_BIN -u LATTICE_DAEMON_BIN cargo xtask ci
 ```sh
 cargo xtask rollout --channel alpha
 cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
+
+# 在 main 上手动跑 full-gate，rollout 通过后更新 nightly
+gh workflow run full-gate.yml --ref main -f publish_nightly=true
 ```
 
 ## 结果
@@ -42,7 +45,7 @@ cargo xtask rollout --channel alpha --out target/rollout/custom-alpha.json
 | --- | --- | --- | --- |
 | `xtask ci` | 手动 | 工具链预检；逐 crate 超时 | rollout |
 | `ci.yml` | `main`、PR | 纯 `.md` PR 只跑 `docs-check` | rollout |
-| `full-gate.yml` | 每日、手动 | 跑无测试 feature 的 rollout | `docs-check` |
+| `full-gate.yml` | 每日、手动 | 跑无测试 feature 的 rollout，通过后按[条件](../../testing.md#ci-与发布证据)更新 `nightly` 预发布 | `docs-check` |
 
 ### Alpha rollout
 

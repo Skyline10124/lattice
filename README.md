@@ -15,10 +15,25 @@ LATTICE 是用 Rust 编写、围绕会话组织的大模型运行时，提供命
 
 ## 安装
 
-目前仅支持 Linux 主机。Rust 工具链版本由
-[rust-toolchain.toml](rust-toolchain.toml) 指定。
+目前仅支持 Linux 主机。前端 `lattice` 与后台 `lattice-daemon` 要放在同一目录。
 
-拉取源码后，在 LATTICE 仓库根目录将前端 `lattice` 与后台 `lattice-daemon` 安装到同一目录（`cargo install` 默认写入同一个 `$CARGO_HOME/bin`）：
+### 从 nightly 安装
+
+`nightly` 预发布是 main 上最近一次通过 `full-gate` 的 release 构建，main 有新提交时每天更新一次；只提供 x86_64 Linux，构建于 ubuntu-24.04（glibc 2.39）。下载、核对并解压到 `~/.local/bin`：
+
+```sh
+base=https://github.com/Skyline10124/lattice/releases/download/nightly
+curl -fL -O "$base/lattice-nightly-x86_64-unknown-linux-gnu.tar.gz" -O "$base/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
+mkdir -p ~/.local/bin
+tar -xzf lattice-nightly-x86_64-unknown-linux-gnu.tar.gz -C ~/.local/bin
+```
+
+升级时把压缩包解压到现有 `lattice` 所在的目录（`-C "$(dirname "$(command -v lattice)")"`），再按[命令行入口](#命令行入口)末尾的升级说明重启后台。
+
+### 从源码安装
+
+Rust 工具链版本由 [rust-toolchain.toml](rust-toolchain.toml) 指定。拉取源码后，在 LATTICE 仓库根目录安装两个二进制（`cargo install` 默认都写入 `$CARGO_HOME/bin`）：
 
 ```sh
 git clone https://github.com/Skyline10124/lattice.git
@@ -27,7 +42,9 @@ cargo install --locked --path crates/lattice-cli
 cargo install --locked --path crates/lattice-daemon
 ```
 
-确保 Cargo 的可执行文件安装目录已加入 `PATH`，然后检查入口：
+### 检查入口
+
+确保安装目录已加入 `PATH`，然后检查入口：
 
 ```sh
 lattice --help
