@@ -1003,6 +1003,192 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
 }
 
 #[test]
+fn fast_daemon_service_actions_report_incompatible_backend_after_systemctl_success() {
+    let spec = ScenarioSpec::direct_local("daemon-service-incompatible-after-success");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
+    let budget = world.budget(&spec);
+    let mut evidence = ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new()).unwrap();
+
+    let result = (|| -> Result<(), String> {
+        let rig = InstallRig::setup(&world, "incompatible-after-success", true)?;
+
+        // 1. 同协议后台应答时，成功核对不改变 `restart` 的既有成功文案与退出码。
+        budget.check(&spec.name);
+        world
+            .start_daemon()
+            .map_err(|e| format!("显式启动场景后台失败：{e}"))?;
+        let restart_running = rig.run_lattice(
+            &world,
+            &["daemon", "restart"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("兼容后台运行时执行 daemon restart", &restart_running);
+        assert_exit_code(&restart_running, 0).map_err(|e| e.to_string())?;
+        assert_stdout_contains_all(&restart_running, &["已重启服务 lattice.service。"])
+            .map_err(|e| e.to_string())?;
+
+        let stop = rig.run_lattice(
+            &world,
+            &["daemon", "stop"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("停止兼容后台", &stop);
+        assert_exit_code(&stop, 0).map_err(|e| e.to_string())?;
+        world
+            .daemon_departed()
+            .map_err(|errs| format!("后台退场核验失败：{errs:?}"))?;
+
+        // 2. 换到短路径状态根，用每次只服务一条连接的旧协议对端模拟 systemctl 成功后仍留在旧后台。
+        budget.check(&spec.name);
+        let short_state = tempfile::Builder::new()
+            .prefix("ltc-after-success-")
+            .tempdir_in("/tmp")
+            .map_err(|e| format!("创建短路径状态根失败：{e}"))?;
+        let lattice_root = short_state.path().join("lattice");
+        let local_dir = lattice_root.join("local");
+        fs::create_dir_all(&local_dir).map_err(|e| e.to_string())?;
+        fs::set_permissions(&lattice_root, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        world.set_env("XDG_STATE_HOME", short_state.path().display().to_string());
+
+        let sock_path = local_dir.join("api.sock");
+        let fixture_timeout = budget.cap_timeout(Duration::from_secs(10));
+        let peer_pid_fragment = format!("对端进程号：{}", std::process::id());
+        let peer_exe = std::env::current_exe()
+            .map_err(|e| format!("读取测试进程可执行文件路径失败：{e}"))?
+            .display()
+            .to_string();
+        let sibling_daemon = fs::canonicalize(&rig.daemon_bin)
+            .map_err(|e| format!("规范化同目录 lattice-daemon 路径失败：{e}"))?
+            .display()
+            .to_string();
+        let unit_path = rig.unit_path().display().to_string();
+
+        let bind_peer_listener = || -> Result<UnixListener, String> {
+            let _ = fs::remove_file(&sock_path);
+            let listener = UnixListener::bind(&sock_path).map_err(|e| e.to_string())?;
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+            Ok(listener)
+        };
+
+        // restart：服务动作已执行，但应答进程仍是旧后台；指出实际运行文件并引导 install。
+        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        rig.clear_systemctl_log();
+        let restart_out = rig.run_lattice(
+            &world,
+            &["daemon", "restart"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("旧协议后台应答时执行 daemon restart", &restart_out);
+        peer_fixture.finish_and_verify()?;
+        assert_exit_code(&restart_out, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&restart_out.stdout).contains("已重启服务 lattice.service。")
+        {
+            return Err("restart 发现旧后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(
+            &restart_out,
+            "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, &peer_pid_fragment).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, &peer_exe).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, &sibling_daemon).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, "lattice daemon install")
+            .map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&restart_out.stderr).contains("切换至新后台") {
+            return Err(format!(
+                "restart 成功后的旧后台诊断不应沿用切换提示：{}",
+                String::from_utf8_lossy(&restart_out.stderr)
+            ));
+        }
+        if rig.systemctl_calls() != ["--user|restart|lattice.service"] {
+            return Err(format!(
+                "restart 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        // install：三条 systemctl 均已成功，但运行文件不是刚写入 unit 的同目录后台；引导核对 unit 与 drop-in。
+        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        rig.clear_systemctl_log();
+        let install_out = rig.run_lattice(
+            &world,
+            &["daemon", "install"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("旧协议后台应答时执行 daemon install", &install_out);
+        peer_fixture.finish_and_verify()?;
+        assert_exit_code(&install_out, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&install_out.stdout).contains("已启用并启动服务") {
+            return Err("install 发现旧后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(&install_out, &unit_path).map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &install_out,
+            "并已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, &peer_pid_fragment).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, &peer_exe).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, "刚写入 unit 的").map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, &sibling_daemon).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, "systemctl --user cat lattice")
+            .map_err(|e| e.to_string())?;
+        let install_stderr = String::from_utf8_lossy(&install_out.stderr);
+        if install_stderr.contains("切换至新后台")
+            || install_stderr.contains("lattice daemon install")
+        {
+            return Err(format!(
+                "install 成功后的旧后台诊断不符合预期：{install_stderr}"
+            ));
+        }
+        let expected_install_calls = [
+            "--user|daemon-reload".to_string(),
+            format!("--user|enable|{unit_path}"),
+            "--user|restart|lattice.service".to_string(),
+        ];
+        if rig.systemctl_calls() != expected_install_calls {
+            return Err(format!(
+                "install 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        // start：可能是对已在运行旧服务的空操作；沿用普通不兼容诊断并引导 restart。
+        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        rig.clear_systemctl_log();
+        let start_out = rig.run_lattice(
+            &world,
+            &["daemon", "start"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("旧协议后台应答时执行 daemon start", &start_out);
+        peer_fixture.finish_and_verify()?;
+        assert_exit_code(&start_out, 1).map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &start_out,
+            "`systemctl --user start lattice.service` 执行成功，但运行中的后台版本较旧且不兼容",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&start_out, &peer_pid_fragment).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&start_out, "lattice daemon restart").map_err(|e| e.to_string())?;
+        if rig.systemctl_calls() != ["--user|start|lattice.service"] {
+            return Err(format!(
+                "start 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
+}
+
+#[test]
 fn fast_daemon_install_distinguishes_exec_path_and_arg_escaping_and_rejects_invalid_paths() {
     let spec = ScenarioSpec::direct_local("daemon-install-systemd-escaping");
     let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");

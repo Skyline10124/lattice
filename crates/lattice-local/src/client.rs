@@ -3,7 +3,7 @@
 
 //! 本地 IPC 客户端句柄与观察流帧读取。
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use lattice_ipc::{
     Acceptance, AuthKey, AuthRemoval, AuthStatus, ConfigureReply, ConfigureRequest, ContextOpReply,
@@ -49,6 +49,24 @@ impl StopOutcome {
     }
 }
 
+/// 单次状态探测的结果，供 `daemon` 子命令在不解析错误文案的前提下区分更旧协议的后台。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusProbe {
+    /// 协议版本一致的后台已应答。
+    Running {
+        status: DaemonStatus,
+        peer_pid: Option<i32>,
+    },
+    /// 对端在同一连接上回写了更旧的协议魔数。
+    OlderBackend {
+        peer_pid: Option<i32>,
+        /// 发请求前读到的对端可执行文件路径（`/proc/<pid>/exe`），仅用于诊断展示。
+        peer_executable: Option<PathBuf>,
+        /// 与普通请求相同的版本不兼容错误。
+        error: LocalError,
+    },
+}
+
 /// 每个操作一个连接；持续读取任务拥有分帧进度，UI 的 next 可取消。
 #[derive(Clone)]
 pub struct LocalClient {
@@ -84,23 +102,34 @@ impl LocalClient {
     }
 
     pub async fn status(&self) -> Result<DaemonStatus> {
-        let (status, _) = self.status_with_peer_pid(Duration::from_secs(5)).await?;
-        Ok(status)
+        match self.probe_status(Duration::from_secs(5)).await? {
+            StatusProbe::Running { status, .. } => Ok(status),
+            StatusProbe::OlderBackend { error, .. } => Err(error),
+        }
     }
 
-    /// 在给定截止时间内查询一次后台状态，并从同一条已连接套接字经 `SO_PEERCRED` 读取对端进程号。
-    pub async fn status_with_peer_pid(
-        &self,
-        timeout: Duration,
-    ) -> Result<(DaemonStatus, Option<i32>)> {
+    /// 在给定截止时间内探测一次后台状态，区分同协议应答与明确回写更旧协议魔数的后台。
+    pub async fn probe_status(&self, timeout: Duration) -> Result<StatusProbe> {
         tokio::time::timeout(timeout, async {
             let mut stream = endpoint::connect(self.layout.clone()).await?;
             let peer_pid = ipc::peer_pid(&stream);
-            ipc::write_request(&mut stream, &Request::Status).await?;
-            match ipc::ResponseReader::default().read(&mut stream).await? {
-                Response::Status(status) => Ok((status, peer_pid)),
-                Response::Error(error) => Err(error),
-                _ => Err(protocol()),
+            // 必须在发请求前读取对端可执行文件路径：对端随后在同一连接上回写魔数，
+            // 证明读取时这个进程号仍属于监听进程；应答后再读，进程可能已退出、进程号被复用。
+            let peer_executable =
+                peer_pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok());
+            match ipc::send_and_read_first_or_older::<_, Response>(&mut stream, &Request::Status)
+                .await?
+            {
+                ipc::FirstResponse::Reply(Response::Status(status)) => {
+                    Ok(StatusProbe::Running { status, peer_pid })
+                }
+                ipc::FirstResponse::Reply(Response::Error(error)) => Err(error),
+                ipc::FirstResponse::Reply(_) => Err(protocol()),
+                ipc::FirstResponse::OlderBackend { error, .. } => Ok(StatusProbe::OlderBackend {
+                    peer_pid,
+                    peer_executable,
+                    error,
+                }),
             }
         })
         .await
@@ -924,6 +953,105 @@ mod tests {
         assert_eq!(bad.kind, LocalErrorKind::BadRequest);
         assert_eq!(bad.message, "不支持的 IM 平台");
 
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_status_distinguishes_older_backend_and_preserves_peer_executable() {
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        use tokio::net::UnixListener;
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let make_layout = |tag: &str| {
+            let temp = TempDir(PathBuf::from("/tmp").join(format!(
+                "ltc-probe-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+            fs::create_dir_all(&temp.0).unwrap();
+            let layout = StateLayout::in_state_root(&temp.0);
+            let local_dir = layout.lattice_root().join("local");
+            fs::create_dir_all(&local_dir).unwrap();
+            fs::set_permissions(layout.lattice_root(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let sock_path = local_dir.join("api.sock");
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+            (temp, layout, listener)
+        };
+
+        // 1. 更旧协议：单次探测识别为 OlderBackend，并带出发请求前读取的对端可执行文件路径；
+        //    `status()` 仍只向外暴露同一个不兼容错误。
+        let (_t1, layout, listener) = make_layout("older");
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut magic = [0_u8; 8];
+                stream.read_exact(&mut magic).await.unwrap();
+                let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+                stream.write_all(&older).await.unwrap();
+                stream.write_u32(4).await.unwrap();
+                stream.write_all(b"null").await.unwrap();
+            }
+        });
+        let client = LocalClient::new(layout);
+        let probe = client
+            .probe_status(Duration::from_secs(2))
+            .await
+            .expect("更旧协议后台应作为探测结果返回");
+        match probe {
+            StatusProbe::OlderBackend {
+                peer_pid,
+                peer_executable,
+                error,
+            } => {
+                assert_eq!(peer_pid, Some(std::process::id() as i32));
+                assert_eq!(
+                    peer_executable,
+                    Some(std::env::current_exe().expect("读取当前测试进程路径"))
+                );
+                assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
+                assert!(
+                    error.message.contains("版本较旧且不兼容"),
+                    "诊断：{}",
+                    error.message
+                );
+            }
+            other => panic!("更旧协议后台应识别为 OlderBackend，实际：{other:?}"),
+        }
+        let err = client
+            .status()
+            .await
+            .expect_err("status() 对旧后台必须仍返回错误");
+        assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
+        assert!(err.message.contains("版本较旧且不兼容"));
+        server.await.unwrap();
+
+        // 2. 更新协议：单次探测直接返回同一个拒绝错误。
+        let (_t2, layout, listener) = make_layout("newer");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut magic = [0_u8; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            let newer = ipc::magic_for_version(ipc::PROTOCOL_VERSION + 1);
+            stream.write_all(&newer).await.unwrap();
+            stream.write_u32(4).await.unwrap();
+            stream.write_all(b"null").await.unwrap();
+        });
+        let err = LocalClient::new(layout)
+            .probe_status(Duration::from_secs(2))
+            .await
+            .expect_err("更新协议后台必须拒绝");
+        assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
+        assert!(err.message.contains("版本较新且不兼容"));
         server.await.unwrap();
     }
 

@@ -14,7 +14,7 @@ mod turn_plan;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub use client::LocalWatch;
-pub use client::{LocalClient, StopOutcome};
+pub use client::{LocalClient, StatusProbe, StopOutcome};
 pub use display::format_image_marker;
 #[cfg(any(test, feature = "test-utils"))]
 pub use endpoint::Departure;
