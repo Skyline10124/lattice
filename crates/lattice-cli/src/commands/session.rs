@@ -458,7 +458,7 @@ pub enum SessionAction {
         #[arg(value_name = "会话ID")]
         session_id: String,
     },
-    /// 查看当前路径逐轮用量与美元费用，未知项显示 -
+    /// 查看当前路径逐轮用量与等量 API 费用，未知项显示 -
     Usage {
         /// 会话 ID 或唯一前缀
         #[arg(value_name = "会话ID")]

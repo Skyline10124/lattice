@@ -249,7 +249,7 @@ fn fast_cli_help_lists_public_commands() {
         ),
         (
             vec!["session", "usage", "--help"],
-            vec!["<会话ID>", "美元费用", "未知项显示 -", "--json"],
+            vec!["<会话ID>", "等量 API 费用", "未知项显示 -", "--json"],
         ),
         (
             vec!["tui", "--help"],
