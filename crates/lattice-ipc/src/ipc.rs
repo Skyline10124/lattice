@@ -24,6 +24,8 @@ use crate::types::{
 mod defs {
     pub const PROTOCOL_VERSION: u8 = 68;
     pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
+    /// 版本无关控制帧魔数：固定为 `LTCTRL\0\x01`，不随业务 `PROTOCOL_VERSION` 变更。
+    pub const CONTROL_MAGIC: &[u8; 8] = b"LTCTRL\0\x01";
     /// 帧魔数固定为 7 字节前缀 `LTLOCAL` 加 1 个无符号协议版本字节（`0..=255`），帧长度不变。
     pub const fn magic_for_version(version: u8) -> [u8; 8] {
         let mut magic = *b"LTLOCAL\0";
@@ -35,13 +37,88 @@ mod defs {
 
 pub use defs::MAX_FRAME;
 #[cfg(not(any(test, feature = "test-utils")))]
-use defs::{MAGIC, PROTOCOL_VERSION, magic_for_version};
+use defs::{CONTROL_MAGIC, MAGIC, PROTOCOL_VERSION, magic_for_version};
 #[cfg(any(test, feature = "test-utils"))]
-pub use defs::{MAGIC, PROTOCOL_VERSION, magic_for_version};
+pub use defs::{CONTROL_MAGIC, MAGIC, PROTOCOL_VERSION, magic_for_version};
 
 const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请用旧二进制执行 `lattice daemon stop` 停止它";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice`（或手动结束旧 `lattice-daemon` 进程）后重启新后台";
+
+/// 版本无关控制请求：仅承载跨协议停机，不随业务展示结构变化。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ControlRequest {
+    Stop,
+}
+
+/// 版本无关控制停机回执：只含与具体业务展示解耦的最小停机计数。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ControlStopStatus {
+    pub epoch: String,
+    pub owners: usize,
+    pub unconfirmed_operations: usize,
+}
+
+/// 后台首帧读取结果：当前版本业务请求，或版本无关控制请求。
+pub enum IncomingRequest<T> {
+    Request(T),
+    Control(ControlRequest),
+}
+
+/// 首条响应帧的分类结果，供 `stop` 在不解析错误文案的前提下识别更旧协议后台。
+pub enum FirstResponse<T> {
+    Reply(T),
+    OlderBackend { peer_version: u8, error: LocalError },
+}
+
+/// 已连接对端的内核进程句柄（经 `SO_PEERCRED` + `pidfd_open` 获取，纯 `rustix` 无 `unsafe`）。
+///
+/// 调用方必须在发送首帧前打开该句柄，并仅在对端随后于同一连接上主动回写更旧协议魔数后
+/// 才允许发送 `SIGTERM`，从而证明监听进程在打开句柄时仍存活且 PID 未被复用。
+pub struct PeerProcess {
+    pid: i32,
+    pidfd: std::os::fd::OwnedFd,
+}
+
+impl PeerProcess {
+    pub fn pid(&self) -> i32 {
+        self.pid
+    }
+
+    /// 经 `pidfd_send_signal` 向绑定的内核进程实例发送 `SIGTERM`；进程已退出（`ESRCH`）视为已终结。
+    pub fn terminate(&self) -> std::io::Result<()> {
+        match rustix::process::pidfd_send_signal(&self.pidfd, rustix::process::Signal::TERM) {
+            Ok(()) => Ok(()),
+            Err(rustix::io::Errno::SRCH) => Ok(()),
+            Err(errno) => Err(std::io::Error::from(errno)),
+        }
+    }
+}
+
+/// 在发请求前捕获已连接本地套接字的对端 `pidfd`；核验对端有效 UID 且拒绝指向当前自身进程。
+pub fn capture_peer_process(fd: impl AsFd) -> std::io::Result<PeerProcess> {
+    let cred = rustix::net::sockopt::socket_peercred(&fd).map_err(std::io::Error::from)?;
+    if cred.uid.as_raw() != uid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "本地连接对端用户不匹配",
+        ));
+    }
+    if cred.pid == rustix::process::getpid() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "拒绝捕获当前进程自身句柄",
+        ));
+    }
+    let pidfd = rustix::process::pidfd_open(cred.pid, rustix::process::PidfdFlags::empty())
+        .map_err(std::io::Error::from)?;
+    Ok(PeerProcess {
+        pid: cred.pid.as_raw_pid(),
+        pidfd,
+    })
+}
 
 /// 携带底层套接字描述符的异步读取流，供版本不兼容诊断在持有连接期间读取对端进程号。
 pub trait PeerStream: AsyncRead + Unpin {
@@ -75,10 +152,12 @@ fn format_peer_pid(peer: Option<BorrowedFd<'_>>) -> String {
 }
 
 fn older_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
-    format!(
-        "运行中的后台版本较旧且不兼容（{}）；请用旧二进制执行 `lattice daemon stop` 停止它",
-        format_peer_pid(peer)
-    )
+    match peer.and_then(peer_pid) {
+        Some(pid) => format!(
+            "运行中的后台版本较旧且不兼容（对端进程号：{pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {pid}`）切换至新后台"
+        ),
+        None => "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop`）切换至新后台".into(),
+    }
 }
 
 fn newer_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
@@ -96,24 +175,40 @@ fn protocol() -> LocalError {
     LocalError::new(LocalErrorKind::Protocol, "不支持或格式错误的本地协议帧")
 }
 
-/// 前缀相符时取出版本字节；新旧由 `check_magic` 按版本数值比较。
+/// 前缀相符时取出版本字节；新旧由 `classify_magic` 按版本数值比较。
 fn magic_version(magic: &[u8; 8]) -> Option<u8> {
     let version = magic[7];
     (*magic == magic_for_version(version)).then_some(version)
 }
 
-fn check_magic(magic: &[u8; 8], peer: Option<BorrowedFd<'_>>) -> Result<()> {
+enum MagicCheck {
+    Current,
+    Older(u8),
+    Newer,
+    Invalid,
+}
+
+fn classify_magic(magic: &[u8; 8]) -> MagicCheck {
     match magic_version(magic) {
-        Some(version) if version == PROTOCOL_VERSION => Ok(()),
-        Some(version) if version < PROTOCOL_VERSION => Err(LocalError::new(
+        Some(version) if version == PROTOCOL_VERSION => MagicCheck::Current,
+        Some(version) if version < PROTOCOL_VERSION => MagicCheck::Older(version),
+        Some(_) => MagicCheck::Newer,
+        None => MagicCheck::Invalid,
+    }
+}
+
+fn check_magic(magic: &[u8; 8], peer: Option<BorrowedFd<'_>>) -> Result<()> {
+    match classify_magic(magic) {
+        MagicCheck::Current => Ok(()),
+        MagicCheck::Older(_) => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
             &older_backend_message(peer),
         )),
-        Some(_) => Err(LocalError::new(
+        MagicCheck::Newer => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
             &newer_backend_message(peer),
         )),
-        None => Err(protocol()),
+        MagicCheck::Invalid => Err(protocol()),
     }
 }
 
@@ -210,7 +305,7 @@ pub async fn read<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Re
     read_frame(stream, false).await?.ok_or_else(eof)
 }
 
-/// 后台读请求专用。魔数不符时先回写一帧本端魔数再断开，让对端客户端能分辨是哪一边版本旧。
+/// 后台读业务请求专用（不接受控制帧）。魔数不符时先回写一帧本端魔数再断开，让对端客户端能分辨是哪一边版本旧。
 pub async fn read_request<T: serde::de::DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
     let mut magic = [0; 8];
     if stream.read(&mut magic[..1]).await? == 0 {
@@ -218,15 +313,132 @@ pub async fn read_request<T: serde::de::DeserializeOwned>(stream: &mut UnixStrea
     }
     stream.read_exact(&mut magic[1..]).await?;
     if let Err(error) = check_magic(&magic, stream.peer_fd()) {
-        let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
-            stream.write_all(MAGIC).await?;
-            stream.write_u32(4).await?;
-            stream.write_all(b"null").await
-        })
-        .await;
+        announce_magic_before_close(stream).await;
         return Err(error);
     }
     read_body(stream).await
+}
+
+/// 后台入口读首帧专用：同时支持当前版本业务请求与版本无关控制帧 `LTCTRL\0\x01`。
+/// 业务魔数不符时先回写一帧本端魔数再断开，让对端客户端能分辨哪一边版本较旧。
+pub async fn read_incoming_request<T: serde::de::DeserializeOwned>(
+    stream: &mut UnixStream,
+) -> Result<IncomingRequest<T>> {
+    let mut magic = [0; 8];
+    if stream.read(&mut magic[..1]).await? == 0 {
+        return Err(eof());
+    }
+    stream.read_exact(&mut magic[1..]).await?;
+    if &magic == CONTROL_MAGIC {
+        let control: ControlRequest = read_body(stream).await?;
+        return Ok(IncomingRequest::Control(control));
+    }
+    if let Err(error) = check_magic(&magic, stream.peer_fd()) {
+        announce_magic_before_close(stream).await;
+        return Err(error);
+    }
+    read_body(stream).await.map(IncomingRequest::Request)
+}
+
+async fn announce_magic_before_close(stream: &mut UnixStream) {
+    let _ = tokio::time::timeout(WRITE_TIMEOUT, async {
+        stream.write_all(MAGIC).await?;
+        stream.write_u32(4).await?;
+        stream.write_all(b"null").await
+    })
+    .await;
+}
+
+/// 写入版本无关控制帧（`LTCTRL\0\x01` + 长度 + JSON）。
+pub async fn write_control<T: serde::Serialize>(
+    stream: &mut (impl AsyncWrite + Unpin),
+    value: &T,
+) -> Result<()> {
+    Ok(write_wire_with_magic(stream, CONTROL_MAGIC, value).await??)
+}
+
+/// 向对端发送版本无关控制停机请求并读取最小停机回执。
+///
+/// 对端不认识 `LTCTRL\0\x01`（例如历史旧版本后台回写其自身 `LTLOCAL<v>` 魔数或直接关闭连接）时返回 `Ok(None)`，
+/// 供客户端决定是否走信号兜底。
+pub async fn exchange_control_stop(stream: &mut UnixStream) -> Result<Option<ControlStopStatus>> {
+    match write_wire_with_magic(stream, CONTROL_MAGIC, &ControlRequest::Stop).await? {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    let mut magic = [0; 8];
+    match stream.read(&mut magic[..1]).await {
+        Ok(0) => return Ok(None),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    match stream.read_exact(&mut magic[1..]).await {
+        Ok(_) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::UnexpectedEof | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return Ok(None);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    if &magic == CONTROL_MAGIC {
+        let status: ControlStopStatus = read_body(stream).await?;
+        return Ok(Some(status));
+    }
+    if magic_version(&magic).is_some() {
+        return Ok(None);
+    }
+    Err(protocol())
+}
+
+/// 发送请求并读取首条响应帧，区分正常回复与明确回写更旧协议魔数的不兼容后台。
+pub async fn send_and_read_first_or_older<
+    Req: serde::Serialize,
+    Res: serde::de::DeserializeOwned,
+>(
+    stream: &mut UnixStream,
+    request: &Req,
+) -> Result<FirstResponse<Res>> {
+    match write_wire_with_magic(stream, MAGIC, request).await? {
+        Ok(()) => {}
+        Err(error)
+            if matches!(
+                error.kind(),
+                std::io::ErrorKind::BrokenPipe | std::io::ErrorKind::ConnectionReset
+            ) =>
+        {
+            return match tokio::time::timeout(
+                WRITE_TIMEOUT,
+                read_first_frame_classified::<serde_json::Value>(stream),
+            )
+            .await
+            {
+                Ok(Ok(FirstFrame::Older {
+                    peer_version,
+                    error,
+                })) => Ok(FirstResponse::OlderBackend {
+                    peer_version,
+                    error,
+                }),
+                Ok(Err(error)) if error.kind == LocalErrorKind::IncompatibleBackend => Err(error),
+                _ => Err(silent_close()),
+            };
+        }
+        Err(error) => return Err(error.into()),
+    }
+    ResponseReader::default().read_first_or_older(stream).await
 }
 
 fn eof() -> LocalError {
@@ -342,12 +554,20 @@ async fn write_wire<T: serde::Serialize>(
     stream: &mut (impl AsyncWrite + Unpin),
     value: &T,
 ) -> Result<std::io::Result<()>> {
+    write_wire_with_magic(stream, MAGIC, value).await
+}
+
+async fn write_wire_with_magic<T: serde::Serialize>(
+    stream: &mut (impl AsyncWrite + Unpin),
+    magic: &[u8; 8],
+    value: &T,
+) -> Result<std::io::Result<()>> {
     let mut frame = Frame(Zeroizing::new(Vec::new()));
     serde_json::to_writer(&mut frame, value).map_err(|_| protocol())?;
     // 魔数、长度和正文一次写出：小请求整帧进入对端接收队列，旧后台只读魔数就关闭时，
     // 这一端看到的是读不到回复，而不是写到一半的 EPIPE。
     let mut wire = Zeroizing::new(Vec::with_capacity(12 + frame.0.len()));
-    wire.extend_from_slice(MAGIC);
+    wire.extend_from_slice(magic);
     wire.extend_from_slice(&(frame.0.len() as u32).to_be_bytes());
     wire.extend_from_slice(&frame.0);
     tokio::time::timeout(WRITE_TIMEOUT, stream.write_all(&wire))
@@ -465,6 +685,42 @@ impl ResponseWriter {
     }
 }
 
+enum FirstFrame<T> {
+    Eof,
+    Frame(T),
+    Older { peer_version: u8, error: LocalError },
+}
+
+async fn read_first_frame_classified<T: serde::de::DeserializeOwned>(
+    stream: &mut impl PeerStream,
+) -> Result<FirstFrame<T>> {
+    let mut magic = [0; 8];
+    match stream.read(&mut magic[..1]).await {
+        Ok(0) => return Ok(FirstFrame::Eof),
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {
+            return Ok(FirstFrame::Eof);
+        }
+        Err(error) => return Err(error.into()),
+    }
+    stream.read_exact(&mut magic[1..]).await?;
+    match classify_magic(&magic) {
+        MagicCheck::Current => read_body(stream).await.map(FirstFrame::Frame),
+        MagicCheck::Older(peer_version) => Ok(FirstFrame::Older {
+            peer_version,
+            error: LocalError::new(
+                LocalErrorKind::IncompatibleBackend,
+                &older_backend_message(stream.peer_fd()),
+            ),
+        }),
+        MagicCheck::Newer => Err(LocalError::new(
+            LocalErrorKind::IncompatibleBackend,
+            &newer_backend_message(stream.peer_fd()),
+        )),
+        MagicCheck::Invalid => Err(protocol()),
+    }
+}
+
 #[derive(Default)]
 pub struct ResponseReader {
     next_message: u64,
@@ -476,6 +732,56 @@ impl ResponseReader {
         Self {
             next_message: 0,
             frame_timeout: Some(LOGIN_FRAME_TIMEOUT),
+        }
+    }
+
+    /// 读取连接上的首条响应，区分正常响应与明确回写更旧协议魔数的不兼容后台。
+    pub async fn read_first_or_older<T: serde::de::DeserializeOwned>(
+        &mut self,
+        stream: &mut impl PeerStream,
+    ) -> Result<FirstResponse<T>> {
+        let next_message = self.next_message.checked_add(1).ok_or_else(protocol)?;
+        let mut json = Zeroizing::new(String::new());
+        let first_frame = match read_first_frame_classified::<ResponseFrame>(stream).await? {
+            FirstFrame::Eof => return Err(silent_close()),
+            FirstFrame::Older {
+                peer_version,
+                error,
+            } => {
+                return Ok(FirstResponse::OlderBackend {
+                    peer_version,
+                    error,
+                });
+            }
+            FirstFrame::Frame(frame) => frame,
+        };
+        let mut current = Some(first_frame);
+        loop {
+            let frame = match current.take() {
+                Some(frame) => frame,
+                None => match read_frame_with_timeout::<ResponseFrame>(
+                    stream,
+                    false,
+                    self.frame_timeout,
+                )
+                .await?
+                {
+                    Some(frame) => frame,
+                    None => return Err(eof()),
+                },
+            };
+            if frame.message_id != self.next_message
+                || frame.offset != json.len() as u64
+                || frame.json_fragment.is_empty()
+            {
+                return Err(protocol());
+            }
+            json.push_str(&frame.json_fragment);
+            if frame.complete {
+                let response = serde_json::from_str(&json).map_err(|_| protocol())?;
+                self.next_message = next_message;
+                return Ok(FirstResponse::Reply(response));
+            }
         }
     }
 
@@ -545,7 +851,7 @@ mod frame_tests {
 
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
-        let older_unavailable = "运行中的后台版本较旧且不兼容（对端进程号不可用）；请用旧二进制执行 `lattice daemon stop` 停止它";
+        let older_unavailable = "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop`）切换至新后台";
         let newer_unavailable =
             "运行中的后台版本较新且不兼容（对端进程号不可用）；请换用匹配的前端";
         check_magic(MAGIC, None).expect("当前协议版本魔数必须通过");
@@ -585,7 +891,7 @@ mod frame_tests {
 
         let self_pid = std::process::id();
         let older_with_pid = format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请用旧二进制执行 `lattice daemon stop` 停止它"
+            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
         );
         let newer_with_pid =
             format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
@@ -727,7 +1033,7 @@ mod frame_tests {
     async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
         let self_pid = std::process::id();
         let expected_older = format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请用旧二进制执行 `lattice daemon stop` 停止它"
+            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
         );
         let expected_newer =
             format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
@@ -1179,5 +1485,80 @@ mod frame_tests {
                 "用例 {label} 的 context_op 零载荷计长结果必须与实发 JSON 字节数完全一致"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn control_stop_wire_shape_incoming_dispatch_and_legacy_fallback_work() {
+        // 1. 锁定控制帧 JSON 线上形状与独立魔数，确保不随业务 PROTOCOL_VERSION 漂移。
+        assert_eq!(CONTROL_MAGIC, b"LTCTRL\0\x01");
+        assert_eq!(
+            serde_json::to_string(&ControlRequest::Stop).unwrap(),
+            r#"{"action":"stop"}"#
+        );
+        let sample = ControlStopStatus {
+            epoch: "7".into(),
+            owners: 1,
+            unconfirmed_operations: 2,
+        };
+        assert_eq!(
+            serde_json::to_string(&sample).unwrap(),
+            r#"{"epoch":"7","owners":1,"unconfirmed_operations":2}"#
+        );
+
+        // 2. read_incoming_request 同时支持版本无关控制帧与当前业务请求帧。
+        let (mut client, mut server) = UnixStream::pair().unwrap();
+        let server_task = tokio::spawn(async move {
+            match read_incoming_request::<serde_json::Value>(&mut server)
+                .await
+                .unwrap()
+            {
+                IncomingRequest::Control(ControlRequest::Stop) => {
+                    write_control(&mut server, &sample).await.unwrap();
+                }
+                IncomingRequest::Request(_) => panic!("预期识别为版本无关控制停机请求"),
+            }
+        });
+        let reply = exchange_control_stop(&mut client)
+            .await
+            .unwrap()
+            .expect("支持控制帧的后台应返回 ControlStopStatus");
+        assert_eq!(
+            reply,
+            ControlStopStatus {
+                epoch: "7".into(),
+                owners: 1,
+                unconfirmed_operations: 2,
+            }
+        );
+        server_task.await.unwrap();
+
+        // 3. 历史旧后台不认识 LTCTRL，回写旧业务魔数或静默关闭时，exchange_control_stop 返回 Ok(None)。
+        for reply_older_magic in [true, false] {
+            let (mut client, mut server) = UnixStream::pair().unwrap();
+            let server_task = tokio::spawn(async move {
+                let mut header = [0_u8; 8];
+                server.read_exact(&mut header).await.unwrap();
+                assert_eq!(&header, CONTROL_MAGIC);
+                if reply_older_magic {
+                    let older = magic_for_version(PROTOCOL_VERSION - 1);
+                    server.write_all(&older).await.unwrap();
+                    server.write_u32(4).await.unwrap();
+                    server.write_all(b"null").await.unwrap();
+                }
+            });
+            assert_eq!(
+                exchange_control_stop(&mut client).await.unwrap(),
+                None,
+                "reply_older_magic={reply_older_magic}"
+            );
+            server_task.await.unwrap();
+        }
+
+        // 4. capture_peer_process 必须拒绝捕获当前进程自身，防止误向自身发信号。
+        let (a, _b) = UnixStream::pair().unwrap();
+        let err = capture_peer_process(&a)
+            .err()
+            .expect("同进程 UnixStream::pair 不应允许捕获自身句柄");
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidInput);
     }
 }

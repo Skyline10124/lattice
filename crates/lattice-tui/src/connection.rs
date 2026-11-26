@@ -259,18 +259,37 @@ pub(crate) fn older_turns_unavailable_status(error: &LocalError) -> Status {
 }
 
 pub(crate) fn observation_lost_status(cause: &ConnectionStatus) -> Status {
-    let text = match cause {
-        ConnectionStatus::Eof => "观察连接结束；不代表 Turn 已关闭，/reconnect 重连".into(),
-        ConnectionStatus::Idle => format!(
-            "观察 {} s 无增量；执行状态未知，/reconnect 重连",
-            lattice_local::STREAM_IDLE_TIMEOUT_SECS
+    match cause {
+        ConnectionStatus::Eof => status(
+            NoticeLevel::Warn,
+            "观察连接结束；不代表 Turn 已关闭，/reconnect 重连".into(),
         ),
-        ConnectionStatus::Error(error) => format!(
-            "观察连接出错；执行状态未知，/reconnect 重连：{}",
-            error.message
+        ConnectionStatus::Idle => status(
+            NoticeLevel::Warn,
+            format!(
+                "观察 {} s 无增量；执行状态未知，/reconnect 重连",
+                lattice_local::STREAM_IDLE_TIMEOUT_SECS
+            ),
         ),
-    };
-    status(NoticeLevel::Warn, text)
+        ConnectionStatus::Error(error)
+            if error.kind == lattice_local::LocalErrorKind::IncompatibleBackend =>
+        {
+            status(
+                NoticeLevel::Error,
+                format!(
+                    "本地协议版本不兼容，请退出并重启匹配的前端：{}",
+                    error.message
+                ),
+            )
+        }
+        ConnectionStatus::Error(error) => status(
+            NoticeLevel::Warn,
+            format!(
+                "观察连接出错；执行状态未知，/reconnect 重连：{}",
+                error.message
+            ),
+        ),
+    }
 }
 
 /// 会话头中后台已知的这一轮执行诊断。

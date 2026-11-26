@@ -24,6 +24,8 @@ const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `TimeoutStopSec` 在排空上限之外附加的尾段收尾与停写余量（秒）。
 const STOP_TIMEOUT_MARGIN_SECS: u64 = 30;
+/// 用户级 systemd 服务单元名称。
+const SERVICE_UNIT_NAME: &str = "lattice.service";
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -54,7 +56,7 @@ pub(super) async fn run(args: InstallArgs) -> ExitCode {
     match execute_install(args.drain_timeout.as_duration()).await {
         Ok(unit_path) => {
             println!("已写入 unit 文件：{}", unit_path.display());
-            println!("已启用并启动服务 lattice.service。");
+            println!("已启用并启动服务 {SERVICE_UNIT_NAME}。");
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -62,6 +64,75 @@ pub(super) async fn run(args: InstallArgs) -> ExitCode {
             ExitCode::from(exit_code_for_kind(error.kind))
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ServiceAction {
+    Start,
+    Restart,
+}
+
+impl ServiceAction {
+    fn systemctl_verb(self) -> &'static str {
+        match self {
+            Self::Start => "start",
+            Self::Restart => "restart",
+        }
+    }
+
+    fn success_message(self) -> &'static str {
+        match self {
+            Self::Start => "已启动服务 lattice.service。",
+            Self::Restart => "已重启服务 lattice.service。",
+        }
+    }
+}
+
+pub(super) async fn run_start() -> ExitCode {
+    run_service_action(ServiceAction::Start).await
+}
+
+pub(super) async fn run_restart() -> ExitCode {
+    run_service_action(ServiceAction::Restart).await
+}
+
+async fn run_service_action(action: ServiceAction) -> ExitCode {
+    match execute_service_action(action).await {
+        Ok(()) => {
+            println!("{}", action.success_message());
+            ExitCode::SUCCESS
+        }
+        Err(error) => {
+            eprintln!("错误：{}", error.message);
+            ExitCode::from(exit_code_for_kind(error.kind))
+        }
+    }
+}
+
+async fn execute_service_action(action: ServiceAction) -> Result<(), LocalError> {
+    let verb = action.systemctl_verb();
+    let Err(reason) =
+        run_systemctl(vec!["--user".into(), verb.into(), SERVICE_UNIT_NAME.into()]).await
+    else {
+        return Ok(());
+    };
+
+    if is_unit_not_found().await {
+        return Err(LocalError::new(
+            LocalErrorKind::Internal,
+            "尚未安装用户服务 lattice.service；请先执行 `lattice daemon install`",
+        ));
+    }
+
+    let probe = match StateLayout::resolve() {
+        Ok(layout) => {
+            let client = LocalClient::new(layout);
+            probe_running_backend(&client, STATUS_PROBE_TIMEOUT).await
+        }
+        Err(_) => BackendProbe::Unreachable,
+    };
+    let message = format_service_action_failure_diagnostic(action, &reason, probe);
+    Err(LocalError::new(LocalErrorKind::Internal, &message))
 }
 
 fn exit_code_for_kind(kind: LocalErrorKind) -> u8 {
@@ -111,13 +182,24 @@ async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError>
     let enable_args = vec![
         "--user".into(),
         "enable".into(),
-        "--now".into(),
         OsString::from(unit_path.as_os_str()),
     ];
     if let Err(reason) = run_systemctl(enable_args).await {
+        return Err(LocalError::new(
+            LocalErrorKind::Internal,
+            &format!(
+                "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable` 失败（{reason}）",
+                unit_path.display()
+            ),
+        ));
+    }
+
+    // 用 restart 而不是 `enable --now`：服务尚未运行时等价于 start，服务已在运行旧版本或旧参数时会优雅重启到最新配置。
+    let restart_args = vec!["--user".into(), "restart".into(), SERVICE_UNIT_NAME.into()];
+    if let Err(reason) = run_systemctl(restart_args).await {
         let client = LocalClient::new(StateLayout::in_state_root(&state_root));
         let probe = probe_running_backend(&client, STATUS_PROBE_TIMEOUT).await;
-        let message = format_enable_failure_diagnostic(&unit_path, &reason, probe);
+        let message = format_install_restart_failure_diagnostic(&unit_path, &reason, probe);
         return Err(LocalError::new(LocalErrorKind::Internal, &message));
     }
 
@@ -441,16 +523,36 @@ fn write_unit_atomically(unit_path: &Path, contents: &str) -> Result<(), LocalEr
     Ok(())
 }
 
+async fn run_systemctl_output(args: Vec<OsString>) -> Result<std::process::Output, String> {
+    tokio::task::spawn_blocking(move || Command::new("systemctl").args(&args).output())
+        .await
+        .map_err(|_| "等待 `systemctl` 子进程的工作线程异常退出".to_owned())?
+        .map_err(|error| format!("无法执行 `systemctl`：{error}"))
+}
+
 async fn run_systemctl(args: Vec<OsString>) -> Result<(), String> {
-    let output =
-        tokio::task::spawn_blocking(move || Command::new("systemctl").args(&args).output())
-            .await
-            .map_err(|_| "等待 `systemctl` 子进程的工作线程异常退出".to_owned())?
-            .map_err(|error| format!("无法执行 `systemctl`：{error}"))?;
+    let output = run_systemctl_output(args).await?;
     if output.status.success() {
         return Ok(());
     }
     Err(format_command_failure(output.status, &output.stderr))
+}
+
+async fn is_unit_not_found() -> bool {
+    let args = vec![
+        "--user".into(),
+        "show".into(),
+        "-p".into(),
+        "LoadState".into(),
+        "--value".into(),
+        SERVICE_UNIT_NAME.into(),
+    ];
+    match run_systemctl_output(args).await {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim() == "not-found"
+        }
+        _ => false,
+    }
 }
 
 fn format_command_failure(status: ExitStatus, stderr: &[u8]) -> String {
@@ -494,24 +596,44 @@ fn format_peer_pid(peer_pid: Option<i32>) -> String {
     }
 }
 
-fn format_enable_failure_diagnostic(
+fn format_install_restart_failure_diagnostic(
     unit_path: &Path,
     systemctl_reason: &str,
     probe: BackendProbe,
 ) -> String {
     match probe {
         BackendProbe::Running { peer_pid } => format!(
-            "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable --now` 失败（{systemctl_reason}）：状态根上已有后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `systemctl --user start lattice`",
+            "已写入并启用 unit 文件 {}，但执行 `systemctl --user restart {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：状态根上已有后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `lattice daemon start`",
             unit_path.display(),
             format_peer_pid(peer_pid)
         ),
         BackendProbe::Incompatible { diagnostic } => format!(
-            "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable --now` 失败（{systemctl_reason}）：{diagnostic}；停止原有后台后再执行 `systemctl --user start lattice`",
+            "已写入并启用 unit 文件 {}，但执行 `systemctl --user restart {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：{diagnostic}；停止原有后台后再执行 `lattice daemon start`",
             unit_path.display()
         ),
         BackendProbe::Unreachable => format!(
-            "已写入 unit 文件 {}，但按该文件路径执行 `systemctl --user enable --now` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情",
+            "已写入并启用 unit 文件 {}，但执行 `systemctl --user restart {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情",
             unit_path.display()
+        ),
+    }
+}
+
+fn format_service_action_failure_diagnostic(
+    action: ServiceAction,
+    systemctl_reason: &str,
+    probe: BackendProbe,
+) -> String {
+    let verb = action.systemctl_verb();
+    match probe {
+        BackendProbe::Running { peer_pid } => format!(
+            "执行 `systemctl --user {verb} {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：状态根上已有未受 systemd 托管的后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `lattice daemon start`",
+            format_peer_pid(peer_pid)
+        ),
+        BackendProbe::Incompatible { diagnostic } => format!(
+            "执行 `systemctl --user {verb} {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：{diagnostic}；停止原有后台后再执行 `lattice daemon start`"
+        ),
+        BackendProbe::Unreachable => format!(
+            "执行 `systemctl --user {verb} {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情"
         ),
     }
 }
@@ -712,10 +834,11 @@ WantedBy=default.target
     }
 
     #[test]
-    fn enable_failure_diagnostics_cover_running_incompatible_and_unreachable_cases() {
+    fn install_and_service_action_failure_diagnostics_cover_running_incompatible_and_unreachable_cases()
+     {
         let unit_path = Path::new("/tmp/cfg/systemd/user/lattice.service");
 
-        let with_pid = format_enable_failure_diagnostic(
+        let with_pid = format_install_restart_failure_diagnostic(
             unit_path,
             "退出码 1",
             BackendProbe::Running {
@@ -724,9 +847,9 @@ WantedBy=default.target
         );
         assert!(with_pid.contains("对端进程号：4242"));
         assert!(with_pid.contains("lattice daemon stop"));
-        assert!(with_pid.contains("systemctl --user start lattice"));
+        assert!(with_pid.contains("lattice daemon start"));
 
-        let without_pid = format_enable_failure_diagnostic(
+        let without_pid = format_install_restart_failure_diagnostic(
             unit_path,
             "退出码 1",
             BackendProbe::Running { peer_pid: None },
@@ -734,21 +857,43 @@ WantedBy=default.target
         assert!(without_pid.contains("对端进程号不可用"));
         assert!(without_pid.contains("lattice daemon stop"));
 
-        let incompatible = format_enable_failure_diagnostic(
+        let incompatible = format_install_restart_failure_diagnostic(
             unit_path,
             "退出码 1",
             BackendProbe::Incompatible {
-                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请用旧二进制执行 `lattice daemon stop` 停止它".into(),
+                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill 5150`）切换至新后台".into(),
             },
         );
         assert!(incompatible.contains("版本较旧且不兼容"));
         assert!(incompatible.contains("对端进程号：5150"));
         assert!(!incompatible.contains("没有后台"));
-        assert!(incompatible.contains("systemctl --user start lattice"));
+        assert!(incompatible.contains("lattice daemon start"));
 
-        let unreachable =
-            format_enable_failure_diagnostic(unit_path, "退出码 1", BackendProbe::Unreachable);
+        let unreachable = format_install_restart_failure_diagnostic(
+            unit_path,
+            "退出码 1",
+            BackendProbe::Unreachable,
+        );
         assert!(unreachable.contains("systemctl --user status lattice"));
+
+        let start_conflict = format_service_action_failure_diagnostic(
+            ServiceAction::Start,
+            "退出码 1",
+            BackendProbe::Running {
+                peer_pid: Some(7788),
+            },
+        );
+        assert!(start_conflict.contains("systemctl --user start lattice.service"));
+        assert!(start_conflict.contains("对端进程号：7788"));
+        assert!(start_conflict.contains("lattice daemon stop"));
+
+        let restart_unreachable = format_service_action_failure_diagnostic(
+            ServiceAction::Restart,
+            "退出码 1",
+            BackendProbe::Unreachable,
+        );
+        assert!(restart_unreachable.contains("systemctl --user restart lattice.service"));
+        assert!(restart_unreachable.contains("systemctl --user status lattice"));
     }
 
     #[tokio::test]

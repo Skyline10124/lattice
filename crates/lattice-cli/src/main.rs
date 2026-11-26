@@ -92,7 +92,7 @@ fn cli_command() -> clap::Command {
 #[derive(Debug)]
 enum CliParseError {
     Clap(clap::Error),
-    DaemonInstallJson,
+    DaemonJsonUnsupported(&'static str),
 }
 
 impl From<clap::Error> for CliParseError {
@@ -125,10 +125,10 @@ fn parse_cli(
         )));
     }
     if let Some(Commands::Daemon(daemon)) = &cli.command
-        && matches!(daemon.action, commands::daemon::DaemonAction::Install(_))
         && cli.json
+        && let Some(subcommand) = daemon.action.json_unsupported_name()
     {
-        return Err(CliParseError::DaemonInstallJson);
+        return Err(CliParseError::DaemonJsonUnsupported(subcommand));
     }
     Ok(cli)
 }
@@ -206,12 +206,12 @@ fn render_cli_parse_error(
 
     let subcmd = first_subcommand_arg(args);
     let has_json =
-        matches!(parse_error, CliParseError::DaemonInstallJson) || args_request_json(args);
+        matches!(parse_error, CliParseError::DaemonJsonUnsupported(_)) || args_request_json(args);
     if has_json {
         let message = if subcmd.is_some_and(|arg| arg == "daemon") {
             match parse_error {
-                CliParseError::DaemonInstallJson => {
-                    commands::daemon::INSTALL_JSON_UNSUPPORTED_MESSAGE.to_owned()
+                CliParseError::DaemonJsonUnsupported(subcommand) => {
+                    commands::daemon::json_unsupported_message(subcommand)
                 }
                 CliParseError::Clap(error) => commands::daemon::cli_error_message(error),
             }
@@ -243,11 +243,11 @@ fn render_cli_parse_error(
     }
     if subcmd.is_some_and(|arg| arg == "daemon") {
         match parse_error {
-            CliParseError::DaemonInstallJson => {
+            CliParseError::DaemonJsonUnsupported(subcommand) => {
                 let _ = writeln!(
                     err,
                     "错误：{}",
-                    commands::daemon::INSTALL_JSON_UNSUPPORTED_MESSAGE
+                    commands::daemon::json_unsupported_message(subcommand)
                 );
             }
             CliParseError::Clap(error) => {
@@ -885,8 +885,8 @@ mod tests {
                 .get_subcommands()
                 .map(|c| c.get_name())
                 .collect::<Vec<_>>(),
-            ["status", "stop", "install"],
-            "lattice daemon 应仅暴露 status、stop 与 install，不包含 serve"
+            ["status", "start", "restart", "stop", "install"],
+            "lattice daemon 应仅暴露 status、start、restart、stop 与 install，不包含 serve"
         );
         let daemon_help = daemon.render_help().to_string();
         for expected in [
@@ -894,6 +894,8 @@ mod tests {
             "用法：lattice daemon <命令>",
             "命令：",
             "status",
+            "start",
+            "restart",
             "stop",
             "install",
             "选项：",
@@ -954,32 +956,38 @@ mod tests {
             "lattice daemon serve 应被拒绝"
         );
         assert!(parse_cli(["lattice", "daemon", "status"]).is_ok());
+        assert!(parse_cli(["lattice", "daemon", "start"]).is_ok());
+        assert!(parse_cli(["lattice", "daemon", "restart"]).is_ok());
         assert!(parse_cli(["lattice", "daemon", "stop"]).is_ok());
         assert!(parse_cli(["lattice", "daemon", "install"]).is_ok());
         assert!(parse_cli(["lattice", "daemon", "install", "--drain-timeout", "30s"]).is_ok());
         assert!(parse_cli(["lattice", "--json", "daemon", "install"]).is_err());
+        assert!(parse_cli(["lattice", "--json", "daemon", "start"]).is_err());
+        assert!(parse_cli(["lattice", "--json", "daemon", "restart"]).is_err());
     }
 
     #[test]
     fn daemon_json_errors_and_install_json_rejection_are_chinese_shaped_and_redacted() {
         let mut cmd = super::cli_command();
-        let install_sub = cmd
-            .find_subcommand_mut("daemon")
-            .unwrap()
-            .find_subcommand_mut("install")
-            .unwrap();
-        for help_text in [
-            install_sub.render_help().to_string(),
-            install_sub.render_long_help().to_string(),
-        ] {
-            assert!(
-                help_text.contains("不支持 --json"),
-                "install 帮助应明确写明不支持 --json：{help_text}"
-            );
-            assert!(
-                !help_text.contains("-j, --json"),
-                "install 选项列表不应把 --json 列为支持参数：{help_text}"
-            );
+        for sub_name in ["install", "start", "restart"] {
+            let sub = cmd
+                .find_subcommand_mut("daemon")
+                .unwrap()
+                .find_subcommand_mut(sub_name)
+                .unwrap();
+            for help_text in [
+                sub.render_help().to_string(),
+                sub.render_long_help().to_string(),
+            ] {
+                assert!(
+                    help_text.contains("不支持 --json"),
+                    "{sub_name} 帮助应明确写明不支持 --json：{help_text}"
+                );
+                assert!(
+                    !help_text.contains("-j, --json"),
+                    "{sub_name} 选项列表不应把 --json 列为支持参数：{help_text}"
+                );
+            }
         }
 
         let secret = "sk-live-secret-should-not-leak-98765";
@@ -1000,6 +1008,22 @@ mod tests {
             ),
             (
                 vec!["lattice", "-vj", "daemon", "install"],
+                "不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "daemon", "start", "--json"],
+                "不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "--json", "daemon", "start"],
+                "不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "daemon", "restart", "--json"],
+                "不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "-j", "daemon", "restart"],
                 "不支持 `--json`",
             ),
             (

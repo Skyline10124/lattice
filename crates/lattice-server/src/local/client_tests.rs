@@ -1732,7 +1732,7 @@ async fn status_against(
     .await
 }
 
-const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请用旧二进制执行 `lattice daemon stop` 停止它";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice`（或手动结束旧 `lattice-daemon` 进程）后重启新后台";
 
 /// 已发布的旧后台读到不认识的魔数就关连接，不回写任何字节；请求剩下的部分留在它的接收队列里。
 #[tokio::test]
@@ -1782,9 +1782,9 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
         })
     })
     .await;
+    let self_pid = std::process::id();
     let expected = format!(
-        "运行中的后台版本较旧且不兼容（对端进程号：{}）；请用旧二进制执行 `lattice daemon stop` 停止它",
-        std::process::id()
+        "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
     );
     assert_eq!(
         (error.kind, error.message.as_str()),
@@ -1811,5 +1811,59 @@ async fn status_reports_a_backend_newer_than_the_client() {
     assert_eq!(
         (error.kind, error.message.as_str()),
         (LocalErrorKind::IncompatibleBackend, expected.as_str())
+    );
+}
+
+#[tokio::test]
+async fn server_accepts_version_independent_control_stop_frame_and_drains_cleanly() {
+    use lattice_ipc::ipc::{ControlStopStatus, exchange_control_stop};
+    use lattice_local::test_support;
+
+    let dir = tempfile::tempdir().unwrap();
+    let layout = lattice_store::StateLayout::in_state_root(dir.path());
+    let (stop_tx, stop_rx) = tokio::sync::mpsc::channel(4);
+    let serve_layout = layout.clone();
+    let serving = tokio::spawn(async move {
+        crate::serve_for_test(serve_layout, None, Duration::from_secs(5), stop_rx).await
+    });
+
+    let client = LocalClient::new(layout.clone());
+    let expected_epoch = tokio::time::timeout(Duration::from_secs(3), async {
+        loop {
+            if let Ok(status) = client.status().await {
+                break status.epoch;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("等待测试后台就绪超时");
+
+    let mut stream = test_support::connect(layout.clone()).await.unwrap();
+    let reply = exchange_control_stop(&mut stream)
+        .await
+        .unwrap()
+        .expect("当前后台必须识别 LTCTRL 控制停机帧并返回最小状态");
+    drop(stream);
+    assert_eq!(
+        reply,
+        ControlStopStatus {
+            epoch: expected_epoch,
+            owners: 0,
+            unconfirmed_operations: 0,
+        }
+    );
+    drop(stop_tx);
+    let exit = tokio::time::timeout(Duration::from_secs(5), serving)
+        .await
+        .expect("控制停机后后台应在期限内退出")
+        .unwrap()
+        .unwrap();
+    assert_eq!(exit.drain, crate::DrainOutcome::Completed);
+    assert!(exit.failure.is_none());
+    drop(exit.instance);
+    assert!(
+        !layout.lattice_root().join("local/api.sock").exists(),
+        "控制停机完成后 api.sock 应已撤下"
     );
 }

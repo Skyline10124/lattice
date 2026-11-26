@@ -56,7 +56,7 @@ status: active
 #### 本地访问与所有权边界
 
 - 本地目录及 socket 核验类型、所有者和私有权限，通信双方均核对 Linux peer UID。IPC 限于本机 Unix socket；身份检查或版本不兼容时拒绝连接，不开放远程入口。
-- 只有实例锁持有者可绑定、替换或清理 socket，也只有它打开会话库。不按 PID、mtime、连接数或超时抢占所有权，也不终止身份或协议不兼容的已有后台；客户端报告错误，交由用户处理。
+- 只有实例锁持有者可绑定、替换或清理 socket，也只有它打开会话库。不按 PID、mtime、连接数或超时抢占所有权；除 `lattice daemon stop` 显式跨版本停止**同有效 UID 且协议版本更旧**的后台外，其余操作不终止身份或协议不兼容的已有后台，由客户端报告错误交由用户处理。`lattice daemon stop` 遇到更旧协议后台时，优先走版本无关控制停机帧（`LTCTRL\0\x01`）；对不支持控制帧的历史旧后台，仅当已在发请求前经 `SO_PEERCRED` 与 `pidfd_open` 捕获同有效 UID 非自身进程句柄、且对端随后在同一连接上主动回写更旧协议魔数证明进程仍存活时，才经 `pidfd_send_signal` 发送 `SIGTERM` 并等待状态根释放；对更新协议后台或静默断连绝不发信号。
 - 版本化帧、长度检查和有界队列限制请求与观察资源。分帧、目录权限检查与协议版本实现入口为 [`lattice-ipc`](../../crates/lattice-ipc/src/ipc.rs)，客户端端点寻址见 [`lattice-local/src/endpoint.rs`](../../crates/lattice-local/src/endpoint.rs)，后台实例锁与 socket 绑定见 [`lattice-server/src/local/ipc.rs`](../../crates/lattice-server/src/local/ipc.rs)，具体计量及超限行为见[输入与传输限制](session/concurrency.md#输入与传输限制)。
 - 后台启动不创建或修复缺失领域库，也不写入未关闭的 Turn。常驻句柄继续遵守各领域的身份、严格打开和发布规则，不增加第二份请求状态库。
 - 单例锁只排除第二个后台，不串行化各 Session 的 Turn。短准入管理与领域锁分开，常驻持库不改变[锁序与持有期限](#锁与并发语义)。

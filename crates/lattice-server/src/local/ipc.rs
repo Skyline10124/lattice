@@ -12,12 +12,14 @@ use std::{
     path::{Path, PathBuf},
 };
 
+pub(crate) use lattice_ipc::ipc::{
+    ControlRequest, ControlStopStatus, IncomingRequest, ResponseWriter, check_dir, check_peer,
+    read_incoming_request, read_login_action, uid, write_control,
+};
 #[cfg(test)]
 pub(crate) use lattice_ipc::ipc::{
-    MAGIC, MAX_FRAME, PROTOCOL_VERSION, ResponseReader, magic_for_version, read, write,
-};
-pub(crate) use lattice_ipc::ipc::{
-    ResponseWriter, check_dir, check_peer, read_login_action, read_request, uid,
+    MAGIC, MAX_FRAME, PROTOCOL_VERSION, ResponseReader, magic_for_version, read, read_request,
+    write,
 };
 
 fn daemon_io_error(action: &str, path: &Path, error: std::io::Error) -> LocalError {

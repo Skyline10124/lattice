@@ -415,6 +415,18 @@ impl Backend {
         }
     }
 
+    async fn stop_and_wait(&self) -> Result<DaemonStatus> {
+        let mut changed = self.changed.subscribe();
+        self.begin_stop();
+        loop {
+            changed.borrow_and_update();
+            if let Some(status) = self.stopped_status() {
+                return Ok(status);
+            }
+            changed.changed().await.map_err(|_| internal())?;
+        }
+    }
+
     pub(super) fn tls_roots_der(&self) -> &[Vec<u8>] {
         match &self.gateway {
             Ok(gateway) => gateway.tls_roots_der(),
@@ -1581,17 +1593,7 @@ impl Backend {
                 self.metadata.refresh().await?;
                 Ok(Response::ModelsRefreshed)
             }
-            Request::Stop => {
-                let mut changed = self.changed.subscribe();
-                self.begin_stop();
-                loop {
-                    changed.borrow_and_update();
-                    if let Some(status) = self.stopped_status() {
-                        return Ok(Response::Status(status));
-                    }
-                    changed.changed().await.map_err(|_| internal())?;
-                }
-            }
+            Request::Stop => self.stop_and_wait().await.map(Response::Status),
             Request::ResolveSession { prefix } => Ok(Response::Session(
                 self.open().await?.resolve_session(prefix).await?,
             )),
@@ -1955,12 +1957,24 @@ async fn canonical_workspace(path: std::path::PathBuf) -> Result<LocalWorkspaceR
 }
 async fn connection(backend: Arc<Backend>, mut stream: UnixStream) -> Result<()> {
     ipc::check_peer(&stream)?;
-    let request = tokio::time::timeout(
+    let request = match tokio::time::timeout(
         Duration::from_secs(10),
-        ipc::read_request::<Request>(&mut stream),
+        ipc::read_incoming_request::<Request>(&mut stream),
     )
     .await
-    .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??;
+    .map_err(|_| LocalError::new(LocalErrorKind::Transport, "request frame timed out"))??
+    {
+        ipc::IncomingRequest::Request(request) => request,
+        ipc::IncomingRequest::Control(ipc::ControlRequest::Stop) => {
+            let status = backend.stop_and_wait().await?;
+            let reply = ipc::ControlStopStatus {
+                epoch: status.epoch,
+                owners: status.owners,
+                unconfirmed_operations: status.unconfirmed_operations,
+            };
+            return ipc::write_control(&mut stream, &reply).await;
+        }
+    };
     let mut writer = ipc::ResponseWriter::default();
     if let Request::AuthLogin { provider } = request {
         let auth = super::auth::require_chatgpt(&provider).and_then(|()| {

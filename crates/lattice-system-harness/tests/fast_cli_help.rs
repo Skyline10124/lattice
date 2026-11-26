@@ -681,6 +681,8 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
                     "用法：lattice daemon <命令>",
                     "命令：",
                     "status",
+                    "start",
+                    "restart",
                     "stop",
                     "install",
                     "选项：",
@@ -706,6 +708,28 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
                         "用法：lattice daemon status [--json]",
                         "选项：",
                         "--json",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    "start",
+                    &[
+                        "启动已安装的用户级 systemd 后台服务",
+                        "不支持 --json",
+                        "用法：lattice daemon start",
+                        "选项：",
+                        "-h, --help",
+                        "显示帮助。",
+                    ][..],
+                ),
+                (
+                    "restart",
+                    &[
+                        "重启已安装的用户级 systemd 后台服务",
+                        "不支持 --json",
+                        "用法：lattice daemon restart",
+                        "选项：",
                         "-h, --help",
                         "显示帮助。",
                     ][..],
@@ -758,12 +782,12 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
                         ));
                     }
                 }
-                if sub == "install"
+                if matches!(sub, "install" | "start" | "restart")
                     && (sub_stdout.contains("-j, --json")
                         || sub_stdout.contains("以 JSON 输出结果"))
                 {
                     return Err(format!(
-                        "`lattice daemon install {flag}` 选项表不应把 `--json` 列为可用选项：{sub_stdout}"
+                        "`lattice daemon {sub} {flag}` 选项表不应把 `--json` 列为可用选项：{sub_stdout}"
                     ));
                 }
             }
@@ -832,6 +856,16 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
             (
                 "install 短标志 -j",
                 vec!["-j", "daemon", "install"],
+                "不支持 `--json`",
+            ),
+            (
+                "start 后置 --json",
+                vec!["daemon", "start", "--json"],
+                "不支持 `--json`",
+            ),
+            (
+                "restart 前置 --json",
+                vec!["--json", "daemon", "restart"],
                 "不支持 `--json`",
             ),
             (

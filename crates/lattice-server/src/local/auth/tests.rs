@@ -37,7 +37,13 @@ async fn stop_cancels_browser_login_and_releases_the_backend_instance() {
             Some(AuthLoginEvent::Authorization(_))
         ));
         let (stopped, outcome) = tokio::join!(client.stop(), login.next());
-        assert!(stopped.unwrap().stopping);
+        assert!(
+            stopped
+                .unwrap()
+                .into_status()
+                .expect("同版本停机应返回 DaemonStatus")
+                .stopping
+        );
         assert!(matches!(
             outcome.unwrap(),
             Some(AuthLoginEvent::Finished(

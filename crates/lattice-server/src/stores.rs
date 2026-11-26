@@ -178,7 +178,6 @@ impl StoreManager {
                     Ok(manager.api(0, store, shutdown, read))
                 }
                 Err(error) => {
-                    let missing = matches!(error, StoreError::NotInitialized { .. });
                     let unknown = matches!(error, StoreError::CreationDurabilityUnknown { .. });
                     let error = ApiError::from(error);
                     if unknown {
@@ -198,12 +197,9 @@ impl StoreManager {
                         if should_recover {
                             manager.recover(0);
                         }
-                    } else if !missing {
-                        let mut state = manager.state.lock().expect("store manager poisoned");
-                        if !matches!(*state, StoreState::Stopped { .. }) {
-                            *state = StoreState::Unavailable(error.clone());
-                        }
                     }
+                    // 首次打开失败（如 NotInitialized、UnsupportedVersion、LegacyStores 或权限错误）
+                    // 不锁入 Unavailable：保持 Unopened，让用户在删除/归档旧库或修复权限后无需重启后台即可恢复。
                     Err(error)
                 }
             }
@@ -685,5 +681,78 @@ mod tests {
         let reopened =
             SessionStore::open(&layout).expect("刚打开的库句柄应已被丢弃并释放底层文件锁");
         drop(reopened);
+    }
+
+    #[tokio::test]
+    async fn initial_open_failure_does_not_latch_unavailable_and_recovers_after_cleanup() {
+        // 1. 磁盘存在损坏或非法的 lattice.redb：首次打开失败但保持 Unopened；
+        //    用户删掉旧库文件后，同一 StoreManager 实例无需重启后台即可直接新建当前版本会话库。
+        let tmp = tempfile::tempdir().unwrap();
+        let layout = StateLayout::in_state_root(tmp.path());
+        let db_path = layout.lattice_root().join("lattice.redb");
+        std::fs::create_dir_all(layout.lattice_root()).unwrap();
+        std::fs::write(&db_path, b"not-a-valid-redb-database").unwrap();
+        let manager = StoreManager::new(layout.clone());
+        let err = manager
+            .acquire(true)
+            .await
+            .err()
+            .expect("非法会话库文件应拒绝打开");
+        assert!(
+            matches!(err, ApiError::Store(_)),
+            "预期返回存储打开错误，实际：{err:?}"
+        );
+        assert!(
+            matches!(*manager.state.lock().unwrap(), StoreState::Unopened),
+            "首次打开失败后应保持 Unopened，不得锁死进 Unavailable"
+        );
+
+        std::fs::remove_file(&db_path).unwrap();
+        let api = manager
+            .acquire(true)
+            .await
+            .expect("删除旧库文件后，同一 StoreManager 应能直接新建当前版本会话库");
+        assert!(
+            api.read(|r| r.list(None, 10))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        drop(api);
+
+        // 2. 存在旧式 sessions.git 目录：报 LegacyStores 后同样保持 Unopened，移走目录后可直接创建。
+        let legacy_tmp = tempfile::tempdir().unwrap();
+        let legacy_layout = StateLayout::in_state_root(legacy_tmp.path());
+        let legacy_dir = legacy_layout.lattice_root().join("sessions.git");
+        std::fs::create_dir_all(&legacy_dir).unwrap();
+        let legacy_manager = StoreManager::new(legacy_layout);
+        let legacy_err = legacy_manager
+            .acquire(true)
+            .await
+            .err()
+            .expect("存在 sessions.git 时应报 LegacyStores");
+        assert!(matches!(
+            legacy_err,
+            ApiError::Store(ref store_err)
+                if matches!(store_err.as_ref(), StoreError::LegacyStores { .. })
+        ));
+        assert!(matches!(
+            *legacy_manager.state.lock().unwrap(),
+            StoreState::Unopened
+        ));
+        std::fs::remove_dir_all(&legacy_dir).unwrap();
+        let recovered = legacy_manager
+            .acquire(true)
+            .await
+            .expect("清理 sessions.git 后同一 StoreManager 应直接恢复建库");
+        assert!(
+            recovered
+                .read(|r| r.list(None, 10))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
     }
 }
