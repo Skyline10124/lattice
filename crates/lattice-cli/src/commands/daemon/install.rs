@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 
-use clap::{ArgAction, Args};
+use clap::Args;
 use lattice_local::{
     DrainTimeout, LocalClient, LocalError, LocalErrorKind, StateLayout, parse_drain_timeout,
     xdg_state_root,
@@ -29,7 +29,7 @@ static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Args, Debug, Clone)]
 pub(crate) struct InstallArgs {
-    /// 停机时等待在途操作排空的上限（非负整数，单位支持 ms、s、m，无单位按秒计；默认 60s）。
+    /// 停机排空上限，支持 ms/s/m，默认 60s
     #[arg(
         long = "drain-timeout",
         value_name = "时长",
@@ -39,15 +39,6 @@ pub(crate) struct InstallArgs {
         value_parser = parse_drain_timeout
     )]
     pub(crate) drain_timeout: DrainTimeout,
-
-    /// 显示帮助。
-    #[arg(
-        short = 'h',
-        long = "help",
-        action = ArgAction::Help,
-        display_order = 1000
-    )]
-    help: Option<bool>,
 }
 
 pub(super) async fn run(args: InstallArgs) -> ExitCode {

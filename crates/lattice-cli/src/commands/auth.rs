@@ -20,21 +20,37 @@ const INVALID_UTF8_MESSAGE: &str = "API key input must be valid UTF-8";
 
 #[derive(Subcommand)]
 pub enum AuthAction {
-    /// Read an API key from the terminal without echo, or from standard input.
-    Set { provider: String },
-    /// Sign in with ChatGPT using a browser or a pasted callback URL.
+    /// 从终端或标准输入读取并保存 API key
+    Set {
+        /// provider 标识
+        #[arg(value_name = "provider")]
+        provider: String,
+    },
+    /// 登录 provider 账号
     Login {
-        #[arg(value_parser = ["chatgpt"])]
+        /// provider 标识
+        #[arg(
+            value_name = "provider",
+            value_parser = crate::help::parse_login_provider
+        )]
         provider: String,
     },
-    /// Sign out of ChatGPT and report remote revocation status.
+    /// 登出 provider 账号
     Logout {
-        #[arg(value_parser = ["chatgpt"])]
+        /// provider 标识
+        #[arg(
+            value_name = "provider",
+            value_parser = crate::help::parse_login_provider
+        )]
         provider: String,
     },
-    /// Remove credentials and report ChatGPT remote revocation status.
-    Remove { provider: String },
-    /// Show credential status without exposing credentials.
+    /// 删除 provider 凭据
+    Remove {
+        /// provider 标识
+        #[arg(value_name = "provider")]
+        provider: String,
+    },
+    /// 查看 provider 凭据与可用性状态
     Status,
 }
 

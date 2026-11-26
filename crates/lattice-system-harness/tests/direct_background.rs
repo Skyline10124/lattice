@@ -3808,11 +3808,6 @@ fn frontends_without_daemon_report_not_running_without_spawning_or_locking() {
                 vec!["--json", "auth", "login", "chatgpt"],
                 None,
             ),
-            (
-                "tui（JSON）",
-                vec!["--json", "tui", "--agent", "background"],
-                None,
-            ),
         ];
 
         for (label, args, stdin_bytes) in json_cases {

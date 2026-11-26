@@ -1,15 +1,14 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lattice im` 中文命令组分派、凭据无回显录入、重载回执与状态输出渲染。
+//! `lattice im` 命令组分派、凭据无回显录入、重载回执与状态输出渲染。
 
 use std::{
-    ffi::OsString,
     io::{self, Write},
     process::ExitCode,
 };
 
-use clap::{ArgAction, Args, Subcommand};
+use clap::Subcommand;
 use lattice_local::{
     ImAuthRemoveReply, ImAuthSetReply, ImAuthStatus, ImCredentialStatus, ImMountResult,
     LocalClient, LocalError, LocalErrorKind, StateLayout,
@@ -23,216 +22,33 @@ const IM_SECRET_PROMPT: &str = "请输入平台凭据：";
 const IM_INVALID_UTF8_MESSAGE: &str = "平台凭据输入不是有效的 UTF-8 文本";
 const UNSUPPORTED_PLATFORM_MESSAGE: &str = "不支持的 IM 平台；当前仅支持 telegram";
 
-/// `lattice im` 顶层子命令组帮助模板。
-pub(crate) const IM_HELP_TEMPLATE: &str = "\
-管理内置 IM 网关的平台凭据与配置重载。
-
-用法：{usage}
-
-命令：
-{subcommands}
-
-选项：
-{options}";
-
-/// `lattice im auth` 二级子命令组帮助模板。
-const IM_AUTH_HELP_TEMPLATE: &str =
-    "{about-with-newline}\n用法：{usage}\n\n命令：\n{subcommands}\n\n选项：\n{options}";
-
-/// 带位置参数的叶子子命令帮助模板。
-const POSITIONAL_SUBCOMMAND_HELP_TEMPLATE: &str =
-    "{about-with-newline}\n用法：{usage}\n\n参数：\n{positionals}\n\n选项：\n{options}";
-
-/// 无位置参数的叶子子命令帮助模板。
-const SUBCOMMAND_HELP_TEMPLATE: &str = "{about-with-newline}\n用法：{usage}\n\n选项：\n{options}";
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ImArgs {
-    /// 显示帮助。
-    #[arg(
-        short = 'h',
-        long = "help",
-        action = ArgAction::Help,
-        display_order = 1000
-    )]
-    help: Option<bool>,
-
-    #[command(subcommand)]
-    pub(crate) action: ImAction,
-}
-
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ImAction {
-    /// 管理 IM 平台凭据（保存、删除与查看状态）。
-    #[command(
-        help_template = IM_AUTH_HELP_TEMPLATE,
-        override_usage = "lattice im auth <命令>",
-        subcommand_value_name = "命令",
-        disable_help_flag = true,
-        disable_help_subcommand = true
-    )]
-    Auth(ImAuthArgs),
-
-    /// 重新读取 IM 配置与凭据并重新挂载 IM 网关。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice im reload [--json]",
-        disable_help_flag = true
-    )]
-    Reload {
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
+    /// 管理 IM 平台凭据
+    Auth {
+        #[command(subcommand)]
+        action: ImAuthAction,
     },
-}
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct ImAuthArgs {
-    /// 显示帮助。
-    #[arg(
-        short = 'h',
-        long = "help",
-        action = ArgAction::Help,
-        display_order = 1000
-    )]
-    help: Option<bool>,
-
-    #[command(subcommand)]
-    pub(crate) action: ImAuthAction,
+    /// 重载 IM 配置与凭据
+    Reload,
 }
 
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum ImAuthAction {
-    /// 从无回显终端或标准输入读取并保存指定平台的凭据，随后重新挂载 IM。
-    #[command(
-        help_template = POSITIONAL_SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice im auth set <平台> [--json]",
-        disable_help_flag = true
-    )]
+    /// 从终端或标准输入读取并保存平台凭据
     Set {
-        /// 平台名称（当前支持 telegram）。
+        /// IM 平台名称
         #[arg(value_name = "平台")]
         platform: String,
-
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
     },
-
-    /// 删除指定平台的已保存凭据，随后重新挂载 IM。
-    #[command(
-        help_template = POSITIONAL_SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice im auth remove <平台> [--json]",
-        disable_help_flag = true
-    )]
+    /// 删除平台凭据
     Remove {
-        /// 平台名称（当前支持 telegram）。
+        /// IM 平台名称
         #[arg(value_name = "平台")]
         platform: String,
-
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
     },
-
-    /// 查看各 IM 平台的凭据配置状态（不回显凭据内容）。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice im auth status [--json]",
-        disable_help_flag = true
-    )]
-    Status {
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
-    },
-}
-
-/// 将根命令向下传播的全局选项在 `im` 子命令树内替换为中文说明。
-pub(crate) fn localize_help(cmd: clap::Command) -> clap::Command {
-    fn localize_common(sub: clap::Command) -> clap::Command {
-        sub.mut_arg("json", |arg| {
-            arg.help("以 JSON 输出结果，不打印人类可读文本。")
-        })
-        .mut_arg("verbose", |arg| arg.help("输出详细日志。"))
-    }
-
-    localize_common(cmd)
-        .mut_subcommand("auth", |auth_cmd| {
-            localize_common(auth_cmd)
-                .mut_subcommand("set", localize_common)
-                .mut_subcommand("remove", localize_common)
-                .mut_subcommand("status", localize_common)
-        })
-        .mut_subcommand("reload", localize_common)
-}
-
-fn mentions_im_auth_subcommand(args: &[OsString]) -> bool {
-    args.iter()
-        .skip(1)
-        .take_while(|arg| arg.as_os_str() != "--")
-        .filter(|arg| !arg.as_encoded_bytes().starts_with(b"-") && arg.as_os_str() != "help")
-        .nth(1)
-        .is_some_and(|arg| arg == "auth")
-}
-
-/// 生成 `lattice im` 组参数解析错误的已脱敏中文正文（绝不拼接任何命令行原始参数值，杜绝秘密回显）。
-pub(crate) fn cli_error_message(args: &[OsString], error: &clap::Error) -> String {
-    let help_cmd = if mentions_im_auth_subcommand(args) {
-        "lattice im auth --help"
-    } else {
-        "lattice im --help"
-    };
-    match error.kind() {
-        clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        | clap::error::ErrorKind::MissingSubcommand => {
-            format!("缺少子命令；执行 `{help_cmd}` 查看用法")
-        }
-        clap::error::ErrorKind::MissingRequiredArgument => {
-            format!("缺少必填参数；执行 `{help_cmd}` 查看用法")
-        }
-        clap::error::ErrorKind::InvalidSubcommand => {
-            format!("未知子命令；执行 `{help_cmd}` 查看用法")
-        }
-        clap::error::ErrorKind::ArgumentConflict => {
-            format!("参数组合冲突；执行 `{help_cmd}` 查看用法")
-        }
-        clap::error::ErrorKind::UnknownArgument => {
-            format!("包含未知参数；执行 `{help_cmd}` 查看用法")
-        }
-        clap::error::ErrorKind::TooManyValues | clap::error::ErrorKind::TooFewValues => {
-            format!("参数数量不正确；执行 `{help_cmd}` 查看用法")
-        }
-        clap::error::ErrorKind::InvalidValue | clap::error::ErrorKind::ValueValidation => {
-            format!("参数值无效；执行 `{help_cmd}` 查看用法")
-        }
-        _ => format!("命令行参数无效；执行 `{help_cmd}` 查看用法"),
-    }
-}
-
-/// 将 `lattice im` 组的 clap 参数解析错误格式化为标准错误中文提示。
-pub(crate) fn format_cli_error(args: &[OsString], error: &clap::Error) -> String {
-    format!("错误：{}", cli_error_message(args, error))
+    /// 查看平台凭据状态
+    Status,
 }
 
 /// 统一渲染 `ImMountResult` 的中文状态文本。
@@ -301,8 +117,8 @@ fn handle_write_result(result: io::Result<ExitCode>, json: bool) -> anyhow::Resu
 
 pub(crate) async fn run(action: ImAction, json: bool) -> anyhow::Result<ExitCode> {
     match action {
-        ImAction::Auth(auth) => match auth.action {
-            ImAuthAction::Set { platform, .. } => {
+        ImAction::Auth { action } => match action {
+            ImAuthAction::Set { platform } => {
                 // 先在本地校验平台名称，非法时立即拒绝且不阻塞等待标准输入。
                 if let Err(error) = validate_platform(&platform) {
                     return report_im_error(error, json);
@@ -336,7 +152,7 @@ pub(crate) async fn run(action: ImAction, json: bool) -> anyhow::Result<ExitCode
                     json,
                 )
             }
-            ImAuthAction::Remove { platform, .. } => {
+            ImAuthAction::Remove { platform } => {
                 if let Err(error) = validate_platform(&platform) {
                     return report_im_error(error, json);
                 }
@@ -353,7 +169,7 @@ pub(crate) async fn run(action: ImAction, json: bool) -> anyhow::Result<ExitCode
                     json,
                 )
             }
-            ImAuthAction::Status { .. } => {
+            ImAuthAction::Status => {
                 let client = match resolve_client() {
                     Ok(client) => client,
                     Err(error) => return report_im_error(error, json),
@@ -365,7 +181,7 @@ pub(crate) async fn run(action: ImAction, json: bool) -> anyhow::Result<ExitCode
                 handle_write_result(render_auth_status(&status, json, &mut io::stdout()), json)
             }
         },
-        ImAction::Reload { .. } => {
+        ImAction::Reload => {
             let client = match resolve_client() {
                 Ok(client) => client,
                 Err(error) => return report_im_error(error, json),
@@ -478,13 +294,11 @@ mod tests {
     async fn invalid_platform_exits_2_immediately_without_waiting_on_stdin() {
         let leaked_token = "999999:MISPLACED_SECRET_PLATFORM_ARG";
         let code = run(
-            ImAction::Auth(ImAuthArgs {
-                help: None,
+            ImAction::Auth {
                 action: ImAuthAction::Set {
                     platform: leaked_token.into(),
-                    help: None,
                 },
-            }),
+            },
             false,
         )
         .await
@@ -492,13 +306,11 @@ mod tests {
         assert_eq!(code, ExitCode::from(2));
 
         let json_err = run(
-            ImAction::Auth(ImAuthArgs {
-                help: None,
+            ImAction::Auth {
                 action: ImAuthAction::Remove {
                     platform: leaked_token.into(),
-                    help: None,
                 },
-            }),
+            },
             true,
         )
         .await

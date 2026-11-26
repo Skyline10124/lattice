@@ -171,50 +171,50 @@ fn fast_cli_help_lists_public_commands() {
             vec!["run", "--help"],
             vec![
                 "--image",
-                "<PATH>",
+                "<路径>",
                 "--channel",
-                "<CHANNEL>",
+                "<渠道>",
                 "--expected-position",
-                "<NODE_ID>",
+                "<节点号>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",
-                "inherit",
-                "off, minimal, low, medium, high, xhigh, max",
+                "省略时继承",
+                "off/minimal/low/medium/high/xhigh/max",
             ],
         ),
         (
             vec!["session", "send", "--help"],
             vec![
                 "--image",
-                "<PATH>",
+                "<路径>",
                 "--channel",
-                "<CHANNEL>",
+                "<渠道>",
                 "--expected-position",
-                "<NODE_ID>",
+                "<节点号>",
                 "--model",
                 "--effort",
                 "<provider>/<model>",
-                "inherit",
-                "off, minimal, low, medium, high, xhigh, max",
+                "省略时继承",
+                "off/minimal/low/medium/high/xhigh/max",
             ],
         ),
         (
             vec!["session", "feed", "--help"],
             vec![
-                "SESSION_ID",
+                "<会话ID>",
                 "--image",
-                "<PATH>",
+                "<路径>",
                 "--channel",
-                "<CHANNEL>",
+                "<渠道>",
                 "--expected-position",
-                "<NODE_ID>",
+                "<节点号>",
             ],
         ),
         (
             vec!["session", "context-op", "--help"],
             vec![
-                "SESSION_ID",
+                "<会话ID>",
                 "--omit-node",
                 "--replace-input",
                 "--image",
@@ -225,19 +225,19 @@ fn fast_cli_help_lists_public_commands() {
                 "--omit-image",
                 "--replace-image",
                 "--channel",
-                "<CHANNEL>",
+                "<渠道>",
                 "--expected-position",
-                "<NODE_ID>",
+                "<节点号>",
             ],
         ),
         (
             vec!["session", "trigger", "--help"],
             vec![
-                "SESSION_ID",
+                "<会话ID>",
                 "--channel",
-                "<CHANNEL>",
+                "<渠道>",
                 "--expected-position",
-                "<NODE_ID>",
+                "<节点号>",
                 "--agent",
                 "--model",
                 "--effort",
@@ -245,16 +245,18 @@ fn fast_cli_help_lists_public_commands() {
         ),
         (
             vec!["session", "inspect", "--help"],
-            vec!["SESSION_ID", "--position", "<NODE_ID>"],
+            vec!["<会话ID>", "--position", "<节点号>"],
         ),
         (
             vec!["session", "usage", "--help"],
+            vec!["<会话ID>", "美元费用", "未知项显示 -", "--json"],
+        ),
+        (
+            vec!["tui", "--help"],
             vec![
-                "SESSION_ID",
-                "current path",
-                "whole-session totals",
-                "Unknown counts and costs are shown as '-'",
-                "--json",
+                "打开终端交互界面",
+                "用法：lattice tui [选项] [会话ID]",
+                "--agent <Agent>",
             ],
         ),
     ] {
@@ -268,9 +270,33 @@ fn fast_cli_help_lists_public_commands() {
             )
             .unwrap();
         let result = assert_exit_code(&output, 0)
-            .and_then(|_| assert_stdout_contains_all(&output, &expected));
+            .and_then(|_| assert_stdout_contains_all(&output, &expected))
+            .and_then(|_| {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for forbidden in [
+                    "Usage:",
+                    "Commands:",
+                    "Arguments:",
+                    "Options:",
+                    "Print help",
+                    "[default:",
+                    "[possible values:",
+                ] {
+                    if stdout.contains(forbidden) {
+                        return Err(lattice_system_harness::AssertError::StdoutMissing {
+                            expected: format!("帮助输出不应残留英文 `{forbidden}`"),
+                        });
+                    }
+                }
+                if args.first() == Some(&"tui") && stdout.contains("-j, --json") {
+                    return Err(lattice_system_harness::AssertError::StdoutMissing {
+                        expected: "`lattice tui --help` 不应暴露 `-j, --json`".into(),
+                    });
+                }
+                Ok(())
+            });
         finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
-            .unwrap_or_else(|report| panic!("session 帮助输出不符合预期\n{report}"));
+            .unwrap_or_else(|report| panic!("帮助输出不符合预期\n{report}"));
     }
     for args in [vec!["session", "usage"], vec!["session", "usage", "--json"]] {
         let output = driver
@@ -289,7 +315,7 @@ fn fast_cli_help_lists_public_commands() {
                     &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
                 )
             } else {
-                assert_stderr_contains(&output, "SESSION_ID")
+                assert_stderr_contains(&output, "<会话ID>")
             }
         });
         finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
@@ -297,7 +323,10 @@ fn fast_cli_help_lists_public_commands() {
     }
     for command in [vec!["run"], vec!["session", "send"]] {
         for json in [false, true] {
-            for (flag, value) in [("--model", "invalid"), ("--effort", "none")] {
+            for (flag, value, expected_err) in [
+                ("--model", "invalid", "模型引用"),
+                ("--effort", "none", "推理档位"),
+            ] {
                 let mut args = Vec::new();
                 if json {
                     args.push("--json");
@@ -317,10 +346,14 @@ fn fast_cli_help_lists_public_commands() {
                     if json {
                         assert_stdout_contains_all(
                             &output,
-                            &["\"type\":\"error\"", "\"kind\":\"bad_request\""],
+                            &[
+                                "\"type\":\"error\"",
+                                "\"kind\":\"bad_request\"",
+                                expected_err,
+                            ],
                         )
                     } else {
-                        assert_stderr_contains(&output, "invalid value")
+                        assert_stderr_contains(&output, expected_err)
                     }
                 });
                 finalize_with_failure_artifacts(
@@ -334,6 +367,33 @@ fn fast_cli_help_lists_public_commands() {
                 .unwrap();
             }
         }
+    }
+    for args in [
+        vec!["tui", "--agent", "reader", "--json"],
+        vec!["--json", "tui", "--agent", "reader"],
+        vec!["-j", "tui", "abcd"],
+    ] {
+        let output = driver
+            .run(
+                &world,
+                &LatticeCommand {
+                    args: args.iter().map(|arg| (*arg).into()).collect(),
+                    timeout: Some(spec.step_timeout()),
+                },
+            )
+            .unwrap();
+        let result = assert_exit_code(&output, 2).and_then(|_| {
+            assert_stdout_contains_all(
+                &output,
+                &[
+                    "\"type\":\"error\"",
+                    "\"kind\":\"bad_request\"",
+                    "`lattice tui` 不支持 `--json`",
+                ],
+            )
+        });
+        finalize_with_failure_artifacts(&world, &spec.name, &args.join(" "), &output, &[], result)
+            .unwrap_or_else(|report| panic!("tui --json 应显式拒绝并退出 2\n{report}"));
     }
 }
 
@@ -375,7 +435,7 @@ fn fast_context_domain_cli_validation() {
                 "--channel",
                 " bad",
             ],
-            "invalid value",
+            "来源渠道",
         ),
         (
             "session send 拒绝空通道名",
@@ -388,12 +448,12 @@ fn fast_context_domain_cli_validation() {
                 "--channel",
                 "",
             ],
-            "invalid value",
+            "来源渠道",
         ),
         (
             "session feed 缺少正文与图片",
             vec!["session", "feed", sid],
-            "PROMPT",
+            "<消息>",
         ),
         (
             "session context-op 缺少任何编辑项",
@@ -421,12 +481,12 @@ fn fast_context_domain_cli_validation() {
         (
             "session inspect --position 拒绝前导加号",
             vec!["session", "inspect", sid, "--position", "+1"],
-            "invalid value",
+            "节点号",
         ),
         (
             "session trigger --expected-position 拒绝前导加号",
             vec!["session", "trigger", sid, "--expected-position", "+1"],
-            "invalid value",
+            "节点号",
         ),
     ];
 
@@ -497,8 +557,8 @@ fn fast_unknown_command_rejected() {
         )
         .expect("执行未知子命令失败");
 
-    let result = assert_exit_code(&output, 2)
-        .and_then(|_| assert_stderr_contains(&output, "unrecognized subcommand"));
+    let result =
+        assert_exit_code(&output, 2).and_then(|_| assert_stderr_contains(&output, "未知子命令"));
     finalize_with_failure_artifacts(
         &world,
         &spec.name,
@@ -507,9 +567,7 @@ fn fast_unknown_command_rejected() {
         &[],
         result,
     )
-    .unwrap_or_else(|report| {
-        panic!("未知子命令应以退出码 2 报告 unrecognized subcommand\n{report}")
-    });
+    .unwrap_or_else(|report| panic!("未知子命令应以退出码 2 报告未知子命令\n{report}"));
 }
 
 #[test]
@@ -543,12 +601,13 @@ fn fast_lattice_daemon_chinese_help_and_argument_validation() {
             assert_stdout_contains_all(
                 &output,
                 &[
+                    "运行 LATTICE 本地后台守护进程",
                     "用法：lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
                     "选项：",
                     "--state-root <绝对路径>",
                     "--drain-timeout <时长>",
                     "-h, --help",
-                    "显示帮助。",
+                    "显示帮助",
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -639,15 +698,12 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
             .unwrap();
 
     let result = (|| -> Result<(), String> {
-        // 顶层 `lattice --help` 中的 `daemon` 条目保持与同列表一致。
+        // 顶层 `lattice --help` 中的 `daemon` 条目统一为中文摘要。
         let top_help = cli.help(&world, &spec).map_err(|e| e.to_string())?;
         evidence.record_command("查询顶层 lattice --help", &top_help);
         assert_exit_code(&top_help, 0).map_err(|e| e.to_string())?;
-        assert_stdout_contains_all(
-            &top_help,
-            &["Manage the local daemon for this user and state root"],
-        )
-        .map_err(|e| e.to_string())?;
+        assert_stdout_contains_all(&top_help, &["管理本地后台守护进程"])
+            .map_err(|e| e.to_string())?;
 
         let forbidden_english = [
             "Usage:",
@@ -677,15 +733,15 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
             assert_stdout_contains_all(
                 &group_out,
                 &[
-                    "管理当前用户与状态根的本地后台守护进程。",
-                    "用法：lattice daemon <命令>",
+                    "管理本地后台守护进程",
+                    "用法：lattice daemon [选项] <命令>",
                     "命令：",
                     "status",
                     "stop",
                     "install",
                     "选项：",
                     "-h, --help",
-                    "显示帮助。",
+                    "显示帮助",
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -702,35 +758,34 @@ fn fast_lattice_daemon_group_chinese_help_and_argument_validation() {
                 (
                     "status",
                     &[
-                        "查询运行中的本地后台状态",
-                        "用法：lattice daemon status [--json]",
+                        "查看运行中的后台状态",
+                        "用法：lattice daemon status [选项]",
                         "选项：",
                         "--json",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     "stop",
                     &[
-                        "停止接收新请求",
-                        "用法：lattice daemon stop [--json]",
+                        "停止后台并等待在途工作收尾",
+                        "用法：lattice daemon stop [选项]",
                         "选项：",
                         "--json",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     "install",
                     &[
-                        "写出用户级 systemd 服务单元",
-                        "不支持 --json",
-                        "用法：lattice daemon install [--drain-timeout <时长>]",
+                        "安装并启动用户级 systemd 服务",
+                        "用法：lattice daemon install [选项]",
                         "选项：",
                         "--drain-timeout <时长>",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
             ] {
@@ -931,72 +986,72 @@ fn fast_lattice_im_group_chinese_help_and_argument_validation() {
                 (
                     vec!["im", flag],
                     &[
-                        "管理内置 IM 网关的平台凭据与配置重载。",
-                        "用法：lattice im <命令>",
+                        "管理内置 IM 网关与平台凭据",
+                        "用法：lattice im [选项] <命令>",
                         "命令：",
                         "auth",
                         "reload",
                         "选项：",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     vec!["im", "auth", flag],
                     &[
                         "管理 IM 平台凭据",
-                        "用法：lattice im auth <命令>",
+                        "用法：lattice im auth [选项] <命令>",
                         "命令：",
                         "set",
                         "remove",
                         "status",
                         "选项：",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     vec!["im", "auth", "set", flag],
                     &[
-                        "用法：lattice im auth set <平台> [--json]",
+                        "用法：lattice im auth set [选项] <平台>",
                         "参数：",
                         "<平台>",
                         "选项：",
                         "--json",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     vec!["im", "auth", "remove", flag],
                     &[
-                        "用法：lattice im auth remove <平台> [--json]",
+                        "用法：lattice im auth remove [选项] <平台>",
                         "参数：",
                         "<平台>",
                         "选项：",
                         "--json",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     vec!["im", "auth", "status", flag],
                     &[
-                        "用法：lattice im auth status [--json]",
+                        "用法：lattice im auth status [选项]",
                         "选项：",
                         "--json",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
                 (
                     vec!["im", "reload", flag],
                     &[
-                        "用法：lattice im reload [--json]",
+                        "用法：lattice im reload [选项]",
                         "选项：",
                         "--json",
                         "-h, --help",
-                        "显示帮助。",
+                        "显示帮助",
                     ][..],
                 ),
             ] {

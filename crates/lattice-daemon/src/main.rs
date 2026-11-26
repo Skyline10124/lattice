@@ -33,14 +33,14 @@ const HELP_TEMPLATE: &str = "{about-with-newline}
 #[derive(Debug, Parser)]
 #[command(
     name = "lattice-daemon",
-    about = "运行 LATTICE 本地后台守护进程。",
+    about = "运行 LATTICE 本地后台守护进程",
     help_template = HELP_TEMPLATE,
     override_usage = "lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
     disable_help_flag = true,
     disable_version_flag = true
 )]
 struct Cli {
-    /// 状态根目录的绝对路径（不会回退到环境变量解析）。
+    /// 状态根目录绝对路径
     #[arg(
         long = "state-root",
         value_name = "绝对路径",
@@ -48,7 +48,7 @@ struct Cli {
     )]
     state_root: PathBuf,
 
-    /// 停机时等待在途操作排空的上限（非负整数，单位支持 ms、s、m，无单位按秒计；默认 60s）。
+    /// 停机排空上限，支持 ms/s/m，默认 60s
     #[arg(
         long = "drain-timeout",
         value_name = "时长",
@@ -59,7 +59,7 @@ struct Cli {
     )]
     drain_timeout: DrainTimeout,
 
-    /// 显示帮助。
+    /// 显示帮助
     #[arg(
         short = 'h',
         long = "help",
@@ -300,12 +300,13 @@ mod tests {
     fn cli_help_is_chinese_and_validates_state_root_and_drain_timeout() {
         let help = Cli::command().render_long_help().to_string();
         for required in [
+            "运行 LATTICE 本地后台守护进程",
             "用法：lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
             "选项：",
             "--state-root <绝对路径>",
             "--drain-timeout <时长>",
             "-h, --help",
-            "显示帮助。",
+            "显示帮助",
         ] {
             assert!(
                 help.contains(required),
