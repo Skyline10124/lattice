@@ -25,8 +25,8 @@ status: active
 | 入口 | 与后台的关系 |
 | --- | --- |
 | `lattice` 的 `run`、`session`、`tui`、`auth`、`im`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台）；其中 `daemon stop` 另支持跨版本停止更旧协议后台 |
-| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload`、按该文件绝对路径的 `systemctl --user enable` 与 `systemctl --user restart lattice.service`（不支持 `--json`），成功后探测一次状态根，后台协议不兼容时退出 `1` |
-| `lattice daemon start`、`lattice daemon restart` | 薄封装 `systemctl --user start|restart lattice.service`（不支持 `--json`），成功后探测一次状态根，后台协议不兼容时退出 `1`；失败时区分未安装 unit 与状态根被占用并附对端进程号诊断 |
+| `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload`、按该文件绝对路径的 `systemctl --user enable` 与 `systemctl --user restart lattice.service`（不支持 `--json`），成功后探测一次状态根，只有协议一致的后台应答才退出 `0`，不兼容或连不上时退出 `1` |
+| `lattice daemon start`、`lattice daemon restart` | 薄封装 `systemctl --user start|restart lattice.service`（不支持 `--json`），成功后探测一次状态根，只有协议一致的后台应答才退出 `0`，不兼容或连不上时退出 `1`；失败时区分未安装 unit 与状态根被占用并附对端进程号诊断 |
 | `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；启动时以 `0700` 准备 `~/.lattice/im` 并建立 `inotify` 配置监视，就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT`、同版本 IPC `stop` 或版本无关控制帧 `LTCTRL\0\x01` 停机并在排空开始时发出 `STOPPING=1` |
 
 ## 判读结果

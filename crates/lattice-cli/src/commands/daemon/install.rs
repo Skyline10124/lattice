@@ -19,7 +19,7 @@ use lattice_local::{
     parse_drain_timeout, xdg_state_root,
 };
 
-/// `systemctl` 调用后探测状态根后台的单次截止时间；失败时用于诊断冲突，成功时用于核对协议兼容性。
+/// `systemctl` 调用后探测状态根后台的单次截止时间；失败时用于诊断冲突，成功时用于核对后台可用。
 const STATUS_PROBE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// `TimeoutStopSec` 在排空上限之外附加的尾段收尾与停写余量（秒）。
@@ -109,12 +109,23 @@ async fn run_service_action(action: ServiceAction) -> ExitCode {
     }
 }
 
+/// 在调用 `systemctl` 前解析本前端的状态根，解析失败时不产生副作用。
+fn resolve_state_root() -> Result<PathBuf, LocalError> {
+    xdg_state_root().map_err(|_| {
+        LocalError::new(
+            LocalErrorKind::BadRequest,
+            "无法解析状态根目录：请设置绝对路径的 XDG_STATE_HOME 或 HOME",
+        )
+    })
+}
+
 async fn execute_service_action(action: ServiceAction) -> Result<(), LocalError> {
+    let state_root = resolve_state_root()?;
     let verb = action.systemctl_verb();
     let Err(reason) =
         run_systemctl(vec!["--user".into(), verb.into(), SERVICE_UNIT_NAME.into()]).await
     else {
-        return verify_service_action_backend(action).await;
+        return verify_service_action_backend(action, &state_root).await;
     };
 
     if is_unit_not_found().await {
@@ -124,32 +135,26 @@ async fn execute_service_action(action: ServiceAction) -> Result<(), LocalError>
         ));
     }
 
-    let probe = match StateLayout::resolve() {
-        Ok(layout) => {
-            let client = LocalClient::new(layout);
-            probe_running_backend(&client, STATUS_PROBE_TIMEOUT).await
-        }
-        Err(_) => BackendProbe::Unreachable,
-    };
+    let client = LocalClient::new(StateLayout::in_state_root(&state_root));
+    let probe = probe_running_backend(&client, STATUS_PROBE_TIMEOUT).await;
     let message = format_service_action_failure_diagnostic(action, &reason, probe);
     Err(LocalError::new(LocalErrorKind::Internal, &message))
 }
 
-/// `systemctl` 已成功执行 `start` 或 `restart` 后核对状态根后台；状态根无法解析时视为探测不到。
-async fn verify_service_action_backend(action: ServiceAction) -> Result<(), LocalError> {
-    let Ok(layout) = StateLayout::resolve() else {
-        return Ok(());
-    };
-    let client = LocalClient::new(layout);
+/// `systemctl` 已成功执行 `start` 或 `restart` 后核对状态根后台。
+async fn verify_service_action_backend(
+    action: ServiceAction,
+    state_root: &Path,
+) -> Result<(), LocalError> {
     match action {
         ServiceAction::Start => {
-            verify_backend_after_success(&client, CompletedAction::Start, STATUS_PROBE_TIMEOUT)
+            verify_backend_after_success(state_root, CompletedAction::Start, STATUS_PROBE_TIMEOUT)
                 .await
         }
         ServiceAction::Restart => {
             let sibling_daemon = sibling_daemon_diagnostic_path();
             verify_backend_after_success(
-                &client,
+                state_root,
                 CompletedAction::Restart {
                     sibling_daemon: sibling_daemon.as_deref(),
                 },
@@ -177,12 +182,7 @@ async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError>
     let daemon_path = resolve_sibling_daemon(&current_exe)?;
 
     // 在触碰磁盘前先完成时长溢出检查、状态根解析、unit 路径解析与 `ExecStart` 转义校验。
-    let state_root = xdg_state_root().map_err(|_| {
-        LocalError::new(
-            LocalErrorKind::BadRequest,
-            "无法解析状态根目录：请设置绝对路径的 XDG_STATE_HOME 或 HOME",
-        )
-    })?;
+    let state_root = resolve_state_root()?;
     let unit_path = resolve_unit_path_from_env(
         std::env::var_os("XDG_CONFIG_HOME").as_deref(),
         std::env::var_os("HOME").as_deref(),
@@ -228,10 +228,9 @@ async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError>
         return Err(LocalError::new(LocalErrorKind::Internal, &message));
     }
 
-    let client = LocalClient::new(StateLayout::in_state_root(&state_root));
     let expected_daemon = canonical_or_original_path(&daemon_path);
     verify_backend_after_success(
-        &client,
+        &state_root,
         CompletedAction::Install {
             unit_path: &unit_path,
             daemon_path: &expected_daemon,
@@ -622,7 +621,12 @@ enum BackendProbe {
     Incompatible {
         diagnostic: String,
     },
-    Unreachable,
+    /// 状态根上没有后台在监听：状态根或端点目录不存在、没有 `api.sock`，或连接被拒绝。
+    NotRunning,
+    /// 端点存在但没能完成状态查询（权限不符、超时、对端未应答即断开等），保留原始错误。
+    Unreachable {
+        error: LocalError,
+    },
 }
 
 async fn probe_running_backend(client: &LocalClient, timeout: Duration) -> BackendProbe {
@@ -642,7 +646,8 @@ async fn probe_running_backend(client: &LocalClient, timeout: Duration) -> Backe
                 diagnostic: error.message,
             }
         }
-        Err(_) => BackendProbe::Unreachable,
+        Err(error) if error.kind == LocalErrorKind::NotRunning => BackendProbe::NotRunning,
+        Err(error) => BackendProbe::Unreachable { error },
     }
 }
 
@@ -685,14 +690,16 @@ fn sibling_daemon_diagnostic_path() -> Option<PathBuf> {
     Some(canonical_or_original_path(&path))
 }
 
-/// 核对 `systemctl` 成功后状态根上应答的后台；探测不到后台时不改判已经成功的 systemctl 动作。
+/// 核对 `systemctl` 成功后状态根上应答的后台；unit 为 `Type=notify`，后台发布 `api.sock` 后才发送 `READY=1`，
+/// 因此 `systemctl` 返回成功时后台应已监听；只有协议一致的后台应答才算成功，连不上说明本前端无法使用该后台。
 async fn verify_backend_after_success(
-    client: &LocalClient,
+    state_root: &Path,
     action: CompletedAction<'_>,
     timeout: Duration,
 ) -> Result<(), LocalError> {
-    match probe_running_backend(client, timeout).await {
-        BackendProbe::Running { .. } | BackendProbe::Unreachable => Ok(()),
+    let client = LocalClient::new(StateLayout::in_state_root(state_root));
+    match probe_running_backend(&client, timeout).await {
+        BackendProbe::Running { .. } => Ok(()),
         BackendProbe::Incompatible { diagnostic } => {
             let message = format!("{}，但{diagnostic}", action.prefix());
             Err(LocalError::new(
@@ -716,6 +723,32 @@ async fn verify_backend_after_success(
                 &message,
             ))
         }
+        BackendProbe::NotRunning => {
+            let message = format_not_running_after_success(action, state_root);
+            Err(LocalError::new(LocalErrorKind::NotRunning, &message))
+        }
+        BackendProbe::Unreachable { error } => {
+            let message = format!(
+                "{}，但无法确认后台可用（{}）；请执行 `systemctl --user status lattice` 查看详情",
+                action.prefix(),
+                error.message
+            );
+            Err(LocalError::new(error.kind, &message))
+        }
+    }
+}
+
+/// 拼装 `systemctl` 成功后状态根上没有后台监听的诊断，并给出核对状态根与 unit 的下一步。
+fn format_not_running_after_success(action: CompletedAction<'_>, state_root: &Path) -> String {
+    let prefix = action.prefix();
+    let root = state_root.display();
+    match action {
+        CompletedAction::Start | CompletedAction::Restart { .. } => format!(
+            "{prefix}，但本前端的状态根 {root} 上没有后台在监听：服务可能使用了另一个状态根，或就绪后已退出；请执行 `systemctl --user cat lattice` 核对 `--state-root`（要让服务改用本前端的状态根，执行 `lattice daemon install`），并执行 `systemctl --user status lattice` 查看详情"
+        ),
+        CompletedAction::Install { .. } => format!(
+            "{prefix}，但刚写入 unit 的状态根 {root} 上没有后台在监听：后台可能就绪后已退出，或 drop-in 覆盖了 `ExecStart`；请执行 `systemctl --user status lattice` 查看详情，并执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in"
+        ),
     }
 }
 
@@ -807,7 +840,7 @@ fn format_install_restart_failure_diagnostic(
                 unit_path.display()
             )
         }
-        BackendProbe::Unreachable => format!(
+        BackendProbe::NotRunning | BackendProbe::Unreachable { .. } => format!(
             "已写入并启用 unit 文件 {}，但执行 `systemctl --user restart {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情",
             unit_path.display()
         ),
@@ -830,7 +863,7 @@ fn format_service_action_failure_diagnostic(
                 "执行 `systemctl --user {verb} {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：{diagnostic}；停止原有后台后再执行 `lattice daemon start`"
             )
         }
-        BackendProbe::Unreachable => format!(
+        BackendProbe::NotRunning | BackendProbe::Unreachable { .. } => format!(
             "执行 `systemctl --user {verb} {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）；请执行 `systemctl --user status lattice` 查看详情"
         ),
     }
@@ -1081,12 +1114,23 @@ WantedBy=default.target
             "失败路径的更旧后台诊断应与协议不兼容分支一致"
         );
 
-        let unreachable = format_install_restart_failure_diagnostic(
+        let not_running = format_install_restart_failure_diagnostic(
             unit_path,
             "退出码 1",
-            BackendProbe::Unreachable,
+            BackendProbe::NotRunning,
         );
-        assert!(unreachable.contains("systemctl --user status lattice"));
+        assert!(not_running.contains("systemctl --user status lattice"));
+        let install_unresponsive = format_install_restart_failure_diagnostic(
+            unit_path,
+            "退出码 1",
+            BackendProbe::Unreachable {
+                error: LocalError::new(LocalErrorKind::Transport, "查询后台状态超时"),
+            },
+        );
+        assert_eq!(
+            install_unresponsive, not_running,
+            "失败路径的探测失败诊断应与没有后台监听一致"
+        );
 
         let start_conflict = format_service_action_failure_diagnostic(
             ServiceAction::Start,
@@ -1099,13 +1143,24 @@ WantedBy=default.target
         assert!(start_conflict.contains("对端进程号：7788"));
         assert!(start_conflict.contains("lattice daemon stop"));
 
-        let restart_unreachable = format_service_action_failure_diagnostic(
+        let restart_not_running = format_service_action_failure_diagnostic(
             ServiceAction::Restart,
             "退出码 1",
-            BackendProbe::Unreachable,
+            BackendProbe::NotRunning,
         );
-        assert!(restart_unreachable.contains("systemctl --user restart lattice.service"));
-        assert!(restart_unreachable.contains("systemctl --user status lattice"));
+        assert!(restart_not_running.contains("systemctl --user restart lattice.service"));
+        assert!(restart_not_running.contains("systemctl --user status lattice"));
+        let restart_unresponsive = format_service_action_failure_diagnostic(
+            ServiceAction::Restart,
+            "退出码 1",
+            BackendProbe::Unreachable {
+                error: LocalError::new(LocalErrorKind::Transport, "查询后台状态超时"),
+            },
+        );
+        assert_eq!(
+            restart_unresponsive, restart_not_running,
+            "失败路径的探测失败诊断应与没有后台监听一致"
+        );
     }
 
     #[tokio::test]
@@ -1220,8 +1275,39 @@ WantedBy=default.target
         );
     }
 
+    #[test]
+    fn not_running_after_systemctl_success_diagnostics_lock_wording() {
+        let state_root = Path::new("/home/alice/.local/state");
+        let unit_path = Path::new("/tmp/cfg/systemd/user/lattice.service");
+        let daemon_path = Path::new("/opt/lattice/bin/lattice-daemon");
+
+        assert_eq!(
+            format_not_running_after_success(CompletedAction::Start, state_root),
+            "`systemctl --user start lattice.service` 执行成功，但本前端的状态根 /home/alice/.local/state 上没有后台在监听：服务可能使用了另一个状态根，或就绪后已退出；请执行 `systemctl --user cat lattice` 核对 `--state-root`（要让服务改用本前端的状态根，执行 `lattice daemon install`），并执行 `systemctl --user status lattice` 查看详情"
+        );
+        assert_eq!(
+            format_not_running_after_success(
+                CompletedAction::Restart {
+                    sibling_daemon: Some(daemon_path),
+                },
+                state_root,
+            ),
+            "已重启服务 lattice.service，但本前端的状态根 /home/alice/.local/state 上没有后台在监听：服务可能使用了另一个状态根，或就绪后已退出；请执行 `systemctl --user cat lattice` 核对 `--state-root`（要让服务改用本前端的状态根，执行 `lattice daemon install`），并执行 `systemctl --user status lattice` 查看详情"
+        );
+        assert_eq!(
+            format_not_running_after_success(
+                CompletedAction::Install {
+                    unit_path,
+                    daemon_path,
+                },
+                state_root,
+            ),
+            "已写入并启用 unit 文件 /tmp/cfg/systemd/user/lattice.service，并已重启服务 lattice.service，但刚写入 unit 的状态根 /home/alice/.local/state 上没有后台在监听：后台可能就绪后已退出，或 drop-in 覆盖了 `ExecStart`；请执行 `systemctl --user status lattice` 查看详情，并执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in"
+        );
+    }
+
     #[tokio::test]
-    async fn success_probe_wiring_reports_older_newer_and_ignores_unreachable_backend() {
+    async fn success_probe_wiring_reports_older_newer_missing_and_unresponsive_backend() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         struct TempDir(PathBuf);
@@ -1270,11 +1356,11 @@ WantedBy=default.target
         };
 
         // 1. restart 后仍是更旧后台：注入的对端与本前端同路径时，指出应安装同一批构建。
-        let (_t1, layout, listener) = make_layout("older");
+        let (temp1, _layout, listener) = make_layout("older");
         let server = spawn_magic_peer(listener, -1);
         let current_exe = std::env::current_exe().unwrap();
         let err = verify_backend_after_success(
-            &LocalClient::new(layout),
+            &temp1.0,
             CompletedAction::Restart {
                 sibling_daemon: Some(&current_exe),
             },
@@ -1289,10 +1375,10 @@ WantedBy=default.target
         server.await.unwrap();
 
         // 2. restart 后是更新后台：沿用客户端的“较新”诊断接在成功前缀后。
-        let (_t2, layout, listener) = make_layout("newer");
+        let (temp2, _layout, listener) = make_layout("newer");
         let server = spawn_magic_peer(listener, 1);
         let err = verify_backend_after_success(
-            &LocalClient::new(layout),
+            &temp2.0,
             CompletedAction::Restart {
                 sibling_daemon: Some(&current_exe),
             },
@@ -1309,15 +1395,12 @@ WantedBy=default.target
         server.await.unwrap();
 
         // 3. start 后仍是更旧后台：沿用普通不兼容诊断并提示 restart。
-        let (_t3, layout, listener) = make_layout("start-older");
+        let (temp3, _layout, listener) = make_layout("start-older");
         let server = spawn_magic_peer(listener, -1);
-        let err = verify_backend_after_success(
-            &LocalClient::new(layout),
-            CompletedAction::Start,
-            Duration::from_secs(2),
-        )
-        .await
-        .expect_err("start 后发现更旧后台必须报错");
+        let err =
+            verify_backend_after_success(&temp3.0, CompletedAction::Start, Duration::from_secs(2))
+                .await
+                .expect_err("start 后发现更旧后台必须报错");
         assert!(
             err.message.starts_with(
                 "`systemctl --user start lattice.service` 执行成功，但运行中的后台版本较旧且不兼容"
@@ -1328,7 +1411,7 @@ WantedBy=default.target
         assert!(err.message.contains("lattice daemon restart"));
         server.await.unwrap();
 
-        // 4. 状态根上没有 api.sock：不改判 systemctl 已成功执行的动作。
+        // 4. 状态根上没有 api.sock：systemctl 成功后必须报告没有后台在监听。
         let temp = TempDir(PathBuf::from("/tmp").join(format!(
             "ltc-success-probe-empty-{}-{}",
             std::process::id(),
@@ -1338,14 +1421,33 @@ WantedBy=default.target
                 .as_nanos()
         )));
         fs::create_dir_all(&temp.0).unwrap();
-        verify_backend_after_success(
-            &LocalClient::new(StateLayout::in_state_root(&temp.0)),
+        let missing_action = CompletedAction::Restart {
+            sibling_daemon: Some(&current_exe),
+        };
+        let err = verify_backend_after_success(&temp.0, missing_action, Duration::from_millis(100))
+            .await
+            .expect_err("状态根上没有后台时必须报错");
+        assert_eq!(err.kind, LocalErrorKind::NotRunning);
+        assert_eq!(
+            err.message,
+            format_not_running_after_success(missing_action, &temp.0)
+        );
+
+        // 5. 端点存在但对端不应答：保留原始超时错误类型，并在诊断中附上原始错误。
+        let (temp5, _layout, _listener) = make_layout("unresponsive");
+        let err = verify_backend_after_success(
+            &temp5.0,
             CompletedAction::Restart {
                 sibling_daemon: Some(&current_exe),
             },
-            Duration::from_millis(100),
+            Duration::from_millis(200),
         )
         .await
-        .expect("探测不到后台时不得改判 systemctl 成功");
+        .expect_err("状态查询超时必须报错");
+        assert_eq!(err.kind, LocalErrorKind::Transport);
+        assert_eq!(
+            err.message,
+            "已重启服务 lattice.service，但无法确认后台可用（查询后台状态超时）；请执行 `systemctl --user status lattice` 查看详情"
+        );
     }
 }
