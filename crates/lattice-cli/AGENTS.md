@@ -39,6 +39,14 @@
 - CLI 消费 `LocalClient` 的观察 idle 诊断、`LocalTurn` 的回执等待结果与后台返回的已脱敏单行 `LocalError.message`，精确映射 `0`/`1`/`2` 退出码（`BadRequest`、`NotFound`、`Conflict` 以 `2` 退出），见[配置拒绝的原因](../../docs/architecture/session/acceptance.md#配置拒绝的原因)与[输入与传输限制](../../docs/architecture/session/concurrency.md#输入与传输限制)。
 - 本 crate 之外：全屏交互界面由 `lattice-tui` 负责；客户端连接、观察状态机、回执交接与日志初始化由 `lattice-local` 负责；IPC 分帧与线上类型由 `lattice-ipc` 负责；profile、provider 配置、模型元数据与凭据的读取管理及持久 Turn 执行由 `lattice-server` 和 `lattice-llm` 负责；全系统黑盒与 release 验收由 `lattice-system-harness` 负责。
 
+### 帮助与参数错误
+
+- 统一入口：全命令树的帮助模板、用法行、`--json` 策略、全局选项排序与参数错误格式化统一在 `src/help.rs` 维护；新增或修改子命令或选项时须同步更新 `usage_for_path`、`json_support_for_path` 与 `help_hint_for_args`。
+- 单版精简中文：所有 `--help` 与 `-h` 输出保持一致且全中文，不写单独长帮助、不生成 `help` 子命令、不暴露 clap 默认英文段落或 `[default:]` / `[possible values:]` 尾注；描述简洁直接、少用括号、条目末尾不加 `。`，不在通用帮助中写死临时性实现限制（如特定 provider）。
+- 占位符与术语：`value_name` 使用无空格简短中文占位符（如 `<会话ID>`、`<路径>`、`<节点号>`），仅命令/选项名与协议或领域术语保持原文（`Agent`、`provider`、`UUID`、`JSON`、`JSONL`、`systemd`、`cli`）；特定口径按对应架构合同表述（如 `session usage` 注明“等量 API 费用”且“未知项显示 -”）。
+- `--json` 与全局选项：全局选项固定沉底（`-j`、`-v`、`-h`、`-V`）；`--json` 按命令区分 JSON / JSONL 说明；不支持 `--json` 的命令（`tui`、`daemon install` / `start` / `restart`）在帮助中隐藏 `-j, --json` 并在解析阶段以退出码 `2` 拒绝。
+- 错误脱敏：所有参数解析错误经 `help::cli_error_message` 输出中文并指向最深层已知子命令的 `--help`（文本写 `stderr` 带 `错误：` 前缀，`--json` 写 `stdout` 结构化 `bad_request`，退出码 `2`），严禁回显原始输入或秘密。
+
 ## 验证
 
 | 改动 | 运行 |
