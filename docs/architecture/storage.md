@@ -45,7 +45,7 @@ status: active
 
 后台生命周期依次为：
 
-1. 后台由 `systemd` 用户服务（`lattice.service`）或手动运行的 `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` 启动；前端只连接已经运行的后台，后台未运行时返回 `not_running`。
+1. 部署后台由 `systemd` 用户服务（`lattice.service`）启动；开发调试与隔离测试的直接启动入口见[宿主平台](platform.md)。前端只连接已经运行的后台，后台未运行时返回 `not_running`。
 2. `serve` 取得实例锁，核验本地目录与 socket；需要处理残留 socket 时，仅清理本用户、身份未变化且已失效的对象，再绑定服务地址。绑定完成且未进入停机时，宿主经 `$NOTIFY_SOCKET`（若已设置）发出 `READY=1`；取不到 `owner.lock` 时不触碰现有 socket，尝试连接已发布 socket 读取对端进程号并以退出码 `3` 退出。
 3. 通信双方完成身份和协议检查后，Backend 接管请求，并通过领域接口打开存储、管理独立任务。最后一个客户端断开后，后台继续运行。
 4. IPC `stop`、`SIGTERM` 或 `SIGINT` 关闭新准入（首次进入排空时经 `$NOTIFY_SOCKET` 发出 `STOPPING=1`）并在有界期限内等待已接管操作收尾，具体查询、取消、排空与尾段责任见[停止后台](session/recovery.md#停止后台)。

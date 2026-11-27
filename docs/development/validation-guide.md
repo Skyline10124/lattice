@@ -19,7 +19,7 @@ status: active
 ## 环境与后台
 
 - 后台（`lattice-daemon`）在启动时按自己的宿主环境确定配置目录、全局 agents 目录与 TLS 根（带 `test-fake-tools` 的测试构建还会读取逗号分隔的 `LATTICE_TEST_TOOLS` 注册假工具），之后保持不变；`providers.toml` 与凭据在每次请求时重读。更换决定这些位置、TLS 根或假工具名单的环境后，重启后台使新环境生效。规则见[配置来源与后台启动](../architecture/session/acceptance.md#配置来源与后台启动)。
-- 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。跨 IPC 协议版本（当前为 `68`）升级后台时，新旧二进制互连普通请求会报 `incompatible_backend`（连接存活时附对端 pid）；systemd 托管下执行 `lattice daemon restart`（或重新执行 `lattice daemon install`），手动运行时新前端直接执行 `lattice daemon stop` 跨版本停下更旧后台（优先经 `LTCTRL\0\x01` 控制帧，历史旧后台经 `pidfd` 发送 `SIGTERM` 兜底）后再启动新版。重启后后台仍较旧时命令退出 `1` 并指出实际运行的 `lattice-daemon`。
+- 找回与重连使用原用户、状态根与会话身份；状态根的解析见[私有状态根](../architecture/storage.md#私有状态根)。跨 IPC 协议版本（当前为 `68`）升级后台时，新旧二进制互连普通请求会报 `incompatible_backend`（连接存活时附对端 pid）；日常部署执行 `lattice daemon restart`（或重新执行 `lattice daemon install`）。开发调试中直接启动的隔离后台，可由新前端执行 `lattice daemon stop` 跨版本停下更旧后台（优先经 `LTCTRL\0\x01` 控制帧，历史旧后台经 `pidfd` 发送 `SIGTERM` 兜底），确认进程退出后再启动新版；适用范围见[宿主平台](../architecture/platform.md)。重启后后台仍较旧时命令退出 `1` 并指出实际运行的 `lattice-daemon`。
 - 崩溃注入与强制清理只在隔离的状态根上进行，例如以 `lattice-daemon --state-root <绝对路径>` 启动的后台。
 
 | 入口 | 与后台的关系 |
@@ -27,7 +27,7 @@ status: active
 | `lattice` 的 `run`、`session`、`tui`、`auth`、`im`、`models`、`daemon status`、`daemon stop` | 只连接当前状态根已经运行的后台；后台未运行时报中文 `not_running` 并退出 `1`（不会自动启动后台）；其中 `daemon stop` 另支持跨版本停止更旧协议后台 |
 | `lattice daemon install [--drain-timeout <时长>]` | 核验同目录下当前有效用户可执行的 `lattice-daemon`，写出用户级 `lattice.service` 并依次执行 `systemctl --user daemon-reload`、按该文件绝对路径的 `systemctl --user enable` 与 `systemctl --user restart lattice.service`（不支持 `--json`），成功后探测一次状态根，只有协议一致的后台应答才退出 `0`，不兼容或连不上时退出 `1` |
 | `lattice daemon start`、`lattice daemon restart` | 薄封装 `systemctl --user start|restart lattice.service`（不支持 `--json`），成功后探测一次状态根，只有协议一致的后台应答才退出 `0`，不兼容或连不上时退出 `1`；失败时区分未安装 unit 与状态根被占用并附对端进程号诊断 |
-| `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 运行本地后台守护进程；启动时以 `0700` 准备 `~/.lattice/im` 并建立 `inotify` 配置监视，就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT`、同版本 IPC `stop` 或版本无关控制帧 `LTCTRL\0\x01` 停机并在排空开始时发出 `STOPPING=1` |
+| `lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]` | 由用户级服务启动，开发调试与隔离测试可直接运行；启动时以 `0700` 准备 `~/.lattice/im` 并建立 `inotify` 配置监视，就绪后经 `$NOTIFY_SOCKET` 发出 `READY=1`，可由 `SIGTERM`、`SIGINT`、同版本 IPC `stop` 或版本无关控制帧 `LTCTRL\0\x01` 停机并在排空开始时发出 `STOPPING=1` |
 
 ## 判读结果
 

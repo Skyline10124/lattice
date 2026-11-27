@@ -50,7 +50,7 @@ status: active
 | [查询、观察与用量](manual/observe-and-usage.md) | 读取 Turn 详情、持续观察、在 TUI 中打开会话、查询用量 |
 | [会话退回与分叉](manual/rewind.md) | 查看会话树，退回到节点后分叉提交 |
 | [取消与执行者消失后继续](manual/cancel-and-continue.md) | 取消正在执行的一轮；执行者消失后继续发送 |
-| [后台与升级](manual/daemon-and-upgrade.md) | 安装用户级服务、查询与停止后台、手动运行后台；升级与输出字段适配 |
+| [后台与升级](manual/daemon-and-upgrade.md) | 安装用户级服务、查询与停止后台、隔离调试后台；升级与输出字段适配 |
 | [凭据与模型元数据](manual/auth-and-models.md) | 录入 key、登录 ChatGPT、查看与刷新模型候选 |
 | [Telegram 私聊接入与运维](manual/im-telegram.md) | 配置 `im/config.toml`、录入/删除 Telegram Bot Token、热重载与私聊命令验收 |
 | [运行测试](manual/run-tests.md) | 运行 crate 测试、默认 harness 场景与显式 feature 目标 |

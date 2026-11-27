@@ -46,6 +46,8 @@ IM 网关（[ADR 0011](0011-im-gateway-inside-backend.md)）把 Telegram 私聊�
 
 ### 5. 由升级命令触发
 
+升级入口面向[宿主平台](../architecture/platform.md)规定的 systemd 用户服务部署，沿用 `restart` 与 `install` 的后台管理流程。
+
 - 后台提供两项本地 IPC 操作：只读元信息表的库格式查询（不扫描整库），以及升级。协议版本随之递增一次。
 - 升级期间，后台不接受用到会话库的请求，由 `StoreManager` 协调。
 - `lattice daemon restart` 与 `lattice daemon install` 在 `systemctl` 成功并核对完后台协议之后查询库格式：
@@ -76,7 +78,7 @@ IM 网关（[ADR 0011](0011-im-gateway-inside-backend.md)）把 Telegram 私聊�
 | --- | --- |
 | 维持硬切 | 每次升级都丢失全部会话；IM 在有人处理之前只能拒绝消息 |
 | 打开时自动转换 | 后台会在没人要求时做不可逆的改动，与“打开不修复、不迁移”冲突 |
-| 单独的升级命令 | 升级二进制后要多记一条命令；`restart` 本来就是升级后要执行的那条 |
+| 单独的升级命令 | 部署后台统一经 systemd 用户服务管理，更新二进制后本来就要执行 `restart`；由同一入口完成转换，避免另记一条命令 |
 | 保留旧版本的 Rust 类型做转换 | 每个旧版本都要保留一套类型与编解码；规范 JSON 层的转换不需要 |
 | 多格式只读兼容 | 读路径要长期同时支持多种格式，复杂度随版本累积 |
 | 重启前预警库格式变化 | 旧后台不认识新格式，新二进制目前也报不出自己的库格式（#440），先做重启后的升级；预警见 #442 |
@@ -85,6 +87,7 @@ IM 网关（[ADR 0011](0011-im-gateway-inside-backend.md)）把 Telegram 私聊�
 
 - 部分取代 [ADR 0006](0006-tree-session-and-global-redb-store.md) 第 2 节中“旧数据没有保留义务”，以及否决方案中的“迁移或只读保留旧数据”：对格式版本 `11` 及之后的会话库，改按本 ADR 保留与转换。第 2 节拒绝 `sessions.git` 与 `invocations.git` 旧库的规则不变。
 - 与 [ADR 0013](0013-user-image-input.md) 第 2 节的 `blobs` 格式一致：转换按原样复制图片字节。
+- [ADR 0011](0011-im-gateway-inside-backend.md#3-后台由-systemd-user-service-托管)第 3 节的部署范围已按本次审查中的维护者决定收窄，见[宿主平台](../architecture/platform.md)；开发调试与隔离测试保留直接启动后台的能力。
 
 ## 影响
 

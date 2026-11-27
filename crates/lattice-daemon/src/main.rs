@@ -33,7 +33,7 @@ const HELP_TEMPLATE: &str = "{about-with-newline}
 #[derive(Debug, Parser)]
 #[command(
     name = "lattice-daemon",
-    about = "运行 LATTICE 本地后台守护进程",
+    about = "运行 LATTICE 本地后台守护进程\n\n部署请执行 `lattice daemon install`，由 systemd 用户服务托管。\n直接运行仅用于开发调试与隔离测试。",
     help_template = HELP_TEMPLATE,
     override_usage = "lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
     disable_help_flag = true,

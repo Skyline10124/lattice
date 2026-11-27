@@ -1083,7 +1083,7 @@ WantedBy=default.target
             unit_path,
             "退出码 1",
             BackendProbe::Incompatible {
-                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill 5150`）切换至新后台".into(),
+                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart` 切换至新后台".into(),
             },
         );
         assert!(incompatible.contains("版本较旧且不兼容"));
@@ -1097,7 +1097,7 @@ WantedBy=default.target
             BackendProbe::Older {
                 peer_pid: Some(5150),
                 peer_executable: None,
-                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill 5150`）切换至新后台".into(),
+                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart` 切换至新后台".into(),
             },
         );
         assert_eq!(

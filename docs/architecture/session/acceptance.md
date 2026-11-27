@@ -57,7 +57,7 @@ status: active
 
 ### 配置来源与后台启动
 
-后台（`lattice-daemon`）使用启动它的宿主环境（`systemd` user manager 与 `lattice.service` unit，或手动运行 `lattice-daemon` 时的进程环境），在启动时读一次，此后不随请求变化，连接到同一后台的前端共用这份配置。
+后台（`lattice-daemon`）使用启动它的宿主环境，在启动时读一次，此后不随请求变化，连接到同一后台的前端共用这份配置。部署后台的环境由 `systemd` 用户管理器与 `lattice.service` 提供；开发调试与隔离测试直接启动时继承启动进程的环境，适用范围见[宿主平台](../platform.md)。
 
 | 项 | 来源 |
 | --- | --- |

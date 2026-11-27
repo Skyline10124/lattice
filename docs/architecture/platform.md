@@ -17,8 +17,8 @@ status: active
 - 不引入 macOS、Windows、BSD、通用 Unix 或其他宿主的兼容路径。
 - 不为可能的未来移植，用可移植、降级或空实现的回退路径削弱 Linux 实现。
 - 扩展 Linux 以外的宿主支持，必须有明确的架构决策和完整的原生实现。
-- 默认后台托管需要 Linux 宿主的 systemd user session（`systemctl --user`）：`lattice daemon install` 写入用户级 `lattice.service` 并启用与启动 `lattice-daemon`。
-- 没有 systemd user session 的环境不做自动降级，由用户或外部监督器直接手动运行 `lattice-daemon --state-root <绝对路径>`。
+- 部署与日常运行要求 Linux 宿主具有可用的 systemd 用户服务（`systemctl --user`），后台统一由用户级 `lattice.service` 托管；`lattice daemon install` 写入服务单元并启用与启动 `lattice-daemon`。没有可用 systemd 用户服务的环境不在部署支持范围内。
+- 直接运行 `lattice-daemon --state-root <绝对路径>` 仅用于开发调试与隔离测试；测试 harness 自行管理场景后台的启停与回收，见[测试工程](../development/testing.md#超时与进程生命周期)。
 - 用户无登录会话时仍需保持后台运行的，由用户自行执行 `loginctl enable-linger`，产品不代为执行会话驻留变更。
 
 ## 验证
