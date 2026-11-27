@@ -1,208 +1,51 @@
 // Copyright 2026 Ast Rin
 // SPDX-License-Identifier: Apache-2.0
 
-//! `lattice daemon` 子命令组分派、中文帮助定制与状态输出渲染。
+//! `lattice daemon` 子命令组分派与状态输出渲染。
 
 mod install;
 
 use std::{io::Write, process::ExitCode};
 
-use clap::{ArgAction, Args, Subcommand};
+use clap::Subcommand;
 use lattice_local::{
     ComponentState, DaemonStatus, LocalClient, LocalError, LocalErrorKind, StateLayout, StopOutcome,
 };
 
 pub(crate) use install::InstallArgs;
 
-/// `lattice daemon` 子命令组帮助模板：使用独立中文说明，保持顶层 `lattice --help` 列表风格一致。
-pub(crate) const DAEMON_HELP_TEMPLATE: &str = "\
-管理当前用户与状态根的本地后台守护进程。
-
-用法：{usage}
-
-命令：
-{subcommands}
-
-选项：
-{options}";
-
-/// `lattice daemon` 下级子命令帮助模板。
-const SUBCOMMAND_HELP_TEMPLATE: &str = "{about-with-newline}\n用法：{usage}\n\n选项：\n{options}";
-
-#[derive(Args, Debug, Clone)]
-pub(crate) struct DaemonArgs {
-    /// 显示帮助。
-    #[arg(
-        short = 'h',
-        long = "help",
-        action = ArgAction::Help,
-        display_order = 1000
-    )]
-    help: Option<bool>,
-
-    #[command(subcommand)]
-    pub(crate) action: DaemonAction,
-}
-
 #[derive(Subcommand, Debug, Clone)]
 pub(crate) enum DaemonAction {
-    /// 查询运行中的本地后台状态（不会拉起后台）。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice daemon status [--json]",
-        disable_help_flag = true
-    )]
-    Status {
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
-    },
-    /// 启动已安装的用户级 systemd 后台服务（不支持 --json）。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice daemon start",
-        disable_help_flag = true
-    )]
-    Start {
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
-    },
-    /// 重启已安装的用户级 systemd 后台服务（不支持 --json）。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice daemon restart",
-        disable_help_flag = true
-    )]
-    Restart {
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
-    },
-    /// 停止接收新请求，等待已接管工作与持久化收尾完成并释放状态根（支持跨版本停止较旧后台）。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice daemon stop [--json]",
-        disable_help_flag = true
-    )]
-    Stop {
-        /// 显示帮助。
-        #[arg(
-            short = 'h',
-            long = "help",
-            action = ArgAction::Help,
-            display_order = 1000
-        )]
-        help: Option<bool>,
-    },
-    /// 写出用户级 systemd 服务单元（lattice.service）并启用与启动或重启后台（不支持 --json）。
-    #[command(
-        help_template = SUBCOMMAND_HELP_TEMPLATE,
-        override_usage = "lattice daemon install [--drain-timeout <时长>]",
-        disable_help_flag = true
-    )]
+    /// 查看运行中的后台状态
+    Status,
+    /// 启动已安装的用户级 systemd 服务
+    Start,
+    /// 重启已安装的用户级 systemd 服务
+    Restart,
+    /// 停止后台并等待在途工作收尾
+    Stop,
+    /// 安装并启动用户级 systemd 服务
     Install(InstallArgs),
 }
 
 impl DaemonAction {
-    /// 对不支持 `--json` 的子命令返回其子命令名称。
+    /// 对不支持 `--json` 的子命令返回完整命令名（不含 `lattice ` 前缀）。
     pub(crate) fn json_unsupported_name(&self) -> Option<&'static str> {
         match self {
-            Self::Install(_) => Some("install"),
-            Self::Start { .. } => Some("start"),
-            Self::Restart { .. } => Some("restart"),
-            Self::Status { .. } | Self::Stop { .. } => None,
+            Self::Install(_) => Some("daemon install"),
+            Self::Start => Some("daemon start"),
+            Self::Restart => Some("daemon restart"),
+            Self::Status | Self::Stop => None,
         }
     }
-}
-
-/// 不支持 `--json` 的 `lattice daemon` 子命令（`install`、`start`、`restart`）返回的中文错误文案。
-pub(crate) fn json_unsupported_message(subcommand: &str) -> String {
-    format!(
-        "`lattice daemon {subcommand}` 不支持 `--json`；执行 `lattice daemon {subcommand} --help` 查看用法"
-    )
-}
-
-/// 将根命令向下传播的全局选项在 `daemon` 子命令组内替换为中文说明，并在不支持 `--json` 的子命令中隐藏该选项。
-pub(crate) fn localize_help(cmd: clap::Command) -> clap::Command {
-    let localize_common = |sub: clap::Command, hide_json: bool| {
-        sub.mut_arg("json", |arg| {
-            if hide_json {
-                arg.hide(true)
-            } else {
-                arg.help("以 JSON 输出结果，不打印人类可读文本。")
-            }
-        })
-        .mut_arg("verbose", |arg| arg.help("输出详细日志。"))
-    };
-
-    localize_common(cmd, false)
-        .mut_subcommand("status", |sub| localize_common(sub, false))
-        .mut_subcommand("start", |sub| localize_common(sub, true))
-        .mut_subcommand("restart", |sub| localize_common(sub, true))
-        .mut_subcommand("stop", |sub| localize_common(sub, false))
-        .mut_subcommand("install", |sub| localize_common(sub, true))
-}
-
-/// 生成 `lattice daemon` 组参数解析错误的已脱敏中文正文（不含 `错误：` 前缀，供文本与 JSON 共用）。
-pub(crate) fn cli_error_message(error: &clap::Error) -> String {
-    use std::error::Error as _;
-    match error.kind() {
-        clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
-        | clap::error::ErrorKind::MissingSubcommand => {
-            "缺少子命令；执行 `lattice daemon --help` 查看用法".into()
-        }
-        clap::error::ErrorKind::InvalidSubcommand => {
-            "未知子命令；执行 `lattice daemon --help` 查看用法".into()
-        }
-        clap::error::ErrorKind::InvalidValue | clap::error::ErrorKind::ValueValidation => {
-            if let Some(source) = error.source() {
-                let msg = source.to_string();
-                if msg.starts_with("排空时长") {
-                    return format!("{msg}；执行 `lattice daemon install --help` 查看用法");
-                }
-            }
-            "参数值无效；执行 `lattice daemon --help` 查看用法".into()
-        }
-        clap::error::ErrorKind::ArgumentConflict => {
-            "参数组合冲突；执行 `lattice daemon --help` 查看用法".into()
-        }
-        clap::error::ErrorKind::UnknownArgument => {
-            "包含未知参数；执行 `lattice daemon --help` 查看用法".into()
-        }
-        clap::error::ErrorKind::TooManyValues | clap::error::ErrorKind::TooFewValues => {
-            "参数数量不正确；执行 `lattice daemon --help` 查看用法".into()
-        }
-        _ => "命令行参数无效；执行 `lattice daemon --help` 查看用法".into(),
-    }
-}
-
-/// 将 `lattice daemon` 组的 clap 参数解析错误格式化为标准错误中文提示。
-pub(crate) fn format_cli_error(error: &clap::Error) -> String {
-    format!("错误：{}", cli_error_message(error))
 }
 
 pub(crate) async fn run(action: DaemonAction, json: bool) -> anyhow::Result<ExitCode> {
     match action {
-        DaemonAction::Status { .. } => run_status(json).await,
-        DaemonAction::Start { .. } => Ok(install::run_start().await),
-        DaemonAction::Restart { .. } => Ok(install::run_restart().await),
-        DaemonAction::Stop { .. } => run_stop(json).await,
+        DaemonAction::Status => run_status(json).await,
+        DaemonAction::Start => Ok(install::run_start().await),
+        DaemonAction::Restart => Ok(install::run_restart().await),
+        DaemonAction::Stop => run_stop(json).await,
         DaemonAction::Install(args) => Ok(install::run(args).await),
     }
 }

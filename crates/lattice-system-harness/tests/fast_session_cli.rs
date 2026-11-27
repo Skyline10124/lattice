@@ -222,7 +222,7 @@ fn missing_session_and_missing_profile_fail_before_dispatch() {
             let stdout = String::from_utf8_lossy(&rejected.stdout);
             let stderr = String::from_utf8_lossy(&rejected.stderr);
             assert!(
-                stderr.contains("agent name must be at most 128 bytes"),
+                stderr.contains("Agent 名称长度不能超过 128 字节"),
                 "标准错误应报告 agent 名称长度限制错误，实际输出：{stderr}"
             );
             assert!(

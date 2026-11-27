@@ -33,18 +33,10 @@ pub(crate) fn state_layout() -> Result<lattice_local::StateLayout> {
     Ok(lattice_local::StateLayout::resolve()?)
 }
 
-pub(crate) fn parse_turn_id(value: &str) -> Result<lattice_local::TurnId, String> {
-    lattice_local::TurnId::parse(value).map_err(|_| "expected canonical TurnId UUID".into())
-}
-
-pub(crate) fn parse_channel(value: &str) -> Result<lattice_local::Channel, String> {
-    lattice_local::Channel::parse(value).map_err(|e| e.to_string())
-}
-
-pub(crate) fn parse_invocation_id(value: &str) -> Result<lattice_local::InvocationId, String> {
-    lattice_local::InvocationId::parse(value)
-        .map_err(|_| "expected canonical InvocationId UUID".into())
-}
+pub(crate) use crate::help::{
+    parse_agent_name, parse_channel, parse_effort, parse_invocation_id, parse_model_ref,
+    parse_node_id, parse_turn_id,
+};
 
 pub(crate) async fn local_client() -> Result<lattice_local::LocalClient> {
     let client = lattice_local::LocalClient::new(state_layout()?);
@@ -54,39 +46,46 @@ pub(crate) async fn local_client() -> Result<lattice_local::LocalClient> {
 
 #[derive(clap::Args, Debug)]
 pub struct SendArgs {
-    #[arg(required_unless_present = "images")]
+    /// 文本消息，仅传 --image 时可省略
+    #[arg(value_name = "消息", required_unless_present = "images")]
     pub prompt: Option<String>,
-    /// Image file to attach (PNG, JPEG, WebP or GIF); repeat to attach several, sent after the message in the given order.
-    #[arg(long = "image", value_name = "PATH")]
+    /// 附带 PNG/JPEG/WebP/GIF 图片，可重复
+    #[arg(long = "image", value_name = "路径")]
     pub images: Vec<PathBuf>,
-    /// Existing session to continue, by ID or unique prefix; omit to start a new session.
-    #[arg(long = "session")]
+    /// 续写已有会话，省略时新建会话
+    #[arg(long = "session", value_name = "会话ID")]
     pub session_id: Option<String>,
-    /// Agent to use. Required for a new session; selecting it updates session settings.
-    #[arg(long, required_unless_present = "session_id")]
-    pub agent: Option<lattice_local::AgentName>,
+    /// 指定 Agent，新建会话时必填
     #[arg(
         long,
-        help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend."
+        value_name = "Agent",
+        required_unless_present = "session_id",
+        value_parser = parse_agent_name
     )]
+    pub agent: Option<lattice_local::AgentName>,
+    /// 模型引用 <provider>/<model>，省略时继承
+    #[arg(long, value_name = "模型", value_parser = parse_model_ref)]
     pub model: Option<lattice_local::ModelRef>,
     #[arg(
         long,
+        value_name = "档位",
+        value_parser = parse_effort,
         help = effort_help()
     )]
     pub effort: Option<lattice_local::Effort>,
-    /// Origin channel for this turn and input item (default: cli).
+    /// 来源渠道标签，默认 cli
     #[arg(
         long = "channel",
-        value_name = "CHANNEL",
+        value_name = "渠道",
         default_value = "cli",
+        hide_default_value = true,
         value_parser = parse_channel
     )]
     pub channel: lattice_local::Channel,
-    /// Require the existing session position to match NODE_ID before submitting.
+    /// 要求会话当前位置匹配此节点号，须配合 --session
     #[arg(
         long = "expected-position",
-        value_name = "NODE_ID",
+        value_name = "节点号",
         requires = "session_id",
         value_parser = parse_node_id
     )]
@@ -95,25 +94,28 @@ pub struct SendArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct FeedArgs {
-    /// Existing session, by ID or unique prefix.
+    /// 会话 ID 或唯一前缀
+    #[arg(value_name = "会话ID")]
     pub session_id: String,
-    #[arg(required_unless_present = "images")]
+    /// 文本消息，仅传 --image 时可省略
+    #[arg(value_name = "消息", required_unless_present = "images")]
     pub prompt: Option<String>,
-    /// Image file to attach (PNG, JPEG, WebP or GIF); repeat to attach several.
-    #[arg(long = "image", value_name = "PATH")]
+    /// 附带 PNG/JPEG/WebP/GIF 图片，可重复
+    #[arg(long = "image", value_name = "路径")]
     pub images: Vec<PathBuf>,
-    /// Origin channel for this input item (default: cli).
+    /// 来源渠道标签，默认 cli
     #[arg(
         long = "channel",
-        value_name = "CHANNEL",
+        value_name = "渠道",
         default_value = "cli",
+        hide_default_value = true,
         value_parser = parse_channel
     )]
     pub channel: lattice_local::Channel,
-    /// Require the session position to match NODE_ID before appending.
+    /// 要求会话当前位置匹配此节点号
     #[arg(
         long = "expected-position",
-        value_name = "NODE_ID",
+        value_name = "节点号",
         value_parser = parse_node_id
     )]
     pub expected_position: Option<lattice_local::NodeId>,
@@ -151,94 +153,96 @@ pub enum RawContextOpToken {
 
 #[derive(clap::Args, Debug)]
 pub struct ContextOpArgs {
-    /// Existing session, by ID or unique prefix.
+    /// 会话 ID 或唯一前缀
+    #[arg(value_name = "会话ID")]
     pub session_id: String,
-    /// Origin channel for this context operation (default: cli).
-    #[arg(
-        long = "channel",
-        value_name = "CHANNEL",
-        default_value = "cli",
-        value_parser = parse_channel
-    )]
-    pub channel: lattice_local::Channel,
-    /// Require the session position to match NODE_ID before applying.
-    #[arg(
-        long = "expected-position",
-        value_name = "NODE_ID",
-        value_parser = parse_node_id
-    )]
-    pub expected_position: Option<lattice_local::NodeId>,
-    /// Omit an entire node from effective model context (repeatable).
+    /// 移出整个节点，可重复
     #[arg(
         long = "omit-node",
-        value_name = "NODE_ID",
+        value_name = "节点号",
         action = clap::ArgAction::Append,
         value_parser = parse_node_id
     )]
     pub omit_node: Vec<lattice_local::NodeId>,
-    /// Replace a ContextInput node (repeatable; may be followed by --image PATH).
+    /// 替换用户输入节点，后可紧跟 --image，可重复
     #[arg(
         long = "replace-input",
         num_args = 2,
-        value_names = ["NODE_ID", "TEXT"],
+        value_names = ["节点号", "文本"],
         action = clap::ArgAction::Append
     )]
     pub replace_input: Vec<String>,
-    /// Attach an image to the immediately preceding --replace-input (repeatable).
+    /// 为前一个 --replace-input 附带图片，可重复
     #[arg(
         long = "image",
-        value_name = "PATH",
+        value_name = "路径",
         action = clap::ArgAction::Append
     )]
     pub images: Vec<PathBuf>,
-    /// Replace a Step node's assistant text (repeatable).
+    /// 替换步骤节点的助手文本，可重复
     #[arg(
         long = "replace-step",
         num_args = 2,
-        value_names = ["NODE_ID", "TEXT"],
+        value_names = ["节点号", "文本"],
         action = clap::ArgAction::Append
     )]
     pub replace_step: Vec<String>,
-    /// Omit a tool invocation and its result pair (repeatable).
+    /// 成对移出工具调用及其结果，可重复
     #[arg(
         long = "omit-invocation",
-        value_name = "INVOCATION_ID",
+        value_name = "调用ID",
         action = clap::ArgAction::Append,
         value_parser = parse_invocation_id
     )]
     pub omit_invocation: Vec<lattice_local::InvocationId>,
-    /// Replace a tool invocation's result text (repeatable).
+    /// 替换工具调用的结果文本，可重复
     #[arg(
         long = "replace-tool-result",
         num_args = 2,
-        value_names = ["INVOCATION_ID", "TEXT"],
+        value_names = ["调用ID", "文本"],
         action = clap::ArgAction::Append
     )]
     pub replace_tool_result: Vec<String>,
-    /// Strip reasoning parts from a Step node (repeatable).
+    /// 剥离步骤节点的推理内容，可重复
     #[arg(
         long = "strip-reasoning",
-        value_name = "NODE_ID",
+        value_name = "节点号",
         action = clap::ArgAction::Append,
         value_parser = parse_node_id
     )]
     pub strip_reasoning: Vec<lattice_local::NodeId>,
-    /// Omit an image from a ContextInput node (IMAGE is <media>:<bytes>:<sha256> or @<PATH>).
+    /// 移出输入节点图片，格式 <类型>:<字节>:<sha256> 或 @<路径>
     #[arg(
         long = "omit-image",
         num_args = 2,
-        value_names = ["NODE_ID", "IMAGE"],
+        value_names = ["节点号", "图片"],
         action = clap::ArgAction::Append
     )]
     pub omit_image: Vec<String>,
-    /// Replace an image in a ContextInput node with text (IMAGE is <media>:<bytes>:<sha256> or @<PATH>).
+    /// 将输入节点图片替换为文本，格式同 --omit-image
     #[arg(
         long = "replace-image",
         num_args = 3,
-        value_names = ["NODE_ID", "IMAGE", "TEXT"],
+        value_names = ["节点号", "图片", "文本"],
         action = clap::ArgAction::Append
     )]
     pub replace_image: Vec<String>,
+    /// 来源渠道标签，默认 cli
+    #[arg(
+        long = "channel",
+        value_name = "渠道",
+        default_value = "cli",
+        hide_default_value = true,
+        value_parser = parse_channel
+    )]
+    pub channel: lattice_local::Channel,
+    /// 要求会话当前位置匹配此节点号
+    #[arg(
+        long = "expected-position",
+        value_name = "节点号",
+        value_parser = parse_node_id
+    )]
+    pub expected_position: Option<lattice_local::NodeId>,
     /// 按命令行参数位置抽取的有序原始编辑项。
     #[arg(skip)]
     pub ordered_tokens: Vec<RawContextOpToken>,
@@ -246,36 +250,38 @@ pub struct ContextOpArgs {
 
 #[derive(clap::Args, Debug)]
 pub struct TriggerArgs {
-    /// Existing session, by ID or unique prefix.
+    /// 会话 ID 或唯一前缀
+    #[arg(value_name = "会话ID")]
     pub session_id: String,
-    /// Origin channel for this trigger (default: cli).
-    #[arg(
-        long = "channel",
-        value_name = "CHANNEL",
-        default_value = "cli",
-        value_parser = parse_channel
-    )]
-    pub channel: lattice_local::Channel,
-    /// Require the session position to match NODE_ID before triggering.
-    #[arg(
-        long = "expected-position",
-        value_name = "NODE_ID",
-        value_parser = parse_node_id
-    )]
-    pub expected_position: Option<lattice_local::NodeId>,
-    /// Agent to update before triggering.
-    #[arg(long)]
+    /// 触发前切换 Agent
+    #[arg(long, value_name = "Agent", value_parser = parse_agent_name)]
     pub agent: Option<lattice_local::AgentName>,
-    #[arg(
-        long,
-        help = "Model reference <provider>/<model>; omit to inherit. Availability is checked by the backend."
-    )]
+    /// 模型引用 <provider>/<model>，省略时继承
+    #[arg(long, value_name = "模型", value_parser = parse_model_ref)]
     pub model: Option<lattice_local::ModelRef>,
     #[arg(
         long,
+        value_name = "档位",
+        value_parser = parse_effort,
         help = effort_help()
     )]
     pub effort: Option<lattice_local::Effort>,
+    /// 来源渠道标签，默认 cli
+    #[arg(
+        long = "channel",
+        value_name = "渠道",
+        default_value = "cli",
+        hide_default_value = true,
+        value_parser = parse_channel
+    )]
+    pub channel: lattice_local::Channel,
+    /// 要求会话当前位置匹配此节点号
+    #[arg(
+        long = "expected-position",
+        value_name = "节点号",
+        value_parser = parse_node_id
+    )]
+    pub expected_position: Option<lattice_local::NodeId>,
 }
 
 pub(crate) fn populate_context_op_tokens(
@@ -412,59 +418,67 @@ fn effort_help() -> String {
         .into_iter()
         .map(lattice_local::Effort::as_str)
         .collect::<Vec<_>>()
-        .join(", ");
-    format!("Reasoning effort: {efforts}. Omit to inherit; off explicitly disables reasoning.")
-}
-
-pub(crate) fn parse_node_id(value: &str) -> Result<lattice_local::NodeId, String> {
-    if value.is_empty() || !value.bytes().all(|b| b.is_ascii_digit()) {
-        return Err("expected decimal NodeId".into());
-    }
-    value
-        .parse::<u64>()
-        .map(lattice_local::NodeId)
-        .map_err(|_| "NodeId exceeds u64".into())
+        .join("/");
+    format!("推理档位：{efforts}，省略时继承")
 }
 
 #[derive(Subcommand)]
 pub enum SessionAction {
-    /// Submit a request; without --session a new session is created via configure.
+    /// 向会话提交一轮对话
     Send(SendArgs),
-    /// Append a ContextInput node to an existing session without triggering a turn.
+    /// 向会话追加用户输入，不触发推理
     Feed(FeedArgs),
-    /// Append a batch ContextOp node to edit effective model context on an existing session.
+    /// 向会话追加上下文编辑操作
     ContextOp(ContextOpArgs),
-    /// Trigger a new turn on an existing session without adding a new input.
+    /// 基于当前有效上下文触发新一轮推理
     Trigger(TriggerArgs),
-    /// Inspect effective model context statistics at the current or specified node.
+    /// 查看有效模型上下文统计
     Inspect {
+        /// 会话 ID 或唯一前缀
+        #[arg(value_name = "会话ID")]
         session_id: String,
-        #[arg(long = "position", value_name = "NODE_ID", value_parser = parse_node_id)]
+        /// 检查指定节点位置，默认当前位置
+        #[arg(long = "position", value_name = "节点号", value_parser = parse_node_id)]
         position: Option<lattice_local::NodeId>,
     },
-    /// Move the conversation position to node N only; the original fork is kept and files are not rolled back.
+    /// 将会话当前位置退回到指定节点，保留原分支且不回退文件
     Rewind {
+        /// 会话 ID 或唯一前缀
+        #[arg(value_name = "会话ID")]
         session_id: String,
-        #[arg(value_parser = parse_node_id)]
+        /// 目标节点序号，根节点为 0
+        #[arg(value_name = "节点号", value_parser = parse_node_id)]
         target: lattice_local::NodeId,
     },
-    /// List all sessions.
+    /// 列出全部会话
     List,
-    /// Show the full session tree, including the root node.
-    Log { session_id: String },
-    /// Show per-turn usage on the current path, with current-path and whole-session totals.
-    ///
-    /// Costs are in USD. Unknown counts and costs are shown as '-'.
-    Usage { session_id: String },
-    /// Show every Step of a Turn by TurnId; --follow keeps observing.
+    /// 查看完整会话树
+    Log {
+        /// 会话 ID 或唯一前缀
+        #[arg(value_name = "会话ID")]
+        session_id: String,
+    },
+    /// 查看当前路径逐轮用量与等量 API 费用，未知项显示 -
+    Usage {
+        /// 会话 ID 或唯一前缀
+        #[arg(value_name = "会话ID")]
+        session_id: String,
+    },
+    /// 按轮次 ID 查看单轮步骤与状态
     Turn {
-        #[arg(value_parser = parse_turn_id)]
+        /// 轮次 TurnId UUID
+        #[arg(value_name = "轮次ID", value_parser = parse_turn_id)]
         turn_id: lattice_local::TurnId,
+        /// 持续观察该轮直至结束
         #[arg(long)]
         follow: bool,
     },
-    /// A taken-over cancel is not yet a durable Cancelled outcome; a cancel not taken over does not mean no background work exists.
-    Cancel { session_id: String },
+    /// 取消会话当前正在执行的一轮
+    Cancel {
+        /// 会话 ID 或唯一前缀
+        #[arg(value_name = "会话ID")]
+        session_id: String,
+    },
 }
 
 fn current_workspace() -> Result<PathBuf, lattice_local::LocalError> {
@@ -1455,8 +1469,7 @@ mod session_cli {
             .unwrap()
             .render_long_help()
             .to_string();
-        assert!(help.contains("does not mean no background work exists"));
-        assert!(help.contains("not yet a durable Cancelled outcome"));
+        assert!(help.contains("取消会话当前正在执行的一轮"));
     }
 
     #[test]
