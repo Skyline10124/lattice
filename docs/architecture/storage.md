@@ -111,7 +111,7 @@ redb 打开时对库文件取独占锁，另一进程打开得到 `DatabaseAlrea
 - **打开时逐条流式核验**：遍历 `blobs` 表时只借用 redb 只读切片而不拷贝进长期内存：先解码键（非 64 位小写十六进制报 `Corruption`），再校验 4 字节版本头（短于 4 字节报 `Corruption`，版本号不等于 `11` 报 `UnsupportedVersion`），接着用 `ImageRef::from_bytes` 核验正文长度落在 `(0, MAX_IMAGE_BYTES]` 内且文件头魔数受支持（空正文、超长或未知格式报 `Corruption`），最后核对算出的 SHA-256 与键一致（不符报 `Corruption`）。核验后立即释放切片，内存中只保留 `(media_type, byte_length)` 元数据，不常驻图片字节。
 - **全库输入、上下文操作与图片引用核对**：全库校验遍历全部会话、全部分支（不仅限于当前路径）上的 `Node::Input` 与 `Node::ContextOp` 节点，核对消息保持[规范化形态](session/conversation.md#用户图片与单轮输入规范化)且其中每个 `ImageRef`（含 `ReplaceInput` 替换内容中的图片引用）在 `blobs` 元数据表中均存在并具有相同的 `media_type` 与 `byte_length`；按增量可回溯游标（`lattice_context::ContextCursor`）单遍显式栈 DFS 遍历每棵会话树，线性时间校验全部分支上的每一个 `ContextOp` 以及每个 `input_nodes` 为空的独立触发 `Step 0` 的父路径有效模型上下文非空；任何不满足均返回 `Corruption` 并指出对应的 `nodes` 键。
 
-打开不初始化、不修复我们自己的记录，不回退旧路径，也不迁移或替换旧版本库。redb 在异常退出后打开时执行的自身崩溃恢复属于库的提交协议，不是记录修复。不符合当前格式的库需要另行获准处理。
+打开不初始化、不修复我们自己的记录，不回退旧路径，也不迁移或替换旧版本库。redb 在异常退出后打开时执行的自身崩溃恢复属于库的提交协议，不是记录修复。不符合当前格式的库需要另行获准处理。升级格式时保留旧会话的规则见 [ADR 0015](../adr/0015-retain-sessions-across-store-format-upgrades.md)，转换机制在 #445 实施；实施完成前不递增格式版本。
 
 ### 首次创建
 

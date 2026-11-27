@@ -45,7 +45,7 @@
 - [ADR 0003](adr/0003-lancet-operates-directly-on-local-workspace.md)：LANCET 直接操作本地工作区的理由与取舍，已由 ADR 0009 取代。
 - [ADR 0004](adr/0004-build-closed-wasm-tool-catalog.md)：构建期封闭的 WASM 工具目录，已由 ADR 0009 取代。
 - [ADR 0005](adr/0005-durable-turn-invocation-and-private-git-stores.md)：持久化 Turn、Invocation 身份与私有 Git 存储；会话/调用存储与文件 Rewind 等部分由 ADR 0006 取代，Git 内核、工作区历史库与工作区锁等部分由 ADR 0009 取代，不透明回放材料的来源粒度由 ADR 0010 修订，项目键哈希绑定由 ADR 0012 改为规范项目路径，crate 依赖图由 ADR 0011 改由依赖边界合同维护。
-- [ADR 0006](adr/0006-tree-session-and-global-redb-store.md)：tree-session、全局 redb 会话库、调用槽位与快照观察，取消文件 Rewind 和 Turn checkpoint；三层记录与自动关闭等部分由 ADR 0007 取代，观察与订阅、按 `--turn-id` 找回等部分由 ADR 0008 取代，工作区历史库、Cell 证据与操作员查询等部分由 ADR 0009 取代，当前 agent 的判定由 ADR 0010 取代，首次提交创建会话由 ADR 0012 取代。
+- [ADR 0006](adr/0006-tree-session-and-global-redb-store.md)：tree-session、全局 redb 会话库、调用槽位与快照观察，取消文件 Rewind 和 Turn checkpoint；三层记录与自动关闭等部分由 ADR 0007 取代，观察与订阅、按 `--turn-id` 找回等部分由 ADR 0008 取代，工作区历史库、Cell 证据与操作员查询等部分由 ADR 0009 取代，当前 agent 的判定由 ADR 0010 取代，首次提交创建会话由 ADR 0012 取代，旧数据不保留、不迁移由 ADR 0015 修订。
 - [ADR 0007](adr/0007-session-tree-as-single-authority.md)：会话树作为会话事实的唯一权威，Step 预留、由 `progress` 给出结论，取消自动关闭；读取时的交付方式由 ADR 0008 取代，槽位结论的 `evidence` 字段由 ADR 0009 移除，草稿会话允许删除由 ADR 0012 修订，接受时事实记在 `UserMessage` 节点由 ADR 0014 拆分为 `Node::Input` 与 `Step 0` 的 `TurnStartMeta`。
 - [ADR 0008](adr/0008-backend-api-commands-view-queries.md)：本地后台 API 分为命令、视图与查询，按会话推送以节点为单位的对话条目，按轮分页，请求身份由客户端生成，`submit` 只接受新请求；`audit` 查询由 ADR 0009 移除，由客户端读取配置与凭据的规则由 ADR 0010 取代，`submit` 区分 `New`/`Existing` 由 ADR 0012 移入 `configure`，前端启动后台由 ADR 0011 取消，以 `UserMessage` 为分页边界与轮次序号计数依据及前端排队状态由 ADR 0014 修订。
 - [ADR 0009](adr/0009-remove-legacy-lancet-tool-executor.md)：从本仓库整体剥离旧 LANCET、WASM 工具链、工作区历史库与审计/操作员接口，工具执行收窄为单一窄接口 `ToolExecutor`（进行中调用的 `deadline` 由执行器负责），身份与规范 JSON 原语归入 `lattice-conversation`；保留的 `ProjectStoreKey` 由 ADR 0012 改为规范项目路径。
@@ -54,6 +54,7 @@
 - [ADR 0012](adr/0012-backend-owns-session-settings.md)：会话设置由后台持有并取代 profile 副本，`configure` 成为显式创建会话与修改设置的唯一命令，`submit` 只面向已有会话并支持核对 `expected_settings`；草稿会话逾 24 小时且无观察者时由后台清理，Session 项目绑定与 IPC 路径改存规范路径原始字节数组；TUI 执行中与 `configure` 在途排队规则由 ADR 0014 移除。
 - [ADR 0013](adr/0013-user-image-input.md)：用户图片输入覆盖对话原语（`png`/`jpeg`/`webp`/`gif` 文件头魔数识别、保序 `MessageSemantic::Image` 与单轮上限）、会话库 v10 内容寻址 `blobs` 表与流式打开校验、`PlannedTurnRequest` 读取前精确帧计长、模型 `input` 输入模态与五种协议同源流式编码、`32 MiB` 本地请求体预算与远端 `HTTP 413` 分离，以及 CLI `--image`、TUI 内联图片与 `/tmp` 私有暂存、Telegram 私聊单图与 `media_group_id` 相册合并输入；TUI 前端排队图片规则由 ADR 0014 移除。
 - [ADR 0014](adr/0014-model-context-domain.md)：引入纯同步零 I/O 领域 crate `lattice-context` 与 `NodeId` 上移，在同一会话树上分离人类 Transcript 与模型上下文双读路径；定义开放来源标识 `Channel`、通用输入 `ContextInput` 与强类型批量编辑 `ContextOp`/`ContextEdit`，拆解 `Node::UserMessage` 为独立 `Node::Input` 与 `Step 0` 的 `TurnStartMeta` 以解耦上下文投喂与 Turn 触发，新增 `expected_position` 乐观位置基线，并前置移除 TUI 前端消息排队功能。
+- [ADR 0015](adr/0015-retain-sessions-across-store-format-upgrades.md)：会话库从格式版本 `11` 起升级时保留旧会话：每次升版登记规范 JSON 层的转换，硬切须维护者批准并显式登记；转换前留副本且只保留最近一份，提交结果不确定时停写、重开后核对；打开仍不迁移，由 `lattice daemon restart` 与 `install` 经用户确认后触发；门禁按转换链核对全部历史夹具的保留语义。
 - [InvocationStore 历史诊断指南](development/invocation-store-diagnostics.md)：仅解释旧 Git ledger 的测量工具、参数与保留证据，不用于 redb 资格化或当前产品验收。
 
 ADR 与合同的分工见[文档写作](governance/writing.md#文档放在哪里)。
