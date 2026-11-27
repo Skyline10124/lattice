@@ -6,8 +6,8 @@ status: active
 
 | 项 | 内容 |
 | --- | --- |
-| 目标 | 安装并托管用户级后台服务、启停或重启后台、查询状态或跨版本停止更旧后台、手动运行后台，处理升级差异与脚本字段 |
-| 前提 | `lattice` 与 `lattice-daemon` 安装在同一目录，IPC 协议版本与 `lattice.redb` 格式版本一致；跨协议版本升级可直接用新二进制重启或停旧后台 |
+| 目标 | 安装并托管用户级后台服务、启停或重启后台、查询状态或跨版本停止更旧后台、在隔离环境中调试后台，处理升级差异与脚本字段 |
+| 前提 | 部署宿主满足[平台要求](../../../architecture/platform.md)，`lattice` 与 `lattice-daemon` 安装在同一目录，IPC 协议版本与 `lattice.redb` 格式版本一致；跨协议版本升级可直接用新二进制重启或停旧后台 |
 | 规则 | [宿主平台](../../../architecture/platform.md)、[ADR 0011](../../../adr/0011-im-gateway-inside-backend.md)、[停止后台](../../../architecture/session/recovery.md#停止后台)、[版本打开](../../../architecture/storage.md#身份版本与打开)、[测试工程](../../testing.md)、[用量费用](../../../architecture/llm/usage.md)、[关闭 Turn](../../../architecture/session/steps.md)、[模型候选](../../../architecture/llm/models.md#模型候选) |
 
 ## 命令
@@ -30,23 +30,28 @@ lattice daemon status
 lattice --json daemon status
 lattice daemon stop
 lattice --json daemon stop
-
-# 无 systemd user session 或隔离目录下手动运行后台
-lattice-daemon --state-root /tmp/lattice-isolated-state --drain-timeout 30s
 ```
 
 ### 升级与输出字段适配
 
 ```sh
-# 已由 systemd 托管时升级两个同目录二进制
+# 升级两个同目录二进制并重启用户级服务
 cargo install --locked --path crates/lattice-cli
 cargo install --locked --path crates/lattice-daemon
 lattice daemon restart
 
-# 同步变更 unit 参数（例如 --drain-timeout）或从手动/旧后台切换至 systemd 托管
+# 同步变更 unit 参数（例如 --drain-timeout），或将旧启动方式迁入 systemd 托管
 lattice daemon stop
 lattice daemon install
 lattice --json daemon status
+```
+
+### 开发调试
+
+按[宿主平台](../../../architecture/platform.md)的边界，直接启动入口用于开发调试与隔离测试。使用独立状态根，调试结束后停止并回收自有进程：
+
+```sh
+lattice-daemon --state-root /tmp/lattice-isolated-state --drain-timeout 30s
 ```
 
 ## 结果
@@ -66,14 +71,14 @@ lattice --json daemon status
 | `unconfirmed_operations == 0` | 人类可读输出中文后台状态摘要与组件区块（无活跃或未挂载组件时为 `组件：无`），`--json` 输出 `epoch`、`stopping`、`owners`、`unconfirmed_operations` 与 `components`；`stop` 后状态根已释放（跨版本控制帧 `--json` 输出 `{"cross_version":true,"method":"control",…}`，历史旧后台信号兜底 `--json` 输出 `{"cross_version":true,"method":"signal","peer_pid":…}` 并在 stderr 注明无法读取排空计数） |
 | `unconfirmed_operations != 0` | 有未确认收尾的操作（`daemon stop` 退出 `1` 并在标准错误提示）；查相关 Session |
 | `stopping` / `not_running` | 锁未放开或断连（`daemon status` 复核），或无后台运行 |
-| `lattice-daemon` | 手动运行后台守护进程（`--state-root` 必填且须为绝对路径，其下用 `lattice/`；`--drain-timeout` 默认 `60s`，参数错误退出 `2`，状态根被占用退出 `3` 并附对端进程号）；按 Ctrl-C（`SIGINT`）或发 `SIGTERM` 进入有界停机，排空完成退出 `0`，排空超时或排空中再次收到信号退出 `4`；故障注入限于隔离目录 |
+| 开发调试直接运行 `lattice-daemon` | `--state-root` 必填且须为绝对路径，其下用 `lattice/`；`--drain-timeout` 默认 `60s`，参数错误退出 `2`，状态根被占用退出 `3` 并附对端进程号；按 Ctrl-C（`SIGINT`）或发 `SIGTERM` 进入有界停机，排空完成退出 `0`，排空超时或排空中再次收到信号退出 `4`；故障注入限于隔离目录 |
 
 ### 升级与输出字段适配
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `incompatible_backend` | 本地 IPC 协议版本（当前为 `68`）与运行中后台不一致；若后台较旧，执行 `lattice daemon restart`（手动运行时直接执行 `lattice daemon stop` 或 `kill <pid>`）切换到新后台；若后台较新，换用匹配的新前端；`lattice daemon restart` 报重启后后台仍较旧时，按其提示更新 `lattice-daemon` 或执行 `lattice daemon install` |
-| `transport`（零字节断开） | 更早后台或崩溃断开；核对存活与版本，必要时执行 `systemctl --user stop lattice` 或手动结束旧 `lattice-daemon` 后重启 |
+| `incompatible_backend` | 本地 IPC 协议版本（当前为 `68`）与运行中后台不一致；若后台较旧，执行 `lattice daemon restart` 切换到新后台；若后台较新，换用匹配的新前端；`lattice daemon restart` 报重启后后台仍较旧时，按其提示更新 `lattice-daemon` 或执行 `lattice daemon install` |
+| `transport`（零字节断开） | 更早后台或崩溃断开；核对存活与版本，必要时执行 `systemctl --user stop lattice` 后重新启动服务 |
 | 拒绝格式版本较旧的库或 `*.git` 旧库 | 原库不变并列路径；由人存档或删除后，下一次请求直接生效，无需重启后台 |
 
 脚本字段对照：

@@ -43,7 +43,7 @@ pub use defs::{CONTROL_MAGIC, MAGIC, PROTOCOL_VERSION, magic_for_version};
 
 const LOGIN_FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
-const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice`（或手动结束旧 `lattice-daemon` 进程）后重启新后台";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice` 后执行 `lattice daemon start`；未受服务托管的遗留后台需先手动结束";
 
 /// 当前编译进本二进制的本地 IPC 业务协议版本号。
 pub const fn current_protocol_version() -> u8 {
@@ -199,9 +199,9 @@ fn format_peer_pid(peer: Option<BorrowedFd<'_>>) -> String {
 fn older_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
     match peer.and_then(peer_pid) {
         Some(pid) => format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {pid}`）切换至新后台"
+            "运行中的后台版本较旧且不兼容（对端进程号：{pid}）；请执行 `lattice daemon restart` 切换至新后台"
         ),
-        None => "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop`）切换至新后台".into(),
+        None => "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart` 切换至新后台".into(),
     }
 }
 
@@ -915,7 +915,7 @@ mod frame_tests {
 
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
-        let older_unavailable = "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop`）切换至新后台";
+        let older_unavailable = "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart` 切换至新后台";
         let newer_unavailable =
             "运行中的后台版本较新且不兼容（对端进程号不可用）；请换用匹配的前端";
         check_magic(MAGIC, None).expect("当前协议版本魔数必须通过");
@@ -955,7 +955,7 @@ mod frame_tests {
 
         let self_pid = std::process::id();
         let older_with_pid = format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
+            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台"
         );
         let newer_with_pid =
             format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
@@ -1097,7 +1097,7 @@ mod frame_tests {
     async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
         let self_pid = std::process::id();
         let expected_older = format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
+            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台"
         );
         let expected_newer =
             format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");

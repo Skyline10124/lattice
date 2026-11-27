@@ -52,6 +52,7 @@ status: accepted
   - 被 SIGKILL 的后台不自动重启；
   - 修改 IM 的配置或凭据不需要重启后台。
 - 2026-11-11：维护者在 #333 中批准本 ADR。
+- 2026-11-27：维护者在 [ADR 0015](0015-retain-sessions-across-store-format-upgrades.md) 审查中决定收窄部署范围，使安装、启停与升级统一使用 systemd 用户服务；部署与开发测试的边界见[宿主平台](../architecture/platform.md)。
 
 ## 决策
 
@@ -95,7 +96,7 @@ SIGTERM、SIGINT 与 IPC `stop` 走同一个停机顺序：
 - **排空上限**是后台参数 `--drain-timeout <时长>`：非负整数加单位 `ms`、`s` 或 `m`，不带单位按秒，默认 `60s`，格式不对时以 `2` 退出。期限从进入停机算起，停机路径上所有等待在途工作的地方共用它。
 - **停写。** 排空超时后，后台置位会话库租约的 `shutdown` 标志与会话库的写闸 `write_disabled`，并让会话库管理器进入不再重开的终态。写闸取的是每次写入从开始到提交一直持有的健康锁，所以停写要等正在进行的那次提交结束；之后任何写入都报 `WriteDisabled`，在途 turn 即使自己跑完也写不出结局，下次启动时成为[执行者消失后的 Turn](../architecture/session/recovery.md#执行者消失后的-turn)。会话库下次按 redb 的崩溃恢复打开，与被 SIGKILL 走同一条路径。
 - **各段上限**到时只是不再等待，没等完的任务在关闭 runtime 时丢弃。第 3 至 6 步合计至多 25 秒，没有组件时至多 15 秒，都在 `stop` 等锁释放的 30 秒之内。组件相关的部分（第 1 步的通知与第 3 步）随 IM 阶段加入。
-- **硬期限。** 停写对那次提交的等待只受存储约束，所以停机的硬期限由 systemd 执行。托管时，后台进入停机就经 `$NOTIFY_SOCKET` 发出 `STOPPING=1`，systemd 随即按 `TimeoutStopSec` 计时，到时发 SIGKILL；由 IPC `stop` 或直接发给进程的信号发起的停机，同样受它约束。`TimeoutStopSec` 取排空上限加 30 秒：尾段 25 秒，另加 5 秒余量，余量包括停写时等的那次提交。手动运行时（包括停机阶段的 `lattice daemon serve`）没有这个硬期限。
+- **硬期限。** 停写对那次提交的等待只受存储约束，所以停机的硬期限由 systemd 执行。托管时，后台进入停机就经 `$NOTIFY_SOCKET` 发出 `STOPPING=1`，systemd 随即按 `TimeoutStopSec` 计时，到时发 SIGKILL；由 IPC `stop` 或直接发给进程的信号发起的停机，同样受它约束。`TimeoutStopSec` 取排空上限加 30 秒：尾段 25 秒，另加 5 秒余量，余量包括停写时等的那次提交。开发调试与隔离测试直接启动后台时没有这个硬期限，由调用方负责最终回收进程。
 - **锁随进程退出释放。** 进程入口显式构建 runtime，以 `shutdown_timeout` 关闭之后直接退出进程；实例锁一直持有到进程退出，由内核在关闭最后一个文件描述符时释放。进程退出时所有线程都已离开用户态，关闭 runtime 时还在运行的阻塞任务随之结束。所以 `stop` 见到锁可取得时，旧后台已不再执行应用层代码，新后台与旧后台不会同时写同一个文件；进程何时完全退出，由 systemd 与 harness 各自确认。
 - **信号**在绑定 socket 之前装好：后台能接受连接时，信号处理一定已就绪。就绪之前收到的信号同样进入停机（没有在途 turn，退出 `0`）。排空期间再收到 SIGTERM 或 SIGINT 时，立即按排空超时处理。
 - **排空超时时的 `stop`。** 回执仍是 `DaemonStatus`，线上形状不变。`unconfirmed_operations` 按现有定义是本进程未完成收尾的操作计数，排空超时时放弃的操作正属此类：每个尚未退休的操作在这时计入一次（一次草稿会话清理按一个操作计，不论它正在删除哪个会话），之后它们退休时不再重复计数。`lattice daemon stop` 照常等锁释放后返回，按现有规则在 `unconfirmed_operations` 不为 0 时退出 `1`，标准错误提示有操作没有确认收尾、其中的在途 turn 重启后显示为执行者消失。
@@ -142,7 +143,7 @@ SIGTERM、SIGINT 与 IPC `stop` 走同一个停机顺序：
 
 - **环境。** 后台的环境来自 systemd user manager 与 unit：`HOME` 由 user manager 给出，`XDG_STATE_HOME`、`SSL_CERT_FILE`、`SSL_CERT_DIR` 写进 unit 或 user manager 的环境才生效。配置目录仍是后台环境中的 `$HOME/.lattice`，TLS 根证书仍在启动时按后台环境载入一次。
 - **一个用户一个后台。** 同一用户的 CLI、TUI 与 IM 连同一个后台，只有一个 unit `lattice.service`。`owner.lock` 排除同一状态根上的第二个后台；同一用户在另一个状态根上再运行后台，不在支持范围内。unit 固定 `--state-root`，前端按自己的 `HOME` 与 `XDG_STATE_HOME` 定位 socket。
-- **启停。** 启动与重启用 `systemctl --user start|restart lattice`，停止用 `systemctl --user stop lattice` 或 `lattice daemon stop`。宿主需要 systemd user session；没有时手动运行 `lattice-daemon`。测试不经 systemd：harness 把 `lattice-daemon` 作为直接子进程启动。
+- **启停。** 启动与重启用 `systemctl --user start|restart lattice`，停止用 `systemctl --user stop lattice` 或 `lattice daemon stop`。宿主支持范围见[宿主平台](../architecture/platform.md)。测试 harness 把 `lattice-daemon` 作为直接子进程启动并负责回收，见[测试工程](../development/testing.md#超时与进程生命周期)。
 
 ### 4. 前端连接已经运行的后台
 

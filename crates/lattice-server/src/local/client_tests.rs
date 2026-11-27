@@ -1732,7 +1732,7 @@ async fn status_against(
     .await
 }
 
-const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice`（或手动结束旧 `lattice-daemon` 进程）后重启新后台";
+const SILENT_CLOSE: &str = "后台未回写响应即关闭了连接；若仍有较旧版本的后台在运行，请执行 `systemctl --user stop lattice` 后执行 `lattice daemon start`；未受服务托管的遗留后台需先手动结束";
 
 /// 已发布的旧后台读到不认识的魔数就关连接，不回写任何字节；请求剩下的部分留在它的接收队列里。
 #[tokio::test]
@@ -1784,7 +1784,7 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
     .await;
     let self_pid = std::process::id();
     let expected = format!(
-        "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart`（手动运行时执行 `lattice daemon stop` 或 `kill {self_pid}`）切换至新后台"
+        "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台"
     );
     assert_eq!(
         (error.kind, error.message.as_str()),
