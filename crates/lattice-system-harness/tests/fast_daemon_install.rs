@@ -239,14 +239,14 @@ WantedBy=default.target\n"
     )
 }
 
-/// 旧协议模拟对端句柄：`accept`、读写与线程退出共用同一个 `deadline`，并在提前析构时唤醒退出。
+/// 异版协议模拟对端句柄：`accept`、读写与线程退出共用同一个 `deadline`，并在提前析构时唤醒退出。
 struct IncompatiblePeerFixture {
     cli_done: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<Result<(), String>>>,
+    handle: Option<std::thread::JoinHandle<Result<(u8, u8), String>>>,
 }
 
 impl IncompatiblePeerFixture {
-    fn spawn(listener: UnixListener, timeout: Duration) -> Result<Self, String> {
+    fn spawn(listener: UnixListener, timeout: Duration, version_delta: i8) -> Result<Self, String> {
         listener
             .set_nonblocking(true)
             .map_err(|e| format!("设置模拟 socket 非阻塞失败：{e}"))?;
@@ -254,7 +254,7 @@ impl IncompatiblePeerFixture {
         let cli_done = Arc::new(AtomicBool::new(false));
         let done_in_thread = Arc::clone(&cli_done);
 
-        let handle = std::thread::spawn(move || -> Result<(), String> {
+        let handle = std::thread::spawn(move || -> Result<(u8, u8), String> {
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -264,23 +264,23 @@ impl IncompatiblePeerFixture {
                                 Ok((stream, _)) => break stream,
                                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                                     return Err(
-                                        "CLI 已结束，但未连接状态根 api.sock 探测旧协议后台"
+                                        "CLI 已结束，但未连接状态根 api.sock 探测异版协议后台"
                                             .to_owned(),
                                     );
                                 }
                                 Err(err) => {
-                                    return Err(format!("旧协议模拟 socket accept 失败：{err}"));
+                                    return Err(format!("异版协议模拟 socket accept 失败：{err}"));
                                 }
                             }
                         }
                         if Instant::now() >= deadline {
                             return Err(format!(
-                                "等待 CLI 连接旧协议模拟 socket 超出期限（{timeout:?}）"
+                                "等待 CLI 连接异版协议模拟 socket 超出期限（{timeout:?}）"
                             ));
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    Err(err) => return Err(format!("旧协议模拟 socket accept 失败：{err}")),
+                    Err(err) => return Err(format!("异版协议模拟 socket accept 失败：{err}")),
                 }
             };
 
@@ -294,14 +294,25 @@ impl IncompatiblePeerFixture {
                 .read_exact(&mut req_magic)
                 .map_err(|e| format!("期限内读取客户端探测帧魔数失败：{e}"))?;
 
+            if &req_magic[..7] != b"LTLOCAL" {
+                return Err(format!("客户端请求魔数无效：{req_magic:?}"));
+            }
+            let frontend_version = req_magic[7];
+            let peer_version = frontend_version
+                .checked_add_signed(version_delta)
+                .ok_or_else(|| "模拟对端协议号超出字节范围".to_owned())?;
+            let mut peer_magic = req_magic;
+            peer_magic[7] = peer_version;
+            let mut frame = peer_magic.to_vec();
+            frame.extend_from_slice(&4_u32.to_be_bytes());
+            frame.extend_from_slice(b"null");
             apply_stream_deadline(&stream, deadline)?;
-            // 写入比当前协议版本（66 = 0x42）旧一版的 LTLOCAL 帧魔数。
             stream
-                .write_all(b"LTLOCAL\x41")
-                .map_err(|e| format!("期限内写入旧协议魔数失败：{e}"))?;
+                .write_all(&frame)
+                .map_err(|e| format!("期限内写入异版协议帧失败：{e}"))?;
             stream
                 .flush()
-                .map_err(|e| format!("刷新旧协议魔数失败：{e}"))?;
+                .map_err(|e| format!("刷新异版协议帧失败：{e}"))?;
             let _ = stream.shutdown(std::net::Shutdown::Write);
 
             let mut sink = [0_u8; 256];
@@ -316,12 +327,12 @@ impl IncompatiblePeerFixture {
                             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                         ) =>
                     {
-                        return Err(format!("等待客户端关闭旧协议探测连接超时：{err}"));
+                        return Err(format!("等待客户端关闭异版协议探测连接超时：{err}"));
                     }
                     Err(_) => break,
                 }
             }
-            Ok(())
+            Ok((frontend_version, peer_version))
         });
 
         Ok(Self {
@@ -330,12 +341,12 @@ impl IncompatiblePeerFixture {
         })
     }
 
-    fn finish_and_verify(mut self) -> Result<(), String> {
+    fn finish_and_verify(mut self) -> Result<(u8, u8), String> {
         self.cli_done.store(true, Ordering::Release);
         let handle = self.handle.take().expect("模拟线程句柄存在");
         handle
             .join()
-            .map_err(|_| "旧协议模拟线程发生 panic".to_owned())?
+            .map_err(|_| "异版协议模拟线程发生 panic".to_owned())?
     }
 }
 
@@ -351,7 +362,7 @@ impl Drop for IncompatiblePeerFixture {
 fn apply_stream_deadline(stream: &UnixStream, deadline: Instant) -> Result<(), String> {
     let now = Instant::now();
     if now >= deadline {
-        return Err("旧协议模拟连接读写超出截止时间".into());
+        return Err("异版协议模拟连接读写超出截止时间".into());
     }
     let remaining = (deadline - now).max(Duration::from_millis(1));
     stream
@@ -1001,7 +1012,7 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             .daemon_departed()
             .map_err(|errs| format!("后台退场核验失败：{errs:?}"))?;
 
-        // 4. `enable --now` 失败且状态根上为旧协议后台：accept、读写与线程退出共用有界期限，
+        // 4. `restart` 失败且状态根上为旧协议后台：accept、读写与线程退出共用有界期限，
         // 保留版本不兼容诊断与对端 pid，不说成“没有后台”。
         budget.check(&spec.name);
         let short_state = tempfile::Builder::new()
@@ -1021,7 +1032,7 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             .map_err(|e| e.to_string())?;
 
         let fixture_timeout = budget.cap_timeout(Duration::from_secs(10));
-        let peer_fixture = IncompatiblePeerFixture::spawn(listener, fixture_timeout)?;
+        let peer_fixture = IncompatiblePeerFixture::spawn(listener, fixture_timeout, -1)?;
 
         world.set_env("XDG_STATE_HOME", short_state.path().display().to_string());
         rig.clear_systemctl_log();
@@ -1030,8 +1041,13 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             &["daemon", "install"],
             budget.cap_timeout(spec.step_timeout()),
         )?;
-        evidence.record_command("旧协议后台占用时 enable --now 失败", &enable_incompat);
-        peer_fixture.finish_and_verify()?;
+        evidence.record_command("旧协议后台占用时 restart 失败", &enable_incompat);
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &enable_incompat,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
 
         assert_exit_code(&enable_incompat, 1).map_err(|e| e.to_string())?;
         let self_pid_fragment = format!("对端进程号：{}", std::process::id());
@@ -1233,7 +1249,8 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
         };
 
         // restart：服务动作已执行，但应答进程仍是旧后台；指出实际运行文件并引导 install。
-        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        let peer_fixture =
+            IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout, -1)?;
         rig.clear_systemctl_log();
         let restart_out = rig.run_lattice(
             &world,
@@ -1241,7 +1258,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("旧协议后台应答时执行 daemon restart", &restart_out);
-        peer_fixture.finish_and_verify()?;
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &restart_out,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
         assert_exit_code(&restart_out, 1).map_err(|e| e.to_string())?;
         if String::from_utf8_lossy(&restart_out.stdout).contains("已重启服务 lattice.service。")
         {
@@ -1271,7 +1293,8 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
         }
 
         // install：三条 systemctl 均已成功，但运行文件不是刚写入 unit 的同目录后台；引导核对 unit 与 drop-in。
-        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        let peer_fixture =
+            IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout, -1)?;
         rig.clear_systemctl_log();
         let install_out = rig.run_lattice(
             &world,
@@ -1279,7 +1302,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("旧协议后台应答时执行 daemon install", &install_out);
-        peer_fixture.finish_and_verify()?;
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &install_out,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
         assert_exit_code(&install_out, 1).map_err(|e| e.to_string())?;
         if String::from_utf8_lossy(&install_out.stdout).contains("已启用并启动服务") {
             return Err("install 发现旧后台时不应打印成功文案".into());
@@ -1317,7 +1345,8 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
         }
 
         // start：可能是对已在运行旧服务的空操作；沿用普通不兼容诊断并引导 restart。
-        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        let peer_fixture =
+            IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout, -1)?;
         rig.clear_systemctl_log();
         let start_out = rig.run_lattice(
             &world,
@@ -1325,7 +1354,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("旧协议后台应答时执行 daemon start", &start_out);
-        peer_fixture.finish_and_verify()?;
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &start_out,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
         assert_exit_code(&start_out, 1).map_err(|e| e.to_string())?;
         assert_stderr_contains(
             &start_out,
@@ -1339,6 +1373,52 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
                 "start 的 systemctl 调用不符合预期：{:?}",
                 rig.systemctl_calls()
             ));
+        }
+
+        // 4. status 的文本与 JSON 错误保留双方协议号；更新后台的 status/restart 提示匹配前端。
+        for (version_delta, args, label) in [
+            (-1, vec!["daemon", "status"], "旧协议后台的 status 文本错误"),
+            (
+                -1,
+                vec!["--json", "daemon", "status"],
+                "旧协议后台的 status JSON 错误",
+            ),
+            (1, vec!["daemon", "status"], "新协议后台的 status 文本错误"),
+            (1, vec!["daemon", "restart"], "新协议后台的 restart 错误"),
+        ] {
+            budget.check(&spec.name);
+            let peer_fixture = IncompatiblePeerFixture::spawn(
+                bind_peer_listener()?,
+                budget.cap_timeout(Duration::from_secs(10)),
+                version_delta,
+            )?;
+            let outcome =
+                rig.run_lattice(&world, &args, budget.cap_timeout(spec.step_timeout()))?;
+            evidence.record_command(label, &outcome);
+            let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+            assert_exit_code(&outcome, 1).map_err(|e| e.to_string())?;
+            let message = if args[0] == "--json" {
+                let error: serde_json::Value = serde_json::from_slice(&outcome.stdout)
+                    .map_err(|e| format!("解析 status JSON 错误失败：{e}"))?;
+                if error["kind"] != "incompatible_backend" {
+                    return Err(format!("status JSON 错误类型不符：{error}"));
+                }
+                error["message"]
+                    .as_str()
+                    .ok_or_else(|| "status JSON 缺少 message".to_owned())?
+                    .to_owned()
+            } else {
+                String::from_utf8_lossy(&outcome.stderr).into_owned()
+            };
+            let versions = format!("后台协议 {peer_version}，本前端 {frontend_version}");
+            let guidance = if version_delta < 0 {
+                "lattice daemon restart"
+            } else {
+                "请换用匹配的前端"
+            };
+            if !message.contains(&versions) || !message.contains(guidance) {
+                return Err(format!("{label} 缺少双方协议号或操作提示：{message}"));
+            }
         }
 
         Ok(())

@@ -604,6 +604,7 @@ enum BackendProbe {
     },
     /// 对端在同一连接上回写了更旧的协议魔数，并带出发请求前捕获的对端事实。
     Older {
+        peer_version: u8,
         peer_pid: Option<i32>,
         peer_executable: Option<PathBuf>,
         diagnostic: String,
@@ -624,10 +625,12 @@ async fn probe_running_backend(client: &LocalClient, timeout: Duration) -> Backe
     match client.probe_status(timeout).await {
         Ok(StatusProbe::Running { peer_pid, .. }) => BackendProbe::Running { peer_pid },
         Ok(StatusProbe::OlderBackend {
+            peer_version,
             peer_pid,
             peer_executable,
             error,
         }) => BackendProbe::Older {
+            peer_version,
             peer_pid,
             peer_executable,
             diagnostic: error.message,
@@ -699,12 +702,14 @@ async fn verify_backend_after_success(
             ))
         }
         BackendProbe::Older {
+            peer_version,
             peer_pid,
             peer_executable,
             diagnostic,
         } => {
             let message = format_older_backend_after_success(
                 action,
+                peer_version,
                 peer_pid,
                 peer_executable.as_deref(),
                 &diagnostic,
@@ -746,6 +751,7 @@ fn format_not_running_after_success(action: CompletedAction<'_>, state_root: &Pa
 /// 拼装 `systemctl` 成功后仍遇到更旧协议后台的诊断；路径与对端事实只作展示，不改变判定。
 fn format_older_backend_after_success(
     action: CompletedAction<'_>,
+    peer_version: u8,
     peer_pid: Option<i32>,
     peer_executable: Option<&Path>,
     diagnostic: &str,
@@ -755,7 +761,7 @@ fn format_older_backend_after_success(
         (CompletedAction::Start, _) => format!("{prefix}，但{diagnostic}"),
         (CompletedAction::Restart { .. } | CompletedAction::Install { .. }, None) => format!(
             "{prefix}，但运行中的后台仍是较旧的不兼容版本（{}）：读不到它的可执行文件路径；请执行 `systemctl --user cat lattice` 核对 `ExecStart` 指向的 `lattice-daemon` 是否与本前端同一批构建",
-            format_peer_pid(peer_pid)
+            lattice_local::format_incompatible_peer(peer_version, peer_pid)
         ),
         (
             CompletedAction::Restart {
@@ -768,7 +774,7 @@ fn format_older_backend_after_success(
             Some(running),
         ) if expected == running => format!(
             "{prefix}，但运行中的后台仍是较旧的不兼容版本（{}）：实际运行的是本前端同目录的 {}；请把与本前端同一批构建的 `lattice-daemon` 安装到该路径，再执行 `lattice daemon restart`",
-            format_peer_pid(peer_pid),
+            lattice_local::format_incompatible_peer(peer_version, peer_pid),
             running.display()
         ),
         (
@@ -778,7 +784,7 @@ fn format_older_backend_after_success(
             Some(running),
         ) => format!(
             "{prefix}，但运行中的后台仍是较旧的不兼容版本（{}）：实际运行的是 {}，不是本前端同目录的 {}；请执行 `lattice daemon install` 让服务改用同目录的 `lattice-daemon`",
-            format_peer_pid(peer_pid),
+            lattice_local::format_incompatible_peer(peer_version, peer_pid),
             running.display(),
             expected.display()
         ),
@@ -789,7 +795,7 @@ fn format_older_backend_after_success(
             Some(running),
         ) => format!(
             "{prefix}，但运行中的后台仍是较旧的不兼容版本（{}）：实际运行的是 {}；请执行 `lattice daemon install` 让服务改用同目录的 `lattice-daemon`",
-            format_peer_pid(peer_pid),
+            lattice_local::format_incompatible_peer(peer_version, peer_pid),
             running.display()
         ),
         (
@@ -800,7 +806,7 @@ fn format_older_backend_after_success(
             Some(running),
         ) => format!(
             "{prefix}，但运行中的后台仍是较旧的不兼容版本（{}）：实际运行的是 {}，不是刚写入 unit 的 {}；请执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in",
-            format_peer_pid(peer_pid),
+            lattice_local::format_incompatible_peer(peer_version, peer_pid),
             running.display(),
             expected.display()
         ),
@@ -1059,6 +1065,8 @@ WantedBy=default.target
     fn install_and_service_action_failure_diagnostics_cover_running_incompatible_and_unreachable_cases()
      {
         let unit_path = Path::new("/tmp/cfg/systemd/user/lattice.service");
+        let frontend_version = lattice_local::current_protocol_version();
+        let peer_version = frontend_version - 1;
 
         let with_pid = format_install_restart_failure_diagnostic(
             unit_path,
@@ -1083,7 +1091,9 @@ WantedBy=default.target
             unit_path,
             "退出码 1",
             BackendProbe::Incompatible {
-                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart` 切换至新后台".into(),
+                diagnostic: format!(
+                    "运行中的后台版本较旧且不兼容（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：5150）；请执行 `lattice daemon restart` 切换至新后台"
+                ),
             },
         );
         assert!(incompatible.contains("版本较旧且不兼容"));
@@ -1095,9 +1105,12 @@ WantedBy=default.target
             unit_path,
             "退出码 1",
             BackendProbe::Older {
+                peer_version,
                 peer_pid: Some(5150),
                 peer_executable: None,
-                diagnostic: "运行中的后台版本较旧且不兼容（对端进程号：5150）；请执行 `lattice daemon restart` 切换至新后台".into(),
+                diagnostic: format!(
+                    "运行中的后台版本较旧且不兼容（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：5150）；请执行 `lattice daemon restart` 切换至新后台"
+                ),
             },
         );
         assert_eq!(
@@ -1172,24 +1185,39 @@ WantedBy=default.target
         let listener = tokio::net::UnixListener::from_std(std_listener).unwrap();
 
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut bad_magic = *lattice_local::test_support::FRAME_MAGIC;
-            bad_magic[7] = bad_magic[7].wrapping_sub(1);
-            stream.write_all(&bad_magic).await.unwrap();
-            let _ = stream.shutdown().await;
+            for peer_version in [
+                lattice_local::current_protocol_version() - 1,
+                lattice_local::current_protocol_version() + 1,
+            ] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request_magic = [0_u8; 8];
+                tokio::io::AsyncReadExt::read_exact(&mut stream, &mut request_magic)
+                    .await
+                    .unwrap();
+                let mut peer_magic = *lattice_local::test_support::FRAME_MAGIC;
+                peer_magic[7] = peer_version;
+                stream.write_all(&peer_magic).await.unwrap();
+                let _ = stream.shutdown().await;
+            }
         });
 
         let client = LocalClient::new(layout);
         let probe = probe_running_backend(&client, Duration::from_secs(2)).await;
-        server.await.unwrap();
+        let frontend_version = lattice_local::current_protocol_version();
 
         let expected_pid = format!("对端进程号：{}", std::process::id());
         match probe {
             BackendProbe::Older {
+                peer_version,
                 peer_pid,
                 peer_executable,
                 diagnostic,
             } => {
+                assert_eq!(peer_version, frontend_version - 1);
+                assert!(diagnostic.contains(&format!(
+                    "后台协议 {}，本前端 {frontend_version}",
+                    frontend_version - 1
+                )));
                 assert_eq!(peer_pid, Some(std::process::id() as i32));
                 assert_eq!(
                     peer_executable,
@@ -1202,11 +1230,25 @@ WantedBy=default.target
             }
             other => panic!("应识别为更旧协议后台，实际：{other:?}"),
         }
+        match probe_running_backend(&client, Duration::from_secs(2)).await {
+            BackendProbe::Incompatible { diagnostic } => {
+                assert!(diagnostic.contains(&format!(
+                    "后台协议 {}，本前端 {frontend_version}",
+                    frontend_version + 1
+                )));
+                assert!(diagnostic.contains("请换用匹配的前端"));
+                assert!(diagnostic.contains(&expected_pid));
+            }
+            other => panic!("应识别为更新协议后台，实际：{other:?}"),
+        }
+        server.await.unwrap();
     }
 
     #[test]
     fn success_after_systemctl_diagnostics_lock_restart_and_install_wording() {
         let unit_path = Path::new("/tmp/cfg/systemd/user/lattice.service");
+        let frontend_version = lattice_local::current_protocol_version();
+        let peer_version = frontend_version - 1;
         let same = Path::new("/opt/lattice/bin/lattice-daemon");
         let other = Path::new("/usr/local/bin/lattice-daemon");
 
@@ -1215,22 +1257,28 @@ WantedBy=default.target
                 CompletedAction::Restart {
                     sibling_daemon: Some(same),
                 },
+                peer_version,
                 Some(4242),
                 Some(same),
                 "测试诊断",
             ),
-            "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（对端进程号：4242）：实际运行的是本前端同目录的 /opt/lattice/bin/lattice-daemon；请把与本前端同一批构建的 `lattice-daemon` 安装到该路径，再执行 `lattice daemon restart`"
+            format!(
+                "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：4242）：实际运行的是本前端同目录的 /opt/lattice/bin/lattice-daemon；请把与本前端同一批构建的 `lattice-daemon` 安装到该路径，再执行 `lattice daemon restart`"
+            )
         );
         assert_eq!(
             format_older_backend_after_success(
                 CompletedAction::Restart {
                     sibling_daemon: Some(same),
                 },
+                peer_version,
                 Some(4242),
                 Some(other),
                 "测试诊断",
             ),
-            "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（对端进程号：4242）：实际运行的是 /usr/local/bin/lattice-daemon，不是本前端同目录的 /opt/lattice/bin/lattice-daemon；请执行 `lattice daemon install` 让服务改用同目录的 `lattice-daemon`"
+            format!(
+                "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：4242）：实际运行的是 /usr/local/bin/lattice-daemon，不是本前端同目录的 /opt/lattice/bin/lattice-daemon；请执行 `lattice daemon install` 让服务改用同目录的 `lattice-daemon`"
+            )
         );
         assert_eq!(
             format_older_backend_after_success(
@@ -1238,31 +1286,82 @@ WantedBy=default.target
                     unit_path,
                     daemon_path: same,
                 },
+                peer_version,
                 Some(4242),
                 Some(other),
                 "测试诊断",
             ),
-            "已写入并启用 unit 文件 /tmp/cfg/systemd/user/lattice.service，并已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（对端进程号：4242）：实际运行的是 /usr/local/bin/lattice-daemon，不是刚写入 unit 的 /opt/lattice/bin/lattice-daemon；请执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in"
+            format!(
+                "已写入并启用 unit 文件 /tmp/cfg/systemd/user/lattice.service，并已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：4242）：实际运行的是 /usr/local/bin/lattice-daemon，不是刚写入 unit 的 /opt/lattice/bin/lattice-daemon；请执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in"
+            )
         );
         assert_eq!(
             format_older_backend_after_success(
                 CompletedAction::Restart {
                     sibling_daemon: Some(same),
                 },
+                peer_version,
                 None,
                 None,
                 "测试诊断",
             ),
-            "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（对端进程号不可用）：读不到它的可执行文件路径；请执行 `systemctl --user cat lattice` 核对 `ExecStart` 指向的 `lattice-daemon` 是否与本前端同一批构建"
+            format!(
+                "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号不可用）：读不到它的可执行文件路径；请执行 `systemctl --user cat lattice` 核对 `ExecStart` 指向的 `lattice-daemon` 是否与本前端同一批构建"
+            )
         );
         assert_eq!(
             format_older_backend_after_success(
                 CompletedAction::Start,
+                peer_version,
                 Some(4242),
                 Some(same),
                 "测试诊断",
             ),
             "`systemctl --user start lattice.service` 执行成功，但测试诊断"
+        );
+        assert_eq!(
+            format_older_backend_after_success(
+                CompletedAction::Install {
+                    unit_path,
+                    daemon_path: same
+                },
+                peer_version,
+                Some(4242),
+                Some(same),
+                "测试诊断",
+            ),
+            format!(
+                "已写入并启用 unit 文件 /tmp/cfg/systemd/user/lattice.service，并已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：4242）：实际运行的是本前端同目录的 /opt/lattice/bin/lattice-daemon；请把与本前端同一批构建的 `lattice-daemon` 安装到该路径，再执行 `lattice daemon restart`"
+            )
+        );
+        assert_eq!(
+            format_older_backend_after_success(
+                CompletedAction::Restart {
+                    sibling_daemon: None
+                },
+                peer_version,
+                Some(4242),
+                Some(other),
+                "测试诊断",
+            ),
+            format!(
+                "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号：4242）：实际运行的是 /usr/local/bin/lattice-daemon；请执行 `lattice daemon install` 让服务改用同目录的 `lattice-daemon`"
+            )
+        );
+        assert_eq!(
+            format_older_backend_after_success(
+                CompletedAction::Install {
+                    unit_path,
+                    daemon_path: same
+                },
+                peer_version,
+                None,
+                None,
+                "测试诊断",
+            ),
+            format!(
+                "已写入并启用 unit 文件 /tmp/cfg/systemd/user/lattice.service，并已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本（后台协议 {peer_version}，本前端 {frontend_version}，对端进程号不可用）：读不到它的可执行文件路径；请执行 `systemctl --user cat lattice` 核对 `ExecStart` 指向的 `lattice-daemon` 是否与本前端同一批构建"
+            )
         );
     }
 
@@ -1346,6 +1445,8 @@ WantedBy=default.target
             })
         };
 
+        let frontend_version = lattice_local::current_protocol_version();
+
         // 1. restart 后仍是更旧后台：注入的对端与本前端同路径时，指出应安装同一批构建。
         let (temp1, _layout, listener) = make_layout("older");
         let server = spawn_magic_peer(listener, -1);
@@ -1363,6 +1464,10 @@ WantedBy=default.target
         assert!(err.message.contains("仍是较旧的不兼容版本"));
         assert!(err.message.contains("实际运行的是本前端同目录的"));
         assert!(err.message.contains(&current_exe.display().to_string()));
+        assert!(err.message.contains(&format!(
+            "后台协议 {}，本前端 {frontend_version}",
+            frontend_version - 1
+        )));
         server.await.unwrap();
 
         // 2. restart 后是更新后台：沿用客户端的“较新”诊断接在成功前缀后。
@@ -1383,6 +1488,10 @@ WantedBy=default.target
             "诊断：{}",
             err.message
         );
+        assert!(err.message.contains(&format!(
+            "后台协议 {}，本前端 {frontend_version}",
+            frontend_version + 1
+        )));
         server.await.unwrap();
 
         // 3. start 后仍是更旧后台：沿用普通不兼容诊断并提示 restart。
@@ -1400,6 +1509,10 @@ WantedBy=default.target
             err.message
         );
         assert!(err.message.contains("lattice daemon restart"));
+        assert!(err.message.contains(&format!(
+            "后台协议 {}，本前端 {frontend_version}",
+            frontend_version - 1
+        )));
         server.await.unwrap();
 
         // 4. 状态根上没有 api.sock：systemctl 成功后必须报告没有后台在监听。
