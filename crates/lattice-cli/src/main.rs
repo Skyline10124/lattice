@@ -102,11 +102,10 @@ fn parse_cli(
         return Err(CliParseError::ModelsRefreshFilterConflict);
     }
     if cli.json {
-        if let Some(Commands::Daemon {
-            action: commands::daemon::DaemonAction::Install(_),
-        }) = &cli.command
+        if let Some(Commands::Daemon { action }) = &cli.command
+            && let Some(command) = action.json_unsupported_name()
         {
-            return Err(CliParseError::JsonUnsupported("daemon install"));
+            return Err(CliParseError::JsonUnsupported(command));
         }
         if matches!(&cli.command, Some(Commands::Tui { .. })) {
             return Err(CliParseError::JsonUnsupported("tui"));
@@ -654,7 +653,7 @@ mod tests {
                     .map(String::as_str)
                     .collect::<Vec<_>>()
                     .as_slice(),
-                ["daemon", "install"] | ["tui"]
+                ["daemon", "install"] | ["daemon", "start"] | ["daemon", "restart"] | ["tui"]
             );
             if unsupported_json {
                 assert!(
@@ -906,8 +905,8 @@ mod tests {
                 .get_subcommands()
                 .map(|c| c.get_name())
                 .collect::<Vec<_>>(),
-            ["status", "stop", "install"],
-            "lattice daemon 应仅暴露 status、stop 与 install，不包含 serve"
+            ["status", "start", "restart", "stop", "install"],
+            "lattice daemon 应仅暴露 status、start、restart、stop 与 install，不包含 serve"
         );
         let daemon_help = daemon.render_help().to_string();
         for expected in [
@@ -915,6 +914,8 @@ mod tests {
             "用法：lattice daemon [选项] <命令>",
             "命令：",
             "status",
+            "start",
+            "restart",
             "stop",
             "install",
             "选项：",
@@ -952,10 +953,14 @@ mod tests {
             "lattice daemon serve 应被拒绝"
         );
         assert!(parse_cli(["lattice", "daemon", "status"]).is_ok());
+        assert!(parse_cli(["lattice", "daemon", "start"]).is_ok());
+        assert!(parse_cli(["lattice", "daemon", "restart"]).is_ok());
         assert!(parse_cli(["lattice", "daemon", "stop"]).is_ok());
         assert!(parse_cli(["lattice", "daemon", "install"]).is_ok());
         assert!(parse_cli(["lattice", "daemon", "install", "--drain-timeout", "30s"]).is_ok());
         assert!(parse_cli(["lattice", "--json", "daemon", "install"]).is_err());
+        assert!(parse_cli(["lattice", "--json", "daemon", "start"]).is_err());
+        assert!(parse_cli(["lattice", "--json", "daemon", "restart"]).is_err());
         assert!(parse_cli(["lattice", "--json", "tui", "--agent", "coder"]).is_err());
         assert!(parse_cli(["lattice", "tui", "abcd", "--json"]).is_err());
     }
@@ -981,6 +986,22 @@ mod tests {
             (
                 vec!["lattice", "-vj", "daemon", "install"],
                 "不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "daemon", "start", "--json"],
+                "`lattice daemon start` 不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "--json", "daemon", "start"],
+                "`lattice daemon start` 不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "daemon", "restart", "--json"],
+                "`lattice daemon restart` 不支持 `--json`",
+            ),
+            (
+                vec!["lattice", "-j", "daemon", "restart"],
+                "`lattice daemon restart` 不支持 `--json`",
             ),
             (
                 vec!["lattice", "tui", "--agent", "coder", "--json"],

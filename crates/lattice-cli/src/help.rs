@@ -162,7 +162,9 @@ fn json_support_for_path(path: &[&str]) -> JsonSupport {
         [] | ["session"] => JsonSupport::RootOrSession,
         ["run"] | ["session", "send"] | ["session", "trigger"] => JsonSupport::StreamJsonl,
         ["session", "turn"] => JsonSupport::TurnFollow,
-        ["daemon", "install"] | ["tui"] => JsonSupport::Unsupported,
+        ["daemon", "install"] | ["daemon", "start"] | ["daemon", "restart"] | ["tui"] => {
+            JsonSupport::Unsupported
+        }
         _ => JsonSupport::SingleJson,
     }
 }
@@ -173,6 +175,8 @@ fn usage_for_path(path: &[&str]) -> Option<&'static str> {
         ["run"] => "lattice run [选项] [消息]",
         ["daemon"] => "lattice daemon [选项] <命令>",
         ["daemon", "status"] => "lattice daemon status [选项]",
+        ["daemon", "start"] => "lattice daemon start [选项]",
+        ["daemon", "restart"] => "lattice daemon restart [选项]",
         ["daemon", "stop"] => "lattice daemon stop [选项]",
         ["daemon", "install"] => "lattice daemon install [选项]",
         ["im"] => "lattice im [选项] <命令>",
@@ -242,6 +246,8 @@ fn help_hint_for_args(args: &[OsString]) -> &'static str {
     match words.as_slice() {
         ["run", ..] => "lattice run --help",
         ["daemon", "status", ..] => "lattice daemon status --help",
+        ["daemon", "start", ..] => "lattice daemon start --help",
+        ["daemon", "restart", ..] => "lattice daemon restart --help",
         ["daemon", "stop", ..] => "lattice daemon stop --help",
         ["daemon", "install", ..] => "lattice daemon install --help",
         ["daemon", ..] => "lattice daemon --help",

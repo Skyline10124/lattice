@@ -422,7 +422,13 @@ async fn legacy_store_rejection_before_execution_does_not_leave_unconfirmed_clea
     );
     idle(&backend).await;
     assert_eq!(
-        client.stop().await.unwrap().unconfirmed_operations,
+        client
+            .stop()
+            .await
+            .unwrap()
+            .into_status()
+            .expect("同版本停机应返回 DaemonStatus")
+            .unconfirmed_operations,
         0,
         "接受前拒绝没有需要确认的写入或收尾"
     );
@@ -1911,7 +1917,12 @@ async fn preparation_disconnect_and_forwarding_panic_keep_independent_cancelled_
         if let Some(release) = release {
             release.send(()).unwrap();
         }
-        let status = bounded(stop).await.unwrap().unwrap();
+        let status = bounded(stop)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_status()
+            .expect("同版本停机应返回 DaemonStatus");
         assert_eq!(status.owners, 0);
         assert_eq!(status.unconfirmed_operations, usize::from(forwarding_panic));
         if forwarding_panic {
@@ -2183,7 +2194,12 @@ async fn stop_waits_for_departure(gated: GatedServe) {
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert!(!stop.is_finished(), "实例锁仍被持有时 stop 已返回");
     release.send(()).unwrap();
-    let status = bounded(stop).await.unwrap().unwrap();
+    let status = bounded(stop)
+        .await
+        .unwrap()
+        .unwrap()
+        .into_status()
+        .expect("同版本停机应返回 DaemonStatus");
     assert_eq!(status.owners, 0);
     assert!(owner_lock_free(&layout), "stop 返回时实例锁尚未释放");
     assert!(!layout.lattice_root().join("local/api.sock").exists());
@@ -2936,10 +2952,20 @@ async fn second_stop_signal_during_drain_triggers_immediate_drain_timeout() {
             signal_sent.elapsed() < Duration::from_secs(5),
             "收到信号后不应继续等待 60 秒排空期限"
         );
-        let dup_status = bounded(dup_ipc).await.unwrap().unwrap();
+        let dup_status = bounded(dup_ipc)
+            .await
+            .unwrap()
+            .unwrap()
+            .into_status()
+            .expect("同版本停机应返回 DaemonStatus");
         assert_eq!(dup_status.unconfirmed_operations, 1);
         if let Some(ipc_stop) = ipc_stop {
-            let first_status = bounded(ipc_stop).await.unwrap().unwrap();
+            let first_status = bounded(ipc_stop)
+                .await
+                .unwrap()
+                .unwrap()
+                .into_status()
+                .expect("同版本停机应返回 DaemonStatus");
             assert_eq!(first_status, dup_status);
         }
 

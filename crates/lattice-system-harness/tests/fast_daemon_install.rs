@@ -46,29 +46,51 @@ if [ "$#" -eq 2 ] && [ "$1" = "--user" ] && [ "$2" = "daemon-reload" ]; then
     fi
     exit 0
 fi
-if [ "$#" -eq 4 ] && [ "$1" = "--user" ] && [ "$2" = "enable" ] && [ "$3" = "--now" ]; then
+if [ "$#" -eq 3 ] && [ "$1" = "--user" ] && [ "$2" = "enable" ]; then
     if [ "${FAKE_SYSTEMCTL_FAIL_ENABLE:-0}" = "1" ]; then
-        printf '%s\n' "模拟 enable --now 失败" >&2
+        printf '%s\n' "模拟 enable 失败" >&2
         exit 1
     fi
     # 模拟运行中的 user manager：按名称启用时只在它自己的配置目录中查找 unit；
     # 按绝对路径启用时文件存在即可，真实的 systemd 会先把它链接进该目录。
-    case "$4" in
+    case "$3" in
         /*)
-            if [ -f "$4" ]; then
+            if [ -f "$3" ]; then
                 exit 0
             fi
-            printf 'Failed to enable unit: Unit file %s does not exist\n' "$4" >&2
+            printf 'Failed to enable unit: Unit file %s does not exist\n' "$3" >&2
             exit 1
             ;;
         *)
-            if [ -f "$FAKE_SYSTEMCTL_MANAGER_UNIT_DIR/$4.service" ]; then
+            if [ -f "$FAKE_SYSTEMCTL_MANAGER_UNIT_DIR/$3.service" ]; then
                 exit 0
             fi
-            printf 'Failed to enable unit: Unit %s.service does not exist\n' "$4" >&2
+            printf 'Failed to enable unit: Unit %s.service does not exist\n' "$3" >&2
             exit 1
             ;;
     esac
+fi
+if [ "$#" -eq 3 ] && [ "$1" = "--user" ] && [ "$2" = "restart" ] && [ "$3" = "lattice.service" ]; then
+    if [ "${FAKE_SYSTEMCTL_FAIL_RESTART:-0}" = "1" ]; then
+        printf '%s\n' "模拟 restart 失败" >&2
+        exit 1
+    fi
+    exit 0
+fi
+if [ "$#" -eq 3 ] && [ "$1" = "--user" ] && [ "$2" = "start" ] && [ "$3" = "lattice.service" ]; then
+    if [ "${FAKE_SYSTEMCTL_FAIL_START:-0}" = "1" ]; then
+        printf '%s\n' "模拟 start 失败" >&2
+        exit 1
+    fi
+    exit 0
+fi
+if [ "$#" -eq 6 ] && [ "$1" = "--user" ] && [ "$2" = "show" ] && [ "$3" = "-p" ] && [ "$4" = "LoadState" ] && [ "$5" = "--value" ] && [ "$6" = "lattice.service" ]; then
+    if [ "${FAKE_SYSTEMCTL_UNIT_NOT_FOUND:-0}" = "1" ]; then
+        printf 'not-found\n'
+    else
+        printf 'loaded\n'
+    fi
+    exit 0
 fi
 printf '未知 systemctl 参数：%s\n' "$line" >&2
 exit 99
@@ -142,6 +164,9 @@ impl InstallRig {
         );
         world.unset_env("FAKE_SYSTEMCTL_FAIL_RELOAD");
         world.unset_env("FAKE_SYSTEMCTL_FAIL_ENABLE");
+        world.unset_env("FAKE_SYSTEMCTL_FAIL_RESTART");
+        world.unset_env("FAKE_SYSTEMCTL_FAIL_START");
+        world.unset_env("FAKE_SYSTEMCTL_UNIT_NOT_FOUND");
 
         Ok(Self {
             lattice_bin,
@@ -347,6 +372,10 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
 
     let result = (|| -> Result<(), String> {
         let rig = InstallRig::setup(&world, "default-case", true)?;
+        // 假 systemctl 不会真正启动 unit；显式启动兼容后台，模拟 `Type=notify` 服务在 systemctl 返回时已经监听。
+        world
+            .start_daemon()
+            .map_err(|e| format!("显式启动场景后台失败：{e}"))?;
         let state_root = world
             .session_store_dir()
             .parent()
@@ -379,10 +408,11 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
             ));
         }
         // unit 写在与 manager 不同的 `XDG_CONFIG_HOME` 下；按名称启用会报 unit 不存在，
-        // 必须按 unit 文件的绝对路径启用。
+        // 必须按 unit 文件的绝对路径启用，再经 restart 启动或重启最新服务。
         let expected_calls = [
             "--user|daemon-reload".to_string(),
-            format!("--user|enable|--now|{}", unit_path.display()),
+            format!("--user|enable|{}", unit_path.display()),
+            "--user|restart|lattice.service".to_string(),
         ];
         if rig.systemctl_calls() != expected_calls {
             return Err(format!(
@@ -468,10 +498,11 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
                 home_unit_path.display()
             ));
         }
-        // unit 已在 manager 的配置目录中时，按路径启用同样成功。
+        // unit 已在 manager 的配置目录中时，按路径启用并重启同样成功。
         let expected_home_calls = [
             "--user|daemon-reload".to_string(),
-            format!("--user|enable|--now|{}", home_unit_path.display()),
+            format!("--user|enable|{}", home_unit_path.display()),
+            "--user|restart|lattice.service".to_string(),
         ];
         if rig.systemctl_calls() != expected_home_calls {
             return Err(format!(
@@ -479,6 +510,49 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
                 rig.systemctl_calls()
             ));
         }
+
+        // 4. `lattice daemon start` 与 `lattice daemon restart` 热路径均只发一次 systemctl 调用。
+        for (subcmd, expected_call, expected_stdout) in [
+            (
+                "start",
+                "--user|start|lattice.service",
+                "已启动服务 lattice.service。",
+            ),
+            (
+                "restart",
+                "--user|restart|lattice.service",
+                "已重启服务 lattice.service。",
+            ),
+        ] {
+            budget.check(&spec.name);
+            rig.clear_systemctl_log();
+            let out = rig.run_lattice(
+                &world,
+                &["daemon", subcmd],
+                budget.cap_timeout(spec.step_timeout()),
+            )?;
+            evidence.record_command(format!("执行 lattice daemon {subcmd}"), &out);
+            assert_exit_code(&out, 0).map_err(|e| format!("{subcmd}: {e}"))?;
+            assert_stdout_contains_all(&out, &[expected_stdout])
+                .map_err(|e| format!("{subcmd}: {e}"))?;
+            if rig.systemctl_calls() != [expected_call] {
+                return Err(format!(
+                    "daemon {subcmd} 的 systemctl 调用不符合预期：{:?}",
+                    rig.systemctl_calls()
+                ));
+            }
+        }
+
+        let stop = rig.run_lattice(
+            &world,
+            &["daemon", "stop"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("停止默认场景后台", &stop);
+        assert_exit_code(&stop, 0).map_err(|e| e.to_string())?;
+        world
+            .daemon_departed()
+            .map_err(|errs| format!("后台退场核验失败：{errs:?}"))?;
 
         Ok(())
     })();
@@ -621,6 +695,16 @@ fn fast_daemon_install_rejects_bad_daemon_binary_or_overflow_without_side_effect
                 vec!["daemon", "install", "--json"],
                 true,
             ),
+            (
+                "start --json 无副作用拒绝",
+                vec!["daemon", "start", "--json"],
+                true,
+            ),
+            (
+                "restart --json 无副作用拒绝",
+                vec!["daemon", "restart", "--json"],
+                true,
+            ),
         ] {
             budget.check(&spec.name);
             let out = overflow_rig.run_lattice(
@@ -652,6 +736,41 @@ fn fast_daemon_install_rejects_bad_daemon_binary_or_overflow_without_side_effect
                 ));
             }
         }
+
+        // 6. `XDG_STATE_HOME` 与 `HOME` 均不可用：三条入口在调用 systemctl 前以 2 退出。
+        world.unset_env("HOME");
+        world.unset_env("XDG_STATE_HOME");
+        overflow_rig.clear_systemctl_log();
+        let unresolved_result = (|| -> Result<(), String> {
+            for subcmd in ["install", "start", "restart"] {
+                budget.check(&spec.name);
+                let out = overflow_rig.run_lattice(
+                    &world,
+                    &["daemon", subcmd],
+                    budget.cap_timeout(spec.step_timeout()),
+                )?;
+                evidence.record_command(format!("状态根不可解析时执行 daemon {subcmd}"), &out);
+                assert_exit_code(&out, 2).map_err(|e| format!("{subcmd}: {e}"))?;
+                assert_stderr_contains(&out, "无法解析状态根目录")
+                    .map_err(|e| format!("{subcmd}: {e}"))?;
+                if overflow_rig.unit_path().exists() {
+                    return Err(format!("{subcmd}: 状态根不可解析时不应写出 unit 文件"));
+                }
+                if !overflow_rig.systemctl_calls().is_empty() {
+                    return Err(format!(
+                        "{subcmd}: 状态根不可解析时不应调用 systemctl：{:?}",
+                        overflow_rig.systemctl_calls()
+                    ));
+                }
+            }
+            Ok(())
+        })();
+        world.set_env("HOME", world.home().display().to_string());
+        world.set_env(
+            "XDG_STATE_HOME",
+            world.home().join(".local/state").display().to_string(),
+        );
+        unresolved_result?;
 
         Ok(())
     })();
@@ -691,32 +810,80 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             ));
         }
 
-        // 2. `enable --now` 失败且无运行中后台：退出 1，提示 `systemctl --user status lattice`。
+        // 1b. `enable` 失败：退出 1，unit 已写出，不再执行 `restart`。
         budget.check(&spec.name);
         rig.clear_systemctl_log();
         world.unset_env("FAKE_SYSTEMCTL_FAIL_RELOAD");
         world.set_env("FAKE_SYSTEMCTL_FAIL_ENABLE", "1");
-        let enable_no_daemon = rig.run_lattice(
+        let enable_fail = rig.run_lattice(
             &world,
             &["daemon", "install"],
             budget.cap_timeout(spec.step_timeout()),
         )?;
-        evidence.record_command("无后台时 enable --now 失败", &enable_no_daemon);
-        assert_exit_code(&enable_no_daemon, 1).map_err(|e| e.to_string())?;
-        assert_stderr_contains(&enable_no_daemon, &unit_str).map_err(|e| e.to_string())?;
-        assert_stderr_contains(&enable_no_daemon, "systemctl --user status lattice")
+        evidence.record_command("enable 失败时执行 install", &enable_fail);
+        assert_exit_code(&enable_fail, 1).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&enable_fail, "systemctl --user enable")
             .map_err(|e| e.to_string())?;
         if rig.systemctl_calls()
             != [
                 "--user|daemon-reload".to_string(),
-                format!("--user|enable|--now|{unit_str}"),
+                format!("--user|enable|{unit_str}"),
             ]
         {
             return Err(format!(
-                "enable 失败时应按顺序调用两条命令：{:?}",
+                "enable 失败后不应继续调用 restart：{:?}",
                 rig.systemctl_calls()
             ));
         }
+
+        // 2. `restart` 失败且无运行中后台：退出 1，提示 `systemctl --user status lattice`。
+        budget.check(&spec.name);
+        rig.clear_systemctl_log();
+        world.unset_env("FAKE_SYSTEMCTL_FAIL_ENABLE");
+        world.set_env("FAKE_SYSTEMCTL_FAIL_RESTART", "1");
+        let restart_no_daemon = rig.run_lattice(
+            &world,
+            &["daemon", "install"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("无后台时 install 的 restart 失败", &restart_no_daemon);
+        assert_exit_code(&restart_no_daemon, 1).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_no_daemon, &unit_str).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_no_daemon, "systemctl --user status lattice")
+            .map_err(|e| e.to_string())?;
+        if rig.systemctl_calls()
+            != [
+                "--user|daemon-reload".to_string(),
+                format!("--user|enable|{unit_str}"),
+                "--user|restart|lattice.service".to_string(),
+            ]
+        {
+            return Err(format!(
+                "install restart 失败时应按顺序调用三条命令：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        // 2b. 未安装 unit（LoadState=not-found）时执行 `start` / `restart`：退出 1 并提示 `lattice daemon install`。
+        world.set_env("FAKE_SYSTEMCTL_FAIL_START", "1");
+        world.set_env("FAKE_SYSTEMCTL_UNIT_NOT_FOUND", "1");
+        for subcmd in ["start", "restart"] {
+            budget.check(&spec.name);
+            rig.clear_systemctl_log();
+            let not_installed = rig.run_lattice(
+                &world,
+                &["daemon", subcmd],
+                budget.cap_timeout(spec.step_timeout()),
+            )?;
+            evidence.record_command(
+                format!("未安装 unit 时执行 daemon {subcmd}"),
+                &not_installed,
+            );
+            assert_exit_code(&not_installed, 1).map_err(|e| format!("{subcmd}: {e}"))?;
+            assert_stderr_contains(&not_installed, "lattice daemon install")
+                .map_err(|e| format!("{subcmd}: {e}"))?;
+        }
+        world.unset_env("FAKE_SYSTEMCTL_UNIT_NOT_FOUND");
 
         // 顺带核验无后台时人类可读的 `lattice daemon status` 输出中文错误且无英文 `error:` 前缀。
         budget.check(&spec.name);
@@ -735,28 +902,34 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             ));
         }
 
-        // 3. `enable --now` 失败且状态根上有运行中后台：报出对端 pid，提示先 `lattice daemon stop` 再 `systemctl --user start lattice`。
+        // 3. `install` 的 `restart` 与 `daemon start` 失败且状态根上有运行中后台：报出对端 pid，提示先 `lattice daemon stop` 再 `lattice daemon start`。
         budget.check(&spec.name);
         world
             .start_daemon()
             .map_err(|e| format!("显式启动场景后台失败：{e}"))?;
         let daemon_pid = world.daemon_pgid().ok_or("未取得场景后台进程号")?;
-
-        rig.clear_systemctl_log();
-        let enable_with_daemon = rig.run_lattice(
-            &world,
-            &["daemon", "install"],
-            budget.cap_timeout(spec.step_timeout()),
-        )?;
-        evidence.record_command("有后台运行时 enable --now 失败", &enable_with_daemon);
-        assert_exit_code(&enable_with_daemon, 1).map_err(|e| e.to_string())?;
         let expected_pid_fragment = format!("对端进程号：{daemon_pid}");
-        assert_stderr_contains(&enable_with_daemon, &expected_pid_fragment)
-            .map_err(|e| e.to_string())?;
-        assert_stderr_contains(&enable_with_daemon, "lattice daemon stop")
-            .map_err(|e| e.to_string())?;
-        assert_stderr_contains(&enable_with_daemon, "systemctl --user start lattice")
-            .map_err(|e| e.to_string())?;
+
+        for (label, args) in [
+            (
+                "有后台运行时 install 的 restart 失败",
+                &["daemon", "install"][..],
+            ),
+            ("有后台运行时 daemon start 失败", &["daemon", "start"][..]),
+        ] {
+            rig.clear_systemctl_log();
+            let conflict_out =
+                rig.run_lattice(&world, args, budget.cap_timeout(spec.step_timeout()))?;
+            evidence.record_command(label, &conflict_out);
+            assert_exit_code(&conflict_out, 1).map_err(|e| format!("{label}: {e}"))?;
+            assert_stderr_contains(&conflict_out, &expected_pid_fragment)
+                .map_err(|e| format!("{label}: {e}"))?;
+            assert_stderr_contains(&conflict_out, "lattice daemon stop")
+                .map_err(|e| format!("{label}: {e}"))?;
+            assert_stderr_contains(&conflict_out, "lattice daemon start")
+                .map_err(|e| format!("{label}: {e}"))?;
+        }
+        world.unset_env("FAKE_SYSTEMCTL_FAIL_START");
 
         // 核验有后台时 `lattice daemon status` 与 `lattice daemon stop` 的人类可读中文输出，以及 `--json` 形状不变。
         budget.check(&spec.name);
@@ -864,12 +1037,307 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
         let self_pid_fragment = format!("对端进程号：{}", std::process::id());
         assert_stderr_contains(&enable_incompat, "版本较旧且不兼容").map_err(|e| e.to_string())?;
         assert_stderr_contains(&enable_incompat, &self_pid_fragment).map_err(|e| e.to_string())?;
-        assert_stderr_contains(&enable_incompat, "systemctl --user start lattice")
+        assert_stderr_contains(&enable_incompat, "lattice daemon start")
             .map_err(|e| e.to_string())?;
         let incompat_stderr = String::from_utf8_lossy(&enable_incompat.stderr);
-        if incompat_stderr.contains("status lattice") || incompat_stderr.contains("没有后台") {
+        if incompat_stderr.contains("status lattice")
+            || incompat_stderr.contains("没有后台")
+            || incompat_stderr.contains("旧二进制")
+        {
+            return Err(format!("版本不兼容后台诊断不符合预期：{incompat_stderr}"));
+        }
+
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
+}
+
+#[test]
+fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
+    let spec = ScenarioSpec::direct_local("daemon-service-verify-after-success");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
+    let budget = world.budget(&spec);
+    let mut evidence = ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new()).unwrap();
+
+    let result = (|| -> Result<(), String> {
+        let rig = InstallRig::setup(&world, "incompatible-after-success", true)?;
+
+        // 1. 同协议后台应答时，成功核对不改变 `restart` 的既有成功文案与退出码。
+        budget.check(&spec.name);
+        world
+            .start_daemon()
+            .map_err(|e| format!("显式启动场景后台失败：{e}"))?;
+        let restart_running = rig.run_lattice(
+            &world,
+            &["daemon", "restart"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("兼容后台运行时执行 daemon restart", &restart_running);
+        assert_exit_code(&restart_running, 0).map_err(|e| e.to_string())?;
+        assert_stdout_contains_all(&restart_running, &["已重启服务 lattice.service。"])
+            .map_err(|e| e.to_string())?;
+
+        let stop = rig.run_lattice(
+            &world,
+            &["daemon", "stop"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("停止兼容后台", &stop);
+        assert_exit_code(&stop, 0).map_err(|e| e.to_string())?;
+        world
+            .daemon_departed()
+            .map_err(|errs| format!("后台退场核验失败：{errs:?}"))?;
+
+        // 2. 同一默认状态根上没有后台：systemctl 成功后三条入口都不能视为成功。
+        let default_state_root = world
+            .session_store_dir()
+            .parent()
+            .expect("默认状态根目录")
+            .display()
+            .to_string();
+
+        budget.check(&spec.name);
+        rig.clear_systemctl_log();
+        let restart_missing = rig.run_lattice(
+            &world,
+            &["daemon", "restart"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("没有后台监听时执行 daemon restart", &restart_missing);
+        assert_exit_code(&restart_missing, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&restart_missing.stdout).contains("已重启服务 lattice.service。")
+        {
+            return Err("restart 连不上后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(
+            &restart_missing,
+            &format!(
+                "已重启服务 lattice.service，但本前端的状态根 {default_state_root} 上没有后台在监听"
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_missing, "systemctl --user cat lattice")
+            .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_missing, "lattice daemon install")
+            .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_missing, "systemctl --user status lattice")
+            .map_err(|e| e.to_string())?;
+        if rig.systemctl_calls() != ["--user|restart|lattice.service"] {
             return Err(format!(
-                "版本不兼容后台不应被报告为无后台：{incompat_stderr}"
+                "没有后台时 restart 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        budget.check(&spec.name);
+        rig.clear_systemctl_log();
+        let start_missing = rig.run_lattice(
+            &world,
+            &["daemon", "start"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("没有后台监听时执行 daemon start", &start_missing);
+        assert_exit_code(&start_missing, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&start_missing.stdout).contains("已启动服务 lattice.service。")
+        {
+            return Err("start 连不上后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(
+            &start_missing,
+            &format!(
+                "`systemctl --user start lattice.service` 执行成功，但本前端的状态根 {default_state_root} 上没有后台在监听"
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        if rig.systemctl_calls() != ["--user|start|lattice.service"] {
+            return Err(format!(
+                "没有后台时 start 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        budget.check(&spec.name);
+        rig.clear_systemctl_log();
+        let install_missing = rig.run_lattice(
+            &world,
+            &["daemon", "install"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("没有后台监听时执行 daemon install", &install_missing);
+        assert_exit_code(&install_missing, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&install_missing.stdout).contains("已启用并启动服务") {
+            return Err("install 连不上后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(&install_missing, &rig.unit_path().display().to_string())
+            .map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &install_missing,
+            &format!(
+                "并已重启服务 lattice.service，但刚写入 unit 的状态根 {default_state_root} 上没有后台在监听"
+            ),
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_missing, "systemctl --user status lattice")
+            .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_missing, "systemctl --user cat lattice")
+            .map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&install_missing.stderr).contains("lattice daemon install") {
+            return Err("install 连不上后台时不应提示再次 install".into());
+        }
+        let expected_missing_install_calls = [
+            "--user|daemon-reload".to_string(),
+            format!("--user|enable|{}", rig.unit_path().display()),
+            "--user|restart|lattice.service".to_string(),
+        ];
+        if rig.systemctl_calls() != expected_missing_install_calls {
+            return Err(format!(
+                "没有后台时 install 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        // 3. 换到短路径状态根，用每次只服务一条连接的旧协议对端模拟 systemctl 成功后仍留在旧后台。
+        budget.check(&spec.name);
+        let short_state = tempfile::Builder::new()
+            .prefix("ltc-after-success-")
+            .tempdir_in("/tmp")
+            .map_err(|e| format!("创建短路径状态根失败：{e}"))?;
+        let lattice_root = short_state.path().join("lattice");
+        let local_dir = lattice_root.join("local");
+        fs::create_dir_all(&local_dir).map_err(|e| e.to_string())?;
+        fs::set_permissions(&lattice_root, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| e.to_string())?;
+        world.set_env("XDG_STATE_HOME", short_state.path().display().to_string());
+
+        let sock_path = local_dir.join("api.sock");
+        let fixture_timeout = budget.cap_timeout(Duration::from_secs(10));
+        let peer_pid_fragment = format!("对端进程号：{}", std::process::id());
+        let peer_exe = std::env::current_exe()
+            .map_err(|e| format!("读取测试进程可执行文件路径失败：{e}"))?
+            .display()
+            .to_string();
+        let sibling_daemon = fs::canonicalize(&rig.daemon_bin)
+            .map_err(|e| format!("规范化同目录 lattice-daemon 路径失败：{e}"))?
+            .display()
+            .to_string();
+        let unit_path = rig.unit_path().display().to_string();
+
+        let bind_peer_listener = || -> Result<UnixListener, String> {
+            let _ = fs::remove_file(&sock_path);
+            let listener = UnixListener::bind(&sock_path).map_err(|e| e.to_string())?;
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600))
+                .map_err(|e| e.to_string())?;
+            Ok(listener)
+        };
+
+        // restart：服务动作已执行，但应答进程仍是旧后台；指出实际运行文件并引导 install。
+        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        rig.clear_systemctl_log();
+        let restart_out = rig.run_lattice(
+            &world,
+            &["daemon", "restart"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("旧协议后台应答时执行 daemon restart", &restart_out);
+        peer_fixture.finish_and_verify()?;
+        assert_exit_code(&restart_out, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&restart_out.stdout).contains("已重启服务 lattice.service。")
+        {
+            return Err("restart 发现旧后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(
+            &restart_out,
+            "已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, &peer_pid_fragment).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, &peer_exe).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, &sibling_daemon).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&restart_out, "lattice daemon install")
+            .map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&restart_out.stderr).contains("切换至新后台") {
+            return Err(format!(
+                "restart 成功后的旧后台诊断不应沿用切换提示：{}",
+                String::from_utf8_lossy(&restart_out.stderr)
+            ));
+        }
+        if rig.systemctl_calls() != ["--user|restart|lattice.service"] {
+            return Err(format!(
+                "restart 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        // install：三条 systemctl 均已成功，但运行文件不是刚写入 unit 的同目录后台；引导核对 unit 与 drop-in。
+        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        rig.clear_systemctl_log();
+        let install_out = rig.run_lattice(
+            &world,
+            &["daemon", "install"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("旧协议后台应答时执行 daemon install", &install_out);
+        peer_fixture.finish_and_verify()?;
+        assert_exit_code(&install_out, 1).map_err(|e| e.to_string())?;
+        if String::from_utf8_lossy(&install_out.stdout).contains("已启用并启动服务") {
+            return Err("install 发现旧后台时不应打印成功文案".into());
+        }
+        assert_stderr_contains(&install_out, &unit_path).map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &install_out,
+            "并已重启服务 lattice.service，但运行中的后台仍是较旧的不兼容版本",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, &peer_pid_fragment).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, &peer_exe).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, "刚写入 unit 的").map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, &sibling_daemon).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&install_out, "systemctl --user cat lattice")
+            .map_err(|e| e.to_string())?;
+        let install_stderr = String::from_utf8_lossy(&install_out.stderr);
+        if install_stderr.contains("切换至新后台")
+            || install_stderr.contains("lattice daemon install")
+        {
+            return Err(format!(
+                "install 成功后的旧后台诊断不符合预期：{install_stderr}"
+            ));
+        }
+        let expected_install_calls = [
+            "--user|daemon-reload".to_string(),
+            format!("--user|enable|{unit_path}"),
+            "--user|restart|lattice.service".to_string(),
+        ];
+        if rig.systemctl_calls() != expected_install_calls {
+            return Err(format!(
+                "install 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
+            ));
+        }
+
+        // start：可能是对已在运行旧服务的空操作；沿用普通不兼容诊断并引导 restart。
+        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        rig.clear_systemctl_log();
+        let start_out = rig.run_lattice(
+            &world,
+            &["daemon", "start"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("旧协议后台应答时执行 daemon start", &start_out);
+        peer_fixture.finish_and_verify()?;
+        assert_exit_code(&start_out, 1).map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &start_out,
+            "`systemctl --user start lattice.service` 执行成功，但运行中的后台版本较旧且不兼容",
+        )
+        .map_err(|e| e.to_string())?;
+        assert_stderr_contains(&start_out, &peer_pid_fragment).map_err(|e| e.to_string())?;
+        assert_stderr_contains(&start_out, "lattice daemon restart").map_err(|e| e.to_string())?;
+        if rig.systemctl_calls() != ["--user|start|lattice.service"] {
+            return Err(format!(
+                "start 的 systemctl 调用不符合预期：{:?}",
+                rig.systemctl_calls()
             ));
         }
 
@@ -927,7 +1395,16 @@ fn fast_daemon_install_distinguishes_exec_path_and_arg_escaping_and_rejects_inva
             "可执行路径含 $ 与 %（无空格）时执行 lattice daemon install",
             &out_unquoted,
         );
-        assert_exit_code(&out_unquoted, 0).map_err(|e| e.to_string())?;
+        assert_exit_code(&out_unquoted, 1).map_err(|e| e.to_string())?;
+        // 假 systemctl 不会真正启动 unit，因此刚写入 unit 的状态根上没有后台在监听。
+        assert_stderr_contains(
+            &out_unquoted,
+            &format!(
+                "刚写入 unit 的状态根 {} 上没有后台在监听",
+                plain_state.display()
+            ),
+        )
+        .map_err(|e| e.to_string())?;
         let expected_unquoted_unit = format!(
             "[Unit]\n\
 StartLimitIntervalSec=120\n\
@@ -977,7 +1454,15 @@ WantedBy=default.target\n"
             "可执行路径含空格、$ 与 % 时执行 lattice daemon install",
             &out_space,
         );
-        assert_exit_code(&out_space, 0).map_err(|e| e.to_string())?;
+        assert_exit_code(&out_space, 1).map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &out_space,
+            &format!(
+                "刚写入 unit 的状态根 {} 上没有后台在监听",
+                plain_state.display()
+            ),
+        )
+        .map_err(|e| e.to_string())?;
         let expected_space_unit = format!(
             "[Unit]\n\
 StartLimitIntervalSec=120\n\
@@ -1067,7 +1552,15 @@ WantedBy=default.target\n"
             "状态根含特殊字符（普通可执行路径）时执行 lattice daemon install",
             &state_arg_out,
         );
-        assert_exit_code(&state_arg_out, 0).map_err(|e| e.to_string())?;
+        assert_exit_code(&state_arg_out, 1).map_err(|e| e.to_string())?;
+        assert_stderr_contains(
+            &state_arg_out,
+            &format!(
+                "刚写入 unit 的状态根 {} 上没有后台在监听",
+                special_state_root.display()
+            ),
+        )
+        .map_err(|e| e.to_string())?;
         let expected_state_arg_unit = format!(
             "[Unit]\n\
 StartLimitIntervalSec=120\n\

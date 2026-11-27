@@ -155,12 +155,13 @@ LATTICE_BIN 或 LATTICE_DAEMON_BIN 未设置、路径不存在、不能规范化
 | 入口 | 职责 |
 | --- | --- |
 | `.github/workflows/ci.yml` | 普通 PR 与 main push 验证：先检查文档链接，再执行两轮验证（含测试 feature 的 clippy）与依赖边界检查；只改 Markdown 的 PR 只运行文档链接检查 |
-| `.github/workflows/full-gate.yml` | 手动或定时的完整验证：执行两轮验证（含测试 feature 的 clippy）与 alpha release rollout |
+| `.github/workflows/full-gate.yml` | 手动或定时的完整验证：执行两轮验证（含测试 feature 的 clippy）与 alpha release rollout；rollout 通过后由 `publish-nightly` 按下文条件更新滚动预发布 `nightly` |
 | `cargo xtask docs-check` | 检查 Git 跟踪的 Markdown 文件中相对链接的目标文件与标题锚点 |
 | `cargo xtask ci` | 本地两轮验证编排（第二轮覆盖 `target/debug/lattice-daemon`），控制编译并发与每个 crate 的测试超时 |
 | `cargo xtask rollout --channel alpha` | 对锁定的无测试 feature release 构建记录产物身份、依赖边界与生产形态验证步骤 |
 
-- rollout 在全部必需步骤实际通过时通过：失败、阻塞或跳过都算未通过，测试步骤要有非零的通过数。步骤结果逐步保存，未执行的步骤保持阻塞，失败证据与产物身份关联到对应构建。发布由维护者执行，见[项目宪章](../governance/charter.md)。
+- rollout 在全部必需步骤实际通过时通过：失败、阻塞或跳过都算未通过，测试步骤要有非零的通过数。步骤结果逐步保存，未执行的步骤保持阻塞，失败证据与产物身份关联到对应构建。正式发布由维护者执行，见[项目宪章](../governance/charter.md)。
+- 滚动预发布 `nightly` 只在 main 的定时运行或勾选 `publish_nightly` 的手动运行中更新：`publish-nightly` 核对 rollout 记录的 `verdict` 为 `pass`、`commit_sha` 为本次运行的提交、两个二进制的 SHA-256 与记录一致，再把它们打包为 `lattice-nightly-x86_64-unknown-linux-gnu.tar.gz`，连同 `SHA256SUMS` 与 `rollout-record.json` 替换旧的 `nightly`；`nightly` 已是同一提交的完整发布时跳过。同一分支上的 `full-gate` 依次运行，较早的提交不会覆盖较新的 `nightly`。只有这个 job 持有 `contents: write`，它不检出也不运行仓库代码。
 - `.githooks/pre-commit` 只阻止误暂存被忽略的文件，测试由上表的入口运行。
 
 ## 验证

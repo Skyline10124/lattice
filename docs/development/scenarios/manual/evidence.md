@@ -23,3 +23,4 @@ jq '{schema_version, commit_sha, artifacts, verdict, rejection, steps: [.steps[]
 | `crates/lattice-system-harness/target/harness-failures/<scenario>/` | 单跑 harness 失败 bundle：依次查主断言、终止与输出完整性、清理或扫描错误 |
 | `target/harness-failures/<scenario>/`、`target/rollout/harness-failures/<scenario>/` | 本地 CI 或显式目录失败 bundle（远程 `harness-failures-ubuntu-latest`、`harness-failures-full-gate`），及 rollout 失败 bundle（记入 `failure_artifacts`） |
 | `target/rollout/rollout-alpha-<yyyymmddTHHMMSSZ>.json`、`alpha-latest.json` | 主记录（`--out` 可改）与最近记录（远程 `rollout-alpha-record`，`schema_version: 2`）；核对 `commit_sha`、`artifacts`（`lattice` 与 `lattice-daemon` 各自的名称、路径、大小与 SHA-256）、`probes`、`steps`、`failure_artifacts`、`verdict`、`rejection` |
+| 远程 `nightly-binaries`（保留 7 天）、Release `nightly` 的附件 | rollout 通过时上传的两个 release 二进制与 `alpha-latest.json`；Release 附件为打包后的 `lattice-nightly-x86_64-unknown-linux-gnu.tar.gz`、`SHA256SUMS` 与 `rollout-record.json`，按记录中的 `commit_sha` 与 `artifacts` 追溯来源 |

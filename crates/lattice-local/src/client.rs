@@ -3,7 +3,7 @@
 
 //! 本地 IPC 客户端句柄与观察流帧读取。
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use lattice_ipc::{
     Acceptance, AuthKey, AuthRemoval, AuthStatus, ConfigureReply, ConfigureRequest, ContextOpReply,
@@ -21,6 +21,51 @@ use crate::{endpoint, login::LocalAuthLogin, operation::ConfigureOutcome};
 
 /// stop 回执后等待旧后台释放实例锁的上限；覆盖回执后收尾连接时的请求读取与写出超时。
 const STOP_RELEASE_TIMEOUT: Duration = Duration::from_secs(30);
+/// 跨版本信号停机时等待旧后台排空并释放状态根的上限；与默认 `TimeoutStopSec`（60s + 30s）对齐。
+const SIGNAL_STOP_RELEASE_TIMEOUT: Duration = Duration::from_secs(90);
+
+/// 停止本地后台的结果：同版本返回完整状态，更旧版本返回控制回执或信号停机结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StopOutcome {
+    /// 与当前协议版本一致的后台经 IPC `stop` 完成排空并释放状态根。
+    Status(DaemonStatus),
+    /// 协议版本较旧的后台经版本无关控制帧完成排空并释放状态根。
+    CrossVersionControl {
+        epoch: String,
+        owners: usize,
+        unconfirmed_operations: usize,
+    },
+    /// 不支持控制帧的历史旧后台经 `pidfd` 发送 `SIGTERM` 后已释放状态根，无法读取排空计数。
+    CrossVersionSignal { peer_pid: i32 },
+}
+
+impl StopOutcome {
+    /// 同版本停机时取出完整的 `DaemonStatus`；跨版本停机返回 `None`。
+    pub fn into_status(self) -> Option<DaemonStatus> {
+        match self {
+            Self::Status(status) => Some(status),
+            Self::CrossVersionControl { .. } | Self::CrossVersionSignal { .. } => None,
+        }
+    }
+}
+
+/// 单次状态探测的结果，供 `daemon` 子命令在不解析错误文案的前提下区分更旧协议的后台。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StatusProbe {
+    /// 协议版本一致的后台已应答。
+    Running {
+        status: DaemonStatus,
+        peer_pid: Option<i32>,
+    },
+    /// 对端在同一连接上回写了更旧的协议魔数。
+    OlderBackend {
+        peer_pid: Option<i32>,
+        /// 发请求前读到的对端可执行文件路径（`/proc/<pid>/exe`），仅用于诊断展示。
+        peer_executable: Option<PathBuf>,
+        /// 与普通请求相同的版本不兼容错误。
+        error: LocalError,
+    },
+}
 
 /// 每个操作一个连接；持续读取任务拥有分帧进度，UI 的 next 可取消。
 #[derive(Clone)]
@@ -57,23 +102,34 @@ impl LocalClient {
     }
 
     pub async fn status(&self) -> Result<DaemonStatus> {
-        let (status, _) = self.status_with_peer_pid(Duration::from_secs(5)).await?;
-        Ok(status)
+        match self.probe_status(Duration::from_secs(5)).await? {
+            StatusProbe::Running { status, .. } => Ok(status),
+            StatusProbe::OlderBackend { error, .. } => Err(error),
+        }
     }
 
-    /// 在给定截止时间内查询一次后台状态，并从同一条已连接套接字经 `SO_PEERCRED` 读取对端进程号。
-    pub async fn status_with_peer_pid(
-        &self,
-        timeout: Duration,
-    ) -> Result<(DaemonStatus, Option<i32>)> {
+    /// 在给定截止时间内探测一次后台状态，区分同协议应答与明确回写更旧协议魔数的后台。
+    pub async fn probe_status(&self, timeout: Duration) -> Result<StatusProbe> {
         tokio::time::timeout(timeout, async {
             let mut stream = endpoint::connect(self.layout.clone()).await?;
             let peer_pid = ipc::peer_pid(&stream);
-            ipc::write_request(&mut stream, &Request::Status).await?;
-            match ipc::ResponseReader::default().read(&mut stream).await? {
-                Response::Status(status) => Ok((status, peer_pid)),
-                Response::Error(error) => Err(error),
-                _ => Err(protocol()),
+            // 必须在发请求前读取对端可执行文件路径：对端随后在同一连接上回写魔数，
+            // 证明读取时这个进程号仍属于监听进程；应答后再读，进程可能已退出、进程号被复用。
+            let peer_executable =
+                peer_pid.and_then(|pid| std::fs::read_link(format!("/proc/{pid}/exe")).ok());
+            match ipc::send_and_read_first_or_older::<_, Response>(&mut stream, &Request::Status)
+                .await?
+            {
+                ipc::FirstResponse::Reply(Response::Status(status)) => {
+                    Ok(StatusProbe::Running { status, peer_pid })
+                }
+                ipc::FirstResponse::Reply(Response::Error(error)) => Err(error),
+                ipc::FirstResponse::Reply(_) => Err(protocol()),
+                ipc::FirstResponse::OlderBackend { error, .. } => Ok(StatusProbe::OlderBackend {
+                    peer_pid,
+                    peer_executable,
+                    error,
+                }),
             }
         })
         .await
@@ -81,40 +137,150 @@ impl LocalClient {
     }
 
     /// 回执之后再等 socket 撤下、`owner.lock` 可取得才返回，调用方随即可在同一 STATE_ROOT 启动新后台。
-    /// 不等待后台进程退出。超过 `STOP_RELEASE_TIMEOUT` 仍未放开时报 Stopping，需用 status 复核。
-    pub async fn stop(&self) -> Result<DaemonStatus> {
-        self.stop_within(STOP_RELEASE_TIMEOUT).await
+    /// 对更旧协议版本的后台，依次尝试版本无关控制帧与经 `pidfd` 发送 `SIGTERM` 兜底；对更新版本仍拒绝。
+    /// 不等待后台进程退出。超时仍未放开时报 Stopping。
+    pub async fn stop(&self) -> Result<StopOutcome> {
+        self.stop_with_timeouts(STOP_RELEASE_TIMEOUT, SIGNAL_STOP_RELEASE_TIMEOUT)
+            .await
     }
 
-    /// 等待上限由调用方给出；正式入口固定用 `STOP_RELEASE_TIMEOUT`，测试以短上限核验超时报错。
+    /// 等待上限由调用方给出；正式入口固定用 `STOP_RELEASE_TIMEOUT` / `SIGNAL_STOP_RELEASE_TIMEOUT`，测试以短上限核验超时报错。
     #[cfg(any(test, feature = "test-utils"))]
-    pub async fn stop_within(&self, timeout: Duration) -> Result<DaemonStatus> {
-        self.stop_within_inner(timeout).await
+    pub async fn stop_within(&self, timeout: Duration) -> Result<StopOutcome> {
+        self.stop_with_timeouts(timeout, timeout).await
     }
 
-    #[cfg(not(any(test, feature = "test-utils")))]
-    async fn stop_within(&self, timeout: Duration) -> Result<DaemonStatus> {
-        self.stop_within_inner(timeout).await
+    async fn stop_with_timeouts(
+        &self,
+        release_timeout: Duration,
+        signal_timeout: Duration,
+    ) -> Result<StopOutcome> {
+        let (mut stream, first_socket_id) =
+            endpoint::connect_with_identity(self.layout.clone()).await?;
+        let first_peer_pid = ipc::peer_pid(&stream);
+        // 必须在发请求前捕获对端 pidfd：只有当对端随后在同一连接上主动回写更旧协议魔数时，
+        // 才证明其在打开句柄时仍存活且 PID 未复用，届时才允许用于实例身份核验与 SIGTERM 兜底。
+        let captured_peer = ipc::capture_peer_process(&stream);
+        let first =
+            ipc::send_and_read_first_or_older::<_, Response>(&mut stream, &Request::Stop).await?;
+        // 先放开连接，后台排空连接时不必等本端。
+        drop(stream);
+        match first {
+            ipc::FirstResponse::Reply(Response::Status(status)) => {
+                drop(captured_peer);
+                endpoint::Departure::new(self.layout.clone())
+                    .wait(release_timeout)
+                    .await?;
+                Ok(StopOutcome::Status(status))
+            }
+            ipc::FirstResponse::Reply(Response::Error(error)) => Err(error),
+            ipc::FirstResponse::Reply(_) => Err(protocol()),
+            ipc::FirstResponse::OlderBackend {
+                peer_version,
+                error,
+            } => {
+                self.stop_older_backend(
+                    first_socket_id,
+                    first_peer_pid,
+                    peer_version,
+                    captured_peer,
+                    error,
+                    release_timeout,
+                    signal_timeout,
+                )
+                .await
+            }
+        }
     }
 
-    async fn stop_within_inner(&self, timeout: Duration) -> Result<DaemonStatus> {
-        let (status, departure) = self.request_stop().await?;
-        departure.wait(timeout).await?;
-        Ok(status)
+    #[allow(clippy::too_many_arguments)]
+    async fn stop_older_backend(
+        &self,
+        first_socket_id: (u64, u64),
+        first_peer_pid: Option<i32>,
+        peer_version: u8,
+        captured_peer: std::io::Result<ipc::PeerProcess>,
+        incompatible_error: LocalError,
+        release_timeout: Duration,
+        signal_timeout: Duration,
+    ) -> Result<StopOutcome> {
+        // 若首连捕获的旧进程已经退出，严禁向任何新替换的后台发送控制停机帧或信号。
+        if let Ok(ref peer) = captured_peer
+            && peer.has_exited().unwrap_or(true)
+        {
+            return Err(peer_replaced());
+        }
+
+        // 1. 优先尝试版本无关控制停机帧：发送前先核对 socket `(dev, ino)`、对端 PID 与旧 pidfd 仍存活，
+        //    同时在线上携带首连确认的 `peer_version`，确保后台在窗口内被替换时绝不误停新实例。
+        let (mut control_stream, second_socket_id) =
+            endpoint::connect_with_identity(self.layout.clone()).await?;
+        let second_peer_pid = ipc::peer_pid(&control_stream);
+        let peer_exited = captured_peer
+            .as_ref()
+            .ok()
+            .is_some_and(|peer| peer.has_exited().unwrap_or(true));
+        if second_socket_id != first_socket_id
+            || first_peer_pid.is_none()
+            || second_peer_pid != first_peer_pid
+            || peer_exited
+        {
+            drop(control_stream);
+            return Err(peer_replaced());
+        }
+
+        let control_reply = ipc::exchange_control_stop(&mut control_stream, peer_version).await?;
+        drop(control_stream);
+        match control_reply {
+            ipc::ControlStopExchange::Stopped(status) => {
+                drop(captured_peer);
+                endpoint::Departure::new(self.layout.clone())
+                    .wait(release_timeout)
+                    .await?;
+                return Ok(StopOutcome::CrossVersionControl {
+                    epoch: status.epoch,
+                    owners: status.owners,
+                    unconfirmed_operations: status.unconfirmed_operations,
+                });
+            }
+            ipc::ControlStopExchange::PeerChanged { .. } => {
+                return Err(peer_replaced());
+            }
+            ipc::ControlStopExchange::Unsupported => {}
+        }
+
+        // 2. 对不支持控制帧的历史旧后台，再次确认旧进程尚未退出后，经首连捕获的 pidfd 发送 SIGTERM。
+        let Ok(peer) = captured_peer else {
+            return Err(incompatible_error);
+        };
+        if peer.has_exited().unwrap_or(true) {
+            return Err(peer_replaced());
+        }
+        let peer_pid = peer.pid();
+        let signaled = peer.terminate().map_err(|io_err| {
+            LocalError::new(
+                LocalErrorKind::Transport,
+                &format!(
+                    "向旧版本后台（对端进程号：{peer_pid}）发送停机信号失败：{io_err}；请执行 `systemctl --user stop lattice` 或 `kill {peer_pid}`"
+                ),
+            )
+        })?;
+        drop(peer);
+        if !signaled {
+            return Err(peer_replaced());
+        }
+        let timeout_message = format!(
+            "已向旧版本后台（对端进程号：{peer_pid}）发送停机信号，但未在期限内释放状态根；请稍后核对进程状态或查看 `systemctl --user status lattice`"
+        );
+        endpoint::Departure::new(self.layout.clone())
+            .wait_with_timeout_message(signal_timeout, &timeout_message)
+            .await?;
+        Ok(StopOutcome::CrossVersionSignal { peer_pid })
     }
 
-    /// 只取得 stop 回执：后台已排空，但 listener、socket 与实例锁可能尚未放开。
+    /// 只取得同版本 stop 回执：后台已排空，但 listener、socket 与实例锁可能尚未放开。
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn request_stop(&self) -> Result<(DaemonStatus, endpoint::Departure)> {
-        self.request_stop_inner().await
-    }
-
-    #[cfg(not(any(test, feature = "test-utils")))]
-    async fn request_stop(&self) -> Result<(DaemonStatus, endpoint::Departure)> {
-        self.request_stop_inner().await
-    }
-
-    async fn request_stop_inner(&self) -> Result<(DaemonStatus, endpoint::Departure)> {
         let mut stream = endpoint::connect(self.layout.clone()).await?;
         ipc::write_request(&mut stream, &Request::Stop).await?;
         let response = ipc::ResponseReader::default().read(&mut stream).await?;
@@ -568,6 +734,13 @@ pub(crate) fn protocol() -> LocalError {
     LocalError::new(LocalErrorKind::Protocol, "unexpected local response")
 }
 
+fn peer_replaced() -> LocalError {
+    LocalError::new(
+        LocalErrorKind::Transport,
+        "跨版本停机期间检测到后台实例已变更；未停止新后台，请执行 `lattice daemon status` 复核后再决定是否重试",
+    )
+}
+
 pub(crate) enum SubmissionReply {
     Accepted(Acceptance),
     Rejected(LocalError),
@@ -578,7 +751,7 @@ pub(crate) enum SubmissionReply {
 mod tests {
     use super::*;
     use lattice_conversation::{ModelId, ProviderId};
-    use tokio::io::AsyncWriteExt;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn interrupted_view_poll_preserves_a_partial_frame() {
@@ -781,5 +954,617 @@ mod tests {
         assert_eq!(bad.message, "不支持的 IM 平台");
 
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn probe_status_distinguishes_older_backend_and_preserves_peer_executable() {
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        use tokio::net::UnixListener;
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let make_layout = |tag: &str| {
+            let temp = TempDir(PathBuf::from("/tmp").join(format!(
+                "ltc-probe-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+            fs::create_dir_all(&temp.0).unwrap();
+            let layout = StateLayout::in_state_root(&temp.0);
+            let local_dir = layout.lattice_root().join("local");
+            fs::create_dir_all(&local_dir).unwrap();
+            fs::set_permissions(layout.lattice_root(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let sock_path = local_dir.join("api.sock");
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+            (temp, layout, listener)
+        };
+
+        // 1. 更旧协议：单次探测识别为 OlderBackend，并带出发请求前读取的对端可执行文件路径；
+        //    `status()` 仍只向外暴露同一个不兼容错误。
+        let (_t1, layout, listener) = make_layout("older");
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut magic = [0_u8; 8];
+                stream.read_exact(&mut magic).await.unwrap();
+                let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+                stream.write_all(&older).await.unwrap();
+                stream.write_u32(4).await.unwrap();
+                stream.write_all(b"null").await.unwrap();
+            }
+        });
+        let client = LocalClient::new(layout);
+        let probe = client
+            .probe_status(Duration::from_secs(2))
+            .await
+            .expect("更旧协议后台应作为探测结果返回");
+        match probe {
+            StatusProbe::OlderBackend {
+                peer_pid,
+                peer_executable,
+                error,
+            } => {
+                assert_eq!(peer_pid, Some(std::process::id() as i32));
+                assert_eq!(
+                    peer_executable,
+                    Some(std::env::current_exe().expect("读取当前测试进程路径"))
+                );
+                assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
+                assert!(
+                    error.message.contains("版本较旧且不兼容"),
+                    "诊断：{}",
+                    error.message
+                );
+            }
+            other => panic!("更旧协议后台应识别为 OlderBackend，实际：{other:?}"),
+        }
+        let err = client
+            .status()
+            .await
+            .expect_err("status() 对旧后台必须仍返回错误");
+        assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
+        assert!(err.message.contains("版本较旧且不兼容"));
+        server.await.unwrap();
+
+        // 2. 更新协议：单次探测直接返回同一个拒绝错误。
+        let (_t2, layout, listener) = make_layout("newer");
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut magic = [0_u8; 8];
+            stream.read_exact(&mut magic).await.unwrap();
+            let newer = ipc::magic_for_version(ipc::PROTOCOL_VERSION + 1);
+            stream.write_all(&newer).await.unwrap();
+            stream.write_u32(4).await.unwrap();
+            stream.write_all(b"null").await.unwrap();
+        });
+        let err = LocalClient::new(layout)
+            .probe_status(Duration::from_secs(2))
+            .await
+            .expect_err("更新协议后台必须拒绝");
+        assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
+        assert!(err.message.contains("版本较新且不兼容"));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stop_uses_control_frame_for_older_backend_and_refuses_newer_or_silent_close() {
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        use tokio::net::UnixListener;
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let make_layout = |tag: &str| {
+            let temp = TempDir(PathBuf::from("/tmp").join(format!(
+                "ltc-stop-{tag}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+            fs::create_dir_all(&temp.0).unwrap();
+            let layout = StateLayout::in_state_root(&temp.0);
+            let local_dir = layout.lattice_root().join("local");
+            fs::create_dir_all(&local_dir).unwrap();
+            fs::set_permissions(layout.lattice_root(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let sock_path = local_dir.join("api.sock");
+            let listener = UnixListener::bind(&sock_path).unwrap();
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+            (temp, layout, sock_path, listener)
+        };
+
+        // 1. 更旧协议版本且支持 LTCTRL 控制帧：首连回写旧魔数，次连走 LTCTRL 完成排空并释放状态根。
+        let (_t1, layout, sock_path, listener) = make_layout("ctrl");
+        let server = tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let mut magic = [0_u8; 8];
+            s1.read_exact(&mut magic).await.unwrap();
+            let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+            s1.write_all(&older).await.unwrap();
+            s1.write_u32(4).await.unwrap();
+            s1.write_all(b"null").await.unwrap();
+            drop(s1);
+
+            let (mut s2, _) = listener.accept().await.unwrap();
+            match ipc::read_incoming_request::<Request>(&mut s2)
+                .await
+                .unwrap()
+            {
+                ipc::IncomingRequest::Control(ipc::ControlRequest::Stop {
+                    expected_protocol_version,
+                }) => {
+                    assert_eq!(expected_protocol_version, ipc::PROTOCOL_VERSION - 1);
+                    ipc::write_control(
+                        &mut s2,
+                        &ipc::ControlStopResponse::Stopped(ipc::ControlStopStatus {
+                            epoch: "legacy-42".into(),
+                            owners: 0,
+                            unconfirmed_operations: 1,
+                        }),
+                    )
+                    .await
+                    .unwrap();
+                }
+                _ => panic!("第二次连接必须发送版本无关控制停机帧"),
+            }
+            drop(s2);
+            drop(listener);
+            let _ = fs::remove_file(&sock_path);
+        });
+        let outcome = LocalClient::new(layout)
+            .stop_within(Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(
+            outcome,
+            StopOutcome::CrossVersionControl {
+                epoch: "legacy-42".into(),
+                owners: 0,
+                unconfirmed_operations: 1,
+            }
+        );
+        server.await.unwrap();
+
+        // 2. 更新协议版本：拒绝停止，不尝试控制帧，也不发信号。
+        let (_t2, layout, _sock_path, listener) = make_layout("newer");
+        let server = tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let mut magic = [0_u8; 8];
+            s1.read_exact(&mut magic).await.unwrap();
+            let newer = ipc::magic_for_version(ipc::PROTOCOL_VERSION + 1);
+            s1.write_all(&newer).await.unwrap();
+            s1.write_u32(4).await.unwrap();
+            s1.write_all(b"null").await.unwrap();
+        });
+        let err = LocalClient::new(layout)
+            .stop_within(Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
+        assert!(err.message.contains("版本较新且不兼容"));
+        server.await.unwrap();
+
+        // 3. 静默断连：报 Transport 提示，绝不进入信号兜底。
+        let (_t3, layout, _sock_path, listener) = make_layout("silent");
+        let server = tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let mut magic = [0_u8; 8];
+            s1.read_exact(&mut magic).await.unwrap();
+        });
+        let err = LocalClient::new(layout)
+            .stop_within(Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, LocalErrorKind::Transport);
+        assert!(err.message.contains("systemctl --user stop lattice"));
+        server.await.unwrap();
+
+        // 4. 首连确认更旧协议后、次连前后台在同一路径上被更新版本实例替换：
+        //    客户端必须在发控制帧前察觉 socket/进程变化并中止，绝不向新实例发送控制停机帧。
+        let (_t4, layout, sock_path, listener) = make_layout("replaced-newer");
+        let replacement_touched = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let touched_flag = std::sync::Arc::clone(&replacement_touched);
+        let server = tokio::spawn(async move {
+            let (mut s1, _) = listener.accept().await.unwrap();
+            let mut magic = [0_u8; 8];
+            s1.read_exact(&mut magic).await.unwrap();
+            drop(listener);
+            fs::remove_file(&sock_path).unwrap();
+            let replacement = UnixListener::bind(&sock_path).unwrap();
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+            // 替换就绪后再向首连回写旧魔数，确保次连必然落在新监听套接字上。
+            let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+            s1.write_all(&older).await.unwrap();
+            s1.write_u32(4).await.unwrap();
+            s1.write_all(b"null").await.unwrap();
+            drop(s1);
+
+            if let Ok(Ok((mut s2, _))) =
+                tokio::time::timeout(Duration::from_millis(200), replacement.accept()).await
+            {
+                let mut probe = [0_u8; 1];
+                if let Ok(Ok(n)) =
+                    tokio::time::timeout(Duration::from_millis(200), s2.read(&mut probe)).await
+                    && n > 0
+                {
+                    touched_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+                }
+            }
+        });
+        let err = LocalClient::new(layout)
+            .stop_within(Duration::from_secs(2))
+            .await
+            .unwrap_err();
+        assert_eq!(err.kind, LocalErrorKind::Transport);
+        assert!(
+            err.message.contains("后台实例已变更") && err.message.contains("未停止新后台"),
+            "替换竞态应明确中止且不误停新后台：{}",
+            err.message
+        );
+        server.await.unwrap();
+        assert!(
+            !replacement_touched.load(std::sync::atomic::Ordering::SeqCst),
+            "检测到后台替换后不得向新监听者发送控制停机字节"
+        );
+    }
+
+    #[tokio::test]
+    async fn stop_falls_back_to_pidfd_sigterm_for_legacy_older_child_process() {
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf, process::Command};
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+        let temp = TempDir(PathBuf::from("/tmp").join(format!(
+            "ltc-legacy-sig-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        )));
+        fs::create_dir_all(&temp.0).unwrap();
+        let layout = StateLayout::in_state_root(&temp.0);
+        let local_dir = layout.lattice_root().join("local");
+        fs::create_dir_all(&local_dir).unwrap();
+        fs::set_permissions(layout.lattice_root(), fs::Permissions::from_mode(0o700)).unwrap();
+        fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700)).unwrap();
+
+        let exe = std::env::current_exe().expect("获取测试二进制路径");
+        let mut child = Command::new(exe)
+            .arg("--exact")
+            .arg("client::tests::legacy_older_daemon_child_helper")
+            .arg("--ignored")
+            .arg("--nocapture")
+            .env("LATTICE_TEST_LEGACY_STATE_ROOT", &temp.0)
+            .spawn()
+            .expect("拉起模拟历史旧后台子进程");
+        let child_pid = child.id() as i32;
+
+        let sock_path = local_dir.join("api.sock");
+        let ready_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !sock_path.exists() {
+            assert!(
+                std::time::Instant::now() < ready_deadline,
+                "模拟历史旧后台未在 5 秒内发布 api.sock"
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        let outcome = LocalClient::new(layout.clone())
+            .stop_within(Duration::from_secs(5))
+            .await
+            .expect("跨版本信号兜底应成功停止历史旧后台并等待释放状态根");
+        assert_eq!(
+            outcome,
+            StopOutcome::CrossVersionSignal {
+                peer_pid: child_pid
+            }
+        );
+
+        let exit_status = tokio::task::spawn_blocking(move || child.wait())
+            .await
+            .unwrap()
+            .expect("等待模拟子进程退出");
+        assert!(
+            exit_status.success(),
+            "模拟历史旧后台应收到 SIGTERM 并正常退出 0，实际：{exit_status:?}"
+        );
+        assert!(!sock_path.exists(), "历史旧后台退出后 api.sock 应已撤下");
+    }
+
+    #[tokio::test]
+    #[ignore = "供 stop_falls_back_to_pidfd_sigterm_for_legacy_older_child_process 拉起真实独立进程"]
+    async fn legacy_older_daemon_child_helper() {
+        use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
+        use tokio::net::UnixListener;
+
+        let Some(root) = std::env::var_os("LATTICE_TEST_LEGACY_STATE_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let layout = StateLayout::in_state_root(&root);
+        let local_dir = layout.lattice_root().join("local");
+        let lock_path = local_dir.join("owner.lock");
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .unwrap();
+        rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive).unwrap();
+
+        let sock_path = local_dir.join("api.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+        let deadline = tokio::time::sleep(Duration::from_secs(10));
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                _ = sigterm.recv() => break,
+                _ = &mut deadline => panic!("等待 SIGTERM 超时"),
+                accepted = listener.accept() => {
+                    let (mut stream, _) = accepted.unwrap();
+                    let mut header = [0_u8; 8];
+                    let _ = stream.read_exact(&mut header).await;
+                    let _ = stream.write_all(&older).await;
+                    let _ = stream.write_u32(4).await;
+                    let _ = stream.write_all(b"null").await;
+                }
+            }
+        }
+        drop(listener);
+        let _ = fs::remove_file(&sock_path);
+        drop(lock);
+    }
+
+    /// 跨进程竞态回归：独立旧协议子进程在首连确认旧版本后被另一进程（当前进程）替换，
+    /// 分别覆盖“旧进程存活但 PID/socket 已变”与“旧进程已退出（pidfd 就绪）”两种窗口，
+    /// 确认 `stop` 立即中止、既不向新监听者发送控制帧字节，也不误发 SIGTERM。
+    #[tokio::test]
+    async fn stop_aborts_when_older_child_process_is_replaced_before_second_connect() {
+        use std::{
+            fs,
+            io::{BufRead, BufReader, Write},
+            os::unix::fs::PermissionsExt,
+            path::PathBuf,
+            process::{Command, Stdio},
+            sync::{
+                Arc,
+                atomic::{AtomicBool, Ordering},
+            },
+        };
+        use tokio::net::UnixListener;
+
+        struct TempDir(PathBuf);
+        impl Drop for TempDir {
+            fn drop(&mut self) {
+                let _ = fs::remove_dir_all(&self.0);
+            }
+        }
+
+        for exit_after_reply in [false, true] {
+            let temp = TempDir(PathBuf::from("/tmp").join(format!(
+                "ltc-replace-race-{exit_after_reply}-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            )));
+            fs::create_dir_all(&temp.0).unwrap();
+            let layout = StateLayout::in_state_root(&temp.0);
+            let local_dir = layout.lattice_root().join("local");
+            fs::create_dir_all(&local_dir).unwrap();
+            fs::set_permissions(layout.lattice_root(), fs::Permissions::from_mode(0o700)).unwrap();
+            fs::set_permissions(&local_dir, fs::Permissions::from_mode(0o700)).unwrap();
+            let sock_path = local_dir.join("api.sock");
+
+            let exe = std::env::current_exe().expect("获取测试二进制路径");
+            let mut child = Command::new(exe)
+                .arg("--exact")
+                .arg("client::tests::legacy_older_daemon_replace_race_helper")
+                .arg("--ignored")
+                .arg("--nocapture")
+                .env("LATTICE_TEST_REPLACE_STATE_ROOT", &temp.0)
+                .env(
+                    "LATTICE_TEST_REPLACE_EXIT_AFTER_REPLY",
+                    if exit_after_reply { "1" } else { "0" },
+                )
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .expect("拉起跨进程替换竞态子进程");
+
+            let mut stdin = child.stdin.take().unwrap();
+            let stdout = BufReader::new(child.stdout.take().unwrap());
+            let read_until_marker = |mut reader: BufReader<std::process::ChildStdout>,
+                                     expected: &'static str| {
+                let mut seen = Vec::new();
+                loop {
+                    let mut line = String::new();
+                    let n = reader.read_line(&mut line).unwrap();
+                    assert!(
+                        n > 0,
+                        "等待子进程标记 `{expected}` 时遇到 EOF；已读输出：{seen:?}"
+                    );
+                    if line.trim() == expected {
+                        return reader;
+                    }
+                    seen.push(line);
+                }
+            };
+
+            let stdout = tokio::task::spawn_blocking(move || read_until_marker(stdout, "BOUND"))
+                .await
+                .unwrap();
+
+            let stop_layout = layout.clone();
+            let stop_task = tokio::spawn(async move {
+                LocalClient::new(stop_layout)
+                    .stop_within(Duration::from_secs(3))
+                    .await
+            });
+
+            let _stdout =
+                tokio::task::spawn_blocking(move || read_until_marker(stdout, "UNLINKED"))
+                    .await
+                    .unwrap();
+
+            // 由另一进程（当前进程）在原路径重新绑定替换监听者，然后放行子进程回写旧魔数。
+            let replacement = UnixListener::bind(&sock_path).unwrap();
+            fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+            let touched = Arc::new(AtomicBool::new(false));
+            let touched_flag = Arc::clone(&touched);
+            let replacement_task = tokio::spawn(async move {
+                if let Ok(Ok((mut s2, _))) =
+                    tokio::time::timeout(Duration::from_millis(300), replacement.accept()).await
+                {
+                    let mut probe = [0_u8; 1];
+                    if let Ok(Ok(n)) =
+                        tokio::time::timeout(Duration::from_millis(200), s2.read(&mut probe)).await
+                        && n > 0
+                    {
+                        touched_flag.store(true, Ordering::SeqCst);
+                    }
+                }
+            });
+
+            stdin = tokio::task::spawn_blocking(move || {
+                writeln!(stdin, "REPLY").unwrap();
+                stdin.flush().unwrap();
+                stdin
+            })
+            .await
+            .unwrap();
+
+            let err = tokio::time::timeout(Duration::from_secs(5), stop_task)
+                .await
+                .expect("跨进程替换竞态 stop 不应超时")
+                .unwrap()
+                .expect_err("检测到跨进程后台替换后必须中止");
+            assert_eq!(err.kind, LocalErrorKind::Transport);
+            assert!(
+                err.message.contains("后台实例已变更") && err.message.contains("未停止新后台"),
+                "exit_after_reply={exit_after_reply} 错误文案不符合预期：{}",
+                err.message
+            );
+            replacement_task.await.unwrap();
+            assert!(
+                !touched.load(Ordering::SeqCst),
+                "exit_after_reply={exit_after_reply} 不得向替换监听者发送控制帧字节"
+            );
+
+            if !exit_after_reply {
+                // 确认旧子进程并未误收 SIGTERM，仍可按协议指令正常退出 0。
+                assert!(
+                    child.try_wait().unwrap().is_none(),
+                    "替换中止时不得继续向旧子进程发送 SIGTERM"
+                );
+                tokio::task::spawn_blocking(move || {
+                    let _ = writeln!(stdin, "EXIT");
+                    let _ = stdin.flush();
+                })
+                .await
+                .unwrap();
+            } else {
+                drop(stdin);
+            }
+            let status = tokio::task::spawn_blocking(move || child.wait())
+                .await
+                .unwrap()
+                .unwrap();
+            assert!(
+                status.success(),
+                "exit_after_reply={exit_after_reply} 子进程应正常退出 0，实际：{status:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "供 stop_aborts_when_older_child_process_is_replaced_before_second_connect 拉起真实独立进程"]
+    async fn legacy_older_daemon_replace_race_helper() {
+        use std::{
+            fs,
+            io::{BufRead, Write},
+            os::unix::fs::PermissionsExt,
+            path::PathBuf,
+        };
+        use tokio::net::UnixListener;
+
+        let Some(root) = std::env::var_os("LATTICE_TEST_REPLACE_STATE_ROOT") else {
+            return;
+        };
+        let exit_after_reply =
+            std::env::var("LATTICE_TEST_REPLACE_EXIT_AFTER_REPLY").as_deref() == Ok("1");
+        let root = PathBuf::from(root);
+        let layout = StateLayout::in_state_root(&root);
+        let sock_path = layout.lattice_root().join("local/api.sock");
+        let listener = UnixListener::bind(&sock_path).unwrap();
+        fs::set_permissions(&sock_path, fs::Permissions::from_mode(0o600)).unwrap();
+
+        {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "BOUND").unwrap();
+            out.flush().unwrap();
+        }
+
+        let (mut stream, _) = listener.accept().await.unwrap();
+        let mut header = [0_u8; 8];
+        stream.read_exact(&mut header).await.unwrap();
+        drop(listener);
+        fs::remove_file(&sock_path).unwrap();
+        {
+            let mut out = std::io::stdout().lock();
+            writeln!(out, "UNLINKED").unwrap();
+            out.flush().unwrap();
+        }
+
+        // 等父进程完成替换套接字绑定后再向首连回写旧魔数。
+        tokio::task::spawn_blocking(|| {
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line).unwrap();
+        })
+        .await
+        .unwrap();
+
+        let older = ipc::magic_for_version(ipc::PROTOCOL_VERSION - 1);
+        let _ = stream.write_all(&older).await;
+        let _ = stream.write_u32(4).await;
+        let _ = stream.write_all(b"null").await;
+        drop(stream);
+
+        if !exit_after_reply {
+            tokio::task::spawn_blocking(|| {
+                let mut line = String::new();
+                let _ = std::io::stdin().lock().read_line(&mut line);
+            })
+            .await
+            .unwrap();
+        }
     }
 }
