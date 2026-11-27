@@ -23,6 +23,98 @@ const EXPECTED_PUBLIC_COMMANDS: &[&str] =
     &["run", "daemon", "im", "auth", "models", "session", "tui"];
 const REMOVED_PUBLIC_COMMANDS: &[&str] = &["audit", "lancet"];
 
+fn validate_version_output(stdout: &[u8], program: &str, daemon: bool) -> Result<(), String> {
+    let text = std::str::from_utf8(stdout).map_err(|e| format!("版本输出不是 UTF-8：{e}"))?;
+    let body = text
+        .strip_prefix(&format!("{program} alpha-"))
+        .and_then(|body| body.strip_suffix("）\n"))
+        .ok_or_else(|| format!("版本输出前缀或结尾不符：{text}"))?;
+    let (date, fields) = body.split_once("（构建 ").ok_or("版本输出缺少构建身份")?;
+    if date != "未知"
+        && !(date.len() == 10
+            && date.bytes().enumerate().all(|(i, b)| {
+                if matches!(i, 4 | 7) {
+                    b == b'-'
+                } else {
+                    b.is_ascii_digit()
+                }
+            }))
+    {
+        return Err(format!("提交日期格式不符：{date}"));
+    }
+    let (identity, protocol) = fields
+        .split_once("，IPC 协议 ")
+        .ok_or("版本输出缺少 IPC 协议号")?;
+    if identity != "未知" {
+        let parts: Vec<_> = identity.split('+').collect();
+        if !(1..=2).contains(&parts.len())
+            || !parts.iter().all(|part| {
+                part.len() == 12 && part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+            })
+        {
+            return Err(format!("构建身份格式不符：{identity}"));
+        }
+    }
+    let protocol = if daemon {
+        let (protocol, format) = protocol
+            .split_once("，会话库格式 ")
+            .ok_or("后台版本缺少会话库格式")?;
+        if !format.bytes().all(|b| b.is_ascii_digit()) || format.parse::<u32>().is_err() {
+            return Err(format!("会话库格式号不是 u32：{format}"));
+        }
+        protocol
+    } else {
+        protocol
+    };
+    if !protocol.bytes().all(|b| b.is_ascii_digit()) || protocol.parse::<u8>().is_err() {
+        return Err(format!("IPC 协议号不是 u8：{protocol}"));
+    }
+    Ok(())
+}
+
+#[test]
+fn fast_version_flags_report_build_identity_and_supported_formats() {
+    let spec = ScenarioSpec::fast("lattice-version");
+    let world = ScenarioWorld::new(&spec.name).expect("创建场景世界失败");
+    let cli = driver();
+    let daemon = daemon_driver();
+    let mut evidence =
+        lattice_system_harness::ScenarioEvidence::new(&world, &spec.name, Vec::<String>::new())
+            .unwrap();
+    let result = (|| -> Result<(), String> {
+        for (program, is_daemon) in [("lattice", false), ("lattice-daemon", true)] {
+            let mut long_output = None;
+            for flag in ["--version", "-V"] {
+                let command = LatticeCommand {
+                    args: vec![flag.into()],
+                    timeout: Some(spec.step_timeout()),
+                };
+                let output = if is_daemon {
+                    daemon.run(&world, &command)
+                } else {
+                    cli.run(&world, &command)
+                }
+                .map_err(|e| e.to_string())?;
+                evidence.record_command(format!("查询 {program} {flag}"), &output);
+                assert_exit_code(&output, 0).map_err(|e| e.to_string())?;
+                if !output.stderr.is_empty() {
+                    return Err(format!("{program} {flag} 不应写标准错误"));
+                }
+                validate_version_output(&output.stdout, program, is_daemon)?;
+                if let Some(long) = &long_output {
+                    if long != &output.stdout {
+                        return Err(format!("{program} 的 --version 与 -V 输出应逐字节一致"));
+                    }
+                } else {
+                    long_output = Some(output.stdout);
+                }
+            }
+        }
+        Ok(())
+    })();
+    evidence.finish_report(result.err()).unwrap();
+}
+
 #[test]
 fn models_help_advertises_refresh_and_rejects_list_filters_on_refresh() {
     let spec = ScenarioSpec::fast("models-refresh-help");
@@ -608,11 +700,13 @@ fn fast_lattice_daemon_chinese_help_and_argument_validation() {
                     "--drain-timeout <时长>",
                     "-h, --help",
                     "显示帮助",
+                    "-V, --version",
+                    "显示版本信息",
                 ],
             )
             .map_err(|e| e.to_string())?;
             let stdout = String::from_utf8_lossy(&output.stdout);
-            for forbidden in ["Usage:", "Options:", "[default:"] {
+            for forbidden in ["Usage:", "Options:", "[default:", "Print version"] {
                 if stdout.contains(forbidden) {
                     return Err(format!("中文帮助输出不应包含 `{forbidden}`：{stdout}"));
                 }

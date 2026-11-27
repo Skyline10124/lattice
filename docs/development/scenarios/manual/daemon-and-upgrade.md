@@ -38,6 +38,10 @@ lattice --json daemon stop
 # 升级两个同目录二进制并重启用户级服务
 cargo install --locked --path crates/lattice-cli
 cargo install --locked --path crates/lattice-daemon
+
+# 核对前后台构建身份、IPC 协议号与后台支持的会话库格式
+lattice --version
+lattice-daemon --version
 lattice daemon restart
 
 # 同步变更 unit 参数（例如 --drain-timeout），或将旧启动方式迁入 systemd 托管

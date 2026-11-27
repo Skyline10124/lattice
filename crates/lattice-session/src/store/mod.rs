@@ -33,6 +33,11 @@ pub use settings::*;
 use std::{path::PathBuf, sync::Mutex};
 pub use types::*;
 
+/// 当前编译进本二进制所支持的会话库格式版本号。
+pub const fn current_format_version() -> u32 {
+    codec::VERSION
+}
+
 pub struct SessionStore {
     db: redb::Database,
     layout: StateLayout,

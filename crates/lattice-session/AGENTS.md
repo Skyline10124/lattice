@@ -6,9 +6,9 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 重导出领域字段类型、`SessionStore` 读写接口及 `test-utils` 测试辅助 |
+| `src/lib.rs` | 将 `store::current_format_version` 显式重导出为 `current_store_format_version`，并重导出领域字段类型、`SessionStore` 读写接口及 `test-utils` 测试辅助 |
 | `src/model/mod.rs`、`src/model/project_path.rs` | 独立于存储机制的纯数据领域类型（`AgentName`、`TurnTimeout`、`RetryPolicy`、`ProjectPath`）与构造校验 |
-| `src/store/mod.rs`、`src/store/types.rs` | `SessionStore`（含幂等写闸 `disable_writes`）、`SessionRead`、`SessionExecutionLock`、`ToolReply`、槽位详情状态（`SlotDetail`、`SlotState`、`SlotReason`）与错误 |
+| `src/store/mod.rs`、`src/store/types.rs` | `current_format_version` 读取私有 `codec::VERSION`、`SessionStore`（含幂等写闸 `disable_writes`）、`SessionRead`、`SessionExecutionLock`、`ToolReply`、槽位详情状态（`SlotDetail`、`SlotState`、`SlotReason`）与错误 |
 | `src/store/input.rs` | 受检单轮输入 `TurnInput` 与输入片段 `TurnInputPart`（图片字节校验、按摘要去重与保序规范化） |
 | `src/store/binding.rs` | 调用槽位绑定事实（`InvocationBinding`、`BindingIdentity`），经 `store` 导出 |
 | `src/store/codec.rs`、`src/store/open.rs`、`src/store/validate.rs` | redb 表（含第 8 张图片字节表 `blobs`）与格式版本 `11` 编解码、首次创建与严格打开、存在 `sessions.git` 或 `invocations.git` 时的拒绝及全库跨记录一致性校验（含 `blobs` 流式核验、`Input` 与 `ContextOp` 载荷及 `ImageRef` 核对、按增量可回溯游标单遍显式栈 DFS 线性覆盖全树全部 `ContextOp` 与无前置输入独立触发 `Step 0` 的父链非空有效上下文校验） |

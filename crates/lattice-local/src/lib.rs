@@ -31,6 +31,7 @@ pub use lattice_conversation::{
     ResultPayload, SessionId, StepContent, StoredToolResult, SuccessContent, TokenSummary,
     TokenUsage, ToolError, ToolResultOutcome, TurnId, UsageCompleteness,
 };
+pub use lattice_ipc::ipc::current_protocol_version;
 pub use lattice_ipc::{
     Acceptance, AgentName, AgentNameError, AttemptDetail, AttemptEndDetail, AttemptProgressDetail,
     AuthCatalogOutcome, AuthLoginOutcome, AuthRemoval, AuthStatus, Availability, CancelStatus,

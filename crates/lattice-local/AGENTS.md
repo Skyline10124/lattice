@@ -6,7 +6,7 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs` | 扁平显式重导出客户端句柄（含 `StatusProbe` 与 `StopOutcome`）、`check_turn_plan`、`check_feed_plan`、`check_context_op_plan`、`format_image_marker`、`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`、`init_logging`、`new_session_id`、`new_turn_id` 及前端所需的 `lattice-ipc`（含上下文操作/触发/检查与组件/IM 状态载荷，不再重导出物理存储类型 `Node`、`TurnStartMeta`、`AttemptProgress`、`SlotProgress`）、`lattice-context` 只读值类型、`lattice-conversation`（含图片、`MAX_IMAGE_BYTES` 与输入模态原语）、`PrivateDirectory`、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
+| `src/lib.rs` | 扁平显式重导出客户端句柄（含 `StatusProbe` 与 `StopOutcome`）、`check_turn_plan`、`check_feed_plan`、`check_context_op_plan`、`format_image_marker`、`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`、`init_logging`、`new_session_id`、`new_turn_id`、`lattice-ipc` 的 `current_protocol_version` 及前端所需的 `lattice-ipc`（含上下文操作/触发/检查与组件/IM 状态载荷，不再重导出物理存储类型 `Node`、`TurnStartMeta`、`AttemptProgress`、`SlotProgress`）、`lattice-context` 只读值类型、`lattice-conversation`（含图片、`MAX_IMAGE_BYTES` 与输入模态原语）、`PrivateDirectory`、`StateLayout` 与 `xdg_state_root`，以及 `test-utils` 下的 `Departure` 与 `test_support` |
 | `src/image_file.rs` | 图片字节与文件的分块摘要核验、粘贴探测与重读比对（`image_bytes_ref`、`image_file_ref`、`probe_image_file`、`read_verified_image`），CLI 与 TUI 共用 |
 | `src/display.rs` | 面向人阅读的图片占位标记格式化 `format_image_marker`（`[IMAGE n · <ext> · <size>]` 整数二进制单位换算） |
 | `src/endpoint.rs` | 本地 Unix socket 端点路径校验、客户端建连（含返回 `api.sock` `(dev, ino)` 身份的 `connect_with_identity`）与对端有效 UID 核验，以及等待 socket 撤下与 `owner.lock` 释放的 `Departure` |

@@ -49,6 +49,8 @@ cargo install --locked --path crates/lattice-daemon
 ```sh
 lattice --help
 lattice-daemon --help
+lattice --version
+lattice-daemon --version
 ```
 
 ## 快速开始
@@ -215,7 +217,7 @@ lattice session usage <session_id>
 lattice --json session usage <session_id>
 ```
 
-升级覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `lattice daemon restart`（或重新执行 `lattice daemon install` 更新 unit 并重启）。需要单独停止更旧协议的后台时，新前端可执行 `lattice daemon stop` 跨版本优雅停机（优先经版本无关控制帧 `LTCTRL\0\x01`，对历史旧后台经 `pidfd` 发送 `SIGTERM` 兜底），随后执行 `lattice daemon start`。本地 IPC 协议版本当前为 `68`，协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
+用 `lattice --version` 与 `lattice-daemon --version` 核对前后台二进制的版本、构建身份、IPC 协议号与后台支持的会话库格式。升级覆盖同目录下的 `lattice` 与 `lattice-daemon` 后执行 `lattice daemon restart`（或重新执行 `lattice daemon install` 更新 unit 并重启）。需要单独停止更旧协议的后台时，新前端可执行 `lattice daemon stop` 跨版本优雅停机（优先经版本无关控制帧 `LTCTRL\0\x01`，对历史旧后台经 `pidfd` 发送 `SIGTERM` 兜底），随后执行 `lattice daemon start`。本地 IPC 协议版本当前为 `68`，协议兼容、输出字段与旧状态处理见[升级与输出字段适配](docs/development/scenarios/manual/daemon-and-upgrade.md#升级与输出字段适配)。
 
 具体参数以各命令帮助为准：
 

@@ -11,6 +11,7 @@ use std::{
     io::{self, IsTerminal},
     path::{Path, PathBuf},
     process::ExitCode,
+    sync::OnceLock,
     time::{Duration, Instant},
 };
 
@@ -37,7 +38,8 @@ const HELP_TEMPLATE: &str = "{about-with-newline}
     help_template = HELP_TEMPLATE,
     override_usage = "lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
     disable_help_flag = true,
-    disable_version_flag = true
+    disable_version_flag = true,
+    version = daemon_version()
 )]
 struct Cli {
     /// 状态根目录绝对路径
@@ -67,6 +69,30 @@ struct Cli {
         display_order = 1000
     )]
     help: Option<bool>,
+
+    /// 显示版本信息
+    #[arg(
+        short = 'V',
+        long = "version",
+        action = ArgAction::Version,
+        display_order = 1001
+    )]
+    version: Option<bool>,
+}
+
+fn daemon_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            format!(
+                "{}（构建 {}，IPC 协议 {}，会话库格式 {}）",
+                env!("LATTICE_VERSION"),
+                env!("LATTICE_BUILD_ID"),
+                lattice_ipc::ipc::current_protocol_version(),
+                lattice_server::current_store_format_version(),
+            )
+        })
+        .as_str()
 }
 
 fn parse_state_root(path: PathBuf) -> Result<PathBuf, String> {
@@ -197,7 +223,10 @@ fn main() -> ExitCode {
     let cli = match Cli::try_parse_from(std::env::args_os()) {
         Ok(cli) => cli,
         Err(error) => {
-            if error.kind() == clap::error::ErrorKind::DisplayHelp {
+            if matches!(
+                error.kind(),
+                clap::error::ErrorKind::DisplayHelp | clap::error::ErrorKind::DisplayVersion
+            ) {
                 let _ = error.print();
                 return ExitCode::from(0);
             }
@@ -294,11 +323,15 @@ fn main() -> ExitCode {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::CommandFactory as _;
 
     #[test]
     fn cli_help_is_chinese_and_validates_state_root_and_drain_timeout() {
-        let help = Cli::command().render_long_help().to_string();
+        let long_help = Cli::try_parse_from(["lattice-daemon", "--help"]).unwrap_err();
+        let short_help = Cli::try_parse_from(["lattice-daemon", "-h"]).unwrap_err();
+        assert_eq!(long_help.kind(), clap::error::ErrorKind::DisplayHelp);
+        assert_eq!(short_help.kind(), clap::error::ErrorKind::DisplayHelp);
+        let help = long_help.to_string();
+        assert_eq!(help, short_help.to_string());
         for required in [
             "运行 LATTICE 本地后台守护进程",
             "用法：lattice-daemon --state-root <绝对路径> [--drain-timeout <时长>]",
@@ -307,6 +340,8 @@ mod tests {
             "--drain-timeout <时长>",
             "-h, --help",
             "显示帮助",
+            "-V, --version",
+            "显示版本信息",
         ] {
             assert!(
                 help.contains(required),
@@ -314,7 +349,7 @@ mod tests {
 {help}"
             );
         }
-        for forbidden in ["Usage:", "Options:", "[default:"] {
+        for forbidden in ["Usage:", "Options:", "[default:", "Print version"] {
             assert!(
                 !help.contains(forbidden),
                 "帮助输出不应混入英文段落或默认值标记 `{forbidden}`，实际：
@@ -370,6 +405,24 @@ mod tests {
             assert!(
                 msg.contains("排空时长"),
                 "非法时长 `{bad_timeout}` 应保留中文错误信息，实际：{msg}"
+            );
+        }
+    }
+
+    #[test]
+    fn version_flags_render_build_identity_protocol_and_store_format() {
+        for flag in ["--version", "-V"] {
+            let error = Cli::try_parse_from(["lattice-daemon", flag]).unwrap_err();
+            assert_eq!(error.kind(), clap::error::ErrorKind::DisplayVersion);
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "lattice-daemon {}（构建 {}，IPC 协议 {}，会话库格式 {}）\n",
+                    env!("LATTICE_VERSION"),
+                    env!("LATTICE_BUILD_ID"),
+                    lattice_ipc::ipc::current_protocol_version(),
+                    lattice_server::current_store_format_version(),
+                )
             );
         }
     }

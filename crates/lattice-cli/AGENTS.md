@@ -6,7 +6,8 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/main.rs` | `lattice` 前端入口、显式多线程 Tokio runtime 构建、`clap` 命令定义、`args_request_json` 跳过带值选项参数位、`context-op` 有序编辑参数提取、`daemon install`/`start`/`restart` 与 `tui` 拒绝 `--json` 及 `lattice_local::init_logging` 日志初始化 |
+| `build.rs` | 引入共用 `crates/build_info.rs`，在构建期生成版本号与构建身份，归属规则见[类型归属与门面传递](../../docs/architecture/crates.md#类型归属与门面传递) |
+| `src/main.rs` | `lattice` 前端入口、顶层 `--version` / `-V` 组合构建信息与 `lattice_local::current_protocol_version()`、显式多线程 Tokio runtime 构建、`clap` 命令定义、`args_request_json` 跳过带值选项参数位、`context-op` 有序编辑参数提取、`daemon install`/`start`/`restart` 与 `tui` 拒绝 `--json` 及 `lattice_local::init_logging` 日志初始化 |
 | `src/help.rs` | 全命令树统一中文帮助模板与用法行、按命令区分 `--json` 说明并隐藏不支持命令的 `--json`、全局选项沉底排序、命令行值解析器与全命令脱敏中文参数错误格式化 |
 | `src/commands/mod.rs` | 子命令模块导出 |
 | `src/commands/run.rs` | 请求身份预生成与输出、`current_dir()` 读取与透传、经 `lattice-local` 的 `image_file_ref` / `read_verified_image` 读取图片与提交前本地预检（`check_turn_plan`）、`configure` 会话创建/设置更新、配置后图片重读核对、`run`/`session send` 与 `session trigger` 共用的 `LocalTurn` 提交/触发/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |

@@ -6,7 +6,7 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/lib.rs`、`src/root.rs` | 根模块生产公开面重导出（后台宿主入口、组件托管组装与 panic 脱敏作用域接口、进程内 `Service` 接口与 `im_auth` 凭据存储接口）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
+| `src/lib.rs`、`src/root.rs` | 根模块生产公开面导出 `current_store_format_version`（转交 `lattice-session` 的格式号）并重导出（后台宿主入口、组件托管组装与 panic 脱敏作用域接口、进程内 `Service` 接口与 `im_auth` 凭据存储接口）与 `test` / `test-utils` 专用重导出（内部子模块全部私有）；`LocalWorkspaceRoot::from_path` 工作区规范路径解析与项目绑定路径提取 |
 | `src/im_auth.rs` | 配置目录下私有文件 `im/auth.json` 的严格权限核验与原子读写（`ImAuthStore`）、零化秘密包装 `ImToken`（不实现 `Debug` 或 `Display`）、平台状态查询 `ImPlatformCredentialState` 及零秘密回显的 `ImAuthError` |
 | `src/session.rs` | 内部会话库异步门面 `SessionApi`（`spawn_blocking` 封装、写异常上报、`SessionId` 精确/前缀解析与 `usage` 查询；类型本身与 `from_store` 仅在 `test` 或 `test-utils` 下对外导出） |
 | `src/configure.rs`、`src/profile.rs`、`src/config_rejection.rs`、`src/redact.rs` | 会话设置与档位选择纯函数 `resolve_settings`，委托 `lattice-profile` 加载配置并转换为有效 profile，经单一构造入口生成脱敏单行 `ConfigRejection` |
@@ -38,7 +38,7 @@
 
 ## 约束
 
-- 内部子模块全部私有；生产公开面由根模块导出后台宿主入口（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`）、组件托管组装接口（`ComponentRegistration`、`ComponentBuildOutcome`、`PreparedComponent`、`ComponentStop`、`ComponentRemountHandle`、`ScopedComponentFuture`、`install_component_panic_hook`、`scoped_component_future`、`with_component_panic_scope`）、进程内服务门面（`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`）与 IM 平台凭据存储（`ImAuthStore`、`ImAuthError`、`ImToken`、`ImPlatformCredentialState`、`TELEGRAM_PLATFORM`），不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；`serve_for_test`、`serve_for_test_with_service`、`serve_for_test_with_components`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
+- 内部子模块全部私有；生产公开面由根模块导出支持的会话库格式号 `current_store_format_version`、后台宿主入口（`serve`、`ServeExit`、`DrainOutcome`、`HostLifecycle`、`InstanceLock`）、组件托管组装接口（`ComponentRegistration`、`ComponentBuildOutcome`、`PreparedComponent`、`ComponentStop`、`ComponentRemountHandle`、`ScopedComponentFuture`、`install_component_panic_hook`、`scoped_component_future`、`with_component_panic_scope`）、进程内服务门面（`Service`、`InProcessTurn`、`InProcessTurnOutcome`、`StopNotification`）与 IM 平台凭据存储（`ImAuthStore`、`ImAuthError`、`ImToken`、`ImPlatformCredentialState`、`TELEGRAM_PLATFORM`），不重导出其他 crate 的领域类型。其他 crate 用不到的自有条目保持 `pub(crate)` 或模块内私有；`serve_for_test`、`serve_for_test_with_service`、`serve_for_test_with_components`、`SessionApi`、`ApiError`、`ConfigRejection`、`LocalWorkspaceRoot`、`start_turn` 及工具接缝类型仅在 `#[cfg(any(test, feature = "test-utils"))]` 下由根模块导出，`run_turn` 保持 `#[cfg(test)]`。
 - `Cargo.toml` 的 `dependencies` 与 `build-dependencies` 禁止引入 `lattice-local`（仅允许在 `dev-dependencies` 中用于后台与客户端端到端协议测试），且禁止在任何依赖段引入 `lattice-im`，由 `cargo xtask crate-boundary` 检查；系统调用统一经 `rustix` 完成并直接以 `std::io::Error::from(errno)` 转换错误。崩溃屏障是唯一例外：停点经 `libc::raise(SIGSTOP)` 只向调用线程发信号，`libc` 作为可选依赖只随 `test-crash-barriers` 引入。`rustix` 的常规接口只能向整个进程或进程组发信号；进程级的 `SIGSTOP` 可能先由其他线程处理，调用线程会在进程停住前越过停点继续执行。
 - `im_auth.rs` 经 `lattice_store::PrivateDirectory` 访问配置目录下的 `im/auth.json`：只读查询遇到缺失目录或文件返回缺失状态而不创建路径，但属主不符、符号链接、过宽权限、超大文件或 JSON 格式违规必须返回类型化错误，不自动 `chmod` 修复；写入由进程内互斥锁串行执行“重读 → 修改 → `0600` 原子替换”；`ImToken` 不实现 `Debug` 或 `Display`，并在释放时清零，任何错误诊断不得回显平台名入参或密钥原文。
 - `TurnCoordinator` 作为唯一的持久 Turn 协调者持有全 Turn `SessionExecutionLock`，复用单一的模型驱动与工具分发路径（经 `turn/images.rs` 的 `SessionImages` 从会话库提供图片）；阻塞式会话库访问放入 `spawn_blocking`，写事务内不等待模型、工具执行器或网络。

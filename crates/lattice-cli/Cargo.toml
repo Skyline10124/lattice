@@ -23,7 +23,11 @@ libc = { workspace = true }
 rustix = { workspace = true, features = ["fs"] }
 zeroize = { workspace = true }
 
+[build-dependencies]
+sha2 = { workspace = true }
+
 [dev-dependencies]
 lattice-local = { workspace = true, features = ["test-utils"] }
 lattice-session = { workspace = true, features = ["test-utils"] }
 tempfile = { workspace = true }
+sha2 = { workspace = true }

@@ -6,7 +6,8 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/main.rs` | 中文命令行参数解析与校验、日志与异步运行时初始化、`SIGTERM` / `SIGINT` 信号监听、内置组件注册与 `HostLifecycle` 衔接、状态根占用时的 `SO_PEERCRED` 对端进程号诊断、`ServeExit` 退出码映射与实例锁生命周期保持 |
+| `build.rs` | 引入共用 `crates/build_info.rs`，在构建期生成版本号与构建身份，归属规则见[类型归属与门面传递](../../docs/architecture/crates.md#类型归属与门面传递) |
+| `src/main.rs` | 中文命令行参数解析与校验、`--version` / `-V` 组合构建信息与 IPC 协议号及后台支持的会话库格式号并以 `0` 退出、日志与异步运行时初始化、`SIGTERM` / `SIGINT` 信号监听、内置组件注册与 `HostLifecycle` 衔接、状态根占用时的 `SO_PEERCRED` 对端进程号诊断、`ServeExit` 退出码映射与实例锁生命周期保持 |
 | `src/im.rs`、`src/im_watch.rs` | 内置 `im` 组件组装器 `ImHost`（调用 `lattice_im::prepare_im_gateway` 转化为 `ComponentRegistration`）、基于 `PrivateDirectory` 的 `~/.lattice/im` `0700` 创建与核验、基于 `rustix::fs::inotify`（`AsyncFd`）仅针对 `config.toml` `CLOSE_WRITE` / `MOVED_TO` 事件触发重新挂载（忽略 `auth.json`、临时文件与删除事件）以及目录移除时按代次标记失效、待显式 `reload` / `auth` 操作恢复监视 |
 | `src/notify.rs` | 基于 `rustix::net` 的 systemd `$NOTIFY_SOCKET` 非阻塞数据报发送（支持文件系统路径与 `@` 抽象命名空间地址，保留原始字节） |
 
