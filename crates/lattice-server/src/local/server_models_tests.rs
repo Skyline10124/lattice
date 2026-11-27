@@ -24,6 +24,7 @@ async fn model_query_fetches_only_a_missing_signed_in_account_catalog_and_preser
     let mut backend = Backend::with_tls_roots(
         layout,
         Some(home.path().into()),
+        "test-build".to_owned(),
         vec![],
         Arc::new(crate::turn::NoTools),
     );

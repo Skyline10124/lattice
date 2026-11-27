@@ -15,6 +15,8 @@ mod test_support;
 use commands::{models, session as session_cmd};
 use help::CliParseError;
 
+pub(crate) const FRONTEND_BUILD_ID: &str = env!("LATTICE_BUILD_ID");
+
 #[derive(Parser)]
 #[command(name = "lattice")]
 #[command(about = "LATTICE — 以会话为中心的 LLM 运行时")]
@@ -88,7 +90,7 @@ fn cli_version() -> &'static str {
             format!(
                 "{}（构建 {}，IPC 协议 {}）",
                 env!("LATTICE_VERSION"),
-                env!("LATTICE_BUILD_ID"),
+                FRONTEND_BUILD_ID,
                 lattice_local::current_protocol_version(),
             )
         })

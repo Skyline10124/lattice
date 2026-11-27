@@ -273,6 +273,7 @@ fn main() -> ExitCode {
         let result = lattice_server::serve(
             serve_layout,
             home_dir,
+            env!("LATTICE_BUILD_ID").to_owned(),
             drain_timeout,
             stop_rx,
             DaemonLifecycle { notifier },

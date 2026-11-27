@@ -43,6 +43,9 @@ use crate::{
 fn daemon_status_sample() -> DaemonStatus {
     DaemonStatus {
         epoch: "epoch-0001".to_owned(),
+        build_id: "1a2b3c4d5e6f".to_owned(),
+        protocol_version: crate::ipc::PROTOCOL_VERSION,
+        store_format_version: lattice_session::current_store_format_version(),
         stopping: false,
         owners: 1,
         unconfirmed_operations: 0,
@@ -53,6 +56,9 @@ fn daemon_status_sample() -> DaemonStatus {
 fn daemon_status_with_components() -> DaemonStatus {
     DaemonStatus {
         epoch: "epoch-0001".to_owned(),
+        build_id: "1a2b3c4d5e6f+7890abcdef12".to_owned(),
+        protocol_version: crate::ipc::PROTOCOL_VERSION,
+        store_format_version: lattice_session::current_store_format_version(),
         stopping: false,
         owners: 1,
         unconfirmed_operations: 0,

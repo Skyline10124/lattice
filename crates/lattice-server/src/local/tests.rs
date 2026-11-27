@@ -136,7 +136,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
         }
     }
 
-    // 1. 正常启动再经停机通道收尾：先收到 ready，再收到一次 stopping（重复信号不重复发送）。
+    // 1. 正常启动再经 IPC 停机：核对运行与停机状态的构建信息，以及 ready/stopping 回调。
     let dir = tempfile::tempdir().unwrap();
     let layout = lattice_session::StateLayout::in_state_root(dir.path());
     let events = Arc::new(Mutex::new(Vec::new()));
@@ -148,6 +148,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
         serve(
             serving_layout,
             home,
+            "deadbeef1234+cafebabe5678".to_owned(),
             std::time::Duration::from_secs(60),
             stop_rx,
             RecordingLifecycle {
@@ -162,7 +163,18 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
         match client.status().await {
-            Ok(_) => break,
+            Ok(status) => {
+                assert_eq!(status.build_id, "deadbeef1234+cafebabe5678");
+                assert_eq!(
+                    status.protocol_version,
+                    lattice_ipc::ipc::current_protocol_version()
+                );
+                assert_eq!(
+                    status.store_format_version,
+                    crate::current_store_format_version()
+                );
+                break;
+            }
             Err(_) if tokio::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
             }
@@ -170,12 +182,27 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
         }
     }
     assert_eq!(events.lock().unwrap().as_slice(), ["ready"]);
-    stop_tx.send(()).await.unwrap();
+    let (stopped, departure) = client.request_stop().await.unwrap();
+    assert_eq!(stopped.build_id, "deadbeef1234+cafebabe5678");
+    assert_eq!(
+        stopped.protocol_version,
+        lattice_ipc::ipc::current_protocol_version()
+    );
+    assert_eq!(
+        stopped.store_format_version,
+        crate::current_store_format_version()
+    );
+    assert!(stopped.stopping);
+    drop(stop_tx);
     let exit = handle.await.unwrap().unwrap();
     assert_eq!(exit.drain, DrainOutcome::Completed);
     assert!(exit.failure.is_none());
     assert_eq!(events.lock().unwrap().as_slice(), ["ready", "stopping"]);
     drop(exit);
+    departure
+        .wait(std::time::Duration::from_secs(5))
+        .await
+        .unwrap();
 
     // 2. 就绪前已收到停机请求：不发 ready，只发一次 stopping，并正常完成收尾。
     let dir_pre = tempfile::tempdir().unwrap();
@@ -186,6 +213,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     let exit_pre = serve(
         layout_pre,
         Some(dir_pre.path().to_path_buf()),
+        "deadbeef1234+cafebabe5678".to_owned(),
         std::time::Duration::from_secs(60),
         stop_pre_rx,
         RecordingLifecycle {
@@ -209,6 +237,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     let exit_fail = serve(
         layout_fail.clone(),
         Some(dir_fail.path().to_path_buf()),
+        "deadbeef1234+cafebabe5678".to_owned(),
         std::time::Duration::from_secs(60),
         stop_fail_rx,
         RecordingLifecycle {

@@ -6,7 +6,7 @@ status: active
 
 | 项 | 内容 |
 | --- | --- |
-| 目标 | CLI `--image` 经 IPC 68 提交保序图文，五种协议按[协议适配合同](../../../architecture/llm/protocols.md#适配器的职责)投影经 `<lattice-context channel="cli">` 包裹的含图请求并在后台重启后从会话库重放历史图片；本地预检拒绝不留草稿会话；跨轮累计超过 32 MiB 在接受前拒绝、`rewind` 后恢复；远端 `HTTP 413` 不重试并给出恢复提示 |
+| 目标 | CLI `--image` 经 IPC 69 提交保序图文，五种协议按[协议适配合同](../../../architecture/llm/protocols.md#适配器的职责)投影经 `<lattice-context channel="cli">` 包裹的含图请求并在后台重启后从会话库重放历史图片；本地预检拒绝不留草稿会话；跨轮累计超过 32 MiB 在接受前拒绝、`rewind` 后恢复；远端 `HTTP 413` 不重试并给出恢复提示 |
 | 前提 | 准备两张固定魔数小图（PNG 魔数 8 字节写入错扩展名文件 `shot.jpg`、JPEG 魔数 4 字节写入 `photo.jpeg`）、一张 3 MiB（`3_145_728` 字节）PNG 大图 `big.png` 与一个非图片文件 `bad.png`；五种协议使用自定义 provider 接入（无 `models.dev` 元数据，不需要手写 `input`）；413 用例在 `agent.toml` 开启 `[llm.retry]`（`max_retries = 2`），假模型脚本先返回带 `x-should-retry: true` 与错误 `message` 的 `413` JSON 响应再附带未达文本回复 |
 | 相关测试 | `direct_user_images`：`user_images_replay_after_daemon_restart`、`user_image_budget_recovers_after_rewind`、`user_image_http_413_is_not_retried` |
 

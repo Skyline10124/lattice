@@ -185,6 +185,7 @@ async fn backend_with_roots(
                 let mut backend = Backend::with_tls_roots(
                     backend_layout,
                     Some(home),
+                    "test-build".to_owned(),
                     roots,
                     Arc::new(crate::turn::NoTools),
                 );
@@ -2075,6 +2076,7 @@ async fn serve_configured(
             let mut backend = Backend::with_tools(
                 backend_layout,
                 Some(home),
+                "test-build".to_owned(),
                 crate::turn::default_tool_executor(),
             );
             Arc::get_mut(&mut backend)
@@ -2147,6 +2149,7 @@ async fn serve_holding_lock() -> GatedServe {
                 let mut backend = Backend::with_tools(
                     backend_layout,
                     Some(home),
+                    "test-build".to_owned(),
                     crate::turn::default_tool_executor(),
                 );
                 Arc::get_mut(&mut backend)
@@ -2580,6 +2583,7 @@ async fn final_release_and_socket_removal_share_the_shutdown_deadline() {
             let mut backend = Backend::with_tools(
                 backend_layout,
                 Some(home),
+                "test-build".to_owned(),
                 crate::turn::default_tool_executor(),
             );
             Arc::get_mut(&mut backend)

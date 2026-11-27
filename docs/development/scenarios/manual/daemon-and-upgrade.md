@@ -43,6 +43,7 @@ cargo install --locked --path crates/lattice-daemon
 lattice --version
 lattice-daemon --version
 lattice daemon restart
+lattice daemon status
 
 # 同步变更 unit 参数（例如 --drain-timeout），或将旧启动方式迁入 systemd 托管
 lattice daemon stop
@@ -64,15 +65,15 @@ lattice-daemon --state-root /tmp/lattice-isolated-state --drain-timeout 30s
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `lattice daemon install` 退出 `0` | 已原子写入 `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lattice.service`（`TimeoutStopSec` 为排空上限加 30 秒），并依次完成 `systemctl --user daemon-reload`、按该文件绝对路径的 `systemctl --user enable` 与 `systemctl --user restart lattice.service`（已运行旧服务或更新排空时长时会优雅重启到最新配置；unit 不在运行中的 user manager 搜索路径里时，systemd 先将其链接进 manager 的配置目录），随后探测一次状态根，协议一致的后台已应答 |
+| `lattice daemon install` 退出 `0` | 已原子写入 `${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/lattice.service`（`TimeoutStopSec` 为排空上限加 30 秒），并依次完成 `systemctl --user daemon-reload`、按该文件绝对路径的 `systemctl --user enable` 与 `systemctl --user restart lattice.service`（已运行旧服务或更新排空时长时会优雅重启到最新配置；unit 不在运行中的 user manager 搜索路径里时，systemd 先将其链接进 manager 的配置目录），随后探测一次状态根，协议一致的后台已应答；构建身份与本前端不同时在 stderr 提示“协议兼容，但不是同一批构建”，仍退出 `0` |
 | `lattice daemon install` 退出 `2` | 同目录缺失当前有效用户可执行的普通文件 `lattice-daemon`、传入了不支持的 `--json`、`--drain-timeout` 无效或加 30 秒后溢出，或可执行路径 / 状态根含无法写入 systemd unit 的字符，或状态根无法解析（`XDG_STATE_HOME` 与 `HOME` 均不可用）；未写 unit 且未调用 `systemctl` |
 | `lattice daemon install` 退出 `1`（写入 unit 失败） | 创建 `systemd/user` 目录、创建临时文件、写入、同步或重命名失败，unit 不一定写出，且未调用 `systemctl`；核对目录权限与磁盘空间后重试 |
 | `lattice daemon install` 退出 `1`（`daemon-reload` 或 `enable` 失败） | unit 已写出，但 `systemctl --user daemon-reload` 或 `enable` 失败；不执行后续步骤，也不探测后台；核对用户级 systemd 会话与错误输出后重试 |
 | `lattice daemon install` 退出 `1`（`restart` 失败） | unit 已写出并启用，探测一次状态根上的后台并按三种情况给出提示与对端 pid：已有后台应答时报出对端 pid 并提示先执行 `lattice daemon stop` 再执行 `lattice daemon start`；对端协议版本不兼容时写出双方协议号与对端 pid；无后台应答时提示执行 `systemctl --user status lattice` |
 | `lattice daemon install` 退出 `1`（`restart` 成功但后台不兼容） | unit 已写出并启用，已成功执行 `restart`，但状态根上应答的后台协议不兼容，诊断写出双方协议号：同目录文件较旧时安装与本前端同一批构建的 `lattice-daemon` 后执行 `lattice daemon restart`；运行的是别处文件时执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in；后台较新时换用匹配的前端 |
 | `lattice daemon install` 退出 `1`（`restart` 成功但连不上后台） | unit 已写出并启用，已成功执行 `restart`，但刚写入 unit 的状态根上没有后台在监听，或状态探测失败（附原始错误）：执行 `systemctl --user status lattice` 查看后台是否就绪后已退出，执行 `systemctl --user cat lattice` 核对生效的 unit 文件与 drop-in 是否覆盖了 `ExecStart` |
-| `lattice daemon start` / `restart` 退出 `0` / `1` / `2` | 不支持 `--json`（传入退出 `2`）；状态根无法解析时退出 `2` 且不调用 `systemctl`；热路径单次调用 `systemctl --user start|restart lattice.service`，成功后探测一次状态根，协议一致的后台应答退出 `0`，否则退出 `1`（`start` 沿用写出双方协议号的普通不兼容诊断；`restart` 遇到更旧后台时指出双方协议号、对端 pid 与实际运行的可执行文件，并按它是否为本前端同目录的 `lattice-daemon` 提示重装 `lattice-daemon` 或执行 `lattice daemon install`）；状态根上没有后台在监听时报出本前端的状态根，执行 `systemctl --user cat lattice` 核对 `--state-root`，要让服务改用该状态根时执行 `lattice daemon install`，并执行 `systemctl --user status lattice` 查看详情；探测失败时附原始错误；`systemctl` 失败时查 `LoadState`，若为 `not-found` 提示先执行 `lattice daemon install`，否则单次探测状态根按占锁后台 / 不兼容后台 / 无应答给出诊断并退出 `1` |
-| `unconfirmed_operations == 0` | 人类可读输出中文后台状态摘要与组件区块（无活跃或未挂载组件时为 `组件：无`），`--json` 输出 `epoch`、`stopping`、`owners`、`unconfirmed_operations` 与 `components`；`stop` 后状态根已释放（跨版本控制帧 `--json` 输出 `{"cross_version":true,"method":"control",…}`，历史旧后台信号兜底 `--json` 输出 `{"cross_version":true,"method":"signal","peer_pid":…}` 并在 stderr 注明无法读取排空计数） |
+| `lattice daemon start` / `restart` 退出 `0` / `1` / `2` | 不支持 `--json`（传入退出 `2`）；状态根无法解析时退出 `2` 且不调用 `systemctl`；热路径单次调用 `systemctl --user start|restart lattice.service`，成功后探测一次状态根，协议一致的后台应答退出 `0`，`restart` 成功但构建身份不同时在 stderr 提示“协议兼容，但不是同一批构建”（`start` 不提示）；协议不兼容或连不上后台时退出 `1`（`start` 沿用写出双方协议号的普通不兼容诊断；`restart` 遇到更旧后台时指出双方协议号、对端 pid 与实际运行的可执行文件，并按它是否为本前端同目录的 `lattice-daemon` 提示重装 `lattice-daemon` 或执行 `lattice daemon install`）；状态根上没有后台在监听时报出本前端的状态根，执行 `systemctl --user cat lattice` 核对 `--state-root`，要让服务改用该状态根时执行 `lattice daemon install`，并执行 `systemctl --user status lattice` 查看详情；探测失败时附原始错误；`systemctl` 失败时查 `LoadState`，若为 `not-found` 提示先执行 `lattice daemon install`，否则单次探测状态根按占锁后台 / 不兼容后台 / 无应答给出诊断并退出 `1` |
+| `unconfirmed_operations == 0` | `daemon status` 文本依次输出中文后台状态摘要、`构建身份：…`、`IPC 协议：…`、`会话库格式：…` 与组件区块（无活跃或未挂载组件时为 `组件：无`）；同版本 `status --json` 与 `stop --json` 输出完整八字段 `epoch`、`build_id`、`protocol_version`、`store_format_version`、`stopping`、`owners`、`unconfirmed_operations` 与 `components`；人类可读 `stop` 保持原有单行停机摘要，返回后状态根已释放（跨版本控制帧 `--json` 输出 `{"cross_version":true,"method":"control",…}`，历史旧后台信号兜底 `--json` 输出 `{"cross_version":true,"method":"signal","peer_pid":…}` 并在 stderr 注明无法读取排空计数） |
 | `unconfirmed_operations != 0` | 有未确认收尾的操作（`daemon stop` 退出 `1` 并在标准错误提示）；查相关 Session |
 | `stopping` / `not_running` | 锁未放开或断连（`daemon status` 复核），或无后台运行 |
 | 开发调试直接运行 `lattice-daemon` | `--state-root` 必填且须为绝对路径，其下用 `lattice/`；`--drain-timeout` 默认 `60s`，参数错误退出 `2`，状态根被占用退出 `3` 并附对端进程号；按 Ctrl-C（`SIGINT`）或发 `SIGTERM` 进入有界停机，排空完成退出 `0`，排空超时或排空中再次收到信号退出 `4`；故障注入限于隔离目录 |
@@ -81,7 +82,7 @@ lattice-daemon --state-root /tmp/lattice-isolated-state --drain-timeout 30s
 
 | 结果 | 含义与下一步 |
 | --- | --- |
-| `incompatible_backend` | 本地 IPC 协议版本（当前为 `68`）与运行中后台不一致，报错写出双方协议号（例如 `后台协议 67，本前端 68`）；若后台较旧，执行 `lattice daemon restart` 切换到新后台；若后台较新，换用匹配的新前端；`lattice daemon restart` 报重启后后台仍较旧时，按其提示更新 `lattice-daemon` 或执行 `lattice daemon install` |
+| `incompatible_backend` | 本地 IPC 协议版本（当前为 `69`）与运行中后台不一致，报错写出双方协议号（例如 `后台协议 68，本前端 69`）；若后台较旧，执行 `lattice daemon restart` 切换到新后台；若后台较新，换用匹配的新前端；`lattice daemon restart` 报重启后后台仍较旧时，按其提示更新 `lattice-daemon` 或执行 `lattice daemon install` |
 | `transport`（零字节断开） | 更早后台或崩溃断开；核对存活与版本，必要时执行 `systemctl --user stop lattice` 后重新启动服务 |
 | 拒绝格式版本较旧的库或 `*.git` 旧库 | 原库不变并列路径；由人存档或删除后，下一次请求直接生效，无需重启后台 |
 
@@ -95,5 +96,5 @@ lattice-daemon --state-root /tmp/lattice-isolated-state --drain-timeout 30s
 | `session usage` | `total`、`turns[].ordinal` | `turns[].start_node`（文本表首列 `NODE` 显示 `@<start_node>`）、`path_total`、`session_total` |
 | `configure`、提交、`head`、Turn 起点与对话条目 | 无设置操作与档位字段；`UserMessage` 存接受时事实，`TurnView` 含 `user_node`；`ConversationEntry` 包裹物理 `Node` 与 `ordinal`/`turn_start` | `configure` 返回 `head` 与 `adjustment`；提交携带 `trigger_channel`、`inputs` 与可选 `expected_settings` / `expected_position`；`head` 含 `agent`、`provider`、`model`、`effort`、`settings_version` 及窗口 `has_older`，`history` 带 `has_more`；扁平对话条目为 `input` / `context_op` / `step`（不再包裹物理 `Node` 或 `turn_start`、`ordinal`，仅 `Step 0` 顶层带 `agent_name`），`TurnView` 含 `start_node` 与 `input_nodes` |
 | `models`、`auth status` | 无档位、状态或后台诊断 | `models` 含 `input`、`supported_efforts`、`availability`（表增 `EFFORTS`、`INPUT`、`AUTH`）；`auth status` 与登录结果中的 `ProviderAuthStatus` 含可选 `diagnostic` |
-| `daemon status`、`daemon stop` | 仅四项后台计数 | 新增必填 `components: ComponentStatus[]`（未启用组件不列入，空时为 `[]`） |
+| `daemon status`、同版本 `daemon stop` | `epoch`、`stopping`、`owners`、`unconfirmed_operations`、`components` | 新增必填 `build_id: String`、`protocol_version: u8`、`store_format_version: u32`，其他五字段保留；`components` 仍为非 Disabled 组件列表 |
 | `session turn` 槽位与工具错误 | `descriptor_identity`、`evidence`、分类错误对象 | `tool_identity`（无 `evidence`）；失败载荷为 `ToolError { code, message }` |

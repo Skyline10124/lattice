@@ -1,6 +1,6 @@
 # lattice-daemon 工作指引
 
-提供 LATTICE 本地后台的独立宿主二进制 `lattice-daemon`：解析 `--state-root` 与 `--drain-timeout`，初始化 `tracing-subscriber` 日志与 Tokio 运行时，注册 `SIGTERM` 与 `SIGINT`，组装内置 `im` 受托管组件与 `rustix::fs::inotify` 配置目录监视，对接 systemd `$NOTIFY_SOCKET`（`READY=1` 与 `STOPPING=1`），调用 `lattice_server::serve` 并按托管合同映射进程退出码，同时将实例锁保持至进程退出。
+提供 LATTICE 本地后台的独立宿主二进制 `lattice-daemon`：解析 `--state-root` 与 `--drain-timeout`，初始化 `tracing-subscriber` 日志与 Tokio 运行时，注册 `SIGTERM` 与 `SIGINT`，组装内置 `im` 受托管组件与 `rustix::fs::inotify` 配置目录监视，对接 systemd `$NOTIFY_SOCKET`（`READY=1` 与 `STOPPING=1`），启动时调用 `lattice_server::serve` 并传入自身 `LATTICE_BUILD_ID`，按托管合同映射进程退出码，同时将实例锁保持至进程退出。
 
 ## 模块
 

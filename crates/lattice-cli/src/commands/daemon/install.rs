@@ -45,9 +45,12 @@ pub(crate) struct InstallArgs {
 
 pub(super) async fn run(args: InstallArgs) -> ExitCode {
     match execute_install(args.drain_timeout.as_duration()).await {
-        Ok(unit_path) => {
+        Ok((unit_path, notice)) => {
             println!("已写入 unit 文件：{}", unit_path.display());
             println!("已启用并启动服务 {SERVICE_UNIT_NAME}。");
+            if let Some(notice) = notice {
+                eprintln!("{notice}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -89,8 +92,11 @@ pub(super) async fn run_restart() -> ExitCode {
 
 async fn run_service_action(action: ServiceAction) -> ExitCode {
     match execute_service_action(action).await {
-        Ok(()) => {
+        Ok(notice) => {
             println!("{}", action.success_message());
+            if let Some(notice) = notice {
+                eprintln!("{notice}");
+            }
             ExitCode::SUCCESS
         }
         Err(error) => {
@@ -110,7 +116,7 @@ fn resolve_state_root() -> Result<PathBuf, LocalError> {
     })
 }
 
-async fn execute_service_action(action: ServiceAction) -> Result<(), LocalError> {
+async fn execute_service_action(action: ServiceAction) -> Result<Option<String>, LocalError> {
     let state_root = resolve_state_root()?;
     let verb = action.systemctl_verb();
     let Err(reason) =
@@ -136,11 +142,16 @@ async fn execute_service_action(action: ServiceAction) -> Result<(), LocalError>
 async fn verify_service_action_backend(
     action: ServiceAction,
     state_root: &Path,
-) -> Result<(), LocalError> {
+) -> Result<Option<String>, LocalError> {
     match action {
         ServiceAction::Start => {
-            verify_backend_after_success(state_root, CompletedAction::Start, STATUS_PROBE_TIMEOUT)
-                .await
+            verify_backend_after_success(
+                state_root,
+                CompletedAction::Start,
+                crate::FRONTEND_BUILD_ID,
+                STATUS_PROBE_TIMEOUT,
+            )
+            .await
         }
         ServiceAction::Restart => {
             let sibling_daemon = sibling_daemon_diagnostic_path();
@@ -149,6 +160,7 @@ async fn verify_service_action_backend(
                 CompletedAction::Restart {
                     sibling_daemon: sibling_daemon.as_deref(),
                 },
+                crate::FRONTEND_BUILD_ID,
                 STATUS_PROBE_TIMEOUT,
             )
             .await
@@ -163,7 +175,7 @@ fn exit_code_for_kind(kind: LocalErrorKind) -> u8 {
     }
 }
 
-async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError> {
+async fn execute_install(drain_timeout: Duration) -> Result<(PathBuf, Option<String>), LocalError> {
     let current_exe = std::env::current_exe().map_err(|error| {
         LocalError::new(
             LocalErrorKind::BadRequest,
@@ -220,17 +232,18 @@ async fn execute_install(drain_timeout: Duration) -> Result<PathBuf, LocalError>
     }
 
     let expected_daemon = canonical_or_original_path(&daemon_path);
-    verify_backend_after_success(
+    let notice = verify_backend_after_success(
         &state_root,
         CompletedAction::Install {
             unit_path: &unit_path,
             daemon_path: &expected_daemon,
         },
+        crate::FRONTEND_BUILD_ID,
         STATUS_PROBE_TIMEOUT,
     )
     .await?;
 
-    Ok(unit_path)
+    Ok((unit_path, notice))
 }
 
 /// 定位并核验与 `current_exe` 同目录下的 `lattice-daemon`：必须存在、是普通文件且对当前有效用户身份可执行。
@@ -600,6 +613,7 @@ fn format_command_failure(status: ExitStatus, stderr: &[u8]) -> String {
 #[derive(Debug, PartialEq, Eq)]
 enum BackendProbe {
     Running {
+        build_id: String,
         peer_pid: Option<i32>,
     },
     /// 对端在同一连接上回写了更旧的协议魔数，并带出发请求前捕获的对端事实。
@@ -610,20 +624,19 @@ enum BackendProbe {
         diagnostic: String,
     },
     /// 其余协议不兼容，即对端协议版本比本前端更新。
-    Incompatible {
-        diagnostic: String,
-    },
+    Incompatible { diagnostic: String },
     /// 状态根上没有后台在监听：状态根或端点目录不存在、没有 `api.sock`，或连接被拒绝。
     NotRunning,
     /// 端点存在但没能完成状态查询（权限不符、超时、对端未应答即断开等），保留原始错误。
-    Unreachable {
-        error: LocalError,
-    },
+    Unreachable { error: LocalError },
 }
 
 async fn probe_running_backend(client: &LocalClient, timeout: Duration) -> BackendProbe {
     match client.probe_status(timeout).await {
-        Ok(StatusProbe::Running { peer_pid, .. }) => BackendProbe::Running { peer_pid },
+        Ok(StatusProbe::Running { status, peer_pid }) => BackendProbe::Running {
+            build_id: status.build_id,
+            peer_pid,
+        },
         Ok(StatusProbe::OlderBackend {
             peer_version,
             peer_pid,
@@ -672,6 +685,23 @@ impl CompletedAction<'_> {
     }
 }
 
+fn build_mismatch_notice(
+    action: CompletedAction<'_>,
+    backend_build_id: &str,
+    frontend_build_id: &str,
+) -> Option<String> {
+    match action {
+        CompletedAction::Start => None,
+        CompletedAction::Restart { .. } | CompletedAction::Install { .. } => {
+            (backend_build_id != frontend_build_id).then(|| {
+                format!(
+                    "运行中的后台与本前端协议兼容，但不是同一批构建（后台构建 {backend_build_id}，本前端 {frontend_build_id}）。"
+                )
+            })
+        }
+    }
+}
+
 /// 路径可规范化时使用规范路径，否则保留拼出的原路径供诊断展示。
 fn canonical_or_original_path(path: &Path) -> PathBuf {
     fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
@@ -689,11 +719,14 @@ fn sibling_daemon_diagnostic_path() -> Option<PathBuf> {
 async fn verify_backend_after_success(
     state_root: &Path,
     action: CompletedAction<'_>,
+    frontend_build_id: &str,
     timeout: Duration,
-) -> Result<(), LocalError> {
+) -> Result<Option<String>, LocalError> {
     let client = LocalClient::new(StateLayout::in_state_root(state_root));
     match probe_running_backend(&client, timeout).await {
-        BackendProbe::Running { .. } => Ok(()),
+        BackendProbe::Running { build_id, .. } => {
+            Ok(build_mismatch_notice(action, &build_id, frontend_build_id))
+        }
         BackendProbe::Incompatible { diagnostic } => {
             let message = format!("{}，但{diagnostic}", action.prefix());
             Err(LocalError::new(
@@ -826,7 +859,7 @@ fn format_install_restart_failure_diagnostic(
     probe: BackendProbe,
 ) -> String {
     match probe {
-        BackendProbe::Running { peer_pid } => format!(
+        BackendProbe::Running { peer_pid, .. } => format!(
             "已写入并启用 unit 文件 {}，但执行 `systemctl --user restart {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：状态根上已有后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `lattice daemon start`",
             unit_path.display(),
             format_peer_pid(peer_pid)
@@ -851,7 +884,7 @@ fn format_service_action_failure_diagnostic(
 ) -> String {
     let verb = action.systemctl_verb();
     match probe {
-        BackendProbe::Running { peer_pid } => format!(
+        BackendProbe::Running { peer_pid, .. } => format!(
             "执行 `systemctl --user {verb} {SERVICE_UNIT_NAME}` 失败（{systemctl_reason}）：状态根上已有未受 systemd 托管的后台正在运行（{}）；请先执行 `lattice daemon stop`，再执行 `lattice daemon start`",
             format_peer_pid(peer_pid)
         ),
@@ -1072,6 +1105,7 @@ WantedBy=default.target
             unit_path,
             "退出码 1",
             BackendProbe::Running {
+                build_id: "test-build".to_owned(),
                 peer_pid: Some(4242),
             },
         );
@@ -1082,7 +1116,10 @@ WantedBy=default.target
         let without_pid = format_install_restart_failure_diagnostic(
             unit_path,
             "退出码 1",
-            BackendProbe::Running { peer_pid: None },
+            BackendProbe::Running {
+                build_id: "test-build".to_owned(),
+                peer_pid: None,
+            },
         );
         assert!(without_pid.contains("对端进程号不可用"));
         assert!(without_pid.contains("lattice daemon stop"));
@@ -1140,6 +1177,7 @@ WantedBy=default.target
             ServiceAction::Start,
             "退出码 1",
             BackendProbe::Running {
+                build_id: "test-build".to_owned(),
                 peer_pid: Some(7788),
             },
         );
@@ -1396,8 +1434,51 @@ WantedBy=default.target
         );
     }
 
+    #[test]
+    fn build_mismatch_notice_only_warns_for_restart_and_install_with_unequal_identities() {
+        for action in [
+            CompletedAction::Restart {
+                sibling_daemon: None,
+            },
+            CompletedAction::Install {
+                unit_path: Path::new("/tmp/lattice.service"),
+                daemon_path: Path::new("/tmp/lattice-daemon"),
+            },
+        ] {
+            for identity in ["1a2b3c4d5e6f", "未知"] {
+                assert_eq!(build_mismatch_notice(action, identity, identity), None);
+            }
+            for (backend, frontend, expected) in [
+                (
+                    "1a2b3c4d5e6f",
+                    "7890abcdef12",
+                    "运行中的后台与本前端协议兼容，但不是同一批构建（后台构建 1a2b3c4d5e6f，本前端 7890abcdef12）。",
+                ),
+                (
+                    "未知",
+                    "7890abcdef12",
+                    "运行中的后台与本前端协议兼容，但不是同一批构建（后台构建 未知，本前端 7890abcdef12）。",
+                ),
+                (
+                    "1a2b3c4d5e6f",
+                    "未知",
+                    "运行中的后台与本前端协议兼容，但不是同一批构建（后台构建 1a2b3c4d5e6f，本前端 未知）。",
+                ),
+            ] {
+                assert_eq!(
+                    build_mismatch_notice(action, backend, frontend).as_deref(),
+                    Some(expected)
+                );
+            }
+        }
+        assert_eq!(
+            build_mismatch_notice(CompletedAction::Start, "1a2b3c4d5e6f", "7890abcdef12"),
+            None
+        );
+    }
+
     #[tokio::test]
-    async fn success_probe_wiring_reports_older_newer_missing_and_unresponsive_backend() {
+    async fn success_probe_wiring_checks_build_identity_and_reports_unavailable_backend() {
         use std::time::{SystemTime, UNIX_EPOCH};
 
         struct TempDir(PathBuf);
@@ -1447,6 +1528,75 @@ WantedBy=default.target
 
         let frontend_version = lattice_local::current_protocol_version();
 
+        // 同协议真实 Status 帧经过探测链路后，保留构建身份并按动作生成可选提示。
+        for (backend_build_id, expected) in [
+            ("1a2b3c4d5e6f", None),
+            (
+                "7890abcdef12",
+                Some(
+                    "运行中的后台与本前端协议兼容，但不是同一批构建（后台构建 7890abcdef12，本前端 1a2b3c4d5e6f）。",
+                ),
+            ),
+        ] {
+            for action in [
+                CompletedAction::Restart {
+                    sibling_daemon: None,
+                },
+                CompletedAction::Install {
+                    unit_path: Path::new("/tmp/lattice.service"),
+                    daemon_path: Path::new("/tmp/lattice-daemon"),
+                },
+            ] {
+                let (temp, _layout, listener) = make_layout("compatible");
+                let server = tokio::spawn(async move {
+                    use tokio::io::AsyncReadExt;
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut magic = [0; 8];
+                    stream.read_exact(&mut magic).await.unwrap();
+                    let length = stream.read_u32().await.unwrap();
+                    let mut request = vec![0; length as usize];
+                    stream.read_exact(&mut request).await.unwrap();
+                    assert_eq!(
+                        serde_json::from_slice::<serde_json::Value>(&request).unwrap(),
+                        serde_json::json!({"operation": "status"})
+                    );
+                    let response = serde_json::json!({
+                        "response": "status",
+                        "value": {
+                            "epoch": "test-epoch",
+                            "build_id": backend_build_id,
+                            "protocol_version": frontend_version,
+                            "store_format_version": 11,
+                            "stopping": false,
+                            "owners": 0,
+                            "unconfirmed_operations": 0,
+                            "components": [],
+                        },
+                    });
+                    let frame = serde_json::to_vec(&serde_json::json!({
+                        "message_id": 0,
+                        "offset": 0,
+                        "json_fragment": response.to_string(),
+                        "complete": true,
+                    }))
+                    .unwrap();
+                    stream.write_all(&magic).await.unwrap();
+                    stream.write_u32(frame.len() as u32).await.unwrap();
+                    stream.write_all(&frame).await.unwrap();
+                });
+                let notice = verify_backend_after_success(
+                    &temp.0,
+                    action,
+                    "1a2b3c4d5e6f",
+                    Duration::from_secs(2),
+                )
+                .await
+                .unwrap();
+                assert_eq!(notice.as_deref(), expected);
+                server.await.unwrap();
+            }
+        }
+
         // 1. restart 后仍是更旧后台：注入的对端与本前端同路径时，指出应安装同一批构建。
         let (temp1, _layout, listener) = make_layout("older");
         let server = spawn_magic_peer(listener, -1);
@@ -1456,6 +1606,7 @@ WantedBy=default.target
             CompletedAction::Restart {
                 sibling_daemon: Some(&current_exe),
             },
+            "test-build",
             Duration::from_secs(2),
         )
         .await
@@ -1478,6 +1629,7 @@ WantedBy=default.target
             CompletedAction::Restart {
                 sibling_daemon: Some(&current_exe),
             },
+            "test-build",
             Duration::from_secs(2),
         )
         .await
@@ -1497,10 +1649,14 @@ WantedBy=default.target
         // 3. start 后仍是更旧后台：沿用普通不兼容诊断并提示 restart。
         let (temp3, _layout, listener) = make_layout("start-older");
         let server = spawn_magic_peer(listener, -1);
-        let err =
-            verify_backend_after_success(&temp3.0, CompletedAction::Start, Duration::from_secs(2))
-                .await
-                .expect_err("start 后发现更旧后台必须报错");
+        let err = verify_backend_after_success(
+            &temp3.0,
+            CompletedAction::Start,
+            "test-build",
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("start 后发现更旧后台必须报错");
         assert!(
             err.message.starts_with(
                 "`systemctl --user start lattice.service` 执行成功，但运行中的后台版本较旧且不兼容"
@@ -1528,9 +1684,14 @@ WantedBy=default.target
         let missing_action = CompletedAction::Restart {
             sibling_daemon: Some(&current_exe),
         };
-        let err = verify_backend_after_success(&temp.0, missing_action, Duration::from_millis(100))
-            .await
-            .expect_err("状态根上没有后台时必须报错");
+        let err = verify_backend_after_success(
+            &temp.0,
+            missing_action,
+            "test-build",
+            Duration::from_millis(100),
+        )
+        .await
+        .expect_err("状态根上没有后台时必须报错");
         assert_eq!(err.kind, LocalErrorKind::NotRunning);
         assert_eq!(
             err.message,
@@ -1544,6 +1705,7 @@ WantedBy=default.target
             CompletedAction::Restart {
                 sibling_daemon: Some(&current_exe),
             },
+            "test-build",
             Duration::from_millis(200),
         )
         .await

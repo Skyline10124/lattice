@@ -761,6 +761,9 @@ pub struct ComponentStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DaemonStatus {
     pub epoch: String,
+    pub build_id: String,
+    pub protocol_version: u8,
+    pub store_format_version: u32,
     pub stopping: bool,
     pub owners: usize,
     pub unconfirmed_operations: usize,

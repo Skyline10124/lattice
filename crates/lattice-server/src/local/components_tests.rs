@@ -1586,6 +1586,7 @@ async fn component_never_launches_after_backend_stopping_takes_effect() {
         super::serve(
             serve_layout,
             home,
+            "test-build".to_owned(),
             Duration::from_secs(60),
             stop_rx,
             lifecycle,

@@ -22,7 +22,7 @@ use crate::types::{
 };
 
 mod defs {
-    pub const PROTOCOL_VERSION: u8 = 68;
+    pub const PROTOCOL_VERSION: u8 = 69;
     pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
     /// 版本无关控制帧魔数：固定为 `LTCTRL\0\x01`，不随业务 `PROTOCOL_VERSION` 变更。
     pub const CONTROL_MAGIC: &[u8; 8] = b"LTCTRL\0\x01";
