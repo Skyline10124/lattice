@@ -17,6 +17,7 @@
 | `src/commands/secret_input.rs` | `auth` 与 `im auth` 共用的无回显终端与标准输入单行秘密读取、16 KiB 上限、控制字符校验及信号下终端模式恢复 |
 | `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、复用 `secret_input` 读取密钥、直接展示后台生成的 `ProviderAuthStatus.diagnostic`、SIWC 登录浏览器与粘贴交互（`login.rs`）及可唤醒输入线程（`login/input.rs`） |
 | `src/commands/models.rs` | `models` 候选列表渲染、配置问题 stderr 提示与 `models refresh` |
+| `tests/build_info.rs` | 独立集成测试目标，引入共用 `crates/build_info.rs` 运行构建期版本与身份推导测试；推导测试会启动 `git` 子进程，故与 `lattice` 二进制单测隔离进程 |
 
 ## 先读
 

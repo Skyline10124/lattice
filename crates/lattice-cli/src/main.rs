@@ -5,9 +5,6 @@ use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
 use std::sync::OnceLock;
 
-#[cfg(test)]
-#[path = "../../build_info.rs"]
-mod build_info;
 mod commands;
 mod help;
 #[cfg(test)]
