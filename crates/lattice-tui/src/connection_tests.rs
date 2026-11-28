@@ -1768,7 +1768,13 @@ fn incompatible_backend_observation_loss_never_suggests_reconnect() {
     let status = crate::connection::observation_lost_status(&ConnectionStatus::Error(
         lattice_local::LocalError::new(
             lattice_local::LocalErrorKind::IncompatibleBackend,
-            "运行中的后台版本较新且不兼容（对端进程号：4242）；请换用匹配的前端",
+            &format!(
+                "运行中的后台版本较新且不兼容（{}）；请换用匹配的前端",
+                lattice_local::format_incompatible_peer(
+                    lattice_local::current_protocol_version() + 1,
+                    Some(4242),
+                )
+            ),
         ),
     ));
     assert_eq!(status.level, NoticeLevel::Error);

@@ -293,6 +293,7 @@ mod tests {
             lattice_server::serve(
                 serve_layout1,
                 Some(home1),
+                env!("LATTICE_BUILD_ID").to_owned(),
                 Duration::from_secs(5),
                 stop_rx1,
                 TestLifecycle,
@@ -361,6 +362,7 @@ mod tests {
             lattice_server::serve(
                 serve_layout2,
                 Some(home2),
+                env!("LATTICE_BUILD_ID").to_owned(),
                 Duration::from_secs(5),
                 stop_rx2,
                 TestLifecycle,
@@ -428,6 +430,7 @@ mod tests {
             lattice_server::serve(
                 serve_layout,
                 serve_home,
+                env!("LATTICE_BUILD_ID").to_owned(),
                 Duration::from_secs(5),
                 stop_rx,
                 TestLifecycle,
@@ -619,6 +622,7 @@ mod tests {
             lattice_server::serve(
                 serve_layout,
                 serve_home,
+                env!("LATTICE_BUILD_ID").to_owned(),
                 Duration::from_secs(5),
                 stop_rx,
                 TestLifecycle,

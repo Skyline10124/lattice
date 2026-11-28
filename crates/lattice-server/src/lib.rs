@@ -6,7 +6,8 @@
 //! 生产公开面由根模块导出后台服务入口（[`serve`]、[`ServeExit`]、[`DrainOutcome`]、[`HostLifecycle`]、[`InstanceLock`]）、
 //! 组件托管组装接口（[`ComponentRegistration`]、[`ComponentBuildOutcome`]、[`PreparedComponent`]、[`ComponentStop`]、[`ComponentRemountHandle`]、[`ScopedComponentFuture`]、[`install_component_panic_hook`]、[`scoped_component_future`]、[`with_component_panic_scope`]）、
 //! 进程内服务接口（[`Service`]、[`InProcessTurn`]、[`InProcessTurnOutcome`]、[`StopNotification`]）以及
-//! IM 凭据存储接口（[`ImAuthStore`]、[`ImAuthError`]、[`ImToken`]、[`ImPlatformCredentialState`]、[`TELEGRAM_PLATFORM`]）；
+//! IM 凭据存储接口（[`ImAuthStore`]、[`ImAuthError`]、[`ImToken`]、[`ImPlatformCredentialState`]、[`TELEGRAM_PLATFORM`]），
+//! 并提供支持的会话库格式号（[`current_store_format_version`]）；
 //! 测试与 `test-utils` 下额外导出集成测试所需的 `serve_for_test`、`serve_for_test_with_service`、
 //! `serve_for_test_with_components`、`SessionApi`、`ApiError`、`LocalWorkspaceRoot`、`start_turn` 及工具执行接缝类型。
 
@@ -20,6 +21,11 @@ mod root;
 mod session;
 mod stores;
 mod turn;
+
+/// 当前后台支持的会话库格式版本号。
+pub const fn current_store_format_version() -> u32 {
+    lattice_session::current_store_format_version()
+}
 
 pub use im_auth::{
     ImAuthError, ImAuthStore, ImPlatformCredentialState, ImToken, TELEGRAM_PLATFORM,

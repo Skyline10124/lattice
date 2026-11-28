@@ -59,6 +59,7 @@ pub enum StatusProbe {
     },
     /// 对端在同一连接上回写了更旧的协议魔数。
     OlderBackend {
+        peer_version: u8,
         peer_pid: Option<i32>,
         /// 发请求前读到的对端可执行文件路径（`/proc/<pid>/exe`），仅用于诊断展示。
         peer_executable: Option<PathBuf>,
@@ -125,7 +126,11 @@ impl LocalClient {
                 }
                 ipc::FirstResponse::Reply(Response::Error(error)) => Err(error),
                 ipc::FirstResponse::Reply(_) => Err(protocol()),
-                ipc::FirstResponse::OlderBackend { error, .. } => Ok(StatusProbe::OlderBackend {
+                ipc::FirstResponse::OlderBackend {
+                    peer_version,
+                    error,
+                } => Ok(StatusProbe::OlderBackend {
+                    peer_version,
                     peer_pid,
                     peer_executable,
                     error,
@@ -1007,12 +1012,14 @@ mod tests {
             .probe_status(Duration::from_secs(2))
             .await
             .expect("更旧协议后台应作为探测结果返回");
-        match probe {
+        let probe_message = match probe {
             StatusProbe::OlderBackend {
+                peer_version,
                 peer_pid,
                 peer_executable,
                 error,
             } => {
+                assert_eq!(peer_version, ipc::PROTOCOL_VERSION - 1);
                 assert_eq!(peer_pid, Some(std::process::id() as i32));
                 assert_eq!(
                     peer_executable,
@@ -1020,19 +1027,24 @@ mod tests {
                 );
                 assert_eq!(error.kind, LocalErrorKind::IncompatibleBackend);
                 assert!(
-                    error.message.contains("版本较旧且不兼容"),
+                    error.message.contains(&format!(
+                        "后台协议 {}，本前端 {}",
+                        ipc::PROTOCOL_VERSION - 1,
+                        ipc::PROTOCOL_VERSION
+                    )),
                     "诊断：{}",
                     error.message
                 );
+                error.message
             }
             other => panic!("更旧协议后台应识别为 OlderBackend，实际：{other:?}"),
-        }
+        };
         let err = client
             .status()
             .await
             .expect_err("status() 对旧后台必须仍返回错误");
         assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
-        assert!(err.message.contains("版本较旧且不兼容"));
+        assert_eq!(err.message, probe_message);
         server.await.unwrap();
 
         // 2. 更新协议：单次探测直接返回同一个拒绝错误。
@@ -1052,6 +1064,11 @@ mod tests {
             .expect_err("更新协议后台必须拒绝");
         assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
         assert!(err.message.contains("版本较新且不兼容"));
+        assert!(err.message.contains(&format!(
+            "后台协议 {}，本前端 {}",
+            ipc::PROTOCOL_VERSION + 1,
+            ipc::PROTOCOL_VERSION
+        )));
         server.await.unwrap();
     }
 
@@ -1156,6 +1173,11 @@ mod tests {
             .unwrap_err();
         assert_eq!(err.kind, LocalErrorKind::IncompatibleBackend);
         assert!(err.message.contains("版本较新且不兼容"));
+        assert!(err.message.contains(&format!(
+            "后台协议 {}，本前端 {}",
+            ipc::PROTOCOL_VERSION + 1,
+            ipc::PROTOCOL_VERSION
+        )));
         server.await.unwrap();
 
         // 3. 静默断连：报 Transport 提示，绝不进入信号兜底。

@@ -6,16 +6,18 @@
 
 | 模块 | 负责 |
 | --- | --- |
-| `src/main.rs` | `lattice` 前端入口、显式多线程 Tokio runtime 构建、`clap` 命令定义、`args_request_json` 跳过带值选项参数位、`context-op` 有序编辑参数提取、`daemon install`/`start`/`restart` 与 `tui` 拒绝 `--json` 及 `lattice_local::init_logging` 日志初始化 |
+| `build.rs` | 引入共用 `crates/build_info.rs`，在构建期生成版本号与构建身份，归属规则见[类型归属与门面传递](../../docs/architecture/crates.md#类型归属与门面传递) |
+| `src/main.rs` | `lattice` 前端入口、顶层 `--version` / `-V` 组合构建信息与 `lattice_local::current_protocol_version()`、显式多线程 Tokio runtime 构建、`clap` 命令定义、`args_request_json` 跳过带值选项参数位、`context-op` 有序编辑参数提取、`daemon install`/`start`/`restart` 与 `tui` 拒绝 `--json` 及 `lattice_local::init_logging` 日志初始化 |
 | `src/help.rs` | 全命令树统一中文帮助模板与用法行、按命令区分 `--json` 说明并隐藏不支持命令的 `--json`、全局选项沉底排序、命令行值解析器与全命令脱敏中文参数错误格式化 |
 | `src/commands/mod.rs` | 子命令模块导出 |
 | `src/commands/run.rs` | 请求身份预生成与输出、`current_dir()` 读取与透传、经 `lattice-local` 的 `image_file_ref` / `read_verified_image` 读取图片与提交前本地预检（`check_turn_plan`）、`configure` 会话创建/设置更新、配置后图片重读核对、`run`/`session send` 与 `session trigger` 共用的 `LocalTurn` 提交/触发/观察/信号取消驱动、八种流式 JSONL 记录与轮末人类摘要渲染及 `0`/`1`/`2` 退出码计算 |
 | `src/commands/session.rs` | `session` 子命令（`send`、`feed`、`context-op`、`trigger`、`inspect`、`rewind`、`list`、`log`、`turn`、`usage`、`cancel`）、复用的 `parse_node_id`（拒绝前导 `'+'`）与 `parse_channel`、本地计划预检（`check_feed_plan`、`check_context_op_plan` 与图片按 `sha256` 去重）、后台连接与调用，以及 `inspect` / 用量费用渲染 |
-| `src/commands/daemon.rs`、`src/commands/daemon/install.rs` | `lattice daemon` 子命令组分派、`daemon status`（含受托管组件运行状态渲染）/ `daemon stop`（含同版本与跨版本控制帧/信号兜底的人类可读中文输出与 `--json` 状态输出）、`daemon start` / `daemon restart`（薄封装 `systemctl --user start|restart lattice.service` 及未安装 unit / 状态根占锁诊断），以及 `daemon install`（同目录有效用户可执行 `lattice-daemon` 核验、`TimeoutStopSec` 计算、`ExecStart` 可执行路径与后续参数分开转义、`lattice.service` 原子写入、`systemctl --user daemon-reload` / `enable` / `restart` 调用与启动失败时的对端进程号诊断）；这些 `systemctl` 入口先解析状态根，成功后核对状态根后台，只有协议一致的后台应答才算成功：后台仍较旧时指出实际运行的可执行文件，没有后台在监听时报出本前端的状态根 |
+| `src/commands/daemon.rs`、`src/commands/daemon/install.rs` | `lattice daemon` 子命令组分派、`daemon status`（渲染后台构建身份、IPC 协议号、支持的会话库格式与受托管组件运行状态）/ `daemon stop`（含同版本与跨版本控制帧/信号兜底的人类可读中文输出与 `--json` 状态输出）、`daemon start` / `daemon restart`（薄封装 `systemctl --user start|restart lattice.service` 及未安装 unit / 状态根占锁诊断），以及 `daemon install`（同目录有效用户可执行 `lattice-daemon` 核验、`TimeoutStopSec` 计算、`ExecStart` 可执行路径与后续参数分开转义、`lattice.service` 原子写入、`systemctl --user daemon-reload` / `enable` / `restart` 调用与启动失败时的对端进程号诊断）；这些 `systemctl` 入口先解析状态根，成功后核对状态根后台，只有协议一致的后台应答才算成功：后台仍较旧时写出双方协议号并指出实际运行的可执行文件，没有后台在监听时报出本前端的状态根；`restart` / `install` 成功但前后台构建身份不同时在 stderr 提示“协议兼容，但不是同一批构建”，退出码仍为 `0`（`start` 不提示），比较规则见[实现模块与公开操作](../../docs/architecture/session/operations.md#实现模块与公开操作) |
 | `src/commands/im.rs` | `lattice im` 子命令组分派（`reload`、`auth set`、`auth remove`、`auth status`，支持 `--json`、无回显终端或管道读取平台凭据及 `0`/`1`/`2` 退出码映射） |
 | `src/commands/secret_input.rs` | `auth` 与 `im auth` 共用的无回显终端与标准输入单行秘密读取、16 KiB 上限、控制字符校验及信号下终端模式恢复 |
 | `src/commands/auth.rs`、`src/commands/auth/` | `auth` 子命令、复用 `secret_input` 读取密钥、直接展示后台生成的 `ProviderAuthStatus.diagnostic`、SIWC 登录浏览器与粘贴交互（`login.rs`）及可唤醒输入线程（`login/input.rs`） |
 | `src/commands/models.rs` | `models` 候选列表渲染、配置问题 stderr 提示与 `models refresh` |
+| `tests/build_info.rs` | 独立集成测试目标，引入共用 `crates/build_info.rs` 运行构建期版本与身份推导测试；推导测试会启动 `git` 子进程，故与 `lattice` 二进制单测隔离进程 |
 
 ## 先读
 

@@ -22,7 +22,7 @@ use crate::types::{
 };
 
 mod defs {
-    pub const PROTOCOL_VERSION: u8 = 68;
+    pub const PROTOCOL_VERSION: u8 = 69;
     pub const MAGIC: &[u8; 8] = &magic_for_version(PROTOCOL_VERSION);
     /// 版本无关控制帧魔数：固定为 `LTCTRL\0\x01`，不随业务 `PROTOCOL_VERSION` 变更。
     pub const CONTROL_MAGIC: &[u8; 8] = b"LTCTRL\0\x01";
@@ -189,26 +189,26 @@ pub fn peer_pid(fd: impl AsFd) -> Option<i32> {
         .map(|cred| cred.pid.as_raw_pid())
 }
 
-fn format_peer_pid(peer: Option<BorrowedFd<'_>>) -> String {
-    match peer.and_then(peer_pid) {
+/// 不兼容后台的双方协议号与对端进程号说明，供客户端诊断共用。
+pub fn format_incompatible_peer(peer_version: u8, peer_pid: Option<i32>) -> String {
+    let peer = match peer_pid {
         Some(pid) => format!("对端进程号：{pid}"),
         None => "对端进程号不可用".into(),
-    }
+    };
+    format!("后台协议 {peer_version}，本前端 {PROTOCOL_VERSION}，{peer}")
 }
 
-fn older_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
-    match peer.and_then(peer_pid) {
-        Some(pid) => format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{pid}）；请执行 `lattice daemon restart` 切换至新后台"
-        ),
-        None => "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart` 切换至新后台".into(),
-    }
+fn older_backend_message(peer_version: u8, peer: Option<BorrowedFd<'_>>) -> String {
+    format!(
+        "运行中的后台版本较旧且不兼容（{}）；请执行 `lattice daemon restart` 切换至新后台",
+        format_incompatible_peer(peer_version, peer.and_then(peer_pid))
+    )
 }
 
-fn newer_backend_message(peer: Option<BorrowedFd<'_>>) -> String {
+fn newer_backend_message(peer_version: u8, peer: Option<BorrowedFd<'_>>) -> String {
     format!(
         "运行中的后台版本较新且不兼容（{}）；请换用匹配的前端",
-        format_peer_pid(peer)
+        format_incompatible_peer(peer_version, peer.and_then(peer_pid))
     )
 }
 
@@ -229,7 +229,7 @@ fn magic_version(magic: &[u8; 8]) -> Option<u8> {
 enum MagicCheck {
     Current,
     Older(u8),
-    Newer,
+    Newer(u8),
     Invalid,
 }
 
@@ -237,7 +237,7 @@ fn classify_magic(magic: &[u8; 8]) -> MagicCheck {
     match magic_version(magic) {
         Some(version) if version == PROTOCOL_VERSION => MagicCheck::Current,
         Some(version) if version < PROTOCOL_VERSION => MagicCheck::Older(version),
-        Some(_) => MagicCheck::Newer,
+        Some(version) => MagicCheck::Newer(version),
         None => MagicCheck::Invalid,
     }
 }
@@ -245,13 +245,13 @@ fn classify_magic(magic: &[u8; 8]) -> MagicCheck {
 fn check_magic(magic: &[u8; 8], peer: Option<BorrowedFd<'_>>) -> Result<()> {
     match classify_magic(magic) {
         MagicCheck::Current => Ok(()),
-        MagicCheck::Older(_) => Err(LocalError::new(
+        MagicCheck::Older(peer_version) => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
-            &older_backend_message(peer),
+            &older_backend_message(peer_version, peer),
         )),
-        MagicCheck::Newer => Err(LocalError::new(
+        MagicCheck::Newer(peer_version) => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
-            &newer_backend_message(peer),
+            &newer_backend_message(peer_version, peer),
         )),
         MagicCheck::Invalid => Err(protocol()),
     }
@@ -774,12 +774,12 @@ async fn read_first_frame_classified<T: serde::de::DeserializeOwned>(
             peer_version,
             error: LocalError::new(
                 LocalErrorKind::IncompatibleBackend,
-                &older_backend_message(stream.peer_fd()),
+                &older_backend_message(peer_version, stream.peer_fd()),
             ),
         }),
-        MagicCheck::Newer => Err(LocalError::new(
+        MagicCheck::Newer(peer_version) => Err(LocalError::new(
             LocalErrorKind::IncompatibleBackend,
-            &newer_backend_message(stream.peer_fd()),
+            &newer_backend_message(peer_version, stream.peer_fd()),
         )),
         MagicCheck::Invalid => Err(protocol()),
     }
@@ -915,31 +915,47 @@ mod frame_tests {
 
     #[tokio::test]
     async fn current_frames_reject_old_empty_and_oversized_frames() {
-        let older_unavailable = "运行中的后台版本较旧且不兼容（对端进程号不可用）；请执行 `lattice daemon restart` 切换至新后台";
-        let newer_unavailable =
-            "运行中的后台版本较新且不兼容（对端进程号不可用）；请换用匹配的前端";
+        let older_unavailable = |version| {
+            format!(
+                "运行中的后台版本较旧且不兼容（后台协议 {version}，本前端 {PROTOCOL_VERSION}，对端进程号不可用）；请执行 `lattice daemon restart` 切换至新后台"
+            )
+        };
+        let newer_unavailable = |version| {
+            format!(
+                "运行中的后台版本较新且不兼容（后台协议 {version}，本前端 {PROTOCOL_VERSION}，对端进程号不可用）；请换用匹配的前端"
+            )
+        };
         check_magic(MAGIC, None).expect("当前协议版本魔数必须通过");
         for version in 0..PROTOCOL_VERSION {
             let error = check_magic(&magic_for_version(version), None).unwrap_err();
             assert_eq!(
                 (error.kind, error.message.as_str()),
-                (LocalErrorKind::IncompatibleBackend, older_unavailable),
-                "version={version}"
+                (
+                    LocalErrorKind::IncompatibleBackend,
+                    older_unavailable(version).as_str()
+                ),
+                "协议版本：{version}"
             );
         }
         for version in (PROTOCOL_VERSION + 1)..=u8::MAX {
             let error = check_magic(&magic_for_version(version), None).unwrap_err();
             assert_eq!(
                 (error.kind, error.message.as_str()),
-                (LocalErrorKind::IncompatibleBackend, newer_unavailable),
-                "version={version}"
+                (
+                    LocalErrorKind::IncompatibleBackend,
+                    newer_unavailable(version).as_str()
+                ),
+                "协议版本：{version}"
             );
         }
         // 版本 61 必须固定判为较旧协议。
         let error = check_magic(&magic_for_version(61), None).unwrap_err();
         assert_eq!(
             (error.kind, error.message.as_str()),
-            (LocalErrorKind::IncompatibleBackend, older_unavailable)
+            (
+                LocalErrorKind::IncompatibleBackend,
+                older_unavailable(61).as_str()
+            )
         );
         // 非套接字描述符（例如管道）无法经 SO_PEERCRED 取对端进程号，必须回退为“对端进程号不可用”。
         let (pipe_reader, _pipe_writer) = std::io::pipe().unwrap();
@@ -950,15 +966,21 @@ mod frame_tests {
         .unwrap_err();
         assert_eq!(
             (pipe_error.kind, pipe_error.message.as_str()),
-            (LocalErrorKind::IncompatibleBackend, older_unavailable)
+            (
+                LocalErrorKind::IncompatibleBackend,
+                older_unavailable(PROTOCOL_VERSION - 1).as_str()
+            )
         );
 
         let self_pid = std::process::id();
         let older_with_pid = format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台"
+            "运行中的后台版本较旧且不兼容（后台协议 {}，本前端 {PROTOCOL_VERSION}，对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台",
+            PROTOCOL_VERSION - 1
         );
-        let newer_with_pid =
-            format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
+        let newer_with_pid = format!(
+            "运行中的后台版本较新且不兼容（后台协议 {}，本前端 {PROTOCOL_VERSION}，对端进程号：{self_pid}）；请换用匹配的前端",
+            PROTOCOL_VERSION + 1
+        );
         let cases = [
             (*MAGIC, 4, b"null".as_slice(), None),
             (
@@ -1018,7 +1040,7 @@ mod frame_tests {
                 }
             })
             .await
-            .expect("IPC frame case timed out");
+            .expect("IPC 帧用例超时");
         }
     }
 
@@ -1097,10 +1119,13 @@ mod frame_tests {
     async fn oversized_request_cut_off_by_an_announcing_backend_reports_its_version() {
         let self_pid = std::process::id();
         let expected_older = format!(
-            "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台"
+            "运行中的后台版本较旧且不兼容（后台协议 {}，本前端 {PROTOCOL_VERSION}，对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台",
+            PROTOCOL_VERSION - 1
         );
-        let expected_newer =
-            format!("运行中的后台版本较新且不兼容（对端进程号：{self_pid}）；请换用匹配的前端");
+        let expected_newer = format!(
+            "运行中的后台版本较新且不兼容（后台协议 {}，本前端 {PROTOCOL_VERSION}，对端进程号：{self_pid}）；请换用匹配的前端",
+            PROTOCOL_VERSION + 1
+        );
         let older = oversized_request_against(Some(magic_for_version(PROTOCOL_VERSION - 1))).await;
         assert_eq!(
             (older.kind, older.message.as_str()),

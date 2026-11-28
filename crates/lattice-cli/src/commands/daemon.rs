@@ -230,6 +230,9 @@ fn render_daemon_status(
             "后台状态：{state_label}（代次：{}，在途执行者：{}，未确认收尾操作：{}）",
             status.epoch, status.owners, status.unconfirmed_operations
         )?;
+        writeln!(out, "构建身份：{}", status.build_id)?;
+        writeln!(out, "IPC 协议：{}", status.protocol_version)?;
+        writeln!(out, "会话库格式：{}", status.store_format_version)?;
         if status.components.is_empty() {
             writeln!(out, "组件：无")?;
         } else {
@@ -276,6 +279,9 @@ mod tests {
     fn daemon_stop_warns_on_stderr_when_operations_are_unconfirmed_while_status_stays_silent() {
         let unconfirmed = DaemonStatus {
             epoch: "7".into(),
+            build_id: "1a2b3c4d5e6f".to_owned(),
+            protocol_version: 69,
+            store_format_version: 11,
             stopping: true,
             owners: 2,
             unconfirmed_operations: 2,
@@ -309,13 +315,15 @@ mod tests {
                 .unwrap();
         assert_eq!(status_code, std::process::ExitCode::from(1));
         let status_stdout = String::from_utf8(status_out).unwrap();
-        assert!(
-            status_stdout.contains("后台状态：停机中")
-                && status_stdout.contains("代次：7")
-                && status_stdout.contains("在途执行者：2")
-                && status_stdout.contains("未确认收尾操作：2")
-                && status_stdout.contains("组件：无"),
-            "人类可读的 daemon status 应输出中文状态行与无组件行，实际：{status_stdout:?}"
+        assert_eq!(
+            status_stdout,
+            concat!(
+                "后台状态：停机中（代次：7，在途执行者：2，未确认收尾操作：2）\n",
+                "构建身份：1a2b3c4d5e6f\n",
+                "IPC 协议：69\n",
+                "会话库格式：11\n",
+                "组件：无\n",
+            )
         );
         assert!(
             status_err.is_empty(),
@@ -325,6 +333,9 @@ mod tests {
 
         let running = DaemonStatus {
             epoch: "9".into(),
+            build_id: "1a2b3c4d5e6f".to_owned(),
+            protocol_version: 69,
+            store_format_version: 11,
             stopping: false,
             owners: 0,
             unconfirmed_operations: 0,
@@ -342,9 +353,9 @@ mod tests {
         .unwrap();
         assert_eq!(human_stop_code, std::process::ExitCode::SUCCESS);
         let human_stop_stdout = String::from_utf8(human_stop_out).unwrap();
-        assert!(
-            human_stop_stdout.contains("后台已停止") && human_stop_stdout.contains("代次：9"),
-            "人类可读的 daemon stop 应输出中文已停止提示，实际：{human_stop_stdout:?}"
+        assert_eq!(
+            human_stop_stdout,
+            "后台已停止（代次：9，剩余在途执行者：0，未确认收尾操作：0）\n"
         );
         assert!(human_stop_err.is_empty());
     }
@@ -353,6 +364,9 @@ mod tests {
     fn daemon_status_renders_component_states_in_text_and_json_while_preserving_exit_code() {
         let with_components = DaemonStatus {
             epoch: "12".into(),
+            build_id: "1a2b3c4d5e6f".to_owned(),
+            protocol_version: 69,
+            store_format_version: 11,
             stopping: false,
             owners: 1,
             unconfirmed_operations: 0,
@@ -393,6 +407,9 @@ mod tests {
             String::from_utf8(text_out).unwrap(),
             concat!(
                 "后台状态：运行中（代次：12，在途执行者：1，未确认收尾操作：0）\n",
+                "构建身份：1a2b3c4d5e6f\n",
+                "IPC 协议：69\n",
+                "会话库格式：11\n",
                 "组件：\n",
                 "  alpha：已挂载\n",
                 "  beta：已挂载；仍按上一份配置运行；workspace 不是绝对路径\n",

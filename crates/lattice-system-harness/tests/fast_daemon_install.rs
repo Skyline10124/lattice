@@ -23,8 +23,8 @@ use std::{
 
 use lattice_system_harness::{
     CommandOutcome, LatticeCommand, LatticeDaemonDriver, LatticeDriver, RunningCommand,
-    ScenarioEvidence, ScenarioSpec, ScenarioWorld, assert_exit_code, assert_stderr_contains,
-    assert_stdout_contains_all,
+    ScenarioBudget, ScenarioEvidence, ScenarioSpec, ScenarioWorld, assert_exit_code,
+    assert_stderr_contains, assert_stdout_contains_all,
 };
 
 const FAKE_SYSTEMCTL_SCRIPT: &str = r#"#!/bin/sh
@@ -219,6 +219,107 @@ fn run_binary(
         .map_err(|e| format!("等待子进程 {} 失败：{e}", binary.display()))
 }
 
+#[derive(Debug)]
+struct BuildVersion {
+    build_id: String,
+    protocol: u8,
+    store_format: Option<u32>,
+}
+
+fn read_binary_version(
+    world: &ScenarioWorld,
+    binary: &Path,
+    timeout: Duration,
+    evidence: &mut ScenarioEvidence,
+) -> Result<BuildVersion, String> {
+    let outcome = run_binary(world, binary, &["--version"], timeout)?;
+    evidence.record_command("读取二进制构建身份与版本", &outcome);
+    assert_exit_code(&outcome, 0).map_err(|e| e.to_string())?;
+    if !outcome.stderr.is_empty() {
+        return Err("版本输出的标准错误应为空".into());
+    }
+    let text = std::str::from_utf8(&outcome.stdout).map_err(|e| e.to_string())?;
+    let (_, fields) = text
+        .trim()
+        .split_once("（构建 ")
+        .ok_or("版本输出缺少构建身份")?;
+    let fields = fields.strip_suffix('）').ok_or("版本输出缺少闭括号")?;
+    let (build_id, versions) = fields
+        .split_once("，IPC 协议 ")
+        .ok_or("版本输出缺少协议号")?;
+    let (protocol, store_format) = match versions.split_once("，会话库格式 ") {
+        Some((protocol, store)) => (
+            protocol,
+            Some(store.parse::<u32>().map_err(|e| e.to_string())?),
+        ),
+        None => (versions, None),
+    };
+    Ok(BuildVersion {
+        build_id: build_id.to_owned(),
+        protocol: protocol.parse().map_err(|e| format!("协议号无效：{e}"))?,
+        store_format,
+    })
+}
+
+fn read_build_versions(
+    rig: &InstallRig,
+    world: &ScenarioWorld,
+    budget: &ScenarioBudget,
+    evidence: &mut ScenarioEvidence,
+) -> Result<(BuildVersion, BuildVersion), String> {
+    let frontend = read_binary_version(
+        world,
+        &rig.lattice_bin,
+        budget.cap_timeout(Duration::from_secs(10)),
+        evidence,
+    )?;
+    let daemon = read_binary_version(
+        world,
+        &rig.daemon_bin,
+        budget.cap_timeout(Duration::from_secs(10)),
+        evidence,
+    )?;
+    if frontend.build_id != daemon.build_id
+        || frontend.protocol != daemon.protocol
+        || daemon.store_format.is_none()
+    {
+        return Err(format!(
+            "场景需要同批前后台构建且后台声明会话库格式：{frontend:?}，{daemon:?}"
+        ));
+    }
+    Ok((frontend, daemon))
+}
+
+fn assert_status_identity(
+    status: &serde_json::Value,
+    version: &BuildVersion,
+) -> Result<(), String> {
+    let fields = [
+        "epoch",
+        "build_id",
+        "protocol_version",
+        "store_format_version",
+        "stopping",
+        "owners",
+        "unconfirmed_operations",
+        "components",
+    ];
+    if status.as_object().map(|object| object.len()) != Some(fields.len())
+        || fields.iter().any(|field| status.get(field).is_none())
+    {
+        return Err(format!("后台状态应包含完整八个字段：{status}"));
+    }
+    if status["build_id"] != version.build_id
+        || status["protocol_version"] != version.protocol
+        || status["store_format_version"].as_u64() != version.store_format.map(u64::from)
+    {
+        return Err(format!(
+            "后台状态的身份与 --version 不一致：{status}，{version:?}"
+        ));
+    }
+    Ok(())
+}
+
 fn expected_unit_text(daemon_exec: &str, state_root_exec: &str, drain: &str, stop: &str) -> String {
     format!(
         "[Unit]\n\
@@ -239,14 +340,14 @@ WantedBy=default.target\n"
     )
 }
 
-/// 旧协议模拟对端句柄：`accept`、读写与线程退出共用同一个 `deadline`，并在提前析构时唤醒退出。
+/// 异版协议模拟对端句柄：`accept`、读写与线程退出共用同一个 `deadline`，并在提前析构时唤醒退出。
 struct IncompatiblePeerFixture {
     cli_done: Arc<AtomicBool>,
-    handle: Option<std::thread::JoinHandle<Result<(), String>>>,
+    handle: Option<std::thread::JoinHandle<Result<(u8, u8), String>>>,
 }
 
 impl IncompatiblePeerFixture {
-    fn spawn(listener: UnixListener, timeout: Duration) -> Result<Self, String> {
+    fn spawn(listener: UnixListener, timeout: Duration, version_delta: i8) -> Result<Self, String> {
         listener
             .set_nonblocking(true)
             .map_err(|e| format!("设置模拟 socket 非阻塞失败：{e}"))?;
@@ -254,7 +355,7 @@ impl IncompatiblePeerFixture {
         let cli_done = Arc::new(AtomicBool::new(false));
         let done_in_thread = Arc::clone(&cli_done);
 
-        let handle = std::thread::spawn(move || -> Result<(), String> {
+        let handle = std::thread::spawn(move || -> Result<(u8, u8), String> {
             let mut stream = loop {
                 match listener.accept() {
                     Ok((stream, _)) => break stream,
@@ -264,23 +365,23 @@ impl IncompatiblePeerFixture {
                                 Ok((stream, _)) => break stream,
                                 Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
                                     return Err(
-                                        "CLI 已结束，但未连接状态根 api.sock 探测旧协议后台"
+                                        "CLI 已结束，但未连接状态根 api.sock 探测异版协议后台"
                                             .to_owned(),
                                     );
                                 }
                                 Err(err) => {
-                                    return Err(format!("旧协议模拟 socket accept 失败：{err}"));
+                                    return Err(format!("异版协议模拟 socket accept 失败：{err}"));
                                 }
                             }
                         }
                         if Instant::now() >= deadline {
                             return Err(format!(
-                                "等待 CLI 连接旧协议模拟 socket 超出期限（{timeout:?}）"
+                                "等待 CLI 连接异版协议模拟 socket 超出期限（{timeout:?}）"
                             ));
                         }
                         std::thread::sleep(Duration::from_millis(10));
                     }
-                    Err(err) => return Err(format!("旧协议模拟 socket accept 失败：{err}")),
+                    Err(err) => return Err(format!("异版协议模拟 socket accept 失败：{err}")),
                 }
             };
 
@@ -294,14 +395,25 @@ impl IncompatiblePeerFixture {
                 .read_exact(&mut req_magic)
                 .map_err(|e| format!("期限内读取客户端探测帧魔数失败：{e}"))?;
 
+            if &req_magic[..7] != b"LTLOCAL" {
+                return Err(format!("客户端请求魔数无效：{req_magic:?}"));
+            }
+            let frontend_version = req_magic[7];
+            let peer_version = frontend_version
+                .checked_add_signed(version_delta)
+                .ok_or_else(|| "模拟对端协议号超出字节范围".to_owned())?;
+            let mut peer_magic = req_magic;
+            peer_magic[7] = peer_version;
+            let mut frame = peer_magic.to_vec();
+            frame.extend_from_slice(&4_u32.to_be_bytes());
+            frame.extend_from_slice(b"null");
             apply_stream_deadline(&stream, deadline)?;
-            // 写入比当前协议版本（66 = 0x42）旧一版的 LTLOCAL 帧魔数。
             stream
-                .write_all(b"LTLOCAL\x41")
-                .map_err(|e| format!("期限内写入旧协议魔数失败：{e}"))?;
+                .write_all(&frame)
+                .map_err(|e| format!("期限内写入异版协议帧失败：{e}"))?;
             stream
                 .flush()
-                .map_err(|e| format!("刷新旧协议魔数失败：{e}"))?;
+                .map_err(|e| format!("刷新异版协议帧失败：{e}"))?;
             let _ = stream.shutdown(std::net::Shutdown::Write);
 
             let mut sink = [0_u8; 256];
@@ -316,7 +428,155 @@ impl IncompatiblePeerFixture {
                             io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
                         ) =>
                     {
-                        return Err(format!("等待客户端关闭旧协议探测连接超时：{err}"));
+                        return Err(format!("等待客户端关闭异版协议探测连接超时：{err}"));
+                    }
+                    Err(_) => break,
+                }
+            }
+            Ok((frontend_version, peer_version))
+        });
+
+        Ok(Self {
+            cli_done,
+            handle: Some(handle),
+        })
+    }
+
+    fn finish_and_verify(mut self) -> Result<(u8, u8), String> {
+        self.cli_done.store(true, Ordering::Release);
+        let handle = self.handle.take().expect("模拟线程句柄存在");
+        handle
+            .join()
+            .map_err(|_| "异版协议模拟线程发生 panic".to_owned())?
+    }
+}
+
+impl Drop for IncompatiblePeerFixture {
+    fn drop(&mut self) {
+        self.cli_done.store(true, Ordering::Release);
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
+struct CompatiblePeerFixture {
+    cli_done: Arc<AtomicBool>,
+    handle: Option<std::thread::JoinHandle<Result<(), String>>>,
+}
+
+impl CompatiblePeerFixture {
+    fn spawn(listener: UnixListener, deadline: Instant) -> Result<Self, String> {
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("设置模拟 socket 非阻塞失败：{e}"))?;
+        let cli_done = Arc::new(AtomicBool::new(false));
+        let done_in_thread = Arc::clone(&cli_done);
+
+        let handle = std::thread::spawn(move || -> Result<(), String> {
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                        if done_in_thread.load(Ordering::Acquire) {
+                            match listener.accept() {
+                                Ok((stream, _)) => break stream,
+                                Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                                    return Err(
+                                        "CLI 已结束，但未连接状态根 api.sock 探测同协议异构建后台"
+                                            .to_owned(),
+                                    );
+                                }
+                                Err(err) => {
+                                    return Err(format!(
+                                        "同协议异构建模拟 socket accept 失败：{err}"
+                                    ));
+                                }
+                            }
+                        }
+                        if Instant::now() >= deadline {
+                            return Err("等待 CLI 连接同协议异构建模拟 socket 超出期限".into());
+                        }
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(err) => return Err(format!("同协议异构建模拟 socket accept 失败：{err}")),
+                }
+            };
+
+            stream
+                .set_nonblocking(false)
+                .map_err(|e| format!("切换模拟连接为带超时阻塞模式失败：{e}"))?;
+            apply_stream_deadline(&stream, deadline)?;
+
+            let mut req_magic = [0_u8; 8];
+            stream
+                .read_exact(&mut req_magic)
+                .map_err(|e| format!("期限内读取客户端探测帧魔数失败：{e}"))?;
+
+            if &req_magic[..7] != b"LTLOCAL" {
+                return Err(format!("客户端请求魔数无效：{req_magic:?}"));
+            }
+            let frontend_version = req_magic[7];
+            let mut length = [0; 4];
+            apply_stream_deadline(&stream, deadline)?;
+            stream
+                .read_exact(&mut length)
+                .map_err(|e| format!("读取请求长度失败：{e}"))?;
+            let mut request = vec![0; u32::from_be_bytes(length) as usize];
+            apply_stream_deadline(&stream, deadline)?;
+            stream
+                .read_exact(&mut request)
+                .map_err(|e| format!("读取请求 JSON 失败：{e}"))?;
+            let request: serde_json::Value =
+                serde_json::from_slice(&request).map_err(|e| e.to_string())?;
+            if request != serde_json::json!({"operation": "status"}) {
+                return Err(format!("预期状态探测请求，实际：{request}"));
+            }
+            let response = serde_json::json!({
+                "response": "status",
+                "value": {
+                    "epoch": "epoch-diff-build",
+                    "build_id": "000000000000",
+                    "protocol_version": frontend_version,
+                    "store_format_version": 11,
+                    "stopping": false,
+                    "owners": 0,
+                    "unconfirmed_operations": 0,
+                    "components": [],
+                },
+            });
+            let payload = serde_json::to_vec(&serde_json::json!({
+                "message_id": 0,
+                "offset": 0,
+                "json_fragment": response.to_string(),
+                "complete": true,
+            }))
+            .map_err(|e| e.to_string())?;
+            let mut frame = req_magic.to_vec();
+            frame.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+            frame.extend_from_slice(&payload);
+            apply_stream_deadline(&stream, deadline)?;
+            stream
+                .write_all(&frame)
+                .map_err(|e| format!("期限内写入同协议异构建帧失败：{e}"))?;
+            stream
+                .flush()
+                .map_err(|e| format!("刷新同协议异构建帧失败：{e}"))?;
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+
+            let mut sink = [0_u8; 256];
+            loop {
+                apply_stream_deadline(&stream, deadline)?;
+                match stream.read(&mut sink) {
+                    Ok(0) => break,
+                    Ok(_) => continue,
+                    Err(err)
+                        if matches!(
+                            err.kind(),
+                            io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut
+                        ) =>
+                    {
+                        return Err(format!("等待客户端关闭同协议异构建探测连接超时：{err}"));
                     }
                     Err(_) => break,
                 }
@@ -335,11 +595,11 @@ impl IncompatiblePeerFixture {
         let handle = self.handle.take().expect("模拟线程句柄存在");
         handle
             .join()
-            .map_err(|_| "旧协议模拟线程发生 panic".to_owned())?
+            .map_err(|_| "同协议异构建模拟线程发生 panic".to_owned())?
     }
 }
 
-impl Drop for IncompatiblePeerFixture {
+impl Drop for CompatiblePeerFixture {
     fn drop(&mut self) {
         self.cli_done.store(true, Ordering::Release);
         if let Some(handle) = self.handle.take() {
@@ -351,7 +611,7 @@ impl Drop for IncompatiblePeerFixture {
 fn apply_stream_deadline(stream: &UnixStream, deadline: Instant) -> Result<(), String> {
     let now = Instant::now();
     if now >= deadline {
-        return Err("旧协议模拟连接读写超出截止时间".into());
+        return Err("模拟连接读写超出截止时间".into());
     }
     let remaining = (deadline - now).max(Duration::from_millis(1));
     stream
@@ -372,6 +632,7 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
 
     let result = (|| -> Result<(), String> {
         let rig = InstallRig::setup(&world, "default-case", true)?;
+        read_build_versions(&rig, &world, &budget, &mut evidence)?;
         // 假 systemctl 不会真正启动 unit；显式启动兼容后台，模拟 `Type=notify` 服务在 systemctl 返回时已经监听。
         world
             .start_daemon()
@@ -535,6 +796,12 @@ fn fast_daemon_install_writes_unit_and_enables_service() {
             assert_exit_code(&out, 0).map_err(|e| format!("{subcmd}: {e}"))?;
             assert_stdout_contains_all(&out, &[expected_stdout])
                 .map_err(|e| format!("{subcmd}: {e}"))?;
+            if !out.stderr.is_empty() {
+                return Err(format!(
+                    "同批构建 {subcmd} 的标准错误应为空：{:?}",
+                    out.stderr
+                ));
+            }
             if rig.systemctl_calls() != [expected_call] {
                 return Err(format!(
                     "daemon {subcmd} 的 systemctl 调用不符合预期：{:?}",
@@ -786,6 +1053,7 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
 
     let result = (|| -> Result<(), String> {
         let rig = InstallRig::setup(&world, "failure-case", true)?;
+        let (_, daemon_version) = read_build_versions(&rig, &world, &budget, &mut evidence)?;
         let unit_str = rig.unit_path().display().to_string();
 
         // 1. `daemon-reload` 失败：退出 1，unit 已写出，不再执行 `enable --now`。
@@ -931,7 +1199,7 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
         }
         world.unset_env("FAKE_SYSTEMCTL_FAIL_START");
 
-        // 核验有后台时 `lattice daemon status` 与 `lattice daemon stop` 的人类可读中文输出，以及 `--json` 形状不变。
+        // 核验状态身份字段与后台 --version 一致，以及 stop 人类可读输出保持单行。
         budget.check(&spec.name);
         let human_status = rig.run_lattice(
             &world,
@@ -947,6 +1215,9 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
                 "代次：",
                 "在途执行者：",
                 "未确认收尾操作：",
+                &format!("构建身份：{}", daemon_version.build_id),
+                &format!("IPC 协议：{}", daemon_version.protocol),
+                &format!("会话库格式：{}", daemon_version.store_format.unwrap()),
                 "组件：无",
             ],
         )
@@ -967,16 +1238,9 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
         assert_exit_code(&json_status, 0).map_err(|e| e.to_string())?;
         let parsed: serde_json::Value =
             serde_json::from_slice(&json_status.stdout).map_err(|e| e.to_string())?;
-        for field in [
-            "epoch",
-            "stopping",
-            "owners",
-            "unconfirmed_operations",
-            "components",
-        ] {
-            if parsed.get(field).is_none() {
-                return Err(format!("--json daemon status 缺少字段 `{field}`：{parsed}"));
-            }
+        assert_status_identity(&parsed, &daemon_version)?;
+        if !human_status.stderr.is_empty() || !json_status.stderr.is_empty() {
+            return Err("状态查询的标准错误应为空".into());
         }
 
         budget.check(&spec.name);
@@ -1001,7 +1265,32 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             .daemon_departed()
             .map_err(|errs| format!("后台退场核验失败：{errs:?}"))?;
 
-        // 4. `enable --now` 失败且状态根上为旧协议后台：accept、读写与线程退出共用有界期限，
+        if String::from_utf8_lossy(&human_stop.stdout).lines().count() != 1 {
+            return Err("人类可读 stop 应保持单行输出".into());
+        }
+        world
+            .start_daemon()
+            .map_err(|e| format!("重启场景后台失败：{e}"))?;
+        let json_stop = rig.run_lattice(
+            &world,
+            &["--json", "daemon", "stop"],
+            budget.cap_timeout(spec.step_timeout()),
+        )?;
+        evidence.record_command("同版本后台执行 --json daemon stop", &json_stop);
+        assert_exit_code(&json_stop, 0).map_err(|e| e.to_string())?;
+        let stopped: serde_json::Value =
+            serde_json::from_slice(&json_stop.stdout).map_err(|e| e.to_string())?;
+        assert_status_identity(&stopped, &daemon_version)?;
+        if stopped["stopping"] != true || !json_stop.stderr.is_empty() {
+            return Err(format!(
+                "同版本 stop 应返回停机状态且标准错误为空：{stopped}"
+            ));
+        }
+        world
+            .daemon_departed()
+            .map_err(|errs| format!("后台退场核验失败：{errs:?}"))?;
+
+        // 4. `restart` 失败且状态根上为旧协议后台：accept、读写与线程退出共用有界期限，
         // 保留版本不兼容诊断与对端 pid，不说成“没有后台”。
         budget.check(&spec.name);
         let short_state = tempfile::Builder::new()
@@ -1021,7 +1310,7 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             .map_err(|e| e.to_string())?;
 
         let fixture_timeout = budget.cap_timeout(Duration::from_secs(10));
-        let peer_fixture = IncompatiblePeerFixture::spawn(listener, fixture_timeout)?;
+        let peer_fixture = IncompatiblePeerFixture::spawn(listener, fixture_timeout, -1)?;
 
         world.set_env("XDG_STATE_HOME", short_state.path().display().to_string());
         rig.clear_systemctl_log();
@@ -1030,8 +1319,13 @@ fn fast_daemon_install_handles_daemon_reload_and_enable_failures_and_chinese_sta
             &["daemon", "install"],
             budget.cap_timeout(spec.step_timeout()),
         )?;
-        evidence.record_command("旧协议后台占用时 enable --now 失败", &enable_incompat);
-        peer_fixture.finish_and_verify()?;
+        evidence.record_command("旧协议后台占用时 restart 失败", &enable_incompat);
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &enable_incompat,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
 
         assert_exit_code(&enable_incompat, 1).map_err(|e| e.to_string())?;
         let self_pid_fragment = format!("对端进程号：{}", std::process::id());
@@ -1061,6 +1355,11 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
 
     let result = (|| -> Result<(), String> {
         let rig = InstallRig::setup(&world, "incompatible-after-success", true)?;
+        let (frontend_version, _) = read_build_versions(&rig, &world, &budget, &mut evidence)?;
+        let frontend_build_id = &frontend_version.build_id;
+        if frontend_build_id == "000000000000" {
+            return Err("异构建夹具身份必须与本前端不同".into());
+        }
 
         // 1. 同协议后台应答时，成功核对不改变 `restart` 的既有成功文案与退出码。
         budget.check(&spec.name);
@@ -1073,6 +1372,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("兼容后台运行时执行 daemon restart", &restart_running);
+        if !restart_running.stderr.is_empty() {
+            return Err(format!(
+                "同批构建 restart 的标准错误应为空：{:?}",
+                restart_running.stderr
+            ));
+        }
         assert_exit_code(&restart_running, 0).map_err(|e| e.to_string())?;
         assert_stdout_contains_all(&restart_running, &["已重启服务 lattice.service。"])
             .map_err(|e| e.to_string())?;
@@ -1232,8 +1537,46 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             Ok(listener)
         };
 
+        // 同协议异构建仍成功；restart/install 提示身份差异，start 保持无提示。
+        let notice = format!(
+            "运行中的后台与本前端协议兼容，但不是同一批构建（后台构建 000000000000，本前端 {frontend_build_id}）。"
+        );
+        for action in ["restart", "install", "start"] {
+            budget.check(&spec.name);
+            let deadline = Instant::now() + budget.cap_timeout(Duration::from_secs(10));
+            let peer = CompatiblePeerFixture::spawn(bind_peer_listener()?, deadline)?;
+            let outcome = rig.run_lattice(
+                &world,
+                &["daemon", action],
+                deadline.saturating_duration_since(Instant::now()),
+            )?;
+            evidence.record_command(format!("同协议异构建后台执行 {action}"), &outcome);
+            peer.finish_and_verify()?;
+            assert_exit_code(&outcome, 0).map_err(|e| e.to_string())?;
+            let success = match action {
+                "restart" => "已重启服务 lattice.service。",
+                "install" => "已启用并启动服务 lattice.service。",
+                _ => "已启动服务 lattice.service。",
+            };
+            assert_stdout_contains_all(&outcome, &[success]).map_err(|e| e.to_string())?;
+            if action == "install" {
+                assert_stdout_contains_all(&outcome, &[&unit_path]).map_err(|e| e.to_string())?;
+            }
+            if action == "start" {
+                if !outcome.stderr.is_empty() {
+                    return Err("start 不应输出构建差异提示".into());
+                }
+            } else {
+                assert_stderr_contains(&outcome, &notice).map_err(|e| e.to_string())?;
+                if String::from_utf8_lossy(&outcome.stderr).contains("错误：") {
+                    return Err("构建差异提示不应带错误前缀".into());
+                }
+            }
+        }
+
         // restart：服务动作已执行，但应答进程仍是旧后台；指出实际运行文件并引导 install。
-        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        let peer_fixture =
+            IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout, -1)?;
         rig.clear_systemctl_log();
         let restart_out = rig.run_lattice(
             &world,
@@ -1241,7 +1584,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("旧协议后台应答时执行 daemon restart", &restart_out);
-        peer_fixture.finish_and_verify()?;
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &restart_out,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
         assert_exit_code(&restart_out, 1).map_err(|e| e.to_string())?;
         if String::from_utf8_lossy(&restart_out.stdout).contains("已重启服务 lattice.service。")
         {
@@ -1271,7 +1619,8 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
         }
 
         // install：三条 systemctl 均已成功，但运行文件不是刚写入 unit 的同目录后台；引导核对 unit 与 drop-in。
-        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        let peer_fixture =
+            IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout, -1)?;
         rig.clear_systemctl_log();
         let install_out = rig.run_lattice(
             &world,
@@ -1279,7 +1628,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("旧协议后台应答时执行 daemon install", &install_out);
-        peer_fixture.finish_and_verify()?;
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &install_out,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
         assert_exit_code(&install_out, 1).map_err(|e| e.to_string())?;
         if String::from_utf8_lossy(&install_out.stdout).contains("已启用并启动服务") {
             return Err("install 发现旧后台时不应打印成功文案".into());
@@ -1317,7 +1671,8 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
         }
 
         // start：可能是对已在运行旧服务的空操作；沿用普通不兼容诊断并引导 restart。
-        let peer_fixture = IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout)?;
+        let peer_fixture =
+            IncompatiblePeerFixture::spawn(bind_peer_listener()?, fixture_timeout, -1)?;
         rig.clear_systemctl_log();
         let start_out = rig.run_lattice(
             &world,
@@ -1325,7 +1680,12 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
             budget.cap_timeout(spec.step_timeout()),
         )?;
         evidence.record_command("旧协议后台应答时执行 daemon start", &start_out);
-        peer_fixture.finish_and_verify()?;
+        let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+        assert_stderr_contains(
+            &start_out,
+            &format!("后台协议 {peer_version}，本前端 {frontend_version}"),
+        )
+        .map_err(|e| e.to_string())?;
         assert_exit_code(&start_out, 1).map_err(|e| e.to_string())?;
         assert_stderr_contains(
             &start_out,
@@ -1339,6 +1699,52 @@ fn fast_daemon_service_actions_verify_backend_after_systemctl_success() {
                 "start 的 systemctl 调用不符合预期：{:?}",
                 rig.systemctl_calls()
             ));
+        }
+
+        // 4. status 的文本与 JSON 错误保留双方协议号；更新后台的 status/restart 提示匹配前端。
+        for (version_delta, args, label) in [
+            (-1, vec!["daemon", "status"], "旧协议后台的 status 文本错误"),
+            (
+                -1,
+                vec!["--json", "daemon", "status"],
+                "旧协议后台的 status JSON 错误",
+            ),
+            (1, vec!["daemon", "status"], "新协议后台的 status 文本错误"),
+            (1, vec!["daemon", "restart"], "新协议后台的 restart 错误"),
+        ] {
+            budget.check(&spec.name);
+            let peer_fixture = IncompatiblePeerFixture::spawn(
+                bind_peer_listener()?,
+                budget.cap_timeout(Duration::from_secs(10)),
+                version_delta,
+            )?;
+            let outcome =
+                rig.run_lattice(&world, &args, budget.cap_timeout(spec.step_timeout()))?;
+            evidence.record_command(label, &outcome);
+            let (frontend_version, peer_version) = peer_fixture.finish_and_verify()?;
+            assert_exit_code(&outcome, 1).map_err(|e| e.to_string())?;
+            let message = if args[0] == "--json" {
+                let error: serde_json::Value = serde_json::from_slice(&outcome.stdout)
+                    .map_err(|e| format!("解析 status JSON 错误失败：{e}"))?;
+                if error["kind"] != "incompatible_backend" {
+                    return Err(format!("status JSON 错误类型不符：{error}"));
+                }
+                error["message"]
+                    .as_str()
+                    .ok_or_else(|| "status JSON 缺少 message".to_owned())?
+                    .to_owned()
+            } else {
+                String::from_utf8_lossy(&outcome.stderr).into_owned()
+            };
+            let versions = format!("后台协议 {peer_version}，本前端 {frontend_version}");
+            let guidance = if version_delta < 0 {
+                "lattice daemon restart"
+            } else {
+                "请换用匹配的前端"
+            };
+            if !message.contains(&versions) || !message.contains(guidance) {
+                return Err(format!("{label} 缺少双方协议号或操作提示：{message}"));
+            }
         }
 
         Ok(())

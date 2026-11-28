@@ -237,6 +237,7 @@ pub(super) struct Backend {
     tools: Arc<dyn ToolExecutor>,
     lifecycle: Arc<dyn HostLifecycle>,
     epoch: String,
+    build_id: String,
     pub(super) admission: Mutex<Admission>,
     changed: watch::Sender<u64>,
     pub(super) stopping: watch::Sender<bool>,
@@ -437,14 +438,22 @@ impl Backend {
     fn with_tools(
         layout: StateLayout,
         home: Option<std::path::PathBuf>,
+        build_id: String,
         tools: Arc<dyn ToolExecutor>,
     ) -> Arc<Self> {
-        Self::with_tls_roots(layout, home, lattice_llm::load_tls_roots_der(), tools)
+        Self::with_tls_roots(
+            layout,
+            home,
+            build_id,
+            lattice_llm::load_tls_roots_der(),
+            tools,
+        )
     }
 
     fn with_tls_roots(
         layout: StateLayout,
         home: Option<std::path::PathBuf>,
+        build_id: String,
         roots: Vec<Vec<u8>>,
         tools: Arc<dyn ToolExecutor>,
     ) -> Arc<Self> {
@@ -474,6 +483,7 @@ impl Backend {
             lifecycle: Arc::new(NoopLifecycle),
             stores,
             epoch: uuid::Uuid::new_v4().to_string(),
+            build_id,
             admission: Mutex::default(),
             changed: watch::channel(0).0,
             stopping: watch::channel(false).0,
@@ -500,6 +510,9 @@ impl Backend {
     fn status_locked(&self, state: &Admission) -> DaemonStatus {
         DaemonStatus {
             epoch: self.epoch.clone(),
+            build_id: self.build_id.clone(),
+            protocol_version: ipc::current_protocol_version(),
+            store_format_version: crate::current_store_format_version(),
             stopping: state.stop.is_stopping(),
             owners: state.owners.len(),
             unconfirmed_operations: state.unconfirmed_operations,
@@ -2118,6 +2131,7 @@ fn im_credential_status(state: crate::im_auth::ImPlatformCredentialState) -> ImC
 pub async fn serve(
     layout: StateLayout,
     home: Option<std::path::PathBuf>,
+    build_id: String,
     drain_timeout: Duration,
     stop_requests: tokio::sync::mpsc::Receiver<()>,
     lifecycle: impl HostLifecycle,
@@ -2128,7 +2142,7 @@ pub async fn serve(
     let lifecycle: Arc<dyn HostLifecycle> = Arc::new(lifecycle);
     let component_manager = super::components::ComponentManager::new(components);
     serve_with_backend(layout, drain_timeout, stop_requests, move || {
-        let mut backend = Backend::with_tools(backend_layout, home, tools);
+        let mut backend = Backend::with_tools(backend_layout, home, build_id, tools);
         let inner = Arc::get_mut(&mut backend).expect("独占构造的后台实例");
         inner.lifecycle = lifecycle;
         inner.components = component_manager;
@@ -2136,6 +2150,9 @@ pub async fn serve(
     })
     .await
 }
+
+#[cfg(any(test, feature = "test-utils"))]
+const TEST_BUILD_ID: &str = "test-build";
 
 /// 测试后台以空动作替代自动与手动元数据刷新，其余操作沿用正式入口。
 #[cfg(any(test, feature = "test-utils"))]
@@ -2198,7 +2215,8 @@ async fn serve_test_backend(
         stop_requests,
         service_tx,
         move || {
-            let mut backend = Backend::with_tools(backend_layout, home, tools);
+            let mut backend =
+                Backend::with_tools(backend_layout, home, TEST_BUILD_ID.to_owned(), tools);
             let inner = Arc::get_mut(&mut backend).expect("unshared test backend");
             inner.metadata = super::metadata::MetadataRefresh::without_network();
             inner.components = component_manager;

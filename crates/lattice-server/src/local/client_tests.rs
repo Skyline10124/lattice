@@ -1784,7 +1784,9 @@ async fn status_reports_an_older_backend_that_announces_its_magic() {
     .await;
     let self_pid = std::process::id();
     let expected = format!(
-        "运行中的后台版本较旧且不兼容（对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台"
+        "运行中的后台版本较旧且不兼容（后台协议 {}，本前端 {}，对端进程号：{self_pid}）；请执行 `lattice daemon restart` 切换至新后台",
+        ipc::PROTOCOL_VERSION - 1,
+        ipc::PROTOCOL_VERSION
     );
     assert_eq!(
         (error.kind, error.message.as_str()),
@@ -1805,7 +1807,9 @@ async fn status_reports_a_backend_newer_than_the_client() {
     })
     .await;
     let expected = format!(
-        "运行中的后台版本较新且不兼容（对端进程号：{}）；请换用匹配的前端",
+        "运行中的后台版本较新且不兼容（后台协议 {}，本前端 {}，对端进程号：{}）；请换用匹配的前端",
+        ipc::PROTOCOL_VERSION + 1,
+        ipc::PROTOCOL_VERSION,
         std::process::id()
     );
     assert_eq!(

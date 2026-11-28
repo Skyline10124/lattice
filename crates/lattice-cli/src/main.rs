@@ -3,6 +3,7 @@
 
 use anyhow::Result;
 use clap::{CommandFactory, FromArgMatches, Parser, Subcommand};
+use std::sync::OnceLock;
 
 mod commands;
 mod help;
@@ -11,10 +12,12 @@ mod test_support;
 use commands::{models, session as session_cmd};
 use help::CliParseError;
 
+pub(crate) const FRONTEND_BUILD_ID: &str = env!("LATTICE_BUILD_ID");
+
 #[derive(Parser)]
 #[command(name = "lattice")]
 #[command(about = "LATTICE — 以会话为中心的 LLM 运行时")]
-#[command(version)]
+#[command(version = cli_version())]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -75,6 +78,20 @@ enum Commands {
         )]
         agent: Option<lattice_local::AgentName>,
     },
+}
+
+fn cli_version() -> &'static str {
+    static VERSION: OnceLock<String> = OnceLock::new();
+    VERSION
+        .get_or_init(|| {
+            format!(
+                "{}（构建 {}，IPC 协议 {}）",
+                env!("LATTICE_VERSION"),
+                FRONTEND_BUILD_ID,
+                lattice_local::current_protocol_version(),
+            )
+        })
+        .as_str()
 }
 
 fn cli_command() -> clap::Command {
@@ -290,6 +307,20 @@ async fn run_commands(cli: Cli) -> Result<std::process::ExitCode> {
 mod tests {
     use super::{Cli, Commands, parse_cli};
     use clap::{CommandFactory, Parser};
+
+    #[test]
+    fn version_renders_build_identity_and_protocol() {
+        let version = super::cli_command().render_version();
+        assert_eq!(
+            version,
+            format!(
+                "lattice {}（构建 {}，IPC 协议 {}）\n",
+                env!("LATTICE_VERSION"),
+                env!("LATTICE_BUILD_ID"),
+                lattice_local::current_protocol_version(),
+            )
+        );
+    }
 
     #[test]
     fn models_accepts_provider_and_auth_filters_and_documents_them() {
