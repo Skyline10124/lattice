@@ -3,16 +3,7 @@
 
 //! 两个二进制共用的构建期版本推导；库 crate 不持有工作区构建身份。
 
-use std::{
-    collections::BTreeSet,
-    ffi::OsStr,
-    fs, io,
-    os::unix::{ffi::OsStrExt, fs::PermissionsExt},
-    path::Path,
-    process::Command,
-};
-
-use sha2::{Digest, Sha256};
+use std::{fs, path::Path, process::Command};
 
 #[cfg(not(test))]
 pub fn emit() {
@@ -77,36 +68,15 @@ fn query(workspace_root: &Path) -> Option<BuildInfo> {
         return None;
     }
 
-    let mut paths = BTreeSet::new();
-    for args in [
-        &[
-            "diff",
-            "--no-ext-diff",
-            "--no-renames",
-            "--name-only",
-            "-z",
-            "HEAD",
-            "--",
-        ][..],
-        &["ls-files", "--others", "--exclude-standard", "-z"][..],
-    ] {
-        let output = git_output(workspace_root, args)?;
-        if output.is_empty() {
-            continue;
-        }
-        let records = output.strip_suffix(&[0])?;
-        for path in records.split(|b| *b == 0) {
-            if path.is_empty() {
-                return None;
-            }
-            paths.insert(path.to_vec());
-        }
-    }
-    let mut build_id = commit[..12].to_owned();
-    if !paths.is_empty() {
-        build_id.push('+');
-        build_id.push_str(&changes_digest(workspace_root, paths)?);
-    }
+    let status = git_output(
+        workspace_root,
+        &["status", "--porcelain", "--untracked-files=normal"],
+    )?;
+    let build_id = if status.is_empty() {
+        commit[..12].to_owned()
+    } else {
+        format!("{}+dirty", &commit[..12])
+    };
     Some(BuildInfo {
         version: format!("alpha-{date}"),
         build_id,
@@ -133,44 +103,6 @@ fn git_output(workspace_root: &Path, args: &[&str]) -> Option<Vec<u8>> {
         return None;
     }
     Some(output.stdout)
-}
-
-fn changes_digest(workspace_root: &Path, paths: BTreeSet<Vec<u8>>) -> Option<String> {
-    let mut digest = Sha256::new();
-    for path in paths {
-        digest.update((path.len() as u64).to_be_bytes());
-        digest.update(&path);
-        let full_path = workspace_root.join(OsStr::from_bytes(&path));
-        let meta = match fs::symlink_metadata(&full_path) {
-            Ok(meta) => meta,
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                digest.update([b'D']);
-                continue;
-            }
-            Err(_) => return None,
-        };
-        if meta.file_type().is_symlink() {
-            let target = fs::read_link(&full_path).ok()?;
-            let bytes = target.as_os_str().as_bytes();
-            digest.update([b'L']);
-            digest.update((bytes.len() as u64).to_be_bytes());
-            digest.update(bytes);
-        } else if meta.file_type().is_file() {
-            let bytes = fs::read(&full_path).ok()?;
-            let exec = u8::from(meta.permissions().mode() & 0o111 != 0);
-            digest.update([b'F', exec]);
-            digest.update((bytes.len() as u64).to_be_bytes());
-            digest.update(bytes);
-        } else {
-            digest.update([b'O']);
-        }
-    }
-    Some(
-        digest.finalize()[..6]
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect(),
-    )
 }
 
 #[cfg(test)]
@@ -232,37 +164,27 @@ mod tests {
     }
 
     #[test]
-    fn dirty_identity_tracks_content_independently_of_staging_and_ignores() {
+    fn dirty_identity_appends_dirty_suffix_for_tracked_or_untracked_changes() {
         let (root, _) = repository();
         let clean = derive(root.path());
+        let dirty = BuildInfo {
+            version: clean.version.clone(),
+            build_id: format!("{}+dirty", clean.build_id),
+        };
+
+        fs::write(root.path().join("tracked"), "改动一").unwrap();
+        assert_eq!(derive(root.path()), dirty);
+        fs::write(root.path().join("tracked"), "原始内容").unwrap();
+        assert_eq!(derive(root.path()), clean);
+
         fs::write(root.path().join("ignored"), "忽略内容").unwrap();
         assert_eq!(derive(root.path()), clean);
 
-        fs::write(root.path().join("tracked"), "改动一").unwrap();
-        let dirty = derive(root.path());
-        assert_eq!(dirty.version, clean.version);
-        let suffix = dirty
-            .build_id
-            .strip_prefix(&format!("{}+", clean.build_id))
-            .expect("改动身份应保留提交号并追加摘要");
-        assert_eq!(suffix.len(), 12);
-        assert!(
-            suffix
-                .bytes()
-                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-        );
-        assert_eq!(derive(root.path()), dirty);
-        git(root.path(), &["add", "tracked"]);
-        assert_eq!(derive(root.path()), dirty);
-        fs::write(root.path().join("tracked"), "暂存后改动二").unwrap();
-        assert_ne!(derive(root.path()), dirty);
-
-        fs::write(root.path().join("tracked"), "原始内容").unwrap();
-        git(root.path(), &["add", "tracked"]);
-        assert_eq!(derive(root.path()), clean);
         fs::write(root.path().join("untracked"), "未跟踪内容").unwrap();
-        assert_ne!(derive(root.path()), clean);
+        assert_eq!(derive(root.path()), dirty);
+
         fs::remove_file(root.path().join("untracked")).unwrap();
+        fs::remove_file(root.path().join("ignored")).unwrap();
         assert_eq!(derive(root.path()), clean);
     }
 

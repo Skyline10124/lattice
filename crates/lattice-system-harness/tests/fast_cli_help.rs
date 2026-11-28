@@ -46,11 +46,11 @@ fn validate_version_output(stdout: &[u8], program: &str, daemon: bool) -> Result
         .split_once("，IPC 协议 ")
         .ok_or("版本输出缺少 IPC 协议号")?;
     if identity != "未知" {
-        let parts: Vec<_> = identity.split('+').collect();
-        if !(1..=2).contains(&parts.len())
-            || !parts.iter().all(|part| {
-                part.len() == 12 && part.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-            })
+        let commit = identity.strip_suffix("+dirty").unwrap_or(identity);
+        if commit.len() != 12
+            || !commit
+                .bytes()
+                .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
         {
             return Err(format!("构建身份格式不符：{identity}"));
         }

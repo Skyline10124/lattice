@@ -148,7 +148,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
         serve(
             serving_layout,
             home,
-            "deadbeef1234+cafebabe5678".to_owned(),
+            "deadbeef1234+dirty".to_owned(),
             std::time::Duration::from_secs(60),
             stop_rx,
             RecordingLifecycle {
@@ -164,7 +164,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     loop {
         match client.status().await {
             Ok(status) => {
-                assert_eq!(status.build_id, "deadbeef1234+cafebabe5678");
+                assert_eq!(status.build_id, "deadbeef1234+dirty");
                 assert_eq!(
                     status.protocol_version,
                     lattice_ipc::ipc::current_protocol_version()
@@ -183,7 +183,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     }
     assert_eq!(events.lock().unwrap().as_slice(), ["ready"]);
     let (stopped, departure) = client.request_stop().await.unwrap();
-    assert_eq!(stopped.build_id, "deadbeef1234+cafebabe5678");
+    assert_eq!(stopped.build_id, "deadbeef1234+dirty");
     assert_eq!(
         stopped.protocol_version,
         lattice_ipc::ipc::current_protocol_version()
@@ -213,7 +213,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     let exit_pre = serve(
         layout_pre,
         Some(dir_pre.path().to_path_buf()),
-        "deadbeef1234+cafebabe5678".to_owned(),
+        "deadbeef1234+dirty".to_owned(),
         std::time::Duration::from_secs(60),
         stop_pre_rx,
         RecordingLifecycle {
@@ -237,7 +237,7 @@ async fn host_lifecycle_observes_ready_and_stopping_outside_admission_lock() {
     let exit_fail = serve(
         layout_fail.clone(),
         Some(dir_fail.path().to_path_buf()),
-        "deadbeef1234+cafebabe5678".to_owned(),
+        "deadbeef1234+dirty".to_owned(),
         std::time::Duration::from_secs(60),
         stop_fail_rx,
         RecordingLifecycle {
